@@ -91,18 +91,19 @@ function explanationPanel(record,node,source) {
   const goal='<h4>与整体研究目标的关系</h4>'+explainStatement(content.goal_connection,record)+(goalSource?disclosure('explain-goal','核对本轮冻结的完整研究目标',markdown(goalSource.text)):'<p class="amber">未找到本轮冻结目标材料。</p>');
   const conclusions='<div class="explain-split"><div class="explain-box supported"><h4>证据支持到哪里</h4>'+explainList(content.supported,record)+'</div><div class="explain-box hypotheses"><h4>仍是待区分的解释</h4>'+explainList(content.hypotheses,record,'没有额外提出机制假说。')+'</div></div><h4>尚未测量 / 不能据此推出</h4>'+explainList(content.unmeasured,record,'材料没有列出额外的未测量项；这不构成已验证。');
   if(state.mode==='brief') {
-    html+='<div class="explain-intro">'+explainStatement(content.overview,record)+'</div>'+section('实际改动',briefStatement(content.change,record,'change'))+explanationMeasurements(record,node)+section('整体目标与本轮边界',explainStatement(content.goal_connection,record))+'<div class="explain-split"><div class="explain-box supported"><h4>支持的结论</h4>'+briefStatement(content.supported?.[0],record,'supported')+'</div><div class="explain-box hypotheses"><h4>仍待区分</h4>'+briefStatement(content.hypotheses?.[0] || content.unmeasured?.[0],record,'unresolved',90)+'</div></div>'+section('下一项验证',badge('建议 · 尚未执行','amber')+briefStatement(content.next_tests?.[0],record,'next',120))+'<p class="caption">切回逐步讲解，核对完整问题、观察、公式与未测量项。</p>';
+    html+='<div class="explain-intro">'+explainStatement(content.overview,record)+'</div>'+section('实际改动',briefStatement(content.change,record,'change'))+explanationMeasurements(record,node)+section('整体目标与本轮边界',explainStatement(content.goal_connection,record))+'<div class="explain-split"><div class="explain-box supported"><h4>支持的结论</h4>'+briefStatement(content.supported?.[0],record,'supported')+'</div><div class="explain-box hypotheses"><h4>仍待区分</h4>'+briefStatement(content.hypotheses?.[0] || content.unmeasured?.[0],record,'unresolved',90)+'</div></div>'+section('下一项验证',badge('建议 · 本说明未执行','amber')+briefStatement(content.next_tests?.[0],record,'next',120))+'<p class="caption">建议基于本轮冻结材料，后续可能已有相近验证。切回逐步讲解可核对完整观察、公式与未测量项。</p>';
   } else {
     const bodies=[
       section('本轮想弄清什么',explainStatement(content.question,record)+goal),
       section('相对代码起点，实际改了什么',explainStatement(content.change,record)+explainTechnical(content.technical,record)),
       section('实际观察到了什么',explanationMeasurements(record,node)+explainList(content.observations,record)),
       section('结果说明了什么，仍不能说明什么',conclusions),
-      section('用什么实验继续区分',badge('说明作者的建议 · 尚未执行','amber')+explainList(content.next_tests,record)+'<p class="caption">这些建议不会自动进入研究路线或触发实验。</p>')
+      section('用什么实验继续区分',badge('说明作者的建议 · 本说明未执行','amber')+explainList(content.next_tests,record)+'<p class="caption">建议基于本轮冻结材料；后续轮次可能已做过相近验证。建议本身不会自动进入研究路线或触发实验。</p>')
     ];
     html+=bodies[state.step]+'<div class="explain-next"><button data-reading-step="'+Math.max(0,state.step-1)+'" '+(state.step===0?'disabled':'')+'>上一步</button><small>'+String(state.step+1)+' / 5</small><button data-reading-step="'+Math.min(4,state.step+1)+'" '+(state.step===4?'disabled':'')+'>'+(state.step<4?'接着看：'+READING_STEPS[state.step+1]:'已读完本轮')+'</button></div>';
   }
   if(content.glossary?.length) html+=disclosure('explain-glossary','本轮术语对照','<dl class="facts explain-glossary">'+content.glossary.map(v=>'<dt>'+esc(v.internal)+'</dt><dd>'+esc(v.plain)+evidenceLinks(v.source_ids,record)+'</dd>').join('')+'</dl>');
+  if(explanation.assisted_review) html+=disclosure('explain-provenance','说明来源与复核记录','<p class="caption">本轮说明由只读协作复核完成，依据冻结材料整理；原草稿、失败回执和修订内容均保留。</p><dl class="facts"><dt>说明方式</dt><dd>'+esc(explanation.assisted_review.method)+'</dd><dt>复核模型</dt><dd>'+esc(explanation.assisted_review.requested_model)+'</dd><dt>检查范围</dt><dd>'+esc(explanation.assisted_review.review_note)+'</dd></dl>');
   const missing=[...(content.missing_material || []),...(explanation.missing_material || [])];
   if(missing.length) html+=disclosure('explain-missing','缺失材料 · '+missing.length+' 项','<ul>'+missing.map(value=>'<li>'+esc(value)+'</li>').join('')+'</ul>');
   return html+explanationEvidence(record,state)+coverage;

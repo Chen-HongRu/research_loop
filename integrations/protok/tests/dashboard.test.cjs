@@ -222,8 +222,12 @@ test('Explanation defaults to steps, preserves per-node reading state, and separ
   rendered=ui.explanationPanel(record,node);
   assert.match(rendered,/1\.8843203088266018 Å/);
   assert.match(rendered,/2\.187434156835498 Å/);
-  assert.match(rendered,/建议 · 尚未执行/);
+  assert.match(rendered,/建议 · 本说明未执行/);
   assert.equal(ui.readingState(record.id).mode,'brief');
+  state.mode='steps';state.step=4;
+  rendered=ui.explanationPanel(record,node);
+  assert.match(rendered,/后续轮次可能已做过相近验证/);
+  assert.doesNotMatch(rendered,/建议 · 尚未执行/);
 });
 
 test('Measurement panel discloses reuse and current exclusions without turning either into improvement', () => {
