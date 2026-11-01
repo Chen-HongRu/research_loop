@@ -505,6 +505,27 @@ class DebugFlowTests(unittest.TestCase):
         self.assertEqual(len(self.invocations), 1)
         self.assertEqual(self.backend.formal_calls, [])
 
+    def test_preadmission_failure_keeps_cause_and_requires_explicit_reconciliation(
+        self,
+    ):
+        self.backend.debug_smoke = lambda *args, **kwargs: {
+            "purpose": "debug",
+            "quality_score_eligible": False,
+            "status": "blocked",
+            "verified": False,
+            "cause": "ValueError: Debug records overlap the candidate workspace",
+        }
+        with self.assertRaisesRegex(
+            HarnessError, "unbound blocked receipt: ValueError:"
+        ):
+            self.recover()
+        debug_root = self.root / "control/debug/0009"
+        self.assertTrue(run.read(debug_root / "flow.json")["smoke_submitted"])
+        self.assertEqual(run.read(debug_root / "debug-budget.json")["attempts"], {})
+        self.assertFalse((debug_root / "decision.json").exists())
+        self.assertEqual(len(self.invocations), 1)
+        self.assertEqual(self.backend.formal_calls, [])
+
     def test_repair_delegate_clips_timeout_to_original_deadline_and_refuses_expiry(
         self,
     ):

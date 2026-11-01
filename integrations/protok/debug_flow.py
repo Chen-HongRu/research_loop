@@ -298,6 +298,11 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                 state["deadline"],
                 recover=recover,
             )
+            if receipt.get("status") == "blocked" and not receipt.get("fingerprint"):
+                raise HarnessError(
+                    "Debug smoke returned an unbound blocked receipt: "
+                    + str(receipt.get("cause") or receipt.get("error"))
+                )
             if (
                 receipt.get("purpose") != "debug"
                 or receipt.get("quality_score_eligible") is not False

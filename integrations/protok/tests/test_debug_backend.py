@@ -277,6 +277,29 @@ class DebugBackendTests(unittest.TestCase):
         self.assertEqual(self.scheduler.commands.count("sbatch"), 1)
         self.assert_formal_unchanged()
 
+    def test_controller_frozen_revision_inside_debug_namespace_can_run_and_resume(self):
+        self.workspace = self.debug_root / "revisions/001/source"
+        self.workspace.mkdir(parents=True)
+        (self.workspace / "candidate.py").write_text("# frozen candidate\n")
+        self.config["workspace"] = str(self.workspace)
+        debug.write(self.config_path, self.config)
+        self.scheduler.terminal = "COMPLETED"
+        result = self.run_attempt()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.run_attempt(recover=True), result)
+        self.assertEqual(self.scheduler.commands.count("sbatch"), 1)
+        self.assert_formal_unchanged()
+
+    def test_workspace_cannot_alias_debug_attempts_or_contain_debug_control(self):
+        for workspace in (self.debug_root / "attempts/source", self.root):
+            with self.subTest(workspace=workspace):
+                self.config["workspace"] = str(workspace)
+                debug.write(self.config_path, self.config)
+                with self.assertRaisesRegex(ValueError, "overlap the candidate"):
+                    self.run_attempt()
+        self.assertEqual(self.scheduler.commands.count("sbatch"), 0)
+        self.assertFalse((self.debug_root / "debug-budget.json").exists())
+
     def test_producer_certifies_accounted_first_step_failure_for_debug_flow(self):
         result = self.run_attempt()
         self.assertEqual(result["status"], "failed")

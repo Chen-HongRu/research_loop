@@ -253,11 +253,23 @@ def run_debug(
         _live(control, owner_token, deadline)
     formal = Path(config["records_root"]).resolve()
     workspace = Path(config["workspace"]).resolve()
-    for protected in (formal, workspace, project):
+    for protected in (formal, project):
         if debug_root.is_relative_to(protected) or protected.is_relative_to(debug_root):
             raise ValueError(
                 "Debug records must be isolated from formal records/source"
             )
+    # The controller freezes candidates inside revisions/NNN/source alongside,
+    # rather than inside, attempts/. Never place debug effects in source or let
+    # an arbitrary workspace alias the records/control files.
+    if debug_root.is_relative_to(workspace) or (
+        workspace.is_relative_to(debug_root)
+        and not (
+            workspace.name == "source"
+            and re.fullmatch(r"[0-9]{3,}", workspace.parent.name)
+            and workspace.parent.parent == debug_root / "revisions"
+        )
+    ):
+        raise ValueError("Debug records overlap the candidate workspace")
     candidates = backend.source_boundary(config)
     identity = backend.fingerprint(config, candidates)
     if existing and existing["fingerprint"] != identity:
