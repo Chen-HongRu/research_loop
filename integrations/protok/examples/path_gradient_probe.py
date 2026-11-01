@@ -34,6 +34,8 @@ def main():
     if os.getpid() != 1:
         raise RuntimeError("Research process must own the isolated PID namespace")
     if not torch.cuda.is_available():
+        # Preserve the driver's precise initialization failure for the next fix.
+        torch.cuda.init()
         raise RuntimeError("CUDA unavailable inside the research sandbox")
     torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False

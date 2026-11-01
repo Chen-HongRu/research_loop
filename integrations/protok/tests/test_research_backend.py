@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import io
 from pathlib import Path
 import shlex
 import shutil
@@ -301,6 +302,88 @@ class ResearchBackendTests(unittest.TestCase):
         self.assertNotIn("('/data', '/data')", launcher)
         self.assertIn("/dev/nvidia", launcher)
         compile(launcher, "launcher", "exec")
+
+    def test_launcher_uses_reported_device_minor_and_logs_only_resource_fields(self):
+        launcher = research._launcher(
+            self.config, "/remote/attempt", self.execution, []
+        )
+        output = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CUDA_VISIBLE_DEVICES": "0",
+                    "SLURM_JOB_GPUS": "4",
+                    "SECRET_TOKEN": "must-not-be-logged",
+                },
+            ),
+            patch(
+                "subprocess.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, "0, GPU-test\n", ""),
+                    subprocess.CompletedProcess(
+                        [],
+                        0,
+                        "<nvidia_smi_log><gpu><uuid>GPU-test</uuid><minor_number>4</minor_number></gpu></nvidia_smi_log>",
+                        "",
+                    ),
+                ],
+            ) as query,
+            patch("ctypes.CDLL", side_effect=OSError("driver probe unavailable")),
+            patch("os.path.exists", return_value=True),
+            patch("os.execve") as execute,
+            patch("sys.stdout", output),
+        ):
+            exec(compile(launcher, "research-launcher", "exec"), {})
+        self.assertEqual(
+            query.call_args_list[0].args[0],
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid",
+                "--format=csv,noheader",
+                "-i",
+                "0",
+            ],
+        )
+        self.assertEqual(
+            query.call_args_list[1].args[0], ["nvidia-smi", "-q", "-x", "-i", "0"]
+        )
+        args = execute.call_args.args[1]
+        self.assertIn("/dev/nvidia4", args)
+        self.assertNotIn("/dev/nvidia0", args)
+        text = output.getvalue()
+        self.assertIn('"minor_number": "4"', text)
+        self.assertIn('"SLURM_JOB_GPUS": "4"', text)
+        self.assertIn("host_libcuda_error", text)
+        self.assertNotIn("SECRET_TOKEN", text)
+        self.assertNotIn("must-not-be-logged", text)
+
+    def test_gpu_query_failure_keeps_driver_evidence_and_bounded_error_tails(self):
+        launcher = research._launcher(
+            self.config, "/remote/attempt", self.execution, []
+        )
+        output = io.StringIO()
+        with (
+            patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0"}),
+            patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 2, "x" * 10000, "unsupported field"
+                ),
+            ),
+            patch("ctypes.CDLL", side_effect=OSError("driver location unavailable")),
+            patch("os.execve") as execute,
+            patch("sys.stdout", output),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "metadata query failed"):
+                exec(compile(launcher, "research-launcher", "exec"), {})
+        text = output.getvalue()
+        self.assertLess(
+            text.index("host_libcuda_error"), text.index("RESEARCH_GPU_QUERY_ERROR")
+        )
+        self.assertIn("unsupported field", text)
+        self.assertNotIn("x" * 4097, text)
+        execute.assert_not_called()
 
     def test_collector_refuses_symlinks_and_caps_total_output(self):
         remote = self.directory / "collect"

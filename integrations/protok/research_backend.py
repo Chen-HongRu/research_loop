@@ -304,18 +304,42 @@ def _launcher(config, remote, execution, inputs):
         (remote + "/inputs.json", "/inputs.json"),
     ]
     mounts += [(item["path"], item["mount"]) for item in inputs]
-    script = f"""import os,re,subprocess,sys
+    script = f"""import ctypes,json,os,re,subprocess,sys,xml.etree.ElementTree as ET
 visible=os.environ.get("CUDA_VISIBLE_DEVICES", "")
+resources={{"CUDA_VISIBLE_DEVICES":visible,"SLURM_JOB_GPUS":os.environ.get("SLURM_JOB_GPUS"),"host_libcuda_paths":[]}}
+try:
+ driver=ctypes.CDLL("libcuda.so.1")
+ with open("/proc/self/maps") as maps:
+  resources["host_libcuda_paths"]=sorted({{line.split()[-1] for line in maps if line.split() and os.path.basename(line.split()[-1]).startswith("libcuda.so")}})[:8]
+except OSError as error: resources["host_libcuda_error"]=str(error)[:1000]
+print("RESEARCH_GPU_RESOURCES "+json.dumps(resources,sort_keys=True),flush=True)
 if not visible or "," in visible: raise RuntimeError("Exactly one Slurm-assigned GPU is required")
-row=subprocess.check_output(["nvidia-smi","--query-gpu=index,uuid","--format=csv,noheader","-i",visible],text=True).strip().splitlines()
+def query(command):
+ def tail(value):
+  return (value.decode(errors="replace") if isinstance(value,bytes) else value or "")[-4096:]
+ try: result=subprocess.run(command,capture_output=True,text=True,timeout=30)
+ except subprocess.TimeoutExpired as error:
+  print("RESEARCH_GPU_QUERY_ERROR "+json.dumps({{"command":command,"error":"timeout","stdout_tail":tail(error.stdout),"stderr_tail":tail(error.stderr)}}),flush=True)
+  raise RuntimeError("NVIDIA metadata query timed out") from error
+ if result.returncode:
+  print("RESEARCH_GPU_QUERY_ERROR "+json.dumps({{"command":command,"returncode":result.returncode,"stdout_tail":tail(result.stdout),"stderr_tail":tail(result.stderr)}}),flush=True)
+  raise RuntimeError("NVIDIA metadata query failed")
+ return result.stdout
+row=query(["nvidia-smi","--query-gpu=index,uuid","--format=csv,noheader","-i",visible]).strip().splitlines()
 if len(row)!=1: raise RuntimeError("GPU identity is ambiguous")
 index,uuid=[x.strip() for x in row[0].split(",")]
 if not re.fullmatch(r"[0-9]+",index) or not uuid.startswith("GPU-"): raise RuntimeError("Unsupported GPU identity")
+gpus=ET.fromstring(query(["nvidia-smi","-q","-x","-i",visible])).findall("gpu")
+if len(gpus)!=1 or (gpus[0].findtext("uuid") or "").strip()!=uuid: raise RuntimeError("XML GPU identity differs from the assigned GPU")
+minor=(gpus[0].findtext("minor_number") or "").strip()
+if not re.fullmatch(r"[0-9]+",minor): raise RuntimeError("GPU XML has no usable device minor number")
+resources.update(index=index,uuid=uuid,minor_number=minor,device="/dev/nvidia"+minor)
+print("RESEARCH_GPU_RESOURCES "+json.dumps(resources,sort_keys=True),flush=True)
 args=["/bin/bwrap","--unshare-user","--unshare-pid","--as-pid-1","--unshare-net","--unshare-ipc","--unshare-uts","--die-with-parent","--new-session","--cap-drop","ALL","--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/inputs"]
 for src,dst in {mounts!r}: args += ["--ro-bind",src,dst]
 if os.path.isfile("/etc/ld.so.cache"): args += ["--ro-bind","/etc/ld.so.cache","/etc/ld.so.cache"]
 args += ["--bind",{remote + "/output"!r},"/output"]
-for dev in ["/dev/nvidiactl","/dev/nvidia"+index,"/dev/nvidia-uvm","/dev/nvidia-uvm-tools"]:
+for dev in ["/dev/nvidiactl","/dev/nvidia"+minor,"/dev/nvidia-uvm","/dev/nvidia-uvm-tools"]:
  if os.path.exists(dev): args += ["--dev-bind",dev,dev]
 for key,value in {{"HOME":"/tmp/home","PATH":"/usr/bin:/bin","TMPDIR":"/tmp","PYTHONPATH":"/workspace:/workspace/scripts","PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1","OMP_NUM_THREADS":"1","CUDA_VISIBLE_DEVICES":uuid,"TORCHINDUCTOR_CACHE_DIR":"/tmp/torch","TRITON_CACHE_DIR":"/tmp/triton"}}.items(): args += ["--setenv",key,value]
 args += ["--chdir","/output",{config["remote_python"]!r},"-B",{str(PurePosixPath("/workspace") / execution["entrypoint"])!r}]
