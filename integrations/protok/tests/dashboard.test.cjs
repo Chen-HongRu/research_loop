@@ -16,9 +16,42 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {gitLayout, graphParent, drawGraph, renderProgress, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
+
+test('Scout refresh retains user expansion and collapse while updating findings', () => {
+  let markup='', fold=null;
+  const prior=elements.get('scoutBody');
+  elements.set('scoutBody',{
+    get innerHTML(){return markup;},
+    set innerHTML(value){
+      markup=value;
+      const tag=value.match(/<details data-disclosure="scout-findings"[^>]*>/);
+      fold=tag?{open:/\sopen(?:\s|>)/.test(tag[0])}:null;
+    },
+    querySelector:selector=>selector==='[data-disclosure="scout-findings"]'?fold:null,
+    querySelectorAll:()=>[],
+  });
+  try {
+    vm.runInContext("data={scout:{status:'completed',summary:'Scout summary',findings:['Initial finding']}};",context);
+    ui.renderScout();
+    assert.equal(fold.open,false);
+    fold.open=true;
+    for(let tick=1;tick<=3;tick++) {
+      vm.runInContext(`data.scout.observed_at=${tick};data.scout.findings=['Updated finding ${tick}'];`,context);
+      ui.renderScout();
+      assert.equal(fold.open,true,'auto-refresh must preserve user expansion');
+      assert.ok(markup.includes('Updated finding '+tick),'findings still refresh');
+    }
+    fold.open=false;
+    ui.renderScout();
+    assert.equal(fold.open,false,'auto-refresh must also preserve explicit collapse');
+  } finally {
+    if(prior) elements.set('scoutBody',prior); else elements.delete('scoutBody');
+    vm.runInContext('data=null;',context);
+  }
+});
 
 test('Git rows follow time; tracks follow code parents, independently of routes and references', () => {
   const nodes = [

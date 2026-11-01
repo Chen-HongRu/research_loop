@@ -507,10 +507,11 @@ async function choose(id) {
 }
 function renderScout() {
   const scout=data.scout; $('scoutPanel').hidden=!scout; if(!scout)return;
+  const body=$('scoutBody'), open=body.querySelector('[data-disclosure="scout-findings"]')?.open || false;
   $('scoutStatus').textContent=STATUS[scout.status] || scout.status || '状态未确认';
   const known=new Set(['status','summary','error','source','observed_at','configured']);
-  $('scoutBody').innerHTML=(scout.summary?markdown(scout.summary):'')+(scout.error?'<div class="reason"><strong>Scout 当前错误</strong><p>'+esc(scout.error)+'</p></div>':'')+disclosure('scout-findings','查看发现与建议',structured(Object.fromEntries(Object.entries(scout).filter(([key])=>!known.has(key)))))+(scout.source?'<div class="source">'+esc(scout.source)+'</div>':'');
-  bindExperiments($('scoutBody'));
+  body.innerHTML=(scout.summary?markdown(scout.summary):'')+(scout.error?'<div class="reason"><strong>Scout 当前错误</strong><p>'+esc(scout.error)+'</p></div>':'')+disclosure('scout-findings','查看发现与建议',structured(Object.fromEntries(Object.entries(scout).filter(([key])=>!known.has(key)))),open)+(scout.source?'<div class="source">'+esc(scout.source)+'</div>':'');
+  bindExperiments(body);
 }
 $('routeFilter').onchange=()=>{drawGraph();drawRoutes();updateView();};
 $('sourceFilter').onchange=()=>highlightSource($('sourceFilter').value);
