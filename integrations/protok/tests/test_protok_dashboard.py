@@ -14,6 +14,40 @@ SPEC.loader.exec_module(DASH)
 
 
 class DashboardTests(unittest.TestCase):
+    def test_presentation_reads_only_cached_content_and_static_assets_are_contained(
+        self,
+    ):
+        from io import BytesIO
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(
+                DASH, "explanation_status", return_value={"status": "pending"}
+            ) as status:
+                self.assertEqual(
+                    DASH.details(root, "0001")["explanation"], {"status": "pending"}
+                )
+                status.assert_called_once_with(root, "0001")
+            with patch.object(DASH, "ThreadingHTTPServer") as factory:
+                factory.return_value.server_port = 0
+                DASH.serve(root, 0, snapshot_only=True)
+                handler = factory.call_args.args[1]
+            for path, expected in [
+                ("/assets/research-explanation.js", b"200 OK"),
+                ("/assets/vendor/katex/katex.min.css", b"200 OK"),
+                ("/assets/vendor/katex/fonts/KaTeX_Main-Regular.woff2", b"200 OK"),
+                ("/assets/../dashboard.py", b"404 Not Found"),
+                ("/assets/vendor/katex/LICENSE", b"404 Not Found"),
+            ]:
+                connection = Mock()
+                connection.makefile.return_value = BytesIO(
+                    ("GET " + path + " HTTP/1.0\r\n\r\n").encode()
+                )
+                response = bytearray()
+                connection.sendall.side_effect = response.extend
+                handler(connection, ("127.0.0.1", 1), Mock())
+                self.assertIn(expected, response, path)
+
     def test_offline_snapshot_needs_neither_owner_token_nor_canonical_project(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

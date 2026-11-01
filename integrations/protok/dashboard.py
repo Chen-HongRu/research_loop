@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import mimetypes
 import sys
 import re
 import time
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.backend import METRIC, PROTOCOL, ProTokBackend
+from integrations.protok.explanation import explanation_coverage, explanation_status
 from integrations.protok.run import job_path
 from research_loop.harness import completed_response
 
@@ -1003,6 +1005,7 @@ def details(root, identity):
         "selection": selection,
         "agents": agent_outputs(root, folder),
         "execution": execution_details(root, identity),
+        "explanation": explanation_status(root, identity),
         "metadata": read(folder / "iteration.json", {}),
         "sources": {
             key: relative(folder / name, root)
@@ -1249,6 +1252,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
                 if source_id != "active" or snapshot_only
                 else "local_records",
                 "count": len(local["nodes"]),
+                "explanation": explanation_coverage(source_root),
             }
         )
         history_frontiers.append(
@@ -1514,6 +1518,22 @@ def serve(root, port, *, snapshot_only=False, history_roots=(), records_root=Non
                 if path == "/":
                     body = Path(__file__).with_suffix(".html").read_bytes()
                     mime = "text/html; charset=utf-8"
+                elif path.startswith("/assets/"):
+                    assets = Path(__file__).parent / "assets"
+                    asset = (assets / path.removeprefix("/assets/")).resolve()
+                    if (
+                        not asset.is_relative_to(assets.resolve())
+                        or asset.suffix
+                        not in {".js", ".css", ".woff2", ".woff", ".ttf"}
+                        or not asset.is_file()
+                    ):
+                        self.send_error(404)
+                        return
+                    body = asset.read_bytes()
+                    mime = (
+                        mimetypes.guess_type(asset.name)[0]
+                        or "application/octet-stream"
+                    )
                 elif path == "/api/snapshot":
                     body = json.dumps(
                         view_snapshot(

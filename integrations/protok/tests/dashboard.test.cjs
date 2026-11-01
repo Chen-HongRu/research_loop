@@ -13,7 +13,10 @@ const document = {getElementById(id) {
 }};
 // Exercise actual rendering functions without a browser, network, or polling loop.
 const context = vm.createContext({document, fetch: () => new Promise(() => {}), setTimeout() {}});
-vm.runInContext(script+'\nglobalThis.ui = {gitLayout, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference};', context);
+for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
+}
+vm.runInContext(script+'\nglobalThis.ui = {gitLayout, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -97,7 +100,7 @@ test('Execute history retains formal, debug, original failure and provenance wit
 });
 
 test('Execute tab tolerates old records and retains Executor and Debug repair completed outputs', () => {
-  assert.match(html, /data-tab="execute">Execute · 执行与调试/);
+  assert.match(html, /data-tab="execute"[^>]*>Execute · 执行与调试/);
   assert.match(ui.executionHistory(), /尚无执行或调试回执/);
   assert.doesNotThrow(()=>ui.executionHistory({job:{status:'prepared'},debug:{},debug_attempts:[]}));
   const rendered=ui.executePanel({agents:[
@@ -188,4 +191,64 @@ test('Unavailable canonical Frontier never falls back to nominal score points', 
   const plot=ui.frontierPlot({available:false,points:[{id:'1',value:2.2,current:true}]},[{id:'1',sequence:1}],'frontier');
   assert.equal(plot.points.length,0);
   assert.equal(plot.curve.length,0);
+});
+
+const statement=text=>({text,source_ids:['s1']});
+function explanationFixture(id='active:0012') {
+  return {id,explanation:{status:'ready',generated_at:'2026-11-02T00:00:00Z',
+    sources:[{id:'s1',path:'frozen/source.py',line_start:1,line_end:1,kind:'actual_source',text:'x = y < z'}],
+    facts:{measurements:[{value:1.8843203088266018}],base_measurements:[{value:2.187434156835498}],base_experiment:'0011',evaluation:{id:'fixed-protocol',comparison_scope:'development-only',protocol:'Fixed development proteins'}},
+    content:{title:'距离特征如何影响坐标更新',overview:statement('本轮增加距离信息。'),question:statement('距离特征是否有用？'),goal_connection:statement('只测了重建，未证明条件多样性。'),change:statement('增加零初始化投影。'),observations:[statement('观察到误差改善。')],supported:[statement('此协议下有收益。')],hypotheses:[statement('容量或梯度路径也可能解释。')],unmeasured:[statement('没有测量条件多样性。')],next_tests:[{...statement('固定容量后比较。'),proposed:true,not_run:true}],technical:{before:statement('原坐标系数。'),after:statement('加入投影。'),formulas:[{before_latex:'c_{ij}=W_hh_j',after_latex:'c_{ij}=W_hh_j+W_rr_{ij}',scope:'省略层与头索引，后续聚合保持原样。',variables:[{symbol_latex:'r_{ij}',meaning:'径向特征',shape:'B × L × L × 16'}],source_ids:['s1']}],flow:[{label:'径向特征',shape:'B,L,L,16',source_ids:['s1']}],unchanged:[],missing:[]},glossary:[],missing_material:[]}}};
+}
+
+test('Explanation defaults to steps, preserves per-node reading state, and separates claims', () => {
+  const record=explanationFixture(), node={frontier_current:true};
+  let rendered=ui.explanationPanel(record,node);
+  assert.match(rendered,/本轮想弄清什么/);
+  assert.match(rendered,/未证明条件多样性/);
+  assert.doesNotMatch(rendered,/参数量|c_\{ij\}/);
+  const state=ui.readingState(record.id);state.step=1;
+  rendered=ui.explanationPanel(record,node);
+  assert.match(rendered,/class="katex/);
+  assert.match(rendered,/B × L × L × 16/);
+  assert.match(rendered,/省略层与头索引/);
+  assert.equal(ui.readingState('history-1:0012').step,0);
+  state.step=3;
+  rendered=ui.explanationPanel(record,node);
+  assert.match(rendered,/证据支持到哪里/);
+  assert.match(rendered,/仍是待区分的解释/);
+  assert.match(rendered,/尚未测量/);
+  state.mode='brief';
+  rendered=ui.explanationPanel(record,node);
+  assert.match(rendered,/1\.8843203088266018 Å/);
+  assert.match(rendered,/2\.187434156835498 Å/);
+  assert.match(rendered,/建议 · 尚未执行/);
+  assert.equal(ui.readingState(record.id).mode,'brief');
+});
+
+test('Measurement panel discloses reuse and current exclusions without turning either into improvement', () => {
+  const record=explanationFixture('active:import');
+  const rendered=ui.explanationMeasurements(record,{imported:true,frontier_exclusion_reason:'excluded by later Review'});
+  assert.match(rendered,/不计为新的独立测量/);
+  assert.match(rendered,/当前资格已排除/);
+  assert.match(rendered,/fixed-protocol/);
+  assert.doesNotMatch(rendered,/RMSD 降低/);
+});
+
+test('Pending, failed, stale and unpublished explanations stay honest and keep authoritative values', () => {
+  for (const status of ['pending','failed','stale','unpublished','insufficient']) {
+    const rendered=ui.explanationPanel({id:status,explanation:{status,reason:'<script>bad</script>'}},{value:2.21});
+    assert.match(rendered,/2\.21 Å/);
+    assert.doesNotMatch(rendered,/<script>|逐步讲解|证据支持到哪里/);
+  }
+  const coverage=ui.explanationCoverage({label:'历史',explanation:{counts:{ready:3,pending:2,failed:1},latest_published_id:'0009',covered_through_id:'0008'}});
+  assert.match(coverage,/已生成 3 \/ 6/);
+  assert.match(coverage,/不表示更早各轮均已覆盖/);
+});
+
+test('Local formula renderer blocks trusted HTML and catches malformed TeX', () => {
+  assert.match(ui.renderMath('x_{ij}+W_r r_{ij}'),/katex-mathml/);
+  assert.match(ui.renderMath('\\notARealCommand{'),/暂不能可靠显示/);
+  assert.doesNotMatch(ui.renderMath('\\href{javascript:alert(1)}{x}'),/<a |href="javascript:/);
+  assert.doesNotMatch(ui.markdown('![x](https://example.com/x.png) [x](data:text/html,test)'),/<img|href="data:/);
 });

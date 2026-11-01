@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Research Loop · 研究现场</title>
+<link rel="stylesheet" href="/assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/assets/research-explanation.css">
 <style>
 :root{color-scheme:dark;--bg:#0d1422;--panel:#151f30;--inset:#101a2a;--line:#2a3850;--text:#e4ecf7;--muted:#a0afc5;--green:#72dfb3;--blue:#8ab8ff;--amber:#f2cb85;--red:#ffacac}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,select,input{font:inherit}button,select{color:var(--text);background:#1c2a40;border:1px solid var(--line);border-radius:7px;padding:6px 11px;cursor:pointer}button:hover,select:hover{border-color:var(--blue)}button:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offset:3px}button.on,button[aria-pressed="true"]{border-color:var(--green);color:var(--green);background:#203b3d}button:disabled{opacity:.5;cursor:default}button.link{padding:0;background:none;border:0;color:var(--blue);font-size:inherit}a{color:var(--blue);overflow-wrap:anywhere}h1,h2,h3,h4,p{margin-top:0}h1{font-size:27px;letter-spacing:-.6px;margin-bottom:4px}h2{font-size:18px;margin-bottom:5px}h3{font-size:16px;margin-bottom:8px}h4{font-size:14px;margin-bottom:6px}small,.muted{color:var(--muted)}small{font-size:12px}.green{color:var(--green)}.amber{color:var(--amber)}.red{color:var(--red)}.eyebrow{font-size:11px;font-weight:650;letter-spacing:1.6px;color:var(--green);margin-bottom:5px}header{border-bottom:1px solid var(--line);padding:22px 30px;display:flex;justify-content:space-between;gap:20px;align-items:center}.connection{text-align:right;font-size:12px;color:var(--muted)}main{max-width:1840px;margin:auto;padding:22px 30px}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:11px;min-width:0}.card{padding:16px 18px}.card b{display:block;font-size:26px;line-height:1.4;margin:5px 0}.card:first-child b{color:var(--green)}.panel{padding:18px}.wide{margin:16px 0}.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.between{justify-content:space-between}.caption{font-size:12px;color:var(--muted);margin:6px 0 12px}.progress-title{display:flex;justify-content:space-between;gap:12px;align-items:start}.progress-title h2{margin:0 0 5px}.phase{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:15px}.phase-item{border-top:3px solid var(--line);padding:9px 8px 1px;color:var(--muted)}.phase-item strong{display:block;font-size:13px;font-weight:550}.phase-item small{font-size:11px}.phase-item.active{border-color:var(--green);color:var(--green)}.phase-item.complete{border-color:#497c72}.phase-item.blocked{border-color:var(--amber);color:var(--amber)}.reasons{display:grid;gap:8px;margin-top:12px}.reason{border-left:3px solid var(--amber);background:#302b23;padding:9px 12px;border-radius:0 6px 6px 0;overflow-wrap:anywhere}.reason p{margin:2px 0}.reason small{display:block}.statusline{margin-top:12px;display:flex;gap:8px 20px;flex-wrap:wrap;color:var(--muted);font-size:12px}.layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:16px;align-items:start}.graph-note{display:flex;gap:12px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:12px;padding:10px 0}.legend-line{display:inline-block;vertical-align:middle;width:24px;border-top:2px solid var(--blue);margin-right:5px}.legend-line.dashed{border-top:2px dashed #a99bc9}.git-scroll{max-height:660px;overflow:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.git-log{position:relative;min-width:520px}.git-rail{position:absolute;left:0;top:0;overflow:visible}.git-row{height:102px;padding:9px 10px;text-align:left;display:block;width:100%;border:0;border-bottom:1px solid #253148;border-radius:0;background:transparent;position:relative;overflow:hidden}.git-row:hover{background:#1b2b42}.git-row.selected{background:#20364b;box-shadow:inset 3px 0 var(--blue)}.git-row.other-route{opacity:.42}.git-row .row-top{display:flex;align-items:center;justify-content:space-between;gap:10px}.commit-id{color:var(--blue);font:600 13px ui-monospace,SFMono-Regular,monospace}.row-action{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:3px 0;font-size:13px}.row-meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;overflow:hidden;white-space:nowrap}.badge{display:inline-block;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:11px;line-height:1.7;font-weight:450;vertical-align:middle;max-width:100%;overflow-wrap:anywhere}.badge.green{border-color:#396052;background:#1d3a33}.badge.amber{border-color:#6d5734;background:#392f22}.badge.red{border-color:#714343;background:#3b272e}.badge.route{border-color:#415474;color:#bad0ed}.score{font:600 13px ui-monospace,SFMono-Regular,monospace;white-space:nowrap}.empty{color:var(--muted);padding:24px 15px;background:var(--inset);border:1px dashed var(--line);border-radius:7px}.route-cards{display:grid;gap:12px;max-height:660px;overflow:auto}.route-card{border:1px solid var(--line);border-radius:8px;padding:13px;background:var(--inset)}.route-card p{font-size:12px;color:var(--muted);margin:7px 0}.route-history{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.route-history button{font-size:12px;padding:4px 8px}.chart-section{margin-top:18px}.chart-section h3{margin:0}#chart{width:100%;height:210px;display:block}.detail-heading{display:flex;justify-content:space-between;align-items:start;gap:12px}.detail-heading h2{margin:0 0 5px}.detail-heading .toolbar{justify-content:flex-end;flex-shrink:0}.tabs{display:flex;gap:5px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:12px;margin:14px 0}.tabs button{font-size:13px}.detail-body{max-height:900px;overflow:auto;overflow-wrap:anywhere;padding:0 3px 4px 0}.detail-meta{font-size:12px;color:var(--muted)}.context-box{border:1px solid var(--line);border-radius:8px;padding:11px 13px;background:var(--inset);margin-bottom:13px;font-size:12px}.context-box .toolbar{gap:5px}.context-box p{margin:4px 0}.facts{margin:0;display:grid;grid-template-columns:minmax(82px,auto) minmax(0,1fr);gap:8px 13px;font-size:13px}.facts dt{color:var(--muted)}.facts dd{margin:0;min-width:0;overflow-wrap:anywhere}.facts .facts{grid-template-columns:90px minmax(0,1fr)}.field-list{margin:0;padding-left:19px}.field-list li{margin-bottom:5px}.fact-block{border-top:1px solid var(--line);padding-top:12px;margin-top:12px}.agent-card{border:1px solid var(--line);border-radius:9px;padding:14px;margin-bottom:13px;background:var(--inset)}.agent-header{display:flex;align-items:center;justify-content:space-between;gap:9px;flex-wrap:wrap;margin-bottom:5px}.agent-header h3{margin:0}.agent-provenance{font-size:11px;color:var(--muted);margin-bottom:11px}.agent-output>.prose>p:last-child{margin-bottom:0}.agent-action{font-size:14px;font-weight:550;border-left:2px solid var(--blue);padding-left:11px;margin:10px 0}.agent-error{color:var(--red);font-size:13px}.source{font:11px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--muted);word-break:break-all}.prose{font-size:13px;line-height:1.85;overflow-wrap:anywhere}.prose p{margin:0 0 10px}.prose h2{font-size:17px;margin:18px 0 8px}.prose h3{font-size:15px;margin:16px 0 6px}.prose h4{font-size:14px;margin:14px 0 5px}.prose ul,.prose ol{padding-left:22px;margin:7px 0 12px}.prose li{margin-bottom:5px}.prose blockquote{margin:10px 0;border-left:3px solid #506485;padding:4px 12px;color:#bbc9dd}.prose pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0a121f;border:1px solid var(--line);border-radius:6px;padding:11px;font:12px/1.75 ui-monospace,SFMono-Regular,monospace;overflow:auto}.prose code{font:12px/1.7 ui-monospace,SFMono-Regular,monospace;background:#26334a;padding:1px 4px;border-radius:3px}.prose pre code{background:none;padding:0}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px;margin:9px 0}th,td{text-align:left;border:1px solid var(--line);padding:7px 9px;vertical-align:top}th{background:#1c2a40}details{margin:10px 0}summary{cursor:pointer;color:var(--blue);font-size:12px;padding:3px 0}details>.prose,details>.facts{margin-top:9px}.subtoolbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.subtoolbar button{font-size:12px;padding:4px 9px}.notice{background:#242c3d;border:1px solid var(--line);border-radius:7px;padding:10px 12px;color:#becbe0;font-size:12px;margin-bottom:12px}.scout{margin:16px 0 0}.scout h3{margin:0}.footer{font-size:11px;color:var(--muted);padding:22px 1px 4px}.loading{color:var(--muted)}[hidden]{display:none!important}
@@ -49,15 +51,18 @@
       <div id="routeWrap" class="route-cards" hidden></div>
     </section>
     <section class="panel" aria-labelledby="detailTitle">
-      <div class="detail-heading"><div><div class="eyebrow">调查记录 / AGENT 输出</div><h2 id="detailTitle">正在读取…</h2></div><div class="toolbar"><button id="follow" aria-pressed="true">跟随当前</button><button id="researchBtn">全局研究</button></div></div>
+      <div class="detail-heading"><div><div class="eyebrow">调查记录 / 研究说明</div><h2 id="detailTitle">正在读取…</h2></div><div class="toolbar"><button id="follow" aria-pressed="true">跟随当前</button><button id="researchBtn">全局研究</button></div></div>
       <div id="detailMeta" class="detail-meta"></div><div id="context" style="margin-top:12px"></div>
-      <div class="tabs" id="tabs" role="tablist" aria-label="调查输出"><button role="tab" aria-selected="true" data-tab="plan" class="on">Plan · 调查合同</button><button role="tab" aria-selected="false" data-tab="execute">Execute · 执行与调试</button><button role="tab" aria-selected="false" data-tab="review">Review · 判断与发现</button><button role="tab" aria-selected="false" data-tab="selection">提案与决策</button><button role="tab" aria-selected="false" data-tab="route">研究知识</button></div>
+      <div class="tabs" id="tabs" role="tablist" aria-label="调查输出"><button role="tab" aria-selected="true" data-tab="explanation" class="on">研究说明</button><button id="rawToggle" class="raw-toggle" aria-expanded="false">核对原始记录</button><button role="tab" aria-selected="false" data-tab="plan" class="raw-tab" hidden>Plan · 调查合同</button><button role="tab" aria-selected="false" data-tab="execute" class="raw-tab" hidden>Execute · 执行与调试</button><button role="tab" aria-selected="false" data-tab="review" class="raw-tab" hidden>Review · 判断与发现</button><button role="tab" aria-selected="false" data-tab="selection" class="raw-tab" hidden>提案与决策</button><button role="tab" aria-selected="false" data-tab="route" class="raw-tab" hidden>研究知识</button></div>
       <div id="detailBody" class="detail-body" aria-live="polite"><div class="loading">正在载入 Agent 输出…</div></div>
     </section>
   </div>
   <section class="panel scout" id="scoutPanel" hidden><div class="toolbar between"><h3>Scout · 外部研究输入</h3><span id="scoutStatus" class="badge"></span></div><div id="scoutBody"></div></section>
   <div class="footer">固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板读取本地研究记录与回执，不发起训练、模型调用或远程轮询。Execute 展示已完成的执行与修复输出、作业回执及调试历史；调试不计正式质量，正式测量经过独立 Review 后才进入质量曲线。</div>
 </main>
+<script src="/assets/vendor/markdown-it/markdown-it.umd.min.js"></script>
+<script src="/assets/vendor/katex/katex.min.js"></script>
+<script src="/assets/research-explanation.js"></script>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
@@ -81,7 +86,8 @@ const LABELS = {
 const VALUES = {active:'继续研究', paused:'暂停', closed:'关闭', met:'已达到', not_met:'未达到', undetermined:'尚未判定', investigate:'开展调查', reselect:'返回重选', stop:'停止', continue:'继续', select:'选择', resample:'重新采样', minimize:'越低越好', maximize:'越高越好', development:'开发集', architecture:'架构探索', diagnostic:'诊断研究', refinement:'局部改进', unreviewed_external_advice:'未经评审的外部建议', full_text:'全文', abstract:'摘要', code:'代码', context_only:'仅上下文，未检索核实', paper:'论文', official_code:'官方代码', prior_record:'已有记录', smoke:'冒烟检查',scored:'正式评价', true:'是', false:'否'};
 const STATUS = {running:'进行中', ready:'等待推进', needs_attention:'需要处理', stopped:'已停止', paused:'已暂停', reviewed:'Review 已发布', planned:'Plan 已冻结', executed:'执行已返回', selecting:'路线选择中', complete:'已完成', completed:'调用已完成', succeeded:'调用已完成', failed:'失败', interrupted:'已中断', timed_out:'超时', partial:'输出未完成', pending:'尚未开始', unknown:'状态未确认', unrecorded:'状态未记录', published:'已发布', accepted:'已接纳', submitted:'作业已提交', prepared:'作业已准备', preparing:'准备中', unavailable:'暂无记录', degraded:'检索不完整，保留既有建议'};
 const COLORS = ['#8ab8ff','#c4a0ef','#73cbbd','#e3b879','#de99ae','#9cbb80'];
-let data = null, selected = null, detail = null, following = true, tab = 'plan', view = 'git', discussion = false, globalView = false, research = '', detailSignature = '', detailToken = 0, detailError = false;
+let data = null, selected = null, detail = null, following = true, tab = 'explanation', view = 'git', discussion = false, globalView = false, research = '', detailSignature = '', detailToken = 0, detailError = false;
+let rawVisible=false;
 let chartView='frontier', frontierPinned=null, frontierHover=null, chartModel=null;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const translated = value => VALUES[String(value)] || String(value ?? '—');
@@ -99,57 +105,27 @@ function experimentLink(id, label) { const resolved=resolveReference(id),node=da
 function exactScore(value) { return typeof value==='number' && Number.isFinite(value) ? String(value) : '未测量'; }
 async function api(path) { const result = await fetch(path, {cache:'no-store'}); if (!result.ok) throw new Error('HTTP '+result.status); return result.json(); }
 
-// Render a small, escaped Markdown subset locally; agent prose never becomes trusted HTML.
-function inline(text) {
-  const tokens = [];
-  const token = html => { const key = '\u0000'+tokens.length+'\u0000'; tokens.push(html); return key; };
-  let value = String(text).replace(/`([^`]+)`/g, (_, code) => token('<code>'+esc(code)+'</code>'));
-  value = value.replace(/\[([^\]\n]+)\]\(([^\s)]+)\)/g, (all, label, url) => /^https?:\/\//i.test(url) ? token('<a href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'+esc(label)+'</a>') : label);
-  value = esc(value).replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>').replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
-  return value.replace(/\u0000(\d+)\u0000/g, (_, index) => tokens[Number(index)]);
-}
+// Parse Markdown with a maintained local renderer; untrusted records never become HTML.
+const proseRenderer=markdownit({html:false,linkify:false,typographer:false,breaks:true});
+proseRenderer.validateLink=url=>/^https?:\/\//i.test(url);
+proseRenderer.disable('image');
+const originalLink=proseRenderer.renderer.rules.link_open || ((tokens,index,options,env,self)=>self.renderToken(tokens,index,options));
+proseRenderer.renderer.rules.link_open=(tokens,index,options,env,self)=>{
+  tokens[index].attrSet('target','_blank');tokens[index].attrSet('rel','noopener noreferrer');
+  return originalLink(tokens,index,options,env,self);
+};
+proseRenderer.renderer.rules.fence=(tokens,index)=>{
+  const token=tokens[index];
+  if(token.info.trim()==='json') {try{return structured(JSON.parse(token.content));}catch(_) {}}
+  return '<pre><code>'+esc(token.content)+'</code></pre>';
+};
+proseRenderer.renderer.rules.table_open=()=>'<div class="table-wrap"><table>';
+proseRenderer.renderer.rules.table_close=()=>'</table></div>';
+function inline(text) {return proseRenderer.renderInline(String(text ?? ''));}
 function markdown(text) {
-  if (!text || text === '暂无记录') return '<div class="empty">尚无完成记录。</div>';
-  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
-  let html = '', i = 0;
-  const special = line => /^\s*$|^#{1,6}\s|^\s*```|^\s*[-*+]\s|^\s*\d+[.)]\s|^\s*>|^\s*---+\s*$/.test(line);
-  while (i < lines.length) {
-    const line = lines[i];
-    if (!line.trim()) { i++; continue; }
-    if (/^\s*```/.test(line)) {
-      const lang = line.trim().slice(3).trim(); const block = []; i++;
-      while (i < lines.length && !/^\s*```/.test(lines[i])) block.push(lines[i++]);
-      i++;
-      if (lang === 'json') { try { html += structured(JSON.parse(block.join('\n'))); continue; } catch (_) { /* Retain malformed output as escaped prose. */ } }
-      html += '<pre><code>'+esc(block.join('\n'))+'</code></pre>'; continue;
-    }
-    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
-    if (heading) { const level = Math.min(4, heading[1].length+1); html += '<h'+level+'>'+inline(heading[2])+'</h'+level+'>'; i++; continue; }
-    if (/^\s*---+\s*$/.test(line)) { html += '<hr>'; i++; continue; }
-    if (i+1 < lines.length && line.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[i+1])) {
-      const cells = row => row.trim().replace(/^\||\|$/g,'').split('|').map(cell => cell.trim());
-      html += '<div class="table-wrap"><table><thead><tr>'+cells(line).map(cell => '<th>'+inline(cell)+'</th>').join('')+'</tr></thead><tbody>'; i += 2;
-      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) html += '<tr>'+cells(lines[i++]).map(cell => '<td>'+inline(cell)+'</td>').join('')+'</tr>';
-      html += '</tbody></table></div>'; continue;
-    }
-    if (/^\s*>/.test(line)) { const quote = []; while (i < lines.length && /^\s*>/.test(lines[i])) quote.push(lines[i++].replace(/^\s*>\s?/,'')); html += '<blockquote>'+markdown(quote.join('\n'))+'</blockquote>'; continue; }
-    const list = /^\s*(?:([-*+])|\d+[.)])\s+/.exec(line);
-    if (list) {
-      const tag = list[1] ? 'ul' : 'ol', pattern = list[1] ? /^\s*[-*+]\s+/ : /^\s*\d+[.)]\s+/;
-      html += '<'+tag+'>';
-      while (i < lines.length && pattern.test(lines[i])) {
-        let item = lines[i++].replace(pattern,'');
-        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !special(lines[i])) item += '\n'+lines[i++].trim();
-        html += '<li>'+inline(item).replace(/\n/g,'<br>')+'</li>';
-      }
-      html += '</'+tag+'>'; continue;
-    }
-    const paragraph = [line]; i++;
-    while (i < lines.length && !special(lines[i]) && !(i+1 < lines.length && lines[i].includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[i+1]))) paragraph.push(lines[i++]);
-    html += '<p>'+inline(paragraph.join('\n')).replace(/\n/g,'<br>')+'</p>';
-  }
-  return '<div class="prose">'+html+'</div>';
+  return !text || text==='暂无记录' ? '<div class="empty">尚无完成记录。</div>' : '<div class="prose">'+proseRenderer.render(String(text))+'</div>';
 }
+
 function structured(value, key = '') {
   if (value == null) return '<span class="muted">未指定</span>';
   if (typeof value === 'boolean') return badge(value ? '是' : '否', value ? 'green' : '');
@@ -248,7 +224,7 @@ function drawGraph() {
     svg += '<circle cx="'+point.x+'" cy="'+point.y+'" r="'+(node.id === selected?7:5)+'" fill="'+(node.published?color:'#151f30')+'" stroke="'+color+'" stroke-width="2"><title>#'+esc(node.id)+'</title></circle>';
     if(node.frontier_current===true)svg+=`<circle cx="${point.x}" cy="${point.y}" r="10" fill="none" stroke="#72dfb3" stroke-width="1.3"/>`;
   }
-  $('graph').innerHTML = '<svg class="git-rail" width="'+width+'" height="'+height+'" aria-hidden="true">'+svg+'</svg><div style="margin-left:'+width+'px">'+ordered.map(node => '<button class="git-row '+(node.id===selected?'selected ':'')+((filter && node.route_id!==filter)||(sourceFilter && node.source_id!==sourceFilter)?'other-route':'')+'" data-node="'+esc(node.id)+'" aria-pressed="'+(node.id===selected)+'"><div class="row-top"><span class="commit-id">'+esc(nodeLabel(node))+'</span><span class="score '+nodeTone(node)+'">'+esc(nodeResult(node))+'</span></div><div class="row-action" title="'+esc(node.action_summary || node.action || node.title || node.route)+'">'+esc(excerpt(node.action_summary || node.action || node.title || node.route || '路线选择中',100))+'</div><div class="row-meta">'+badge(node.route || node.source_label || '待选择','route')+'<span>'+esc(node.base?'起点 '+nodeLabel(data.nodes.find(item=>item.id===node.base)):node.imported_from?'同版本导入':node.source_id==='ledger'?'早期账本，未经 Loop 评审':'独立基线')+'</span><span class="graph-frontier">'+(node.frontier_current===true?'◎ 当前 Frontier':node.frontier_reached===true?'◇ 曾进入 Frontier':'')+'</span><span>'+esc(node.frontier_exclusion_reason?'资格已排除':node.imported?'历史导入':node.published?'已发布':STATUS[node.status] || '未发布')+'</span></div></button>').join('')+'</div>';
+  $('graph').innerHTML = '<svg class="git-rail" width="'+width+'" height="'+height+'" aria-hidden="true">'+svg+'</svg><div style="margin-left:'+width+'px">'+ordered.map(node => '<button class="git-row '+(node.id===selected?'selected ':'')+((filter && node.route_id!==filter)||(sourceFilter && node.source_id!==sourceFilter)?'other-route':'')+'" data-node="'+esc(node.id)+'" aria-pressed="'+(node.id===selected)+'"><div class="row-top"><span class="commit-id">'+esc(nodeLabel(node))+'</span><span class="score '+nodeTone(node)+'">'+esc(nodeResult(node))+'</span></div><div class="row-action" title="'+esc(explanationEntry(node)?.question || node.action_summary || node.action || node.title || node.route)+'">'+esc(excerpt(explanationEntry(node)?.title || node.action_summary || node.action || node.title || node.route || '路线选择中',100))+'</div><div class="row-meta">'+badge(node.route || node.source_label || '待选择','route')+'<span>'+esc(node.base?'起点 '+nodeLabel(data.nodes.find(item=>item.id===node.base)):node.imported_from?'同版本导入':node.source_id==='ledger'?'早期账本，未经 Loop 评审':'独立基线')+'</span><span class="graph-frontier">'+(node.frontier_current===true?'◎ 当前 Frontier':node.frontier_reached===true?'◇ 曾进入 Frontier':'')+'</span><span>'+esc(node.frontier_exclusion_reason?'资格已排除':node.imported?'历史导入':node.published?'已发布':STATUS[node.status] || '未发布')+'</span></div></button>').join('')+'</div>';
   bindExperiments($('graph'));
 }
 function drawRoutes() {
@@ -383,17 +359,21 @@ function renderSnapshot() {
 function renderDetailHeader() {
   const node = data.nodes.find(item => item.id === selected);
   $('tabs').hidden=node?.source_id==='ledger'&&!globalView;
-  $('detailTitle').textContent = globalView ? '全局研究理解' : node ? nodeLabel(node)+' · '+node.route : '尚无调查记录';
+  const cachedTitle=detail?.id===selected && detail.explanation?.status==='ready' ? detail.explanation.content?.title : (data.sources || []).find(s=>s.id===node?.source_id)?.explanation?.entries?.find(e=>e.id===node?.local_id && e.status==='ready')?.title;
+  $('detailTitle').textContent = globalView ? '全局研究理解' : node ? nodeLabel(node)+' · '+(cachedTitle || node.route) : '尚无调查记录';
   $('detailMeta').textContent = globalView ? '当前实例已发布的全局知识；历史实例的文档可从对应节点查看。' : node ? (node.source_id==='ledger'?'早期评价账本，未经本 Loop 评审':node.published?'Review 已发布':'尚未发布 Review')+' · '+(node.imported?'历史回执导入 · ':'')+(node.value==null?'无已核查的质量测量':'RMSD '+exactScore(node.value)+' Å') : '等待第一个调查节点';
   if (!node || globalView) { $('context').innerHTML = ''; return; }
   if(node.source_id==='ledger'){$('context').innerHTML='<div class="context-box ledger-record">'+((node.record_mode || node.mode)==='smoke'?'早期冒烟检查 · 不构成正式质量测量':'早期评价账本')+' · '+esc(clock(node.created_at))+'<br>只展示原始元数据；未由本 Loop 独立评审，未记录可确认的比较范围，不进入已评审 Frontier 曲线。</div>';return;}
   const references = (node.references || []).filter(id => id !== node.base);
   const jobs=(node.attempts || []).map(attempt=>'作业 '+(attempt.owned_job_id || '待绑定')+' · '+(attempt.terminal_state || attempt.status || '状态未记录')+(attempt.gpu_seconds!=null?' · '+attempt.gpu_seconds+' GPU 秒':'')).join('；');
+  const contextOpen=$('context').querySelector('details')?.open || false;
   $('context').innerHTML = '<div class="context-box"><div class="toolbar"><span class="muted">代码起点</span> '+(node.base?experimentLink(node.base):'<span>独立基线，无 Study 父版本</span>')+'<span class="muted" style="margin-left:10px">研究路线</span> '+badge((node.route_id || '')+' · '+node.route,'route')+(node.inquiry_kind?badge(translated(node.inquiry_kind)):'')+'</div><p><span class="muted">额外证据引用</span> '+(references.length?references.map(id=>experimentLink(id)).join('、'):'无')+'</p>'+(node.action_summary || node.action?'<p><span class="muted">'+esc(node.action_summary_label || '行动摘录')+'</span> '+esc(excerpt(node.action_summary || node.action,230))+'</p>':'')+(jobs?'<p><span class="muted">评估回执</span> '+esc(jobs)+'</p>':'')+'</div>';
   if (node.source_commit) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p><span class="muted">冻结源码版本</span> <code title="'+esc(node.source_commit)+'">'+esc(node.source_commit.slice(0,12))+'</code></p>');
   if (node.imported_from) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p><span class="muted">同版本结果导入</span> '+experimentLink(node.imported_from)+'；不增加新评价结果。</p>');
   if (node.same_ledger_result) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p><span class="muted">同一账本结果</span> '+experimentLink(node.same_ledger_result)+'</p>');
   if (node.frontier_exclusion_reason) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p class="amber">该候选当前资格已排除：'+esc(node.frontier_exclusion_reason)+'，不参与 Frontier 指标曲线。</p>');
+  const contextContent=$('context').innerHTML;
+  $('context').innerHTML=disclosure('round-context','轮次、代码起点、版本与作业回执',contextContent,contextOpen);
   bindExperiments($('context'));
 }
 function executionHistory(execution) {
@@ -462,6 +442,11 @@ function renderDetail() {
   else if (!selected) body.innerHTML = '<div class="empty">尚无调查记录。</div>';
   else if (!detail || detail.id !== selected) body.innerHTML = '<div class="loading">正在读取 #'+esc(selected)+' 的记录…</div>';
   else if (detail.ledger) body.innerHTML='<div class="notice">'+esc(detail.summary)+'</div>'+structured(detail.ledger)+disclosure('ledger-sources','元数据来源',structured(detail.sources));
+  else if (tab === 'explanation') {
+    const node=data.nodes.find(item=>item.id===selected), source=data.sources?.find(item=>item.id===node?.source_id);
+    body.innerHTML=explanationPanel(detail,node,source);
+    bindExplanation(body);
+  }
   else if (tab === 'execute') body.innerHTML = executePanel(detail);
   else if (tab === 'route') {
     body.innerHTML = '<div class="notice">这是本轮发布时的路线知识快照。顶部“全局研究”展示当前跨路线的研究理解。</div>'+markdown(detail.route);
@@ -492,7 +477,7 @@ async function loadDetail(force = false) {
     const result = await api(node?.detail_url || '/api/node/'+encodeURIComponent(id));
     if (token!==detailToken || id!==selected || globalView) return;
     const signature=JSON.stringify(result);
-    if(force || detailError || signature!==detailSignature || detail?.id!==id){detail={...result,id};detailSignature=signature;renderDetail();} detailError=false;
+    if(force || detailError || signature!==detailSignature || detail?.id!==id){detail={...result,id};detailSignature=signature;renderDetailHeader();renderDetail();} detailError=false;
   } catch(error) { if(token===detailToken){detailError=true;$('detailBody').innerHTML='<div class="empty red">读取调查记录失败：'+esc(error.message)+'。下一次刷新会重试。</div>';} }
 }
 async function choose(id) {
@@ -513,7 +498,8 @@ $('frontierViews').querySelectorAll('[data-chart-view]').forEach(button=>button.
 $('frontierSlider').oninput=()=>pinFrontierIndex(Number($('frontierSlider').value));
 $('frontierPrev').onclick=()=>pinFrontierIndex(Math.max(0,Number($('frontierSlider').value)-1));
 $('frontierNext').onclick=()=>pinFrontierIndex(Math.min((chartModel?.points.length || 1)-1,Number($('frontierSlider').value)+1));
-$('frontierDetails').onclick=async()=>{const point=chartModel?.points.find(item=>pointKey(item)===frontierPinned);if(point){tab='review';await choose(point.id);$('detailTitle').scrollIntoView({behavior:'smooth',block:'start'});}};
+$('frontierDetails').onclick=async()=>{const point=chartModel?.points.find(item=>pointKey(item)===frontierPinned);if(point){tab='explanation';await choose(point.id);$('detailTitle').scrollIntoView({behavior:'smooth',block:'start'});}};
+$('rawToggle').onclick=()=>{rawVisible=!rawVisible;$('rawToggle').setAttribute('aria-expanded',String(rawVisible));$('rawToggle').textContent=rawVisible?'收起原始记录':'核对原始记录';$('tabs').querySelectorAll('.raw-tab').forEach(button=>button.hidden=!rawVisible);if(!rawVisible && tab!=='explanation'){tab='explanation';renderDetail();}};
 $('refs').onchange=drawGraph;
 $('graphBtn').onclick=()=>{view='git';updateView();}; $('routesBtn').onclick=()=>{view='routes';updateView();};
 $('tabs').querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{tab=button.dataset.tab;globalView=false;$('detailBody').scrollTop=0;renderDetailHeader();renderDetail();});
