@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "source": "User steering plus repository and primary-source review, 2026-11-01",
+  "user_intent": [
+    "重点是 readout、conditioning 与网络架构；不是继续堆微小标量工程实验。",
+    "继承 deterministic ProTok 能力，最终相同hidden通过不同noise生成多样而有效的protein structures。",
+    "文献Agent应结合本系统观察和已做实验提出新机制，GPU无需等待其检索。"
+  ],
+  "observations": [
+    {
+      "id": "O1",
+      "fact": "历史full 4491对齐CA评估中，原teacher为1.437979 Å；fresh H-D3+Kabsch在1300步报告1.473196 Å。这是历史单训练seed/采样噪声结果，不能与当前449子集排名直接比较。",
+      "sources": [
+        "protok_goal"
+      ]
+    },
+    {
+      "id": "O2",
+      "fact": "node value、pair value、node+pair residual三个H分支均在约1500步后退化；例如H-V1 val从1500步1.496785到4000步1.947591，train probe也从1.4740到1.9820。报告指出FM loss仍可下降。",
+      "sources": [
+        "protok_convergence"
+      ]
+    },
+    {
+      "id": "O3",
+      "fact": "main的ProTokDecoder可返回PredictionHead之前的raw hidden；PredictionHead调用Dim6RotStructureHead，并有bb_pred_only路径。原baseline能力包含这个已训练的结构head。",
+      "sources": [
+        "protok_decoder",
+        "protok_head"
+      ]
+    },
+    {
+      "id": "O4",
+      "fact": "历史H实现用FP64 proper Kabsch把预测Y对齐至当前X_t，且训练target不对齐；每个Euler步骤重新做对齐。其代码明确SVD梯度要求非退化协方差。",
+      "sources": [
+        "protok_h_code"
+      ]
+    },
+    {
+      "id": "O5",
+      "fact": "ProTok研究记录已暂停PCA轴、direct v-predict、multichannel vectors和NCAC模板方向；本建议不自动重开这些路线。",
+      "sources": [
+        "protok_goal"
+      ]
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "claim": "一次入口条件注入可能让强teacher条件与动态几何状态难以分工；逐层提供独立条件通路可能改善有限2k预算内的优化。这尚未被当前实验验证。"
+    },
+    {
+      "id": "H2",
+      "claim": "H早期好、晚期差且train/val同步，说明应研究目标函数与采样轨迹之间的错配；现有证据不足以断言是Kabsch数值问题、过拟合或Euler误差中的某一个。"
+    },
+    {
+      "id": "H3",
+      "claim": "继承deterministic结构head可能提供比从随机小head重建更好的起点；但强baseline也可能使网络忽略初始噪声，因此RMSD收益不能替代条件多样性证据。"
+    }
+  ],
+  "initial_directions": [
+    {
+      "id": "depthwise_conditioning",
+      "status": "candidate_within_current_scope",
+      "idea": "保持现有X几何输出，改变条件信息进入网络的位置：让每层都能读取独立的frozen-H条件支路。",
+      "difference": "新增的是trunk中的持续条件访问，既不替换三向量基，也不只改最后一层系数。借鉴DiT逐层调制思想；其图像实验不构成蛋白任务有效性的证据。"
+    },
+    {
+      "id": "h_degradation_diagnosis",
+      "status": "blocked_scope_for_execution",
+      "idea": "先解释H为什么越训练采样越差：把形状预测、坐标对齐、路径分布和数值积分分开观测。",
+      "difference": "新增可区分原因的中间量与反事实输入，不把最终RMSD差异直接归因于某个模块。"
+    },
+    {
+      "id": "inherit_protok_head",
+      "status": "blocked_scope_for_execution",
+      "idea": "从原deterministic ProTok结构head出发，增加依赖X_t和t的可学习适配，避免从零重新学已经具备的结构能力。",
+      "difference": "可信原checkpoint结构head作为可验证起点；cached raw_H不变。AlphaFlow证明了把强确定性预测器改成生成去噪器这一思路值得研究，但ProTok需要独立设计与验证。"
+    }
+  ],
+  "evaluation_gap": {
+    "fact": "当前已知主指标是固定449子集的单协议重建RMSD。",
+    "implication": "它可筛选短期重建能力，无法单独验证p(structure|hidden)的质量或多样性。",
+    "later_diagnostic_spec": "固定一组hidden，各取至少8个独立初始noise；统计proper-aligned样本间CA RMSD/距离矩阵差异，同时报每个样本的重建分布、局部几何和碰撞比例。只在合格样本中解释多样性，不能仅报best-of-N。若需要重新编码一致性，先确认模型/输入原子可用。",
+    "identifiability": "若每个hidden只有一个观测target，无法仅靠这些重建数据证明真实条件构象分布；MD或实验ensemble是另一数据范围，不能悄悄并入当前比较。",
+    "rotation_rule": "整体旋转和平移不计入结构多样性。"
+  },
+  "sources": {
+    "protok_goal": {
+      "kind": "repository_research_record",
+      "url": "https://github.com/Chen-HongRu/ProTok/blob/codex/fm-protok-parity/FM_PROTOK_PARITY.md",
+      "blob_sha": "c79a02a0d8f80faf386e27d7f3a580099779c4ce"
+    },
+    "protok_convergence": {
+      "kind": "repository_experiment_report",
+      "url": "https://github.com/Chen-HongRu/ProTok/blob/codex/fm-protok-parity/reports/frame-values-convergence-20261028/README.md",
+      "blob_sha": "6351e00f09f00ab3a9cb288020bbafc8006df613"
+    },
+    "protok_decoder": {
+      "kind": "repository_code",
+      "url": "https://github.com/Chen-HongRu/ProTok/blob/8ba779e23b177e18f246aa1b04320c5345e48d65/protok/model/blocks.py"
+    },
+    "protok_head": {
+      "kind": "repository_code",
+      "url": "https://github.com/Chen-HongRu/ProTok/blob/8ba779e23b177e18f246aa1b04320c5345e48d65/protok/layer/head.py"
+    },
+    "protok_h_code": {
+      "kind": "repository_code",
+      "url": "https://github.com/Chen-HongRu/ProTok/blob/8ba779e23b177e18f246aa1b04320c5345e48d65/protok/model/ca_h_flow.py"
+    },
+    "alphaflow_paper": {
+      "kind": "primary_paper",
+      "title": "AlphaFold Meets Flow Matching for Generating Protein Ensembles",
+      "url": "https://arxiv.org/html/2402.04845v2",
+      "relevant_sections": "3.1–3.2, Appendix A.1–A.2",
+      "supported_claim": "确定性结构预测器经noisy-state/time适配可用于ensemble生成；需要处理对齐、训练路径和损失的数学契约。"
+    },
+    "alphaflow_code": {
+      "kind": "official_implementation",
+      "url": "https://github.com/bjing2016/alphaflow"
+    },
+    "dit_paper": {
+      "kind": "primary_paper",
+      "title": "Scalable Diffusion Models with Transformers",
+      "url": "https://arxiv.org/html/2212.09748v2",
+      "relevant_sections": "3.2, 5",
+      "supported_claim": "逐层条件调制及零初始化在其图像扩散实验中有用；仅作为ProTok架构假设来源。"
+    },
+    "dit_code": {
+      "kind": "official_implementation",
+      "url": "https://github.com/facebookresearch/DiT/blob/main/models.py",
+      "blob_sha": "c90eeba7b2eee18b40b2128045248795b4b38d91",
+      "relevant_symbol": "DiTBlock.adaLN_modulation"
+    }
+  },
+  "full_report": "/root/research-loop/deployments/protok-se3-20261101/runtime-exploration-v1/research-inputs/scout-findings.json",
+  "history_snapshots": "/root/research-loop/deployments/protok-se3-20261101/runtime-exploration-v1/research-inputs/protok-history/",
+  "instructions": [
+    "原有暂停路线仍需明确恢复条件；不能把已有X/H、Kabsch、node/pair实验包装为新方向。",
+    "后两条方向缺checkpoint/诊断接口，先保留requirements；逐层H条件通路是当前三文件内可测试候选，尚未验证有效。"
+  ]
+}

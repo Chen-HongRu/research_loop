@@ -1,0 +1,1293 @@
+"""Persistent evidence-driven research with bounded selection and publication."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import random
+import subprocess
+import time
+import uuid
+from contextlib import contextmanager
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .evaluation import build_frontier, validate_evaluation
+from .exploration import (
+    allocation,
+    guidance,
+    route_candidates,
+    stage_schema,
+    validate_design,
+    validate_exploration,
+)
+from .harness import AgentHarness, HarnessConfig, HarnessError, make_harness
+from .protocol import SCHEMAS, prompt, validate_response
+from .strategy import debate_rounds, review_guidance, validate_strategy
+
+
+class StudyError(RuntimeError):
+    pass
+
+
+class BudgetExhausted(StudyError):
+    pass
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _read(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _atomic_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(value, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _write(path: Path, value) -> None:
+    _atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def _git(folder: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(folder), *args], capture_output=True, text=True
+    )
+    if result.returncode:
+        raise StudyError(f"Git failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def initialize(
+    root: Path,
+    *,
+    goal: str,
+    harness: HarnessConfig | None = None,
+    workspace: Path | None = None,
+    max_iterations: int | None = 10,
+    allow_write: bool = False,
+    global_evaluation: dict | None = None,
+    max_calls: int | None = 100,
+    max_seconds: int = 3600,
+    selection: dict | None = None,
+    strategy: dict | None = None,
+    exploration: dict | None = None,
+) -> Path:
+    root = Path(root).resolve()
+    workspace = Path(workspace).resolve() if workspace else root / "workspace"
+    if not goal.strip():
+        raise ValueError("A nonempty research goal is required")
+    for name, value in (
+        ("max_iterations", max_iterations),
+        ("max_calls", max_calls),
+        ("max_seconds", max_seconds),
+    ):
+        if value is None and name != "max_seconds":
+            continue
+        if type(value) is not int or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    strategy = validate_strategy(strategy)
+    exploration = validate_exploration(exploration)
+    policy = {"seed": 0, "debate_rounds": 1, "max_resamples": 1}
+    if selection:
+        if set(selection) - set(policy):
+            raise ValueError("Unknown selection settings")
+        policy.update(selection)
+    if any(type(v) is not int or v < 0 for v in policy.values()):
+        raise ValueError("Selection settings must be nonnegative integers")
+    if policy["debate_rounds"] < 1:
+        raise ValueError("At least one debate round is required")
+    if root.is_relative_to(workspace):
+        raise ValueError("Workspace must not contain the study's control files")
+    if root.exists() and any(root.iterdir()):
+        raise StudyError(f"Refusing to initialize a nonempty directory: {root}")
+    if global_evaluation is not None:
+        validate_evaluation(global_evaluation)
+    baseline = None
+    if allow_write:
+        workspace.mkdir(parents=True, exist_ok=True)
+        if not (workspace / ".git").exists():
+            if any(workspace.iterdir()):
+                raise StudyError(
+                    "Writable workspace must be an existing clean Git repo or empty"
+                )
+            _git(workspace, "init")
+            _git(
+                workspace,
+                "-c",
+                "user.name=Research Loop",
+                "-c",
+                "user.email=research-loop@localhost",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Initial research workspace",
+            )
+        if _git(workspace, "status", "--porcelain"):
+            raise StudyError(
+                "Commit or isolate existing workspace changes before initializing"
+            )
+        baseline = _git(workspace, "rev-parse", "HEAD")
+    root.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    (root / "iterations").mkdir()
+    _atomic_text(root / "goal.md", goal.rstrip() + "\n")
+    _atomic_text(
+        root / "research.md", "# Current research\n\nNo investigations completed.\n"
+    )
+    _write(
+        root / "study.json",
+        {
+            "version": 2,
+            "workspace": str(workspace),
+            "baseline": baseline,
+            "harness": asdict(harness or HarnessConfig()),
+            "max_iterations": max_iterations,
+            "allow_write": allow_write,
+            "global_evaluation": global_evaluation,
+            "max_calls": max_calls,
+            "max_seconds": max_seconds,
+            "selection": policy,
+            "strategy": strategy,
+            **({"exploration": exploration} if exploration else {}),
+        },
+    )
+    _write(root / "routes/index.json", {})
+    _write(root / "frontiers.json", {"global": {}, "local": {}})
+    _write(
+        root / "state.json",
+        {
+            "iteration": 0,
+            "phase": "done",
+            "status": "ready",
+            "calls": {},
+            "call_count": 0,
+            "elapsed_seconds": 0.0,
+            "sampling_queue": [],
+            "sample_counter": 0,
+            "selection_round": 0,
+            "active_attempt": None,
+            "stop_reason": None,
+            "goal_status": "undetermined",
+            "review_ref": None,
+        },
+    )
+    return root
+
+
+class Study:
+    def __init__(self, root: Path, harness: AgentHarness | None = None):
+        self.root = Path(root).resolve()
+        self.config = _read(self.root / "study.json")
+        if self.config.get("version") != 2:
+            raise StudyError(
+                "Unsupported study format; preserve old records and initialize a new study"
+            )
+        self.strategy = validate_strategy(self.config.get("strategy"))
+        self.exploration = validate_exploration(self.config.get("exploration"))
+        self.workspace = Path(self.config["workspace"])
+        self.harness = harness or make_harness(HarnessConfig(**self.config["harness"]))
+        self._run_start = None
+        self._elapsed_start = 0.0
+
+    def status(self) -> dict:
+        return _read(self.root / "state.json")
+
+    def frontiers(self) -> dict:
+        return _read(self.root / "frontiers.json")
+
+    def graph(self) -> list[dict]:
+        return [
+            _read(p)
+            for p in sorted((self.root / "iterations").glob("*/iteration.json"))
+        ]
+
+    def _observations(self) -> dict:
+        path = self.root / "observations.json"
+        return (
+            _read(path)
+            if path.exists()
+            else {"version": 1, "runs": [], "intervals": []}
+        )
+
+    def _save_observations(self, observations: dict) -> None:
+        records = observations["runs"] + observations["intervals"]
+        complete = all(r["wall_seconds"] is not None for r in records)
+
+        def total(records):
+            # An unknown crash interval must never become zero measured overhead.
+            if any(r["wall_seconds"] is None for r in records):
+                return None
+            return sum(r["wall_seconds"] for r in records)
+
+        intervals = observations["intervals"]
+        observations["totals"] = {
+            "run_wall_seconds": total(observations["runs"]),
+            "selection_wall_seconds": total(
+                [r for r in intervals if r["phase"] == "selection"]
+            ),
+            "review_wall_seconds": total(
+                [r for r in intervals if r["phase"] == "review"]
+            ),
+            "overhead_wall_seconds": total(intervals),
+            "complete": complete,
+        }
+        _write(self.root / "observations.json", observations)
+
+    def _recover_observations(self) -> None:
+        observations = self._observations()
+        for record in observations["runs"] + observations["intervals"]:
+            if record["status"] == "running":
+                record["status"] = "incomplete"
+        self._save_observations(observations)
+
+    @contextmanager
+    def _observe(self, phase: str, iteration: int | None = None):
+        started = time.monotonic()
+        identity = uuid.uuid4().hex
+        key = "runs" if phase == "run" else "intervals"
+        observations = self._observations()
+        observations[key].append(
+            {
+                "id": identity,
+                "phase": phase,
+                "iteration": iteration,
+                "started_at": _now(),
+                "ended_at": None,
+                "wall_seconds": None,
+                "status": "running",
+            }
+        )
+        self._save_observations(observations)
+        status = "failed"
+        try:
+            yield
+            status = "succeeded"
+        finally:
+            elapsed = time.monotonic() - started
+            observations = self._observations()
+            record = next(r for r in observations[key] if r["id"] == identity)
+            record.update(ended_at=_now(), wall_seconds=elapsed, status=status)
+            self._save_observations(observations)
+
+    @contextmanager
+    def _lock(self):
+        with (self.root / ".lock").open("a") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise StudyError("Another controller is using this study") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def _save(self, state: dict) -> None:
+        if self._run_start is not None:
+            state["elapsed_seconds"] = (
+                self._elapsed_start + time.monotonic() - self._run_start
+            )
+        _write(self.root / "state.json", state)
+
+    def retry(self) -> dict:
+        with self._lock():
+            self._recover_observations()
+            state = self.status()
+            if state["status"] not in {"needs_attention", "running"}:
+                raise StudyError("There is no interrupted or failed call to retry")
+            active = state["active_attempt"]
+            if active and not (
+                state["phase"] == "execute"
+                and state.get("accepted_calls", {}).get("execute")
+            ):
+                state["calls"] = {
+                    k: v for k, v in state["calls"].items() if v != active
+                }
+            if state["phase"] == "review":
+                folder = self._folder(state)
+                if (folder / "publication.json").exists():
+                    with (
+                        self._observe("run"),
+                        self._observe("review", state["iteration"]),
+                    ):
+                        self._publish(state, folder, _read(folder / "publication.json"))
+                    return state
+                state["calls"].pop("review", None)
+                self._review_before(folder, state["route_id"])
+            state.update(status="ready", active_attempt=None, error=None)
+            self._save(state)
+            return state
+
+    def _folder(self, state: dict) -> Path:
+        return self.root / "iterations" / f"{state['iteration']:04d}"
+
+    def run(self, *, iterations: int = 1) -> dict:
+        if type(iterations) is not int or iterations < 1:
+            raise ValueError("iterations must be positive")
+        with self._lock():
+            self._recover_observations()
+            with self._observe("run"):
+                return self._run(iterations)
+
+    def _run(self, iterations: int) -> dict:
+        state = self.status()
+        self._run_start = time.monotonic()
+        self._elapsed_start = state["elapsed_seconds"]
+        try:
+            for _ in range(iterations):
+                if state["status"] == "stopped":
+                    break
+                if state["status"] == "needs_attention":
+                    if (
+                        state["phase"] == "review"
+                        and (self._folder(state) / "publication.json").exists()
+                    ):
+                        state["status"] = "ready"
+                    else:
+                        raise StudyError(
+                            "Inspect retained effects then explicitly retry; no action was repeated"
+                        )
+                if state["phase"] == "done":
+                    if (
+                        self.config["max_iterations"] is not None
+                        and state["iteration"] >= self.config["max_iterations"]
+                    ):
+                        self._stop(state, "iteration_budget")
+                        break
+                    self._begin(state)
+                while state["phase"] != "done" and state["status"] != "stopped":
+                    self._step(state)
+            return state
+        except BudgetExhausted as exc:
+            self._stop(state, str(exc))
+            return state
+        except (
+            HarnessError,
+            StudyError,
+            OSError,
+            ValueError,
+            KeyboardInterrupt,
+        ) as exc:
+            if (
+                not state["active_attempt"]
+                and state.get("last_call_key") in state["calls"]
+            ):
+                state["active_attempt"] = state["calls"][state["last_call_key"]]
+            state.update(status="needs_attention", error=f"{type(exc).__name__}: {exc}")
+            self._save(state)
+            raise
+        finally:
+            self._run_start = None
+
+    def _stop(self, state: dict, reason: str) -> None:
+        state.update(
+            status="stopped", phase="done", stop_reason=reason, active_attempt=None
+        )
+        self._save(state)
+
+    def _begin(self, state: dict) -> None:
+        # Human research edits become explicit immutable revisions before sampling.
+        routes = _read(self.root / "routes/index.json")
+        changed = False
+        for route_id, route in routes.items():
+            current = self.root / "routes" / route_id / "research.md"
+            if (
+                current.exists()
+                and current.read_text()
+                != (self.root / route["research_ref"]).read_text()
+            ):
+                relative = f"revisions/{route_id}-{uuid.uuid4().hex}.md"
+                _atomic_text(self.root / relative, current.read_text())
+                _write(
+                    self.root / (relative + ".json"),
+                    {
+                        "source": "human",
+                        "previous": route["research_ref"],
+                        "created_at": _now(),
+                    },
+                )
+                route["research_ref"] = relative
+                changed = True
+        if changed:
+            _write(self.root / "routes/index.json", routes)
+        folder = self.root / "iterations" / f"{state['iteration'] + 1:04d}"
+        folder.mkdir(exist_ok=True)
+        if any(
+            p.name not in {"context", "iteration.json", "iteration.json.tmp"}
+            for p in folder.iterdir()
+        ):
+            raise StudyError(
+                "Unexpected unowned iteration contents; inspect before continuing"
+            )
+        context = folder / "context"
+        for source, destination in (
+            ("goal.md", "goal.md"),
+            ("study.json", "study.before.json"),
+            ("research.md", "global.before.md"),
+            ("routes/index.json", "routes.before.json"),
+            ("frontiers.json", "frontiers.before.json"),
+        ):
+            target = context / destination
+            if not target.exists():
+                _atomic_text(target, (self.root / source).read_text())
+        if self.exploration:
+            # Inputs arriving during this investigation are consumed next time.
+            # A missing/failed scout never blocks the experiment loop.
+            for source, destination in (
+                (self.root / "research_inputs.json", "research_inputs.json"),
+                (self.root.parent / "control/scout/latest.json", "scout_inputs.json"),
+            ):
+                target = context / destination
+                if not target.exists():
+                    try:
+                        value = (
+                            _read(source)
+                            if source.exists() and source.stat().st_size <= 131072
+                            else None
+                        )
+                    except (OSError, ValueError) as error:
+                        value = {"unavailable": type(error).__name__}
+                    _write(target, value)
+            recent = [
+                p
+                for p in sorted((self.root / "iterations").glob("*/insight.json"))
+                if (p.parent / "publication.json").exists()
+                and _read(p.parent / "iteration.json")["status"] == "reviewed"
+            ][-3:]
+            target = context / "recent_insights.json"
+            if not target.exists():
+                _write(
+                    target, [{"iteration": p.parent.name, **_read(p)} for p in recent]
+                )
+        number = state["iteration"] + 1
+        metadata = folder / "iteration.json"
+        if metadata.exists() and _read(metadata)["id"] != f"{number:04d}":
+            raise StudyError("Inconsistent iteration metadata")
+        if not metadata.exists():
+            _write(
+                metadata,
+                {
+                    "id": f"{number:04d}",
+                    "previous_iteration": state["iteration"] or None,
+                    "created_at": _now(),
+                    "route_id": None,
+                    "base_experiment": None,
+                    "references": [],
+                    "input_artifacts": [],
+                    "output_artifacts": [],
+                    "evaluation_refs": [],
+                    "status": "selecting",
+                },
+            )
+        state.update(
+            iteration=number,
+            phase="selection",
+            status="ready",
+            calls={},
+            accepted_calls={},
+            active_attempt=None,
+            selection_round=0,
+            selected=None,
+            route_id=None,
+            plan_ref=None,
+            execution_ref=None,
+            review_ref=None,
+            error=None,
+        )
+        self._save(state)
+
+    def _context(self, folder: Path) -> dict:
+        config = _read(folder / "context/study.before.json")
+        evaluation = config["global_evaluation"]
+        views = _read(folder / "context/frontiers.before.json")
+        views["global"] = {
+            k: v for k, v in views["global"].items() if v.get("allow_feedback", True)
+        }
+        context = {
+            "study_root": str(self.root),
+            "goal": (folder / "context/goal.md").read_text(),
+            "global_research": (folder / "context/global.before.md").read_text(),
+            "global_evaluation": evaluation,
+            "frontiers": views,
+            "routes": _read(folder / "context/routes.before.json"),
+        }
+        slot = allocation(config.get("exploration"), int(folder.name))
+        if slot:
+            context["exploration"] = slot
+            for name in ("research_inputs", "scout_inputs", "recent_insights"):
+                path = folder / "context" / f"{name}.json"
+                context[name] = _read(path) if path.exists() else None
+        return context
+
+    def _route_context(self, folder: Path, route_id: str) -> dict:
+        routes = _read(folder / "context/routes.before.json")
+        if route_id not in routes:
+            return {
+                "id": "new",
+                "research": "New route; propose a bounded opportunity.",
+                "evaluations": {},
+            }
+        route = routes[route_id]
+        return {
+            "id": route_id,
+            "metadata": route,
+            "research": (self.root / route["research_ref"]).read_text(),
+            "evaluations": _read(self.root / route["evaluation_ref"]),
+        }
+
+    def _call(
+        self,
+        state: dict,
+        phase: str,
+        key: str,
+        context: dict,
+        directory: Path,
+        *,
+        workspace: Path | None = None,
+    ) -> dict:
+        state["last_call_key"] = key
+        if key in state["calls"]:
+            attempt = self.root / state["calls"][key]
+            if (
+                not (attempt / "process.json").exists()
+                or _read(attempt / "process.json").get("status") != "succeeded"
+            ):
+                state["active_attempt"] = str(attempt.relative_to(self.root))
+                raise StudyError(
+                    "Interrupted call has no successful completion receipt"
+                )
+            result = _read(attempt / "response.json")
+        else:
+            if (
+                self.config["max_calls"] is not None
+                and state["call_count"] >= self.config["max_calls"]
+            ):
+                raise BudgetExhausted("call_budget")
+            self._save(state)
+            remaining = self.config["max_seconds"] - state["elapsed_seconds"]
+            if remaining < 1:
+                raise BudgetExhausted("time_budget")
+            attempt = (
+                directory / f"attempt-{len(list(directory.glob('attempt-*'))) + 1:03d}"
+            )
+            attempt.mkdir(parents=True)
+            _write(attempt / "context.json", context)
+            relative = str(attempt.relative_to(self.root))
+            state["calls"][key] = relative
+            state.update(
+                status="running",
+                active_attempt=relative,
+                call_count=state["call_count"] + 1,
+            )
+            self._save(state)
+            timeout = min(int(remaining), self.config["harness"]["timeout_seconds"])
+            if phase == "execute":
+                timeout = min(timeout, context["plan"]["contract"]["timeout_seconds"])
+            result = self.harness.run(
+                prompt=prompt(phase, context)
+                + guidance(phase, context)
+                + (
+                    "\n\n" + review_guidance(self.strategy)
+                    if phase == "review" and review_guidance(self.strategy)
+                    else ""
+                ),
+                schema=stage_schema(phase, context, SCHEMAS),
+                workspace=workspace or self.workspace,
+                run_dir=attempt,
+                writable=phase == "execute" and self.config["allow_write"],
+                timeout_seconds=max(1, timeout),
+            )
+        validate_response(phase, result, schema=stage_schema(phase, context, SCHEMAS))
+        validate_design(phase, result, context)
+        if not result["markdown"].strip():
+            raise StudyError("Stage report must be nonempty")
+        state.setdefault("accepted_calls", {})[key] = True
+        state.update(status="ready", active_attempt=None)
+        self._save(state)
+        return result
+
+    def _sample(self, state: dict, folder: Path, round_id: int) -> list[str]:
+        path = folder / "selection.json"
+        selections = _read(path) if path.exists() else {"rounds": {}}
+        record = selections["rounds"].get(str(round_id))
+        if record is None:
+            routes = _read(folder / "context/routes.before.json")
+            slot = self._context(folder).get("exploration")
+            eligible = [r for r, v in routes.items() if v["status"] == "active"]
+            queue = [r for r in state["sampling_queue"] if r in eligible or r == "new"]
+            rng = random.Random(
+                self.config["selection"]["seed"] + state["sample_counter"]
+            )
+            candidates = []
+            if slot and slot["kind"] != "refinement":
+                candidates = route_candidates(slot, routes, self.graph())
+            elif not eligible:
+                candidates = ["new", "new"]
+            else:
+                while len(candidates) < 2:
+                    if not queue:
+                        queue = eligible + ["new"]
+                        rng.shuffle(queue)
+                    index = next(
+                        (i for i, r in enumerate(queue) if r not in candidates), None
+                    )
+                    if index is None:
+                        refill = [r for r in eligible + ["new"] if r not in candidates]
+                        rng.shuffle(refill)
+                        queue += refill
+                        continue
+                    candidates.append(queue.pop(index))
+            record = {
+                "candidates": candidates,
+                "queue_after": queue,
+                "counter": state["sample_counter"] + 1,
+                "seed": self.config["selection"]["seed"],
+                **({"exploration": slot} if slot else {}),
+            }
+            selections["rounds"][str(round_id)] = record
+            _write(path, selections)
+        if state["sample_counter"] < record["counter"]:
+            state.update(
+                sampling_queue=record["queue_after"], sample_counter=record["counter"]
+            )
+            self._save(state)
+        return record["candidates"]
+
+    def _select(self, state: dict, folder: Path) -> None:
+        round_id = state["selection_round"]
+        common = self._context(folder)
+        common["budget"] = {
+            "calls_left": self.config["max_calls"] - state["call_count"]
+            if self.config["max_calls"] is not None
+            else None,
+            "seconds_left": self.config["max_seconds"] - state["elapsed_seconds"],
+        }
+        choices = self._sample(state, folder, round_id)
+        base = folder / "selection" / f"round-{round_id + 1:03d}"
+        proposals = {}
+        for side, route_id in zip(("a", "b"), choices):
+            context = {
+                **common,
+                "role": side,
+                "route": self._route_context(folder, route_id),
+            }
+            proposals[side] = self._call(
+                state,
+                "proposal",
+                f"s{round_id}-{side}",
+                context,
+                base / f"{side}-proposal",
+            )
+            if route_id != "new" and proposals[side]["route_id"] != route_id:
+                raise StudyError("Advocate changed its sampled route")
+            if (
+                proposals[side]["route_id"] != "new"
+                and proposals[side]["route_id"] not in common["routes"]
+            ):
+                raise StudyError("Unknown proposed route")
+        debate = []
+        for turn in range(
+            debate_rounds(self.strategy, self.config["selection"]["debate_rounds"])
+        ):
+            for phase in ("critique", "response"):
+                for side in ("a", "b"):
+                    context = {
+                        **common,
+                        "role": side,
+                        "route": self._route_context(
+                            folder, proposals[side]["route_id"]
+                        ),
+                        "proposals": proposals,
+                        "debate": debate,
+                    }
+                    result = self._call(
+                        state,
+                        phase,
+                        f"s{round_id}-{turn}-{side}-{phase}",
+                        context,
+                        base / f"{turn + 1}-{side}-{phase}",
+                    )
+                    debate.append(
+                        {"side": side, "phase": phase, "markdown": result["markdown"]}
+                    )
+        judge = self._call(
+            state,
+            "judge",
+            f"s{round_id}-judge",
+            {**common, "proposals": proposals, "debate": debate},
+            base / "judge",
+        )
+        path = folder / "selection.json"
+        records = _read(path)
+        records["rounds"][str(round_id)].update(proposals=proposals, judge=judge)
+        _write(path, records)
+        if judge["decision"] == "stop":
+            state["goal_status"] = judge["goal_status"]
+            self._stop(state, judge["stop_reason"] or "judge")
+        elif judge["decision"] == "resample":
+            self._reselect(state)
+        else:
+            if judge["choice"] not in proposals:
+                raise StudyError("Judge select must identify a proposal")
+            state.update(
+                selected={"proposal": proposals[judge["choice"]], "judge": judge},
+                phase="plan",
+            )
+            self._save(state)
+
+    def _reselect(self, state: dict) -> None:
+        if state["selection_round"] >= self.config["selection"]["max_resamples"]:
+            self._stop(state, "selection_budget")
+        else:
+            state.update(
+                selection_round=state["selection_round"] + 1,
+                phase="selection",
+                selected=None,
+            )
+            self._save(state)
+
+    def _step(self, state: dict) -> None:
+        phase = state["phase"]
+        if phase in {"selection", "review"}:
+            with self._observe(phase, state["iteration"]):
+                self._dispatch_step(state)
+        else:
+            self._dispatch_step(state)
+
+    def _dispatch_step(self, state: dict) -> None:
+        folder = self._folder(state)
+        if state["phase"] == "selection":
+            self._select(state, folder)
+            return
+        if state["phase"] == "plan":
+            proposal = state["selected"]["proposal"]
+            context = {
+                **self._context(folder),
+                "selected": state["selected"],
+                "route": self._route_context(folder, proposal["route_id"]),
+                "workspace": str(folder / "workspace"),
+            }
+            result = self._call(
+                state,
+                "plan",
+                f"plan-{state['selection_round']}",
+                context,
+                folder / "plan",
+            )
+            if result["decision"] == "stop":
+                self._stop(state, result["stop_reason"] or "plan")
+                return
+            if result["decision"] == "reselect":
+                self._reselect(state)
+                return
+            self._accept_plan(state, folder, result)
+            return
+        if state["phase"] == "execute":
+            metadata = _read(folder / "iteration.json")
+            context = {
+                **self._context(folder),
+                "route_research": (folder / "context/route.before.md").read_text(),
+                "plan": _read(self.root / state["plan_ref"]),
+                "experiment": metadata,
+                "workspace": metadata["workspace"],
+                "execution_writes_enabled": self.config["allow_write"],
+            }
+            # Execution receives relevant global context but no debate transcript.
+            result = self._call(
+                state,
+                "execute",
+                "execute",
+                context,
+                folder / "execute",
+                workspace=Path(metadata["workspace"]),
+            )
+            definition = self.config["global_evaluation"]
+            if (
+                definition
+                and not definition["allow_feedback"]
+                and any(
+                    m["evaluation_id"] == definition["id"]
+                    for m in result["measurements"]
+                )
+            ):
+                raise StudyError(
+                    "Final-only evaluations must be graded outside the research loop"
+                )
+            _atomic_text(folder / "execute.md", result["markdown"])
+            state["execution_ref"] = str(
+                Path(state["calls"]["execute"]) / "response.json"
+            )
+            metadata["output_artifacts"] = result["artifacts"]
+            if self.config["allow_write"] and metadata["status"] != "executed":
+                metadata["workspace_ref"] = self._checkpoint(
+                    Path(metadata["workspace"]), result["artifacts"]
+                )
+            metadata["status"] = "executed"
+            _write(folder / "iteration.json", metadata)
+            if not (folder / "review.before.json").exists():
+                self._review_before(folder, state["route_id"])
+            state["phase"] = "review"
+            self._save(state)
+            return
+        if state["phase"] == "review":
+            self._review(state, folder)
+
+    def _accept_plan(self, state: dict, folder: Path, result: dict) -> None:
+        proposal = state["selected"]["proposal"]
+        if result["base_experiment"] != proposal["base_experiment"]:
+            raise StudyError("Plan changed the selected base; return reselect instead")
+        for ref in set(
+            result["references"]
+            + ([result["base_experiment"]] if result["base_experiment"] else [])
+        ):
+            if not ref.isdigit() or int(ref) >= state["iteration"]:
+                raise StudyError(
+                    "Graph references must point to earlier reviewed experiments"
+                )
+            prior = _read(self.root / "iterations" / ref / "iteration.json")
+            if prior["status"] != "reviewed":
+                raise StudyError("Graph reference has no published review")
+        local = result["local_evaluation"]
+        if result["contract"]["timeout_seconds"] < 1:
+            raise StudyError("Execution contract timeout must be positive")
+        if local:
+            validate_evaluation(local)
+            if (
+                self.config["global_evaluation"]
+                and local["id"] == self.config["global_evaluation"]["id"]
+            ):
+                raise StudyError("Local evaluation cannot reuse the global identity")
+            if not local["allow_feedback"]:
+                raise StudyError("Local search evaluation must allow feedback")
+        routes = _read(folder / "context/routes.before.json")
+        route_id = proposal["route_id"]
+        if route_id == "new":
+            route_id = f"R{max([int(r[1:]) for r in routes] or [0]) + 1:04d}"
+        route = self._route_context(folder, proposal["route_id"])
+        definitions = route["evaluations"]
+        if local:
+            if local["id"] in definitions and definitions[local["id"]] != local:
+                raise StudyError("Changed local definition requires a new ID")
+            definitions[local["id"]] = local
+        _write(folder / "local-evaluations.after.json", definitions)
+        _atomic_text(
+            folder / "context/route.before.md",
+            route["research"]
+            if proposal["route_id"] != "new"
+            else result["route_research"],
+        )
+        _atomic_text(folder / "plan.md", result["markdown"])
+        workdir = self.workspace
+        version = self.config["baseline"]
+        if result["base_experiment"]:
+            version = _read(
+                self.root / "iterations" / result["base_experiment"] / "iteration.json"
+            ).get("workspace_ref")
+        if self.config["allow_write"]:
+            if not version:
+                raise StudyError("Selected experiment has no recoverable Git version")
+            workdir = folder / "workspace"
+            if not workdir.exists():
+                _git(
+                    self.workspace, "worktree", "add", "--detach", str(workdir), version
+                )
+            if _git(workdir, "rev-parse", "HEAD") != version:
+                raise StudyError(
+                    "Unexpected workspace version while preparing execution"
+                )
+        metadata = _read(folder / "iteration.json")
+        metadata.update(
+            route_id=route_id,
+            base_experiment=result["base_experiment"],
+            references=result["references"],
+            input_artifacts=result["input_artifacts"],
+            evaluation_refs=[
+                d["id"] for d in (self.config["global_evaluation"], local) if d
+            ],
+            workspace=str(workdir),
+            workspace_ref=version,
+            status="planned",
+            route_title=proposal["route_title"],
+        )
+        _write(folder / "iteration.json", metadata)
+        state.update(
+            route_id=route_id,
+            phase="execute",
+            plan_ref=str(
+                Path(state["calls"][f"plan-{state['selection_round']}"])
+                / "response.json"
+            ),
+        )
+        self._save(state)
+
+    def _checkpoint(self, workdir: Path, artifacts: list[dict]) -> str:
+        source_suffixes = {
+            ".py",
+            ".toml",
+            ".md",
+            ".yaml",
+            ".yml",
+            ".json",
+            ".c",
+            ".h",
+            ".cpp",
+            ".rs",
+            ".jl",
+            ".sh",
+        }
+        modified = _git(workdir, "diff", "--name-only", "HEAD").splitlines()
+        for name in modified:
+            if Path(name).suffix not in source_suffixes:
+                raise StudyError(
+                    "Tracked non-source artifact changed; preserve it and explicitly version the input"
+                )
+            _git(workdir, "add", "--", name)
+        # Enumerate names only; never read/hash datasets or binary checkpoints.
+        for name in _git(
+            workdir, "ls-files", "--others", "--exclude-standard"
+        ).splitlines():
+            path = workdir / name
+            if path.suffix in source_suffixes:
+                if path.stat().st_size > 1024 * 1024:
+                    raise StudyError(
+                        "Unversioned large text artifact requires an explicit external reference"
+                    )
+                _git(workdir, "add", "--", name)
+        for artifact in artifacts:
+            path = Path(artifact["path"])
+            path = path if path.is_absolute() else workdir / path
+            if path.suffix in source_suffixes and path.is_relative_to(workdir):
+                _git(workdir, "add", "--", str(path))
+        # Deterministic code commits make receipt recovery idempotent, even if the
+        # controller dies between publishing the Git object and node metadata.
+        folder = workdir.parent
+        metadata = _read(folder / "iteration.json")
+        tree = _git(workdir, "write-tree")
+        env = dict(
+            os.environ,
+            GIT_AUTHOR_NAME="Research Loop",
+            GIT_AUTHOR_EMAIL="research-loop@localhost",
+            GIT_COMMITTER_NAME="Research Loop",
+            GIT_COMMITTER_EMAIL="research-loop@localhost",
+            GIT_AUTHOR_DATE=metadata["created_at"],
+            GIT_COMMITTER_DATE=metadata["created_at"],
+        )
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(workdir),
+                "commit-tree",
+                tree,
+                "-p",
+                metadata["workspace_ref"],
+                "-m",
+                f"Research candidate {metadata['id']}",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        commit = result.stdout.strip()
+        _git(workdir, "reset", "--soft", commit)
+        return commit
+
+    def _review_before(self, folder: Path, route_id: str) -> None:
+        if (self.root / "study.json").read_text() != (
+            folder / "context/study.before.json"
+        ).read_text():
+            raise StudyError(
+                "Study configuration changed during the investigation; reconcile the frozen contract"
+            )
+        if (self.root / "goal.md").read_text() != (
+            folder / "context/goal.md"
+        ).read_text():
+            raise StudyError(
+                "Study goal changed during the investigation; reconcile the frozen contract"
+            )
+        paths = [
+            "study.json",
+            "goal.md",
+            "research.md",
+            "routes/index.json",
+            "frontiers.json",
+            f"routes/{route_id}/research.md",
+            f"routes/{route_id}/evaluation.json",
+        ]
+        _write(
+            folder / "review.before.json",
+            {
+                p: (self.root / p).read_text() if (self.root / p).exists() else None
+                for p in paths
+            },
+        )
+
+    def _review(self, state: dict, folder: Path) -> None:
+        publication = folder / "publication.json"
+        if publication.exists():
+            self._publish(state, folder, _read(publication))
+            return
+        before = _read(folder / "review.before.json")
+        route_text = (
+            before[f"routes/{state['route_id']}/research.md"]
+            or (folder / "context/route.before.md").read_text()
+        )
+        context = {
+            **self._context(folder),
+            "route_research": route_text,
+            "global_research": before["research.md"],
+            "plan": _read(self.root / state["plan_ref"]),
+            "execute": _read(self.root / state["execution_ref"]),
+            "experiment": _read(folder / "iteration.json"),
+            "workspace": str(folder / "workspace"),
+            "selected_research_design": state.get("selected", {})
+            .get("proposal", {})
+            .get("research_design"),
+        }
+        guidance = review_guidance(self.strategy)
+        if guidance:
+            context["review_guidance"] = guidance
+        result = self._call(state, "review", "review", context, folder / "review")
+        execute = context["execute"]
+        reviews = {r["candidate_id"]: r for r in result["candidate_reviews"]}
+        if len(reviews) != len(result["candidate_reviews"]):
+            raise StudyError("Duplicate candidate reviews")
+        measured_ids = [m["candidate_id"] for m in execute["measurements"]]
+        if len(set(measured_ids)) != len(measured_ids) or set(reviews) != set(
+            measured_ids
+        ):
+            raise StudyError(
+                "Candidate reviews must match unique current measurements exactly"
+            )
+        plan = context["plan"]
+        definitions = [
+            d for d in (self.config["global_evaluation"], plan["local_evaluation"]) if d
+        ]
+        candidates = []
+        for measurement in execute["measurements"]:
+            cid = measurement["candidate_id"]
+            if cid not in reviews:
+                raise StudyError("Every measurement requires explicit review")
+            definition = next(
+                (d for d in definitions if d["id"] == measurement["evaluation_id"]),
+                None,
+            )
+            if definition is None:
+                raise StudyError(
+                    "Measurement uses an evaluation outside the frozen contract"
+                )
+            if not definition["allow_feedback"]:
+                raise StudyError(
+                    "Final-only evaluations must be graded outside the research loop"
+                )
+            metrics = {m["name"]: m["value"] for m in measurement["metrics"]}
+            if len(metrics) != len(measurement["metrics"]):
+                raise StudyError("Duplicate metric names")
+            artifact = measurement["artifact"]
+            artifact_path = Path(artifact["path"])
+            if not artifact_path.is_absolute():
+                artifact_path = Path(context["experiment"]["workspace"]) / artifact_path
+            artifact_path = artifact_path.resolve()
+            if artifact not in execute["artifacts"]:
+                raise StudyError(
+                    "Measured candidate is not a declared execution artifact"
+                )
+            if not artifact_path.is_relative_to(
+                Path(context["experiment"]["workspace"]).resolve()
+            ):
+                raise StudyError(
+                    "Candidate must belong to the isolated execution workspace"
+                )
+            if reviews[cid]["verified"] and not artifact_path.exists():
+                raise StudyError("Verified candidate artifact is missing")
+            candidates.append(
+                {
+                    "id": f"{state['iteration']:04d}:{cid}",
+                    "experiment_id": f"{state['iteration']:04d}",
+                    "artifact": {
+                        "path": str(artifact_path),
+                        "version": artifact["version"],
+                    },
+                    "evaluation_id": measurement["evaluation_id"],
+                    "comparison_scope": measurement["comparison_scope"],
+                    "metrics": metrics,
+                    "evidence": measurement["evidence"],
+                    "verified": reviews[cid]["verified"],
+                    "valid": reviews[cid]["valid"],
+                }
+            )
+        _write(
+            folder / "candidates.json",
+            {
+                "route_id": state["route_id"],
+                "global_evaluation_id": self.config["global_evaluation"]["id"]
+                if self.config["global_evaluation"]
+                else None,
+                "definitions": definitions,
+                "candidates": candidates,
+                "corrections": result.get("candidate_corrections", []),
+            },
+        )
+        views = self._build_views(extra=folder)
+        metadata = context["experiment"]
+        metadata["status"] = "reviewed"
+        metadata["references"] = sorted(
+            set(metadata["references"])
+            | {
+                correction["candidate_id"].split(":", 1)[0]
+                for correction in result.get("candidate_corrections", [])
+            }
+        )
+        routes = json.loads(before["routes/index.json"])
+        relative = str(folder.relative_to(self.root))
+        routes[state["route_id"]] = {
+            "title": metadata["route_title"],
+            "status": result["route_status"],
+            "reason": result["route_reason"],
+            "resume_condition": result["resume_condition"],
+            "research_ref": f"{relative}/route.after.md",
+            "evaluation_ref": f"{relative}/local-evaluations.after.json",
+        }
+        writes = {
+            "research.md": result["global_research"],
+            "routes/index.json": json.dumps(routes, indent=2, ensure_ascii=False)
+            + "\n",
+            "frontiers.json": json.dumps(views, indent=2, ensure_ascii=False) + "\n",
+            f"routes/{state['route_id']}/research.md": result["route_research"],
+            f"routes/{state['route_id']}/evaluation.json": (
+                folder / "local-evaluations.after.json"
+            ).read_text(),
+        }
+        _atomic_text(folder / "review.md", result["markdown"])
+        _atomic_text(folder / "route.after.md", result["route_research"])
+        _atomic_text(folder / "global.after.md", result["global_research"])
+        state_after = dict(state)
+        state_after.update(
+            status="ready",
+            phase="done",
+            active_attempt=None,
+            review_ref=str(Path(state["calls"]["review"]) / "response.json"),
+            goal_status=result["goal_status"],
+        )
+        if result["decision"] == "stop" or (
+            self.config["max_iterations"] is not None
+            and state["iteration"] >= self.config["max_iterations"]
+        ):
+            state_after.update(
+                status="stopped",
+                stop_reason="review"
+                if result["decision"] == "stop"
+                else "iteration_budget",
+            )
+        bundle = {
+            "before": before,
+            "writes": writes,
+            "metadata": metadata,
+            "state_after": state_after,
+        }
+        # Refuse conflicts before preparing a replayable publication.
+        self._check_publication(bundle)
+        if "insight" in result:
+            _write(folder / "insight.json", result["insight"])
+        _write(publication, bundle)
+        self._publish(state, folder, bundle)
+
+    def _check_publication(self, bundle: dict) -> None:
+        for relative, old in bundle["before"].items():
+            path = self.root / relative
+            current = path.read_text() if path.exists() else None
+            if current not in (old, bundle["writes"].get(relative, old)):
+                raise StudyError(
+                    f"{relative} changed during review; preserve the edit and retry"
+                )
+
+    def _publish(self, state: dict, folder: Path, bundle: dict) -> None:
+        self._check_publication(bundle)
+        for relative, value in bundle["writes"].items():
+            _atomic_text(self.root / relative, value)
+        _write(folder / "iteration.json", bundle["metadata"])
+        next_state = dict(bundle["state_after"])
+        self._save(next_state)
+        state.update(next_state)
+
+    def _build_views(self, *, extra: Path | None = None) -> dict:
+        records = []
+        for folder in sorted((self.root / "iterations").iterdir()):
+            if folder == extra or (
+                (folder / "publication.json").exists()
+                and _read(folder / "iteration.json")["status"] == "reviewed"
+            ):
+                path = folder / "candidates.json"
+                if path.exists():
+                    records.append(_read(path))
+        definitions = {}
+        current = self.config["global_evaluation"]
+        if current:
+            definitions[(None, current["id"])] = current
+        for record in records:
+            for definition in record["definitions"]:
+                owner = (
+                    None
+                    if definition["id"] == record["global_evaluation_id"]
+                    else record["route_id"]
+                )
+                key = (owner, definition["id"])
+                if key in definitions and definitions[key] != definition:
+                    raise StudyError(
+                        "Evaluation identity was reused with a different definition"
+                    )
+                definitions[key] = definition
+        result = {"global": {}, "local": {}}
+        # Corrections change eligibility only; original measurement records stay intact.
+        known = {}
+        for record in records:
+            for correction in record.get("corrections", []):
+                candidate_id = correction["candidate_id"]
+                if candidate_id not in known or not correction["reason"].strip():
+                    raise StudyError(
+                        "Correction requires an earlier published candidate and reason"
+                    )
+                known[candidate_id].update(
+                    valid=correction["valid"], verified=correction["verified"]
+                )
+            record["candidates"] = [dict(c) for c in record["candidates"]]
+            for candidate in record["candidates"]:
+                if candidate["id"] in known:
+                    raise StudyError("Duplicate qualified candidate ID")
+                known[candidate["id"]] = candidate
+        for (owner, evaluation_id), definition in definitions.items():
+            candidates = [
+                c
+                for r in records
+                if (owner is None and r["global_evaluation_id"] == evaluation_id)
+                or (
+                    owner == r["route_id"]
+                    and evaluation_id != r["global_evaluation_id"]
+                )
+                for c in r["candidates"]
+                if c["evaluation_id"] == evaluation_id
+            ]
+            view = build_frontier(definition, candidates)
+            view["allow_feedback"] = definition["allow_feedback"]
+            if owner is None:
+                result["global"][evaluation_id] = view
+            else:
+                result["local"].setdefault(owner, {})[evaluation_id] = view
+        return result
+
+    def rebuild_frontiers(self) -> dict:
+        with self._lock():
+            if self.status()["phase"] != "done":
+                raise StudyError(
+                    "Finish or reconcile the active iteration before rebuilding"
+                )
+            result = self._build_views()
+            _write(self.root / "frontiers.json", result)
+            return result

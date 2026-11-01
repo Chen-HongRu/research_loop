@@ -1,0 +1,6 @@
+Server Python environment: /root/research-loop/.venv/bin/python
+PYTHONPATH=src:. python -m unittest discover -s tests -q
+Ran 150 tests in 12.796s
+OK
+Ruff check and format passed for changed Python files.
+Live read-only search: completed; 3 observed web tool events; 3 sources.
