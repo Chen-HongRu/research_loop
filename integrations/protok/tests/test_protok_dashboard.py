@@ -1024,6 +1024,143 @@ class HistoryViewTests(unittest.TestCase):
         self.assertFalse(result["frontier"]["sources"][0]["available"])
         self.assertTrue(result["coverage"]["limitations"])
 
+    def test_real_ledger_layout_retains_smokes_without_quality_points_or_aliases(self):
+        self.study(self.archive, [(self.first, 3.0)], start=100)
+        self.study(self.active, [(self.shared, 2.0)], start=200)
+        for number in range(1, 13):
+            self.ledger(
+                f"{number:064x}",
+                number,
+                value=3.0 + number if number <= 10 else None,
+                status="complete" if number <= 10 else "failed",
+            )
+        scored_fingerprint = f"{1:064x}"
+        for index, fingerprint in enumerate(
+            (scored_fingerprint, self.shared, "e" * 64)
+        ):
+            prefix = "smoke-" + fingerprint
+            self.put(
+                self.records,
+                prefix + "/state.json",
+                {
+                    "fingerprint": fingerprint,
+                    "created_at": 30 + index,
+                    "status": "complete" if index < 2 else "failed",
+                    "mode": "smoke",
+                    "attempts": [],
+                },
+            )
+            self.put(
+                self.records,
+                prefix + "/run-config.json",
+                {"protocol": DASH.PROTOCOL, "metric": DASH.METRIC},
+            )
+            if index < 2:
+                self.put(
+                    self.records,
+                    prefix + "/summary.json",
+                    {"quality_score_eligible": False},
+                )
+        result = DASH.view_snapshot(
+            self.active,
+            snapshot_only=True,
+            history_roots=[self.archive],
+            records_root=self.records,
+        )
+        nodes = {node["id"]: node for node in result["nodes"]}
+        self.assertEqual(result["coverage"]["ledger_record_count"], 15)
+        self.assertEqual(result["coverage"]["ledger_point_count"], 10)
+        self.assertEqual(result["coverage"]["ledger_smoke_count"], 3)
+        self.assertIn("ledger:" + scored_fingerprint, nodes)
+        smoke = nodes["ledger:smoke-" + scored_fingerprint]
+        self.assertEqual(smoke["record_mode"], "smoke")
+        self.assertTrue(smoke["diagnostic"])
+        self.assertIsNone(smoke["observed_value"])
+        self.assertIn("冒烟", smoke["route"])
+        self.assertIn("冒烟", smoke["title"])
+        self.assertIn("冒烟", smoke["action_summary"])
+        self.assertIsNone(smoke["value"])
+        self.assertEqual(nodes["ledger:smoke-" + "e" * 64]["status"], "failed")
+        self.assertNotIn("same_ledger_result", nodes["active:0001"])
+        self.assertTrue(
+            all(
+                "smoke-" not in point["id"]
+                for point in result["frontier"]["legacy_points"]
+            )
+        )
+        self.assertEqual(
+            smoke["detail_url"], "/api/node/ledger/smoke-" + scored_fingerprint
+        )
+        details = DASH.source_details(
+            self.active,
+            "ledger",
+            "smoke-" + scored_fingerprint,
+            history_roots=[self.archive],
+            records_root=self.records,
+        )
+        self.assertEqual(details["ledger"]["mode"], "smoke")
+        self.assertIsNone(details["ledger"]["observed_value"])
+        self.assertFalse(details["frontier_eligible"])
+        # Exercise the actual HTTP route with an in-memory connection, without opening a service.
+        from io import BytesIO
+
+        connection = Mock()
+        connection.makefile.return_value = BytesIO(
+            ("GET " + smoke["detail_url"] + " HTTP/1.0\r\n\r\n").encode()
+        )
+        response = bytearray()
+        connection.sendall.side_effect = response.extend
+        with patch.object(DASH, "ThreadingHTTPServer") as factory:
+            factory.return_value.server_port = 0
+            DASH.serve(
+                self.active,
+                0,
+                snapshot_only=True,
+                history_roots=[self.archive],
+                records_root=self.records,
+            )
+            handler = factory.call_args.args[1]
+        handler(connection, ("127.0.0.1", 1), Mock())
+        self.assertIn(b"200 OK", response)
+        self.assertIn(b'"record_mode": "smoke"', response)
+        # Either diagnostic mode or an ineligible-quality flag prevents curve admission.
+        scored_summary_path = self.records / scored_fingerprint / "summary.json"
+        scored_summary = DASH.read(scored_summary_path)
+        scored_summary["quality_score_eligible"] = False
+        self.put(self.records, scored_fingerprint + "/summary.json", scored_summary)
+        self.put(
+            self.records,
+            "smoke-" + scored_fingerprint + "/summary.json",
+            {
+                "fingerprint": scored_fingerprint,
+                "protocol": DASH.PROTOCOL,
+                "objective": DASH.METRIC,
+                "quality_score_eligible": True,
+                "value": 0.001,
+            },
+        )
+        guarded = DASH.view_snapshot(
+            self.active,
+            snapshot_only=True,
+            history_roots=[self.archive],
+            records_root=self.records,
+        )
+        self.assertEqual(guarded["coverage"]["ledger_point_count"], 9)
+        self.assertTrue(
+            all(
+                "smoke-" not in point["id"]
+                for point in guarded["frontier"]["legacy_points"]
+            )
+        )
+        for invalid in (
+            "smoke-../" + scored_fingerprint,
+            "smoke-smoke-" + scored_fingerprint,
+        ):
+            with self.assertRaises(ValueError):
+                DASH.source_details(
+                    self.active, "ledger", invalid, records_root=self.records
+                )
+
     def test_source_details_uses_only_configured_sources_and_keeps_local_refs(self):
         self.study(self.archive, [(self.first, 3.0)], start=100)
         self.study(self.active, [(self.shared, 2.0)], start=200)

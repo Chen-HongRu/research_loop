@@ -859,10 +859,16 @@ def ledger_history(records_root, cutoff):
             later += 1
             continue
         fingerprint = state.get("fingerprint")
+        record_name = path.parent.name
+        record_mode = state.get("mode")
+        diagnostic = record_mode == "smoke"
         if (
             not isinstance(fingerprint, str)
             or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
-            or path.parent.name != fingerprint
+            or not (
+                record_name == fingerprint
+                or (diagnostic and record_name == "smoke-" + fingerprint)
+            )
         ):
             limitations.append(f"{path.parent.name} 的记录身份不完整，未纳入账本视图。")
             continue
@@ -876,16 +882,21 @@ def ledger_history(records_root, cutoff):
         usable = (
             same_protocol
             and finite
+            and record_mode == "scored"
+            and summary.get("quality_score_eligible") is True
             and summary.get("fingerprint", fingerprint) == fingerprint
         )
-        identity = "ledger:" + fingerprint
+        identity = "ledger:" + record_name
         node = {
             "id": identity,
-            "local_id": fingerprint,
+            "local_id": record_name,
             "source_id": "ledger",
             "source_label": "前置账本",
-            "label": "历史评价 " + fingerprint[:10],
-            "route": "前置固定协议账本",
+            "label": ("历史检查 " if diagnostic else "历史评价 ") + fingerprint[:10],
+            "mode": record_mode,
+            "record_mode": record_mode,
+            "diagnostic": diagnostic,
+            "route": "历史冒烟检查" if diagnostic else "前置固定协议账本",
             "route_id": None,
             "base": None,
             "declared_base": None,
@@ -898,6 +909,7 @@ def ledger_history(records_root, cutoff):
             "frontier_eligible": False,
             "value": value if usable else None,
             "provisional_value": value if usable else None,
+            "observed_value": value if same_protocol and finite else None,
             "fingerprint": fingerprint,
             "evaluation_id": protocol,
             "comparison_scope": None,
@@ -918,18 +930,30 @@ def ledger_history(records_root, cutoff):
                 for attempt in state.get("attempts", [])
             ],
             "job_status": state.get("status"),
-            "title": "未经独立 Review 的历史评价",
-            "action_summary": brief(state.get("error"))
+            "title": "历史冒烟检查（诊断，不计正式 RMSD）"
+            if diagnostic
+            else "未经独立 Review 的历史评价",
+            "action_summary": (
+                "冒烟检查：" + brief(state.get("error"))
+                if state.get("error")
+                else "历史冒烟检查；诊断记录，不计正式 RMSD。"
+            )
+            if diagnostic
+            else brief(state.get("error"))
             or "原始固定协议历史评价；仅展示已记录元数据。",
             "action_summary_label": "账本记录",
             "action": None,
-            "summary": "未经 Study 独立 Review，不进入 reviewed Frontier。",
+            "summary": "诊断检查，不计正式 RMSD 或 Frontier。"
+            if diagnostic
+            else "未经 Study 独立 Review，不进入 reviewed Frontier。",
             "created_at": created,
             "error": state.get("error"),
-            "detail_url": "/api/node/ledger/" + fingerprint,
+            "detail_url": "/api/node/ledger/" + record_name,
             "frontier_current": False,
             "frontier_reached": None,
-            "frontier_exclusion_reason": "unreviewed_ledger",
+            "frontier_exclusion_reason": "diagnostic_smoke"
+            if diagnostic
+            else "unreviewed_ledger",
             "quality_score_eligible": summary.get("quality_score_eligible"),
         }
         nodes.append(node)
@@ -1126,7 +1150,12 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
             continue
         protocol, scope = node.get("evaluation_id"), node.get("comparison_scope")
         if node["source_id"] == "ledger":
-            ledger_results[(fingerprint, protocol)] = node["id"]
+            if (
+                node.get("record_mode") == "scored"
+                and node.get("quality_score_eligible") is True
+                and node.get("value") is not None
+            ):
+                ledger_results[(fingerprint, protocol)] = node["id"]
         elif node.get("frontier_eligible") and scope:
             key = (fingerprint, protocol, scope)
             previous = scoped_results.get(key)
@@ -1201,6 +1230,9 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
                 bool(point.get("duplicate_of")) for point in points
             ),
             "ledger_record_count": len(ledger_nodes),
+            "ledger_smoke_count": sum(
+                node.get("record_mode") == "smoke" for node in ledger_nodes
+            ),
             "ledger_point_count": len(legacy_points),
             "unique_observed_fingerprint_count": len(observed_result_keys),
             "ledger_cutoff": cutoff,
@@ -1215,7 +1247,9 @@ def source_details(root, source_id, local_id, *, history_roots=(), records_root=
         source["id"]: source for source in study_sources(root, history_roots)
     }
     if source_id == "ledger":
-        if records_root is None or not re.fullmatch(r"[0-9a-f]{64}", local_id):
+        if records_root is None or not re.fullmatch(
+            r"(?:smoke-)?[0-9a-f]{64}", local_id
+        ):
             raise ValueError("Unknown ledger source or record")
         cutoff, _ = history_cutoff(root, history_roots)
         nodes, _, _, _ = ledger_history(records_root, cutoff)
@@ -1228,11 +1262,17 @@ def source_details(root, source_id, local_id, *, history_roots=(), records_root=
             "label": node["label"],
             "reviewed": False,
             "frontier_eligible": False,
-            "summary": "原始账本元数据，未经 Study 独立 Review；不进入 reviewed Frontier。",
+            "summary": node["summary"],
+            "record_mode": node["record_mode"],
+            "diagnostic": node["diagnostic"],
             "ledger": {
                 key: node.get(key)
                 for key in (
                     "fingerprint",
+                    "mode",
+                    "record_mode",
+                    "diagnostic",
+                    "observed_value",
                     "evaluation_id",
                     "comparison_scope",
                     "value",
@@ -1284,7 +1324,8 @@ def serve(root, port, *, snapshot_only=False, history_roots=(), records_root=Non
                     ).encode()
                     mime = "application/json; charset=utf-8"
                 elif re.fullmatch(
-                    r"/api/node/(active|history-[1-9][0-9]*|ledger)/[0-9a-f]+", path
+                    r"/api/node/(?:active|history-[1-9][0-9]*)/[0-9]{4,}|/api/node/ledger/(?:smoke-)?[0-9a-f]{64}",
+                    path,
                 ):
                     _, _, _, source_id, local_id = path.split("/")
                     try:
