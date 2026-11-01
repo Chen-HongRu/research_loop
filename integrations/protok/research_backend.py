@@ -18,6 +18,8 @@ from integrations.protok.continuation import _load_backend, validate_continuatio
 
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 LOG_BYTES = 65536
+RESEARCH_ENVIRONMENTS = "/data/user/hongruchen/experiments/ProTok/research-environments"
+BASE_PYTHON = "/data/user/hongruchen/projects/ProTok/.venv/bin/python"
 
 
 def _read(path):
@@ -29,6 +31,52 @@ def _write(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
     temporary.replace(path)
+
+
+def _environment(value):
+    """Validate bounded operator configuration, without inspecting library contents."""
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "version",
+            "id",
+            "base_python",
+            "python_version",
+            "site_packages",
+            "packages",
+        }
+        or type(value["version"]) is not int
+        or value["version"] != 1
+        or not isinstance(value["id"], str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", value["id"])
+        or value["base_python"] != BASE_PYTHON
+        or value["python_version"] != "3.12.13"
+        or value["site_packages"]
+        != f"{RESEARCH_ENVIRONMENTS}/{value['id']}/site-packages"
+        or not isinstance(value["packages"], list)
+        or len(value["packages"]) > 256
+    ):
+        raise ProTokError("Invalid trusted research environment")
+    seen = set()
+    for package in value["packages"]:
+        if (
+            not isinstance(package, dict)
+            or set(package) != {"distribution", "import", "version", "source"}
+            or any(
+                not isinstance(package[key], str)
+                or not package[key]
+                or len(package[key]) > 256
+                for key in ("distribution", "import", "version")
+            )
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", package["distribution"])
+            or not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", package["import"])
+            or package["source"] not in ("base", "supplement")
+            or package["distribution"].lower().replace("_", "-") in seen
+        ):
+            raise ProTokError("Invalid trusted research package inventory")
+        seen.add(package["distribution"].lower().replace("_", "-"))
+    return value
 
 
 def _relative(value):
@@ -278,7 +326,7 @@ print(json.dumps(items))
     return result
 
 
-def _launcher(config, remote, execution, inputs):
+def _launcher(config, remote, execution, inputs, environment=None):
     """Trusted launcher with an empty root and explicit read-only mounts."""
     # The shell writes this generated Python launcher; no agent shell is evaluated.
     prefix = "/data/user/hongruchen/projects/ProTok/.venv"
@@ -304,6 +352,14 @@ def _launcher(config, remote, execution, inputs):
         (remote + "/inputs.json", "/inputs.json"),
     ]
     mounts += [(item["path"], item["mount"]) for item in inputs]
+    pythonpath = "/workspace:/workspace/scripts"
+    if environment is not None:
+        environment = _environment(environment)
+        mounts += [
+            (environment["site_packages"], "/research-libs"),
+            (remote + "/environment.json", "/environment.json"),
+        ]
+        pythonpath += ":/research-libs"
     script = f"""import ctypes,json,os,re,subprocess,sys,xml.etree.ElementTree as ET
 visible=os.environ.get("CUDA_VISIBLE_DEVICES", "")
 resources={{"CUDA_VISIBLE_DEVICES":visible,"SLURM_JOB_GPUS":os.environ.get("SLURM_JOB_GPUS"),"host_libcuda_paths":[]}}
@@ -341,15 +397,15 @@ if os.path.isfile("/etc/ld.so.cache"): args += ["--ro-bind","/etc/ld.so.cache","
 args += ["--bind",{remote + "/output"!r},"/output"]
 for dev in ["/dev/nvidiactl","/dev/nvidia"+minor,"/dev/nvidia-uvm","/dev/nvidia-uvm-tools"]:
  if os.path.exists(dev): args += ["--dev-bind",dev,dev]
-for key,value in {{"HOME":"/tmp/home","PATH":"/usr/bin:/bin","TMPDIR":"/tmp","PYTHONPATH":"/workspace:/workspace/scripts","PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1","OMP_NUM_THREADS":"1","CUDA_VISIBLE_DEVICES":uuid,"TORCHINDUCTOR_CACHE_DIR":"/tmp/torch","TRITON_CACHE_DIR":"/tmp/triton"}}.items(): args += ["--setenv",key,value]
+for key,value in {{"HOME":"/tmp/home","PATH":"/usr/bin:/bin","TMPDIR":"/tmp","PYTHONPATH":{pythonpath!r},"PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1","OMP_NUM_THREADS":"1","CUDA_VISIBLE_DEVICES":uuid,"TORCHINDUCTOR_CACHE_DIR":"/tmp/torch","TRITON_CACHE_DIR":"/tmp/triton","MPLBACKEND":"Agg","MPLCONFIGDIR":"/tmp/matplotlib","NUMBA_CACHE_DIR":"/tmp/numba","JOBLIB_TEMP_FOLDER":"/tmp/joblib"}}.items(): args += ["--setenv",key,value]
 args += ["--chdir","/output",{config["remote_python"]!r},"-B",{str(PurePosixPath("/workspace") / execution["entrypoint"])!r}]
 os.execve(args[0],args,{{"PATH":"/usr/bin:/bin"}})
 """
     return script
 
 
-def _batch(config, remote, execution, inputs, allocated):
-    launcher = _launcher(config, remote, execution, inputs)
+def _batch(config, remote, execution, inputs, allocated, environment=None):
+    launcher = _launcher(config, remote, execution, inputs, environment)
     directives = {
         "partition": "debug",
         "nodes": 1,
@@ -500,6 +556,9 @@ def run_script(
                     "Recovery cannot submit a retained prepared research job"
                 )
             inputs = existing["inputs"]
+            environment = existing.get("environment")
+            if environment is not None:
+                _environment(environment)
         else:
             if recover:
                 raise ProTokError("No retained research job to recover")
@@ -528,6 +587,12 @@ def run_script(
                 )
             inputs = _inputs(root, config, execution, iteration)
             inputs = _input_metadata(fixed, config, inputs)
+            environment_path = control / "research-environment.json"
+            environment = None
+            if environment_path.exists():
+                if environment_path.stat().st_size > 256 * 1024:
+                    raise ProTokError("Trusted research environment exceeds 256 KiB")
+                environment = _environment(_read(environment_path))
             execution_identity = hashlib.sha256(
                 json.dumps(
                     {
@@ -535,6 +600,11 @@ def run_script(
                         "execution": execution,
                         "inputs": inputs,
                         "iteration": iteration,
+                        **(
+                            {"environment": environment}
+                            if environment is not None
+                            else {}
+                        ),
                     },
                     sort_keys=True,
                 ).encode()
@@ -547,7 +617,7 @@ def run_script(
                 + identity[:16]
             )
             _batch(
-                config, remote, execution, inputs, allocated
+                config, remote, execution, inputs, allocated, environment
             )  # Validate before publishing effects.
             record.mkdir(parents=True)
             existing = {
@@ -567,6 +637,7 @@ def run_script(
                 "base_config": config,
                 "owner": owner,
                 "continuation": lease,
+                **({"environment": environment} if environment is not None else {}),
             }
             attempt = {
                 "seed": 42,
@@ -579,6 +650,8 @@ def run_script(
             state = {"purpose": "research", "status": "prepared", "attempts": [attempt]}
             _write(record / "job.json", existing)
             _write(record / "state.json", state)
+            if environment is not None:
+                _write(record / "environment.json", environment)
         original_ssh = fixed.ssh
         watching = True
 
@@ -612,8 +685,17 @@ def run_script(
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source / name, destination)
                 (staging / "code/autoresearch-se3.sbatch").write_text(
-                    _batch(config, existing["remote"], execution, inputs, allocated)
+                    _batch(
+                        config,
+                        existing["remote"],
+                        execution,
+                        inputs,
+                        allocated,
+                        environment,
+                    )
                 )
+                if environment is not None:
+                    _write(staging / "environment.json", environment)
                 _write(
                     staging / "inputs.json",
                     {
@@ -748,10 +830,16 @@ def run_script(
             "terminal_state": attempt.get("terminal_state"),
             "exit_code": attempt.get("exit_code"),
             "inputs": inputs,
+            **({"environment": environment} if environment is not None else {}),
             "outputs": outputs,
             "evidence": [
                 str(record / "job.json"),
                 str(record / "state.json"),
+                *(
+                    [str(record / "environment.json")]
+                    if environment is not None
+                    else []
+                ),
                 *(
                     [str(record / "stdout-tail.log")]
                     if (record / "stdout-tail.log").exists()

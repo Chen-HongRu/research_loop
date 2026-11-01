@@ -204,6 +204,115 @@ class ResearchBackendTests(unittest.TestCase):
             **changes,
         )
 
+    def environment(self):
+        return {
+            "version": 1,
+            "id": "common-20261102-v1",
+            "base_python": research.BASE_PYTHON,
+            "python_version": "3.12.13",
+            "site_packages": research.RESEARCH_ENVIRONMENTS
+            + "/common-20261102-v1/site-packages",
+            "packages": [
+                {
+                    "distribution": "numpy",
+                    "import": "numpy",
+                    "version": "2.2.6",
+                    "source": "base",
+                },
+                {
+                    "distribution": "scipy",
+                    "import": "scipy",
+                    "version": "1.15.3",
+                    "source": "supplement",
+                },
+            ],
+        }
+
+    def test_environment_is_snapshotted_mounted_and_bound_to_identity(self):
+        environment = self.environment()
+        research._write(self.control / "research-environment.json", environment)
+        receipt = self.run_job()
+        record = self.control / "research-jobs/0002"
+        self.assertEqual(receipt["environment"], environment)
+        for path in (
+            record / "job.json",
+            record / "staging/environment.json",
+            record / "environment.json",
+        ):
+            value = research._read(path)
+            self.assertEqual(value.get("environment", value), environment)
+        self.assertIn(str((record / "environment.json").resolve()), receipt["evidence"])
+        import json
+
+        expected = hashlib.sha256(
+            json.dumps(
+                {
+                    "source_identity": receipt["source_identity"],
+                    "execution": self.execution,
+                    "inputs": receipt["inputs"],
+                    "iteration": "0002",
+                    "environment": environment,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(receipt["execution_identity"], expected)
+        launcher = research._launcher(
+            self.config, "/remote/attempt", self.execution, [], environment
+        )
+        self.assertIn(repr((environment["site_packages"], "/research-libs")), launcher)
+        self.assertIn(
+            repr(("/remote/attempt/environment.json", "/environment.json")), launcher
+        )
+        self.assertIn('args += ["--ro-bind",src,dst]', launcher)
+        self.assertIn("/workspace:/workspace/scripts:/research-libs", launcher)
+        self.assertIn('"MPLBACKEND":"Agg"', launcher)
+        self.assertNotIn(
+            repr((research.RESEARCH_ENVIRONMENTS, research.RESEARCH_ENVIRONMENTS)),
+            launcher,
+        )
+        compile(launcher, "launcher", "exec")
+
+    def test_recovery_uses_retained_environment_even_when_live_manifest_changes(self):
+        environment = self.environment()
+        research._write(self.control / "research-environment.json", environment)
+        self.fixed.behavior = "unknown"
+        initial = self.run_job()
+        # Invalid live configuration must not affect an already admitted allocation.
+        research._write(self.control / "research-environment.json", {"invalid": True})
+        recovered = self.run_job(recover=True)
+        self.assertEqual(recovered["environment"], environment)
+        self.assertEqual(recovered["execution_identity"], initial["execution_identity"])
+        self.assertEqual(self.fixed.submissions, 1)
+
+    def test_legacy_recovery_ignores_new_environment_and_preserves_old_receipts(self):
+        self.fixed.behavior = "unknown"
+        initial = self.run_job()
+        research._write(self.control / "research-environment.json", self.environment())
+        recovered = self.run_job(recover=True)
+        self.assertNotIn("environment", initial)
+        self.assertNotIn("environment", recovered)
+        self.assertEqual(recovered["execution_identity"], initial["execution_identity"])
+        record = self.control / "research-jobs/0002"
+        self.assertFalse((record / "staging/environment.json").exists())
+        launcher = (record / "staging/code/autoresearch-se3.sbatch").read_text()
+        self.assertNotIn("/research-libs", launcher)
+
+    def test_invalid_environment_is_rejected_before_publication(self):
+        for key, value in (
+            ("site_packages", research.RESEARCH_ENVIRONMENTS + "/../private"),
+            ("base_python", "/other/python"),
+            ("python_version", "3.13.0"),
+            ("packages", [{"distribution": "scipy"}]),
+        ):
+            with self.subTest(key=key):
+                environment = self.environment()
+                environment[key] = value
+                research._write(self.control / "research-environment.json", environment)
+                with self.assertRaises(ProTokError):
+                    self.run_job()
+                self.assertFalse((self.control / "research-jobs/0002").exists())
+
     def test_script_receipt_is_bounded_nonformal_and_repeatable(self):
         receipt = self.run_job()
         self.assertEqual(receipt["status"], "completed")

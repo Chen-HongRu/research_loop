@@ -51,6 +51,30 @@ a bounded stdout tail. Source/configuration identities are hashed; datasets and
 checkpoints are not scanned or hashed. Checkpoints are resolved from a completed,
 published evaluation receipt, and must actually exist.
 
+The operator's `control/execution-environment.json` supplies available tools, Python
+paths, package versions and import names to every new proposal, Plan, Execute and
+Review call. It distinguishes the lightweight Aliyun authoring environment, the
+formal HPC environment and supplemental research libraries. Missing dependencies
+are unmet prerequisites; agents do not install packages or assume that a library
+available on one host is available on another.
+
+An optional `control/research-environment.json` identifies a versioned supplemental
+package directory, the existing Python interpreter and the verified package
+inventory. Research jobs retain that manifest in their identity and receipt,
+expose it as `/environment.json`, and mount its packages read-only at
+`/research-libs`. Recovery uses the job's retained manifest. Formal evaluation
+continues to use its original environment. Plotting uses the headless `Agg` backend;
+Matplotlib, Numba and joblib use temporary cache directories.
+
+Operators install supplements with `uv` into a new versioned directory. Resolve
+against the existing base package versions, install only missing distributions,
+and preserve the published directory. The install lock records transitive
+dependencies; library files are not scanned or hashed at job startup.
+`examples/library_probe.py` checks declared imports and versions, small numerical,
+statistical, symbolic, tensor/gradient and file operations, plus headless plotting
+inside the actual research sandbox. This is an operator environment check, not a
+scientific investigation or an official score.
+
 Supported inputs are `hidden_cache`, `targets`, `teacher` and
 `checkpoint:<published iteration>:<0|1000|2000>`. Data roles are `development` or
 `exploratory`; model inputs may also use `model` or `reference`. The current cache

@@ -232,6 +232,11 @@ The controller executes a frozen script and its imported research/candidate code
 do not change those files after submission. One script may perform multiple paired
 computations within one shared allocation. Do not SSH, install dependencies or
 launch compute by another path. The Aliyun controller has no Torch.
+The verified library inventory is supplied by the operator execution-environment
+context. Supplemental research libraries, when configured, are described by the
+retained /environment.json inside the sandbox and mounted read-only at /research-libs.
+Do not assume unlisted libraries are available or auto-install them; report an unmet
+prerequisite when a required library is unavailable.
 The available compute profile is the existing H100 debug allocation, gpu=true,
 8 CPU / 96 GiB, 60..1800 seconds in whole minutes. Even CPU calculations in this
 profile consume and report GPU allocation seconds from the original shared budget.
