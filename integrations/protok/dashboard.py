@@ -95,6 +95,12 @@ def agent_outputs(root, folder):
     attempts = list((folder / "selection").glob("round-*/*/attempt-*"))
     for phase in ("plan", "review"):
         attempts.extend((folder / phase).glob("attempt-*"))
+    execution = list((folder / "execute").glob("attempt-*"))
+    recovery = folder / "execute/recovery"
+    repairs = list((recovery / "repairs").glob("*/attempt-*"))
+    execution.extend([recovery, *repairs])
+    # Expose genuine completed Execute receipts, never partial Agent transcripts.
+    attempts.extend(path for path in execution if completed_response(path) is not None)
     entries = []
     for attempt in attempts:
         if not attempt.is_dir():
@@ -116,6 +122,9 @@ def agent_outputs(root, folder):
                 turn, side, phase = match.groups()
                 turn = int(turn)
                 key = f"s{round_number - 1}-{turn - 1}-{side}-{phase}"
+        elif attempt in execution:
+            phase = "execute"
+            key = calls.get(relative(attempt, root / "study"), "execute")
         else:
             phase = parent
             key = calls.get(relative(attempt, root / "study"), phase)
@@ -134,7 +143,14 @@ def agent_outputs(root, folder):
         role = (
             f"Advocate {side.upper()}"
             if side
-            else {"judge": "Judge", "plan": "Planner", "review": "Reviewer"}[phase]
+            else "Debug repair"
+            if attempt in repairs
+            else {
+                "judge": "Judge",
+                "plan": "Planner",
+                "review": "Reviewer",
+                "execute": "Executor",
+            }[phase]
         )
         entry = {
             "key": key,
@@ -154,7 +170,9 @@ def agent_outputs(root, folder):
             "published": is_published,
         }
         # Receipt timestamps retain actual invocation order across retries/resampling.
-        started = timestamp(process.get("started"))
+        started = timestamp(process.get("started")) or timestamp(
+            read(attempt / "completed.json", {}).get("completed_at")
+        )
         entry["_order"] = started if started is not None else attempt.stat().st_mtime
         entries.append(entry)
     entries.sort(key=lambda entry: (entry["_order"], entry["source"]))
@@ -589,7 +607,7 @@ def snapshot(root, *, snapshot_only=False):
     else:
         owner = read(root / "control/ownership.json", {})
         backend = ProTokBackend(Path(owner["project"]), root / "control").inspect()
-    records = {r["fingerprint"]: r for r in backend["records"]}
+    records = {r.get("record", r["fingerprint"]): r for r in backend["records"]}
     nodes = []
     for folder in sorted((study / "iterations").glob("[0-9]*")):
         meta = read(folder / "iteration.json", {})
@@ -598,7 +616,7 @@ def snapshot(root, *, snapshot_only=False):
         identity = meta["id"]
         job = read(job_path(root, identity) / "job.json", {})
         receipt = read(job_path(root, identity) / "result.json", {})
-        record = records.get(job.get("fingerprint"), {})
+        record = records.get(job.get("record_name") or job.get("fingerprint"), {})
         agents = agent_outputs(root, folder)
         _, published, saved, current = iteration_context(root, folder)
         review = (
@@ -824,6 +842,110 @@ def snapshot(root, *, snapshot_only=False):
     }
 
 
+def execution_details(root, identity):
+    """Read the same investigation's retained continuation/job metadata only."""
+    directory = job_path(root, identity)
+    job = read(directory / "job.json", {})
+    name = job.get("record_name") or job.get("fingerprint")
+    config = read(directory / "runtime-config.json", {})
+    record = {}
+    records_root = config.get("records_root")
+    if (
+        isinstance(name, str)
+        and re.fullmatch(r"[0-9a-f]{64}(?:--[A-Za-z0-9_-]{1,64})?", name)
+        and isinstance(records_root, str)
+        and Path(records_root).is_absolute()
+    ):
+        record = read(Path(records_root) / name / "state.json", {})
+    if not record:
+        record = next(
+            (
+                r
+                for r in read(root / "control/backend-snapshot.json", {}).get(
+                    "records", []
+                )
+                if (r.get("record") or r.get("fingerprint")) == name
+            ),
+            {},
+        )
+    debug = root / "control/debug" / identity
+    budget = read(debug / "debug-budget.json", {})
+    active = budget.get("attempts", {}).get(budget.get("active_attempt"), {})
+    used = budget.get("used_gpu_seconds", 0)
+    reserved = active.get("allocated_gpu_seconds", 0)
+    attempts = []
+    for attempt_id, accounting in sorted(budget.get("attempts", {}).items()):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", attempt_id):
+            continue
+        path = debug / "attempts" / attempt_id
+        receipt_path = path / "receipt.json"
+        if not receipt_path.exists() and (path / "blocked.json").exists():
+            receipt_path = path / "blocked.json"
+        receipt = read(receipt_path, {})
+        state = read(path / "state.json", {})
+        native = next(iter(state.get("attempts", [])), {})
+        attempts.append(
+            {
+                "id": attempt_id,
+                "owned_job_id": receipt.get("owned_job_id")
+                or native.get("owned_job_id")
+                or accounting.get("job_id"),
+                "status": receipt.get("status")
+                or native.get("status")
+                or accounting.get("phase"),
+                "terminal_state": receipt.get("terminal_state")
+                or native.get("terminal_state"),
+                "gpu_seconds": receipt.get(
+                    "gpu_seconds", accounting.get("receipt", {}).get("gpu_seconds")
+                ),
+                "allocated_gpu_seconds": accounting.get("allocated_gpu_seconds"),
+                "verified": receipt.get("verified", False),
+                "failure_kind": receipt.get("failure_kind"),
+                "cause": receipt.get("cause") or receipt.get("error"),
+                "source": relative(
+                    receipt_path if receipt_path.exists() else path / "state.json", root
+                ),
+            }
+        )
+    failure = read(debug / "failure.json", {})
+    result = {
+        "job": {
+            key: job.get(key)
+            for key in ("status", "fingerprint", "source_commit", "record_name")
+        },
+        "formal_attempts": [
+            {
+                key: attempt.get(key)
+                for key in (
+                    "owned_job_id",
+                    "status",
+                    "terminal_state",
+                    "gpu_seconds",
+                    "seed",
+                )
+            }
+            for attempt in record.get("attempts", [])
+        ],
+        "debug_attempts": attempts,
+        "original_failure": {
+            "cause": failure.get("cause"),
+            "owned_job_id": failure.get("job_id"),
+            "gpu_seconds": failure.get("gpu_seconds"),
+            "source": relative(debug / "failure.json", root) if failure else None,
+        },
+    }
+    if budget:
+        limit = budget["limit_gpu_seconds"]
+        result["debug"] = {
+            "phase": read(debug / "flow.json", {}).get("phase"),
+            "used_gpu_seconds": used,
+            "reserved_gpu_seconds": reserved,
+            "remaining_gpu_seconds": max(0, limit - used - reserved),
+            "limit_gpu_seconds": limit,
+        }
+    return result
+
+
 def details(root, identity):
     folder = root / "study/iterations" / identity
     selection = read(folder / "selection.json", {})
@@ -832,6 +954,7 @@ def details(root, identity):
         "review": prose(folder / "review.md"),
         "selection": selection,
         "agents": agent_outputs(root, folder),
+        "execution": execution_details(root, identity),
         "metadata": read(folder / "iteration.json", {}),
         "sources": {
             key: relative(folder / name, root)

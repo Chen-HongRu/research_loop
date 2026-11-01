@@ -51,12 +51,12 @@
     <section class="panel" aria-labelledby="detailTitle">
       <div class="detail-heading"><div><div class="eyebrow">调查记录 / AGENT 输出</div><h2 id="detailTitle">正在读取…</h2></div><div class="toolbar"><button id="follow" aria-pressed="true">跟随当前</button><button id="researchBtn">全局研究</button></div></div>
       <div id="detailMeta" class="detail-meta"></div><div id="context" style="margin-top:12px"></div>
-      <div class="tabs" id="tabs" role="tablist" aria-label="调查输出"><button role="tab" aria-selected="true" data-tab="plan" class="on">Plan · 调查合同</button><button role="tab" aria-selected="false" data-tab="review">Review · 判断与发现</button><button role="tab" aria-selected="false" data-tab="selection">提案与决策</button><button role="tab" aria-selected="false" data-tab="route">研究知识</button></div>
+      <div class="tabs" id="tabs" role="tablist" aria-label="调查输出"><button role="tab" aria-selected="true" data-tab="plan" class="on">Plan · 调查合同</button><button role="tab" aria-selected="false" data-tab="execute">Execute · 执行与调试</button><button role="tab" aria-selected="false" data-tab="review">Review · 判断与发现</button><button role="tab" aria-selected="false" data-tab="selection">提案与决策</button><button role="tab" aria-selected="false" data-tab="route">研究知识</button></div>
       <div id="detailBody" class="detail-body" aria-live="polite"><div class="loading">正在载入 Agent 输出…</div></div>
     </section>
   </div>
   <section class="panel scout" id="scoutPanel" hidden><div class="toolbar between"><h3>Scout · 外部研究输入</h3><span id="scoutStatus" class="badge"></span></div><div id="scoutBody"></div></section>
-  <div class="footer">固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板读取本地研究记录与回执，不发起训练、模型调用或远程轮询。Execution 仅显示阶段与结果状态。</div>
+  <div class="footer">固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板读取本地研究记录与回执，不发起训练、模型调用或远程轮询。Execute 展示已完成的执行与修复输出、作业回执及调试历史；调试不计正式质量，正式测量经过独立 Review 后才进入质量曲线。</div>
 </main>
 <script>
 'use strict';
@@ -76,6 +76,7 @@ const LABELS = {
   research_design:'研究设计', kind:'研究类型', structural_change:'结构改动', prior_attempts:'已有尝试', difference_from_prior:'与已有工作的差异', contrasting_predictions:'相互区分的预测', minimal_test:'最小验证', scope_requirements:'所需权限与范围', scout_idea_ids:'参考的 Scout 建议', insight:'研究洞见', observed:'实际观察', supported:'证据支持的结论', unresolved:'尚未解决', next_discriminating_test:'下一项区分性实验', actual_kind:'实际研究类型', allocation_respected:'符合本轮研究分配', allocation_reason:'分配判断依据', observations:'已有观察', minimal_experiment:'最小实验', expected_outcomes:'预期的不同结果', ready_to_test:'已具备实验条件', accessed:'实际读取范围',
   fingerprint:'评价结果标识', status:'记录状态', created_at:'创建时间', error:'保留错误', attempts:'作业回执', owned_job_id:'作业编号', terminal_state:'终态', exit_code:'退出状态', gpu_seconds:'GPU 秒', quality_score_eligible:'后端质量计分资格', evaluation_id:'评价协议编号',
   mode:'记录类型', record_mode:'账本类型', diagnostic:'诊断记录', observed_value:'诊断观测值（不计正式质量）',
+  source_commit:'源码版本', record_name:'记录名称', phase:'调试阶段', used_gpu_seconds:'已用 GPU 秒', reserved_gpu_seconds:'预留 GPU 秒', remaining_gpu_seconds:'剩余 GPU 秒', limit_gpu_seconds:'预算上限 GPU 秒', allocated_gpu_seconds:'分配 GPU 秒', failure_kind:'失败类别', cause:'原因',
 };
 const VALUES = {active:'继续研究', paused:'暂停', closed:'关闭', met:'已达到', not_met:'未达到', undetermined:'尚未判定', investigate:'开展调查', reselect:'返回重选', stop:'停止', continue:'继续', select:'选择', resample:'重新采样', minimize:'越低越好', maximize:'越高越好', development:'开发集', architecture:'架构探索', diagnostic:'诊断研究', refinement:'局部改进', unreviewed_external_advice:'未经评审的外部建议', full_text:'全文', abstract:'摘要', code:'代码', context_only:'仅上下文，未检索核实', paper:'论文', official_code:'官方代码', prior_record:'已有记录', smoke:'冒烟检查',scored:'正式评价', true:'是', false:'否'};
 const STATUS = {running:'进行中', ready:'等待推进', needs_attention:'需要处理', stopped:'已停止', paused:'已暂停', reviewed:'Review 已发布', planned:'Plan 已冻结', executed:'执行已返回', selecting:'路线选择中', complete:'已完成', completed:'调用已完成', succeeded:'调用已完成', failed:'失败', interrupted:'已中断', timed_out:'超时', partial:'输出未完成', pending:'尚未开始', unknown:'状态未确认', unrecorded:'状态未记录', published:'已发布', accepted:'已接纳', submitted:'作业已提交', prepared:'作业已准备', preparing:'准备中', unavailable:'暂无记录', degraded:'检索不完整，保留既有建议'};
@@ -395,9 +396,24 @@ function renderDetailHeader() {
   if (node.frontier_exclusion_reason) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p class="amber">该候选当前资格已排除：'+esc(node.frontier_exclusion_reason)+'，不参与 Frontier 指标曲线。</p>');
   bindExperiments($('context'));
 }
+function executionHistory(execution) {
+  if (!execution || !Object.keys(execution).length) return '<div class="empty">尚无执行或调试回执。</div>';
+  const section = (title, body) => body ? '<section class="agent-card"><h3>'+esc(title)+'</h3>'+body+'</section>' : '';
+  const attempts = (items, fields, label) => Array.isArray(items) ? items.map((item,index)=>'<div class="fact-block"><h4>'+esc(label+' '+(index+1))+'</h4>'+facts(item,fields)+'</div>').join('') : '';
+  return section('当前正式作业',facts(execution.job || {},['status','fingerprint','source_commit','record_name']))+
+    section('原始失败',facts(execution.original_failure || {},['cause','owned_job_id','gpu_seconds','source']))+
+    section('调试预算 · 不计正式质量',facts(execution.debug || {},['phase','used_gpu_seconds','reserved_gpu_seconds','remaining_gpu_seconds','limit_gpu_seconds']))+
+    section('调试记录 · 不计正式质量',attempts(execution.debug_attempts,['id','owned_job_id','status','terminal_state','gpu_seconds','allocated_gpu_seconds','verified','failure_kind','cause','source'],'调试'))+
+    section('正式作业回执',attempts(execution.formal_attempts,['owned_job_id','status','terminal_state','gpu_seconds','seed'],'正式尝试'));
+}
+function executePanel(record) {
+  const agents = (record.agents || []).filter(agent=>agent.phase==='execute');
+  const saved = !agents.length && typeof record.execute==='string' && record.execute!=='暂无记录' ? markdown(record.execute) : '';
+  return '<div class="notice">执行与调试保留在当前 Study 节点。调试记录不计正式质量；正式测量经过独立 Review 后才进入质量曲线。</div>'+executionHistory(record.execution)+agents.map(agentCard).join('')+saved;
+}
 function agentCard(agent, index) {
   const output = agent.output || {}, phase = agent.phase, key = 'agent-'+(agent.key || index)+'-'+(agent.attempt || index);
-  const status = agent.published ? (phase==='plan'?'合同已发布':'Review 已发布') : agent.accepted ? '控制器已接纳' : STATUS[agent.status] || agent.status || '状态未确认';
+  const status = agent.published ? (phase==='plan'?'合同已发布':phase==='review'?'Review 已发布':'已发布') : agent.accepted ? '控制器已接纳' : STATUS[agent.status] || agent.status || '状态未确认';
   const tone = agent.published || agent.accepted ? 'green' : ['failed','interrupted','timed_out'].includes(agent.status) ? 'red' : 'amber';
   const meta = [agent.round != null ? '选择轮次 '+agent.round : null, agent.attempt ? String(agent.attempt).replace(/^attempt-/, 'attempt ') : null, agent.duration_seconds != null ? duration(agent.duration_seconds) : null, agent.started_at ? clock(agent.started_at) : null].filter(Boolean).join(' · ');
   let body = '';
@@ -409,6 +425,9 @@ function agentCard(agent, index) {
       if (output.markdown) body += disclosure(key+'-full','Planner 的完整说明',markdown(output.markdown),!output.contract);
       if (output.input_artifacts?.length) body += disclosure(key+'-inputs','冻结的输入版本',structured(output.input_artifacts));
       if (output.stop_reason) body += '<div class="notice">停止原因：'+esc(output.stop_reason)+'</div>';
+    } else if (phase === 'execute') {
+      body += facts(output,['decision','action','stop_reason']);
+      if (output.markdown) body += readingField(key+'-execute','执行与修复说明',output.markdown);
     } else if (phase === 'review') {
       body += facts(output,['decision','goal_status','route_status']);
       if (output.insight) body += '<div class="fact-block"><h4>研究洞见</h4>'+structured(output.insight)+'</div>';
@@ -431,7 +450,7 @@ function agentCard(agent, index) {
   if (!agent.accepted && !agent.published && Object.keys(output).length) body = '<div class="notice">调用已返回完整输出；控制器是否接纳尚未确认。</div>'+body;
   if (agent.error) body += '<p class="agent-error">'+esc(agent.error)+'</p>';
   const full = '<div class="agent-output">'+body+'</div>'+(agent.source?disclosure(key+'-source','记录来源','<div class="source">'+esc(agent.source)+'</div>'):'');
-  const role=agent.role || {plan:'Planner',review:'Reviewer',judge:'Judge',proposal:'Advocate'}[phase] || phase;
+  const role=agent.role || {plan:'Planner',execute:'Executor',review:'Reviewer',judge:'Judge',proposal:'Advocate'}[phase] || phase;
   const suffix={proposal:'提案',critique:'质疑',response:'回应'}[phase];
   const header = '<div class="agent-header"><h3>'+esc(role+(suffix?' · '+suffix:''))+'</h3>'+badge(status,tone)+'</div><div class="agent-provenance">'+esc(meta || '调用时间未记录')+'</div>';
   return '<article class="agent-card">'+header+(['critique','response'].includes(phase)?disclosure(key+'-discussion',phase==='critique'?'查看质疑':'查看回应',full):full)+'</article>';
@@ -443,6 +462,7 @@ function renderDetail() {
   else if (!selected) body.innerHTML = '<div class="empty">尚无调查记录。</div>';
   else if (!detail || detail.id !== selected) body.innerHTML = '<div class="loading">正在读取 #'+esc(selected)+' 的记录…</div>';
   else if (detail.ledger) body.innerHTML='<div class="notice">'+esc(detail.summary)+'</div>'+structured(detail.ledger)+disclosure('ledger-sources','元数据来源',structured(detail.sources));
+  else if (tab === 'execute') body.innerHTML = executePanel(detail);
   else if (tab === 'route') {
     body.innerHTML = '<div class="notice">这是本轮发布时的路线知识快照。顶部“全局研究”展示当前跨路线的研究理解。</div>'+markdown(detail.route);
   } else {

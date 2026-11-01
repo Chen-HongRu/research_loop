@@ -13,7 +13,7 @@ const document = {getElementById(id) {
 }};
 // Exercise actual rendering functions without a browser, network, or polling loop.
 const context = vm.createContext({document, fetch: () => new Promise(() => {}), setTimeout() {}});
-vm.runInContext(script+'\nglobalThis.ui = {gitLayout, markdown, structured, agentCard, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference};', context);
+vm.runInContext(script+'\nglobalThis.ui = {gitLayout, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -78,6 +78,36 @@ test('Long contract fields have a short excerpt and retain the entire text behin
   assert.match(rendered, /展开完整评价方法/);
   assert.match(rendered, /<details data-disclosure="contract-evaluation">/);
   assert.ok(rendered.includes(text));
+});
+
+test('Execute history retains formal, debug, original failure and provenance without synthetic quality', () => {
+  const rendered=ui.executionHistory({
+    job:{status:'submitted',fingerprint:'formal-fingerprint',source_commit:'abc123',record_name:'fresh-formal'},
+    original_failure:{cause:'Original OOM <script>bad()</script>',owned_job_id:'original-job',gpu_seconds:12,source:'original.json'},
+    debug:{phase:'repair',used_gpu_seconds:17,reserved_gpu_seconds:3,remaining_gpu_seconds:80,limit_gpu_seconds:100},
+    debug_attempts:[{id:'debug-1',owned_job_id:'debug-job',status:'failed',terminal_state:'OOM',gpu_seconds:17,allocated_gpu_seconds:20,verified:false,failure_kind:'memory',cause:'<img src=x onerror=bad()>',source:'debug.json',quality_score:999}],
+    formal_attempts:[{owned_job_id:'formal-job',status:'running',terminal_state:null,gpu_seconds:0,seed:42,quality_score:888}],
+    quality_score:777,
+  });
+  for (const field of ['当前正式作业','formal-fingerprint','abc123','fresh-formal','原始失败','original-job','original.json','调试预算 · 不计正式质量','已用 GPU 秒','预留 GPU 秒','剩余 GPU 秒','预算上限 GPU 秒','debug-1','debug-job','OOM','分配 GPU 秒','证据已核查','失败类别','memory','debug.json','正式作业回执','formal-job','采样种子','42']) assert.ok(rendered.includes(field),field);
+  assert.match(rendered, /<dd>0<\/dd>/);
+  assert.match(rendered, /&lt;script&gt;/);
+  assert.match(rendered, /&lt;img/);
+  assert.doesNotMatch(rendered, /<script>|<img|999|888|777|quality_score|RMSD|"owned_job_id"\s*:/);
+});
+
+test('Execute tab tolerates old records and retains Executor and Debug repair completed outputs', () => {
+  assert.match(html, /data-tab="execute">Execute · 执行与调试/);
+  assert.match(ui.executionHistory(), /尚无执行或调试回执/);
+  assert.doesNotThrow(()=>ui.executionHistory({job:{status:'prepared'},debug:{},debug_attempts:[]}));
+  const rendered=ui.executePanel({agents:[
+    {phase:'execute',role:'Executor',status:'completed',accepted:true,output:{action:'Submitted job',markdown:'Formal receipt retained'},source:'execute-output.json'},
+    {phase:'execute',role:'Debug repair',status:'completed',accepted:false,output:{markdown:'Fixed the allocation <img>'},source:'repair-output.json'},
+    {phase:'review',role:'Reviewer',output:{markdown:'Separate review'}},
+  ]});
+  for (const field of ['Executor','Debug repair','Formal receipt retained','Fixed the allocation &lt;img&gt;','execute-output.json','repair-output.json','控制器已接纳','控制器是否接纳尚未确认','正式测量经过独立 Review 后才进入质量曲线']) assert.ok(rendered.includes(field),field);
+  assert.doesNotMatch(rendered, /Separate review|Review 已发布|<img>/);
+  assert.match(ui.executePanel({execute:'Legacy execution receipt'}), /Legacy execution receipt/);
 });
 
 test('Exploration proposals and reviews expose questions, discriminating tests and unresolved findings', () => {
