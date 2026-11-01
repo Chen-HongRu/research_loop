@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import shutil
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from research_loop.debug_budget import DebugBudget
 from research_loop.harness import HarnessError, completed_response
+from research_loop.submission import RECEIPT, STAGING
 
 from .backend import CANDIDATE_FILES, METRIC, PROTOCOL, allocation_record
 
@@ -45,13 +47,26 @@ class _RepairDelegate:
         return self.delegate.run(**kwargs)
 
 
-def _no_interface(workspace):
-    for name in ("evaluation-request.json", "evaluation-result.json"):
+def _no_interface(workspace, expected_submission=None):
+    for name in ("evaluation-request.json", "evaluation-result.json", STAGING):
         path = workspace / name
         if path.exists() or path.is_symlink():
             raise HarnessError(
                 "Debug repair cannot retain evaluation interface effects"
             )
+    receipt = workspace / RECEIPT
+    if (
+        receipt.is_symlink()
+        or (
+            receipt.exists()
+            and (
+                expected_submission is None
+                or json.loads(receipt.read_text()) != expected_submission
+            )
+        )
+        or (expected_submission is not None and not receipt.exists())
+    ):
+        raise HarnessError("Debug repair changed the certified original submission")
 
 
 def _stopped(attempt, read):
@@ -112,7 +127,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
     budget = DebugBudget(debug, scope_id=iteration, limit_gpu_seconds=1800)
     baseline = read(root / "study/study.json")["baseline"]
     check_scope(workspace, baseline)
-    _no_interface(workspace)
+    _no_interface(workspace, failure.get("submission"))
     immutable_record(debug / "failure.json", failure)
     flow_path = debug / "flow.json"
     if flow_path.exists():
@@ -146,7 +161,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
 
     def finish(reason, result=None):
         check_scope(workspace, baseline)
-        _no_interface(workspace)
+        _no_interface(workspace, failure.get("submission"))
         accounting = budget.status()
         if accounting["active_attempt"] is not None or accounting["breached"]:
             raise HarnessError("Cannot finish with unresolved debug accounting")
@@ -193,7 +208,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
 
     while True:
         check_scope(workspace, baseline)
-        _no_interface(workspace)
+        _no_interface(workspace, failure.get("submission"))
         pending = (state["phase"] == "smoke" and state.get("smoke_submitted")) or (
             state["phase"] == "formal" and state.get("formal_submitted")
         )
@@ -232,7 +247,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
             attempts = sorted(directory.glob("attempt-*"))
             if attempts and completed_response(attempts[-1]) is None:
                 _stopped(attempts[-1], read)
-                _no_interface(workspace)
+                _no_interface(workspace, failure.get("submission"))
                 state["failures"].append(
                     {"kind": "partial_repair", "attempt": str(attempts[-1])}
                 )
@@ -254,14 +269,14 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                 )
             except HarnessError as error:
                 check_scope(workspace, baseline)
-                _no_interface(workspace)
+                _no_interface(workspace, failure.get("submission"))
                 for attempt in directory.glob("attempt-*"):
                     _stopped(attempt, read)
                 return finish(
                     "repair Agent failed without known external effects: " + str(error)
                 )
             check_scope(workspace, baseline)
-            _no_interface(workspace)
+            _no_interface(workspace, failure.get("submission"))
             changed = signatures(candidate_bytes(workspace))
             if changed == state["failed_signatures"]:
                 return finish("repair did not change the failed candidate source")

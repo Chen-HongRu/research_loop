@@ -307,6 +307,21 @@ class DebugFlowTests(unittest.TestCase):
         self.recover()
         self.assertEqual(len(self.invocations), 1)
 
+    def test_certified_submission_receipt_survives_debug_and_blocks_resubmission(self):
+        from research_loop.submission import RECEIPT, submit
+
+        receipt = {"action": "evaluate"}
+        run.write(self.workspace / RECEIPT, receipt)
+        self.failure["submission"] = receipt
+        result = self.recover()
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(run.read(self.workspace / RECEIPT), receipt)
+        self.assertEqual(submit(self.workspace)["status"], "accepted")
+        self.assertEqual(len(self.backend.formal_calls), 1)
+        (self.workspace / RECEIPT).unlink()
+        with self.assertRaisesRegex(HarnessError, "certified original submission"):
+            self.recover()
+
     def test_smoke_interruption_recovers_same_attempt_without_second_charge(self):
         self.backend.smokes = ["completed"]
         self.backend.interrupt_smoke = True

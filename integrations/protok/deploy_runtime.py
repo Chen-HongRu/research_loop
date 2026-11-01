@@ -99,7 +99,9 @@ def check_debug_boundary(root, backend):
     return state
 
 
-def deploy(root, runtime, *, resume_debug=False):
+def deploy(root, runtime, *, resume_debug=False, resume_submission=False):
+    if resume_debug and resume_submission:
+        raise ValueError("Choose one explicit recovery mode")
     root, runtime = root.resolve(), runtime.resolve()
     commit = (runtime / "SOURCE_COMMIT").read_text().strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -125,11 +127,16 @@ def deploy(root, runtime, *, resume_debug=False):
     ):
         fcntl.flock(supervisor_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(runner_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        state = (
-            check_debug_boundary(root, backend)
-            if resume_debug
-            else check_boundary(root, backend)
-        )
+        if resume_submission:
+            from integrations.protok.resume_submission import validate_prepared
+
+            state = validate_prepared(root, backend)
+        else:
+            state = (
+                check_debug_boundary(root, backend)
+                if resume_debug
+                else check_boundary(root, backend)
+            )
         stop = control / "STOP"
         stop_before = stop.read_text() if stop.exists() else None
         protected = {
@@ -162,11 +169,11 @@ def deploy(root, runtime, *, resume_debug=False):
             marker.read_text() != marker_text
             or read(root / "study/state.json") != state
             or (stop.read_text() if stop.exists() else None) != stop_before
-            or (stop.exists() and not resume_debug)
+            or (stop.exists() and not (resume_debug or resume_submission))
         ):
             raise RuntimeError("Operator state changed during handoff")
         marker.unlink()
-        if resume_debug and stop.exists():
+        if (resume_debug or resume_submission) and stop.exists():
             stop.unlink()
         write(
             backup / "deployment.json",
@@ -176,6 +183,7 @@ def deploy(root, runtime, *, resume_debug=False):
                 "runtime": str(runtime),
                 "after_iteration": state["iteration"],
                 "resume_debug": resume_debug,
+                "resume_submission": resume_submission,
                 "at": time.time(),
             },
         )
@@ -189,6 +197,7 @@ def deploy(root, runtime, *, resume_debug=False):
             "runtime": str(runtime),
             "after_iteration": state["iteration"],
             "resume_debug": resume_debug,
+            "resume_submission": resume_submission,
             "at": time.time(),
         },
     )
@@ -199,9 +208,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--runtime", type=Path, required=True)
-    parser.add_argument("--resume-debug", action="store_true")
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument("--resume-debug", action="store_true")
+    recovery.add_argument("--resume-submission", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(deploy(args.root, args.runtime, resume_debug=args.resume_debug)))
+    print(
+        json.dumps(
+            deploy(
+                args.root,
+                args.runtime,
+                resume_debug=args.resume_debug,
+                resume_submission=args.resume_submission,
+            )
+        )
+    )
 
 
 if __name__ == "__main__":

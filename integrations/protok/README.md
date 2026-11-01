@@ -19,6 +19,33 @@ manifest describes the original snapshot and is not a current deployment check.
 
 ## Recovery
 
+Evaluation submission uses the reusable `research_loop.submission` API:
+
+```sh
+uv run python -m research_loop.submission submit --workspace WORKSPACE --action evaluate
+uv run python -m research_loop.submission status --workspace WORKSPACE
+```
+
+The runtime supplies the equivalent absolute command to every Agent stage.
+Only this API writes the request, staging file and lock; the controller atomically
+claims it into a retained `evaluation-submission.json`. Repeated calls return the
+same pending, accepted or terminal result. `accepted` means claimed, not GPU-started.
+A crash after claiming needs reconciliation; it never permits a second submission.
+The controller clears unchanged parent-checkpoint interfaces once before Execute,
+and retains all current-iteration submission evidence on reentry.
+
+For an explicitly authorized, published stop before any submission or job:
+
+```sh
+uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --resume-unsubmitted --authorization 'User authorized repair and continuation'
+uv run python integrations/protok/deploy_runtime.py --root RUN_ROOT --runtime RUNTIME --resume-submission
+```
+
+Preparation retains STOP and immutable failure history. Deployment checks the
+matching preparation and HANDOFF; the next iteration inherits exactly the
+unmeasured candidate under an operator Plan, then receives an independent Review.
+Source identity is checked before allocation. Existing budget/deadline stay fixed.
+
 Run status with the correct project path from the existing ownership record:
 
 ```sh

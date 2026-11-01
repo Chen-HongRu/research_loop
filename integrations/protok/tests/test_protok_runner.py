@@ -11,6 +11,13 @@ from unittest.mock import Mock, patch
 
 from integrations.protok.backend import CANDIDATE_FILES, METRIC, PROTOCOL, ProTokError
 from research_loop.harness import HarnessError
+from research_loop.submission import (
+    RECEIPT,
+    REQUEST,
+    claim_request,
+    status as submission_status,
+    submit,
+)
 from test_core import RecordedHarness
 
 SPEC = importlib.util.spec_from_file_location(
@@ -229,7 +236,7 @@ class ProTokRunnerTests(unittest.TestCase):
                 self.assertEqual(self.backend.evaluations, 0)
                 self.assertFalse((self.control / "jobs").exists())
 
-    def test_absent_optional_environment_preserves_prompt(self):
+    def test_submission_api_instructions_reach_all_stages(self):
         delegate = Mock()
         delegate.run.return_value = {"markdown": "Read-only response."}
         harness = RUNNER.ProTokHarness(self.backend, self.root, delegate, self.deadline)
@@ -240,9 +247,10 @@ class ProTokRunnerTests(unittest.TestCase):
             timeout_seconds=60,
         )
         self.assertEqual(response, delegate.run.return_value)
-        self.assertEqual(
-            delegate.run.call_args.kwargs["prompt"], "Original stage instructions."
-        )
+        prompt = delegate.run.call_args.kwargs["prompt"]
+        self.assertTrue(prompt.startswith("Original stage instructions."))
+        self.assertIn("submission.py submit --workspace .", prompt)
+        self.assertIn("transport instructions replace older", prompt)
 
     def test_local_incomplete_rejects_any_evaluation_job_or_interface(self):
         response = {
@@ -259,7 +267,7 @@ class ProTokRunnerTests(unittest.TestCase):
             )
         (job / "job.json").unlink()
         job.rmdir()
-        for name in RUNNER.INTERFACE_FILES:
+        for name in RUNNER.SUBMISSION_EFFECT_FILES:
             with self.subTest(name=name):
                 path = self.workspace / name
                 RUNNER.write(path, {"status": "unknown"})
@@ -273,6 +281,120 @@ class ProTokRunnerTests(unittest.TestCase):
             RUNNER.local_incomplete(
                 self.root, self.backend, self.workspace, "0002", response
             )
+
+    def test_status_lock_does_not_count_as_a_submitted_evaluation(self):
+        self.assertEqual(submission_status(self.workspace)["status"], "not_submitted")
+        response = {
+            "outcome": "incomplete",
+            "markdown": "Local check failed.",
+            "artifacts": [],
+            "measurements": [],
+        }
+        RUNNER.local_incomplete(
+            self.root, self.backend, self.workspace, "0002", response
+        )
+        self.assertEqual(self.backend.evaluations, 0)
+
+    def test_parent_interfaces_are_cleared_once_and_current_submission_is_retained(
+        self,
+    ):
+        RUNNER.write(self.workspace / RECEIPT, {"action": "evaluate"})
+        RUNNER.write(self.workspace / "evaluation-result.json", {"status": "completed"})
+        self.command(
+            "git",
+            "-C",
+            str(self.workspace),
+            "add",
+            "--",
+            RECEIPT,
+            "evaluation-result.json",
+        )
+        self.command(
+            "git",
+            "-C",
+            str(self.workspace),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "--quiet",
+            "-m",
+            "Parent receipts",
+        )
+        RUNNER.initialize_submission_workspace(self.root, self.workspace, "0002")
+        self.assertEqual(submission_status(self.workspace)["status"], "not_submitted")
+        submit(self.workspace)
+        claim_request(self.workspace)
+        RUNNER.initialize_submission_workspace(self.root, self.workspace, "0002")
+        self.assertEqual(submit(self.workspace)["status"], "accepted")
+        self.assertTrue((self.workspace / RECEIPT).exists())
+        self.assertFalse((self.workspace / REQUEST).exists())
+
+    def test_new_unreconciled_interface_is_never_cleared(self):
+        submit(self.workspace)
+        with self.assertRaisesRegex(ProTokError, "Unreconciled evaluation interface"):
+            RUNNER.initialize_submission_workspace(self.root, self.workspace, "0002")
+        self.assertEqual(submission_status(self.workspace)["status"], "pending")
+        self.assertFalse((self.control / "evaluation-interfaces/0002.json").exists())
+
+    def test_operator_continuation_rejects_changed_source_before_allocation(self):
+        RUNNER.write(
+            self.workspace.parent / "iteration.json",
+            {"operator_resume": {"source_signatures": {"wrong": "source"}}},
+        )
+        with self.assertRaisesRegex(ProTokError, "changed the unmeasured candidate"):
+            self.request(action="evaluate", iteration="0002")
+        self.assertFalse((self.control / "jobs/0002").exists())
+        self.assertEqual(self.backend.evaluations, 0)
+
+    def test_repeated_api_calls_through_real_bridge_allocate_once(self):
+        workspace = self.root / "study/iterations/0002/workspace"
+        workspace.parent.mkdir(parents=True)
+        self.command(
+            "git", "clone", "--shared", "--quiet", str(self.project), str(workspace)
+        )
+        (workspace / CANDIDATE_FILES[0]).write_text("# new candidate\n")
+
+        def execute(**kwargs):
+            submit(workspace)
+            until = time.monotonic() + 5
+            while submission_status(workspace)["status"] not in {"completed", "failed"}:
+                submit(workspace)
+                if time.monotonic() >= until:
+                    raise AssertionError("No evaluation result")
+                time.sleep(0.01)
+            receipt = submit(workspace)["result"]
+            return {
+                "outcome": "completed",
+                "markdown": "Measured using reusable API.",
+                "artifacts": [receipt["artifact"]],
+                "measurements": [
+                    {
+                        "candidate_id": receipt["fingerprint"],
+                        "artifact": receipt["artifact"],
+                        "evaluation_id": PROTOCOL,
+                        "comparison_scope": PROTOCOL,
+                        "metrics": [{"name": METRIC, "value": receipt["value"]}],
+                        "evidence": receipt["evidence"],
+                    }
+                ],
+            }
+
+        harness = RUNNER.ProTokHarness(
+            self.backend, self.root, Mock(run=execute), self.deadline
+        )
+        result = harness.run(
+            prompt="Execute", writable=True, workspace=workspace, timeout_seconds=60
+        )
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(self.backend.evaluations, 1)
+        self.assertEqual(submit(workspace)["status"], "completed")
+        with self.assertRaisesRegex(HarnessError, "requires reconciliation"):
+            harness.run(
+                prompt="Execute", writable=True, workspace=workspace, timeout_seconds=60
+            )
+        self.assertEqual(self.backend.evaluations, 1)
 
     def test_first_import_freezes_only_candidate_source_without_allocating(self):
         RUNNER.write(

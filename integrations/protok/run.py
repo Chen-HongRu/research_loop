@@ -10,6 +10,7 @@ import json
 import sys
 import math
 import re
+import shlex
 import subprocess
 import shutil
 import threading
@@ -28,6 +29,13 @@ from research_loop.harness import (
     publish_completed_response,
 )
 from research_loop.protocol import validate_response
+from research_loop.submission import (
+    INTERFACE_FILES,
+    LOCK,
+    RECEIPT,
+    claim_request,
+    status as submission_status,
+)
 from integrations.protok.backend import (
     CANDIDATE_FILES,
     METRIC,
@@ -54,7 +62,78 @@ CODEX = os.environ.get(
     "PROTOK_CODEX",
     "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
 )
-INTERFACE_FILES = {"evaluation-request.json", "evaluation-result.json"}
+SUBMISSION_EFFECT_FILES = INTERFACE_FILES - {LOCK}
+
+
+def submission_instructions():
+    client = Path(__file__).resolve().parents[2] / "src/research_loop/submission.py"
+    command = shlex.join([sys.executable, "-B", str(client)])
+    return f"""Controller evaluation submission API (transport instructions replace older
+instructions to hand-write interface files; scientific scope and budget are unchanged):
+During Execute, use `{command} submit --workspace . --action evaluate` (import only
+for the first historical-import iteration). Use `{command} status --workspace .`
+to inspect the same submission. The API's named temporary file, lock and retained
+submission receipt are authorized transport files, not candidate modifications.
+Never implement publication yourself, edit/delete these files, or use O_TMPFILE/linkat.
+Repeated API submit calls return the same submission; they do not launch a second job.
+not_submitted means nothing was published; after a local publication failure you may
+retry the API once only if status confirms not_submitted. pending means published;
+accepted means the controller claimed it, not that GPU execution has started. For
+pending/accepted wait quietly for evaluation-result.json within the frozen timeout.
+completed/failed return the original result. An unknown state requires reconciliation,
+not a new submission. Return only the actual trusted artifact/measurement as before.
+"""
+
+
+def initialize_submission_workspace(root, workspace, iteration):
+    """Remove only unchanged parent-checkpoint interfaces, once before any Agent."""
+    root, workspace = Path(root), Path(workspace)
+    marker = root / "control/evaluation-interfaces" / f"{iteration}.json"
+    if marker.exists():
+        record = read(marker)
+        if record["workspace"] != str(workspace):
+            raise ProTokError("Submission workspace initialization identity changed")
+        if record["status"] == "ready":
+            return
+    else:
+        if (root / "control/jobs" / iteration).exists():
+            raise ProTokError("Existing evaluation job requires reconciliation")
+        tracked = set(
+            git(workspace, "ls-files", "--", *sorted(INTERFACE_FILES)).splitlines()
+        )
+        record = {
+            "workspace": str(workspace),
+            "head": git(workspace, "rev-parse", "HEAD"),
+            "inherited": sorted(tracked),
+            "status": "initializing",
+        }
+    if (
+        record["head"] != git(workspace, "rev-parse", "HEAD")
+        or (root / "control/jobs" / iteration).exists()
+    ):
+        raise ProTokError("Submission initialization has unresolved effects")
+    for name in INTERFACE_FILES:
+        path = workspace / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        if (
+            name not in record["inherited"]
+            or path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > 1024 * 1024
+            or subprocess.run(
+                ["git", "-C", str(workspace), "show", f"HEAD:{name}"],
+                check=True,
+                capture_output=True,
+            ).stdout
+            != path.read_bytes()
+        ):
+            raise ProTokError("Unreconciled evaluation interface: " + name)
+    if not marker.exists():
+        write(marker, record)
+    for name in record["inherited"]:
+        (workspace / name).unlink(missing_ok=True)
+    write(marker, {**record, "status": "ready"})
 
 
 def read(path):
@@ -236,7 +315,7 @@ def local_incomplete(root, backend, workspace, iteration, result):
         raise ProTokError(
             "An existing evaluation job requires explicit backend reconciliation"
         )
-    for name in INTERFACE_FILES:
+    for name in SUBMISSION_EFFECT_FILES:
         path = Path(workspace) / name
         if path.exists() or path.is_symlink():
             raise ProTokError(
@@ -316,6 +395,13 @@ def certify_candidate_failure(root, backend, workspace, iteration):
         source_signatures=record["source_signatures"],
         source_commit=record["source_commit"],
     )
+    submission = Path(workspace) / RECEIPT
+    if submission.is_symlink() or (
+        submission.exists() and read(submission) != record["request"]
+    ):
+        raise ProTokError("Claimed request differs from the failed evaluation")
+    if submission.exists():
+        details["submission"] = read(submission)
     debug_root = root / "control/debug" / iteration
     request = workspace / "evaluation-request.json"
     result = workspace / "evaluation-result.json"
@@ -450,6 +536,10 @@ class ProTokHarness:
         baseline = read(self.root / "study/study.json")["baseline"]
         check_scope(workspace, baseline)
         before = signatures(candidate_bytes(workspace))
+        metadata = Path(workspace).parent / "iteration.json"
+        recovery = read(metadata).get("operator_resume") if metadata.exists() else None
+        if recovery and before != recovery["source_signatures"]:
+            raise ProTokError("Operator continuation changed the unmeasured candidate")
         job = self.root / "control/jobs" / iteration
         if job.exists():
             saved = read(job / "job.json")
@@ -528,10 +618,9 @@ class ProTokHarness:
             if not request_path.exists():
                 continue
             try:
-                if request_path.is_symlink() or request_path.stat().st_size > 1024:
-                    raise ProTokError("Request must be a small regular JSON file")
-                request = read(request_path)
-                request_path.unlink()
+                request = claim_request(workspace)
+                if request is None:
+                    continue
                 result = self.evaluate_request(
                     workspace, iteration, request, stop, deadline
                 )
@@ -564,6 +653,7 @@ class ProTokHarness:
         if remaining <= 0 or (self.root / "control/STOP").exists():
             raise HarnessError("Continuation deadline reached or control/STOP set")
         kwargs["timeout_seconds"] = min(kwargs["timeout_seconds"], remaining, 3600)
+        kwargs["prompt"] += "\n\n" + submission_instructions()
         environment = self.root / "control/execution-environment.json"
         if environment.exists():
             kwargs["prompt"] += (
@@ -585,16 +675,15 @@ class ProTokHarness:
             if (outer / "context.json").exists():
                 shutil.copyfile(outer / "context.json", agent / "context.json")
             kwargs["run_dir"] = agent
-        # Prior interface files cannot trigger a new allocation or supply feedback.
+        # Parent checkpoints carry receipts; same-iteration receipts must survive reentry.
         result_path = workspace / "evaluation-result.json"
         request_path = workspace / "evaluation-request.json"
-        for path in (request_path, result_path):
-            if path.is_symlink():
-                raise ProTokError("Evaluation interface cannot be a symlink")
-            path.unlink(missing_ok=True)
+        iteration = workspace.parent.name
+        initialize_submission_workspace(self.root, workspace, iteration)
+        if submission_status(workspace)["status"] != "not_submitted":
+            raise HarnessError("Existing evaluation submission requires reconciliation")
         stop = threading.Event()
         deadline = min(self.deadline, time.time() + kwargs["timeout_seconds"] - 5)
-        iteration = workspace.parent.name
         thread = threading.Thread(
             target=self._watch, args=(workspace, iteration, stop, deadline)
         )
@@ -721,12 +810,13 @@ old run IDs are external evidence, never Study graph references. Subsequent prop
 base on the current Global Frontier best experiment; explain mathematical invariants, masks,
 and rationale in Plan before editing. A mechanism hypothesis is optional. Only editable files:
 {", ".join(CANDIDATE_FILES)}. No additional code, report or scratch files.
-During Execute atomically write evaluation-request.json containing exactly {{"action":"import"}}
-(first iteration) or {{"action":"evaluate"}} (later), then wait for evaluation-result.json.
+During Execute use the controller-provided submission API with action=import
+(first iteration) or action=evaluate (later), then wait for its actual result.
 Use a bounded polling loop up to 3600s or the remaining window; timeout_seconds in Plan should
-allow this, at most 3600 seconds. Never resubmit. The fixed bridge freezes and verifies source and returns actual
-receipt, fingerprint, metric/value, evidence and provenance. Do not modify the two interface
-JSON files except publishing the request. Return exactly its artifact and one measurement:
+allow this, at most 3600 seconds. Repeated API calls observe the same submission.
+The API's temporary file, lock and receipt are permitted transport files; never hand-write
+or delete interface files. The fixed bridge freezes and verifies source and returns actual
+receipt, fingerprint, metric/value, evidence and provenance. Return exactly its artifact and one measurement:
 candidate_id=fingerprint, evaluation_id={PROTOCOL}, comparison_scope={PROTOCOL},
 metrics=[{{"name":"{METRIC}","value":actual value}}], evidence=all returned evidence paths.
 Local prechecks should be minimal and relevant to the changed computation on ordinary,
@@ -956,6 +1046,9 @@ def _run_one(root, backend):
     _repair_completed_control(root, backend, study)
     state = study.status()
     deadline = admission(root, backend, require_idle=not state.get("debugging"))
+    from integrations.protok.resume_submission import begin_pending
+
+    begin_pending(study, backend)
     config = HarnessConfig(**study.config["harness"])
     study.harness = ProTokHarness(backend, root, CodexHarness(config), deadline)
     try:
@@ -1247,6 +1340,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--project", type=Path, default=PROJECT)
+    parser.add_argument(
+        "--authorization", help="Recorded user authorization for explicit recovery"
+    )
     modes = parser.add_mutually_exclusive_group(required=True)
     for mode in (
         "init",
@@ -1256,6 +1352,7 @@ def main(argv=None):
         "reconcile-completed-execute",
         "repair-completed-control",
         "begin-debug",
+        "resume-unsubmitted",
     ):
         modes.add_argument("--" + mode, action="store_true")
     args = parser.parse_args(argv)
@@ -1283,6 +1380,10 @@ def main(argv=None):
         }
     elif args.begin_debug:
         result = begin_debug(root, backend)
+    elif args.resume_unsubmitted:
+        from integrations.protok.resume_submission import prepare_resume
+
+        result = prepare_resume(root, backend, authorization=args.authorization or "")
     else:
         result = run_one(root, backend)
     print(json.dumps(result, indent=2, ensure_ascii=False))
