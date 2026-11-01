@@ -9,12 +9,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from research_loop.protok import CANDIDATE_FILES, METRIC, PROTOCOL, ProTokError
+from integrations.protok.backend import CANDIDATE_FILES, METRIC, PROTOCOL, ProTokError
 from research_loop.harness import HarnessError
 from test_core import RecordedHarness
 
 SPEC = importlib.util.spec_from_file_location(
-    "protok_runner", Path(__file__).resolve().parents[1] / "integrations/protok/run.py"
+    "protok_runner", Path(__file__).resolve().parents[3] / "integrations/protok/run.py"
 )
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
@@ -25,6 +25,7 @@ class FakeBackend:
         self.project, self.control, self.owner_token = project, control, "test-owner"
         self.initial = RUNNER.signatures(RUNNER.candidate_bytes(project))
         self.evaluations = 0
+        self.completed = {}
         self.row = {
             "fingerprint": RUNNER.BEST_FINGERPRINT,
             "status": "complete",
@@ -71,13 +72,25 @@ class FakeBackend:
         assert timeout_seconds > 0
         self.evaluations += 1
         prepared = self.prepare_config(workspace, output)
-        return {
+        result = {
             **prepared,
             "metric": METRIC,
             "value": 2.5,
             "verified": True,
             "evidence": [str(self.control / "new/summary.json")],
         }
+        self.completed[prepared["fingerprint"]] = result
+        return result
+
+    def completed_receipt(self, workspace, config_path, fingerprint):
+        prepared = self.prepare_config(workspace, config_path)
+        if prepared["fingerprint"] != fingerprint or self.inspect()["outstanding"]:
+            raise ProTokError("No complete, settled, candidate-bound backend receipt")
+        if fingerprint == RUNNER.BEST_FINGERPRINT:
+            return RUNNER.import_best(self, prepared)
+        if fingerprint not in self.completed:
+            raise ProTokError("No complete, settled, candidate-bound backend receipt")
+        return self.completed[fingerprint]
 
 
 class ProTokRunnerTests(unittest.TestCase):
@@ -301,6 +314,86 @@ class ProTokRunnerTests(unittest.TestCase):
         self.assertEqual(self.backend.evaluations, 1)
         self.assertEqual(RUNNER.git(self.project, "rev-parse", "HEAD"), self.baseline)
 
+    def test_completed_backend_repairs_result_and_job_publication_without_evaluation(
+        self,
+    ):
+        (self.workspace / CANDIDATE_FILES[1]).write_text("# measured candidate\n")
+        result = self.request("evaluate", "0002")
+        job = self.control / "jobs/0002"
+        record = RUNNER.read(job / "job.json")
+        RUNNER.write(job / "job.json", {**record, "status": "submitted"})
+        repaired = RUNNER.completed_job(self.root, self.backend, self.workspace, "0002")
+        self.assertEqual(repaired, result)
+        self.assertEqual(RUNNER.read(job / "job.json")["status"], "completed")
+        (job / "result.json").unlink()
+        RUNNER.write(job / "job.json", {**record, "status": "submitted"})
+        repaired = RUNNER.completed_job(self.root, self.backend, self.workspace, "0002")
+        self.assertEqual(repaired["value"], result["value"])
+        self.assertEqual(self.backend.evaluations, 1)
+        RUNNER.write(job / "result.json", {**repaired, "value": 0.01})
+        with self.assertRaisesRegex(ProTokError, "authoritative receipt"):
+            RUNNER.completed_job(self.root, self.backend, self.workspace, "0002")
+        self.assertEqual(self.backend.evaluations, 1)
+
+    def test_delegate_success_is_not_wrapper_completion_when_metric_check_fails(self):
+        from research_loop.harness import completed_response
+
+        workspace = self.root / "study/iterations/0001/workspace"
+        workspace.parent.mkdir(parents=True)
+        self.command(
+            "git", "clone", "--shared", "--quiet", str(self.project), str(workspace)
+        )
+        outer = self.directory / "attempt-001"
+        outer.mkdir()
+
+        def delegate_run(**kwargs):
+            agent = kwargs["run_dir"]
+            RUNNER.write(workspace / "evaluation-request.json", {"action": "import"})
+            until = time.monotonic() + 5
+            while not (workspace / "evaluation-result.json").exists():
+                if time.monotonic() >= until:
+                    raise AssertionError("No backend result")
+                time.sleep(0.01)
+            receipt = RUNNER.read(workspace / "evaluation-result.json")
+            result = {
+                "outcome": "completed",
+                "markdown": "Incorrect agent claim.",
+                "artifacts": [receipt["artifact"]],
+                "measurements": [
+                    {
+                        "candidate_id": receipt["fingerprint"],
+                        "artifact": receipt["artifact"],
+                        "evaluation_id": PROTOCOL,
+                        "comparison_scope": PROTOCOL,
+                        "metrics": [{"name": METRIC, "value": 0.001}],
+                        "evidence": receipt["evidence"],
+                    }
+                ],
+            }
+            RUNNER.write(agent / "response.json", result)
+            RUNNER.write(agent / "process.json", {"status": "succeeded"})
+            return result
+
+        delegate = Mock()
+        delegate.run.side_effect = delegate_run
+        harness = RUNNER.ProTokHarness(self.backend, self.root, delegate, self.deadline)
+        with self.assertRaisesRegex(HarnessError, "does not match"):
+            harness.run(
+                prompt="Execute",
+                writable=True,
+                workspace=workspace,
+                run_dir=outer,
+                timeout_seconds=60,
+            )
+        self.assertIsNone(completed_response(outer))
+        raw = completed_response(outer / "agent")
+        self.assertIsNotNone(raw)
+        with self.assertRaisesRegex(HarnessError, "does not match"):
+            harness.validate_completed(
+                raw, workspace=workspace, run_dir=outer / "agent"
+            )
+        self.assertEqual(self.backend.evaluations, 0)
+
     def test_scope_rejects_tracked_untracked_and_ignored_extra_files(self):
         for name in ("README.md", "scratch.py", "ignored.tmp"):
             with self.subTest(name=name):
@@ -357,6 +450,123 @@ class ProTokRunnerTests(unittest.TestCase):
         self.assertEqual(
             RUNNER.read(self.control / "jobs/0002/job.json")["status"], "submitted"
         )
+
+    def test_interrupted_execute_reconciles_as_new_operator_attempt_then_independent_review(
+        self,
+    ):
+        from research_loop import initialize
+        from research_loop.harness import completed_response
+
+        (self.root / "study/study.json").unlink()
+        (self.root / "study").rmdir()
+        initialize(
+            self.root / "study",
+            goal=RUNNER.GOAL,
+            workspace=self.project,
+            allow_write=True,
+            max_iterations=None,
+            max_calls=None,
+            global_evaluation={
+                "id": PROTOCOL,
+                "comparison_scope": PROTOCOL,
+                "protocol": "Fixed development protocol.",
+                "data_role": "development",
+                "allow_feedback": True,
+                "objectives": [
+                    {"name": METRIC, "direction": "minimize", "unit": "Angstrom"}
+                ],
+                "constraints": [],
+            },
+        )
+
+        class InterruptedHarness(RecordedHarness):
+            stop_after = 10
+
+            def response(delegate, phase, context, kwargs):
+                if phase != "execute":
+                    return super().response(phase, context, kwargs)
+                workspace = Path(kwargs["workspace"])
+                RUNNER.write(
+                    workspace / "evaluation-request.json", {"action": "import"}
+                )
+                until = time.monotonic() + 5
+                while not (workspace / "evaluation-result.json").exists():
+                    if time.monotonic() >= until:
+                        raise AssertionError("No backend receipt")
+                    time.sleep(0.01)
+                raise HarnessError(
+                    "Agent transport interrupted after backend completion"
+                )
+
+        delegate = InterruptedHarness()
+        delegate.stop_after = 10
+        with patch.object(RUNNER, "CodexHarness", return_value=delegate):
+            with self.assertRaisesRegex(HarnessError, "transport interrupted"):
+                RUNNER.run_one(self.root, self.backend)
+        study = RUNNER.Study(self.root / "study")
+        before = study.status()
+        partial = study.root / before["calls"]["execute"]
+        self.assertIsNone(completed_response(partial))
+        (partial / "agent/partial.json").write_text('{"partial":')
+        partial_bytes = (partial / "agent/partial.json").read_bytes()
+        calls = len(delegate.calls)
+        repaired = RUNNER.reconcile_completed_execute(self.root, self.backend)
+        replacement = study.root / repaired["calls"]["execute"]
+        self.assertNotEqual(partial, replacement)
+        self.assertIn(
+            "Operator reconciliation", completed_response(replacement)["markdown"]
+        )
+        self.assertFalse((partial / "process.json").exists())
+        self.assertEqual((partial / "agent/partial.json").read_bytes(), partial_bytes)
+        self.assertEqual(repaired["call_count"], before["call_count"])
+        self.assertEqual(repaired["elapsed_seconds"], before["elapsed_seconds"])
+        self.assertEqual(len(delegate.calls), calls)
+        self.assertTrue((self.control / "STOP").exists())
+        (self.control / "STOP").unlink()
+        with patch.object(RUNNER, "CodexHarness", return_value=delegate):
+            after = RUNNER.run_one(self.root, self.backend)
+        self.assertEqual(after["phase"], "done")
+        self.assertEqual(delegate.count("execute"), 1)
+        self.assertEqual(delegate.count("review"), 1)
+        self.assertEqual(self.backend.evaluations, 0)
+        self.assertEqual(
+            RUNNER.read(self.control / "active-best.json")["metrics"][METRIC],
+            RUNNER.BEST_VALUE,
+        )
+
+        # Crash after independent Review but before adapter control publication.
+        (self.control / "active-best.json").unlink()
+        (self.control / "journal.jsonl").unlink()
+        retained = study.status()
+        RUNNER.write(
+            study.root / "state.json",
+            {**retained, "phase": "review", "status": "needs_attention"},
+        )
+        (self.control / "STOP").touch()
+        owner = RUNNER.read(self.control / "ownership.json")
+        RUNNER.write(
+            self.control / "ownership.json", {**owner, "expires_at": time.time() - 1}
+        )
+        stale_runner = {"status": "running", "iteration_before": 0, "pid": 12345}
+        RUNNER.write(self.control / "runner.json", stale_runner)
+        self.assertTrue(RUNNER.repair_completed_control(self.root, self.backend))
+        self.assertEqual(study.status()["phase"], "done")
+        self.assertTrue((self.control / "active-best.json").exists())
+        self.assertEqual(
+            len((self.control / "journal.jsonl").read_text().splitlines()), 1
+        )
+        self.assertEqual(delegate.count("review"), 1)
+        self.assertEqual(self.backend.evaluations, 0)
+        repaired_runner = RUNNER.read(self.control / "runner.json")
+        self.assertEqual(repaired_runner["status"], "completed")
+        self.assertEqual(repaired_runner["iteration"], retained["iteration"])
+        self.assertEqual(
+            RUNNER.read(Path(repaired_runner["reconciliation"]))["previous_runner"],
+            stale_runner,
+        )
+        self.assertIn("publication-repair", repaired_runner["completion_provenance"])
+        self.assertTrue(RUNNER.repair_completed_control(self.root, self.backend))
+        self.assertEqual(RUNNER.read(self.control / "runner.json"), repaired_runner)
 
     def test_initialization_seeds_history_and_routes_without_old_dag_or_count_caps(
         self,

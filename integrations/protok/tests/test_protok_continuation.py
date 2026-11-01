@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from research_loop.protok_continuation import (
+from integrations.protok.continuation import (
     install_hooks,
     launch,
     validate_continuation,
@@ -407,9 +407,7 @@ class ContinuationTest(unittest.TestCase):
     def test_original_main_enforces_global_lock(self):
         with (self.records / ".eval.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with patch(
-                "research_loop.protok_continuation.time.time", return_value=1000
-            ):
+            with patch("integrations.protok.continuation.time.time", return_value=1000):
                 with self.assertRaises(BlockingIOError):
                     launch(self.project, self.control, "opaque", self.runtime)
 
@@ -453,9 +451,7 @@ class IncrementalContinuationTest(unittest.TestCase):
         )
         self.owner["expires_at"] = self.cont["deadline"]
         self.sync_control()
-        clock = patch(
-            "research_loop.protok_continuation.time.time", return_value=100000
-        )
+        clock = patch("integrations.protok.continuation.time.time", return_value=100000)
         clock.start()
         self.addCleanup(clock.stop)
 
@@ -738,7 +734,7 @@ class IncrementalContinuationTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "cannot reserve"):
                     backend.reserve_record(config, "new", "baseline")
                 with patch(
-                    "research_loop.protok_continuation.time.time", return_value=now
+                    "integrations.protok.continuation.time.time", return_value=now
                 ):
                     if terminal == "COMPLETED":
                         backend.wait_for_job(

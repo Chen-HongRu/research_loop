@@ -4,8 +4,15 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from research_loop.harness import HarnessConfig, HarnessError, make_harness
+from research_loop.harness import (
+    HarnessConfig,
+    HarnessError,
+    completed_response,
+    make_harness,
+    publish_completed_response,
+)
 
 
 class HarnessTests(unittest.TestCase):
@@ -101,6 +108,46 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(process["reasoning_verification"], "unverified")
         self.assertIsInstance(process["pid"], int)
         self.assertIsNotNone(process["ended"])
+        self.assertEqual(completed_response(self.run_dir), result)
+
+    def test_completion_survives_interrupted_final_bookkeeping(self):
+        from research_loop import harness
+
+        write_json = harness._write_json
+
+        def fail_final_status(path, value):
+            if path.name == "process.json" and value.get("status") == "succeeded":
+                raise OSError("simulated interruption before final status commit")
+            write_json(path, value)
+
+        with patch.object(harness, "_write_json", side_effect=fail_final_status):
+            with self.assertRaisesRegex(OSError, "simulated interruption"):
+                self.run_agent("pi", self.pi_code())
+        self.assertEqual(
+            json.loads((self.run_dir / "process.json").read_text())["status"],
+            "running",
+        )
+        self.assertEqual(completed_response(self.run_dir), {"ok": True})
+
+    def test_partial_response_is_not_a_receipt_and_legacy_success_is_readable(self):
+        response = {"ok": True}
+        (self.run_dir / "response.json").write_text(json.dumps(response))
+        process = self.run_dir / "process.json"
+        for status in ("running", "failed", "timed_out"):
+            process.write_text(json.dumps({"status": status}))
+            self.assertIsNone(completed_response(self.run_dir))
+        process.write_text(json.dumps({"status": "succeeded"}))
+        self.assertEqual(completed_response(self.run_dir), response)
+        process.write_text(json.dumps({"status": "succeeded", "run_id": "new"}))
+        self.assertIsNone(completed_response(self.run_dir))
+
+    def test_explicit_custom_receipt_and_reused_run_directory(self):
+        publish_completed_response(self.run_dir, {"accepted": True})
+        self.assertEqual(completed_response(self.run_dir), {"accepted": True})
+        (self.run_dir / "process.json").write_text(
+            json.dumps({"status": "running", "run_id": "next-attempt"})
+        )
+        self.assertIsNone(completed_response(self.run_dir))
 
     def test_pi_success_requires_catalog_and_settled(self):
         self.assertEqual(self.run_agent("pi", self.pi_code()), {"ok": True})

@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 # Runtime selection must not depend on a previous deployment's PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 
@@ -18,10 +19,20 @@ class ScoutScheduler:
     """Poll independently while run_one is blocked on an actual GPU evaluation."""
 
     def __init__(self, root, *, manager=None, interval=3):
+        self.root = Path(root)
         if manager is None:
             from research_loop.scout import ScoutManager
+            from integrations.protok.backend import CANDIDATE_FILES
 
-            manager = ScoutManager(root)
+            control = self.root / "control"
+            manager = ScoutManager(
+                root,
+                deadline=min(
+                    read(control / "continuation.json")["deadline"],
+                    read(control / "ownership.json")["expires_at"],
+                ),
+                source_files=CANDIDATE_FILES,
+            )
         self.manager = manager
         self.interval = interval
         self.stopped = threading.Event()
@@ -31,7 +42,21 @@ class ScoutScheduler:
 
     def _run(self):
         while not self.stopped.is_set():
-            self.manager.launch_if_due()
+            try:
+                state = read(self.root / "study/state.json")
+                job = (
+                    self.root
+                    / "control/jobs"
+                    / f"{state['iteration']:04d}"
+                    / "job.json"
+                )
+                if job.exists() and read(job).get("status") == "submitted":
+                    self.manager.launch_if_due()
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                write(
+                    self.root / "control/scout/scheduler-error.json",
+                    {"error": f"{type(error).__name__}: {error}", "at": time.time()},
+                )
             self.stopped.wait(self.interval)
 
     def start(self):
@@ -41,12 +66,20 @@ class ScoutScheduler:
         self.stopped.set()
         self.manager.close()
 
+    def shutdown(self):
+        """Settle local Scout processes before the supervisor exits."""
+        self.close()
+        if self.thread.ident is not None:
+            self.thread.join()
+        self.manager.shutdown()
+
 
 def read(path):
     return json.loads(path.read_text())
 
 
 def write(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
     temporary.replace(path)
@@ -83,9 +116,13 @@ def drive(root, runner, backend, *, clock=time.time):
     lease = read(control / "continuation.json")
     if lease.get("schema") != 2 or lease.get("seconds") != 86400:
         raise ValueError("Server requires an activated schema2 lease")
+    if (root / "study/state.json").exists():
+        runner.repair_completed_control(root, backend)
     while not (control / "STOP").exists():
+        state_path = root / "study/state.json"
+        state = read(state_path) if state_path.exists() else None
         # This marker is checked only between complete, published iterations.
-        if (control / "HANDOFF").exists():
+        if (control / "HANDOFF").exists() and state and state["phase"] == "done":
             return "handoff"
         status = backend.inspect()
         if status["outstanding"]:
@@ -95,12 +132,15 @@ def drive(root, runner, backend, *, clock=time.time):
         if spent < 0:
             raise RuntimeError("Historical GPU accounting decreased")
         reserve = backend._config()["reserve_gpu_seconds"]
-        if remaining < 1800 or spent + 1800 + reserve > lease["additional_gpu_seconds"]:
+        fresh = state is None or state["phase"] == "done"
+        if fresh and (
+            remaining < 1800 or spent + 1800 + reserve > lease["additional_gpu_seconds"]
+        ):
             return "budget"
         if not (root / "study/study.json").exists():
             runner.init_study(root, backend)
         state = runner.read(root / "study/state.json")
-        if state["status"] != "ready":
+        if state["status"] == "stopped":
             return "attention"
         state = runner.run_one(root, backend)
         if state["status"] != "ready":
@@ -159,7 +199,7 @@ def main():
                 reason = "user_stop"
         finally:
             if scout is not None:
-                scout.close()
+                scout.shutdown()
             if reason != "handoff":
                 (control / "STOP").write_text(f"Supervisor stopped: {reason}\n")
             status = backend.inspect()

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 SPEC = importlib.util.spec_from_file_location(
-    "server", Path(__file__).resolve().parents[1] / "integrations/protok/server.py"
+    "server", Path(__file__).resolve().parents[3] / "integrations/protok/server.py"
 )
 SERVER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SERVER)
@@ -39,6 +39,7 @@ class ServerTests(unittest.TestCase):
                     },
                 )
                 SERVER.write(root / "study/study.json", {})
+                SERVER.write(root / "study/state.json", {"phase": "done"})
                 backend = Mock()
                 backend.inspect.return_value = {
                     "outstanding": [],
@@ -90,12 +91,16 @@ class ProTokServerTests(unittest.TestCase):
             },
         )
         self.write("study/study.json", {})
-        self.write("study/state.json", {"status": "ready"})
+        self.write("study/state.json", {"status": "ready", "phase": "done"})
         self.backend = SimpleNamespace(
             inspect=Mock(return_value={"outstanding": [], "used_gpu_seconds": 100}),
             _config=Mock(return_value={"reserve_gpu_seconds": 100}),
         )
-        self.runner = SimpleNamespace(read=SERVER.read, run_one=Mock())
+        self.runner = SimpleNamespace(
+            read=SERVER.read,
+            run_one=Mock(),
+            repair_completed_control=Mock(return_value=False),
+        )
 
     def write(self, name, value):
         (self.root / name).write_text(json.dumps(value))
@@ -131,8 +136,35 @@ class ProTokServerTests(unittest.TestCase):
         )
         self.runner.run_one.assert_not_called()
 
+    def test_completed_control_repair_precedes_budget_gate(self):
+        self.assertEqual(
+            SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 9000),
+            "budget",
+        )
+        self.runner.repair_completed_control.assert_called_once_with(
+            self.root, self.backend
+        )
+
+    def test_existing_review_can_finish_without_budget_for_new_allocation(self):
+        self.write("study/state.json", {"status": "running", "phase": "review"})
+
+        def finish(*args):
+            (self.root / "control/STOP").touch()
+            return {"status": "ready"}
+
+        self.runner.run_one.side_effect = finish
+        self.assertEqual(
+            SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 9000),
+            "user_stop",
+        )
+        self.runner.run_one.assert_called_once()
+
     def test_scout_runs_off_the_driver_thread_and_closes_without_wait(self):
         entered, release = threading.Event(), threading.Event()
+        self.write("study/state.json", {"iteration": 7})
+        job = self.root / "control/jobs/0007/job.json"
+        job.parent.mkdir(parents=True)
+        job.write_text(json.dumps({"status": "submitted"}))
 
         def launch():
             entered.set()
@@ -149,6 +181,16 @@ class ProTokServerTests(unittest.TestCase):
         finally:
             release.set()
             scheduler.thread.join(2)
+
+    def test_shutdown_settles_scheduler_and_owned_search(self):
+        self.write("study/state.json", {"iteration": 7})
+        manager = SimpleNamespace(launch_if_due=Mock(), close=Mock(), shutdown=Mock())
+        scheduler = SERVER.ScoutScheduler(self.root, manager=manager, interval=0.01)
+        scheduler.start()
+        scheduler.shutdown()
+        self.assertFalse(scheduler.thread.is_alive())
+        manager.close.assert_called_once()
+        manager.shutdown.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -138,17 +138,15 @@ An unselected route and a dominated candidate remain available as explicit bases
 use the Study goal's input/scope rules and record exactly what is inherited.
 Prefer information about the main scientific bottleneck over ease of editing.
 Consider an informative negative result as useful, but say what it would rule out.
-Claims about stochastic generation require evidence of conditional fidelity,
-structural validity and diversity after rigid alignment. A single-noise RMSD does
-not establish those properties. Do not manufacture missing diagnostics or infer
-that failed short training disproves an entire architecture.
+Keep conclusions within the actual evaluation scope. Do not manufacture missing
+diagnostics or infer that one bounded negative result disproves an entire method.
 """
     if phase == "proposal":
         common += """
 Fill research_design with a concrete structural difference, relevant earlier
 attempts, at least two contrasting predicted outcomes and the smallest useful
-test. Repeating X readout or H/Kabsch is not novel if it is already in the history;
-a new controlled intervention on them must identify the unresolved question.
+test. Repeating a historical approach needs an explicit unresolved comparison or
+a materially different controlled intervention.
 List any out-of-scope requirements; do not execute them. Cite a scout idea ID when
 using it, otherwise use an empty list. Keep proposal prose near 600 words.
 """

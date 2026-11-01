@@ -2,13 +2,17 @@
 
 import argparse
 import json
+import sys
 import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from research_loop.protok import ProTokBackend
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+
+from integrations.protok.backend import ProTokBackend
 
 
 def read(path, default=None):

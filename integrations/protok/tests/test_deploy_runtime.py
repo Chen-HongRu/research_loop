@@ -7,14 +7,14 @@ from unittest.mock import Mock
 
 
 SPEC = importlib.util.spec_from_file_location(
-    "exploration_deploy",
-    Path(__file__).resolve().parents[1] / "integrations/protok/deploy_exploration.py",
+    "runtime_deploy",
+    Path(__file__).resolve().parents[3] / "integrations/protok/deploy_runtime.py",
 )
 DEPLOY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DEPLOY)
 
 
-class ExplorationDeployTests(unittest.TestCase):
+class RuntimeDeployTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -69,26 +69,6 @@ class ExplorationDeployTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Existing STOP"):
             DEPLOY.check_boundary(self.root, self.backend)
         self.assertEqual(stop.read_text(), "Operator intervention")
-
-    def test_inactive_service_requires_explicit_reconciliation(self):
-        DEPLOY.check_service_state(self.root, "active", False)
-        for state, allowed in [
-            ("inactive", False),
-            ("inactive", True),
-            ("failed", True),
-        ]:
-            with (
-                self.subTest(state=state, allowed=allowed),
-                self.assertRaises(RuntimeError),
-            ):
-                DEPLOY.check_service_state(self.root, state, allowed)
-        self.write(
-            "control/reconciliations/readonly-proposal-handoff-0007/result.json",
-            {"status": "restored_published_boundary"},
-        )
-        DEPLOY.check_service_state(self.root, "inactive", True)
-        with self.assertRaises(RuntimeError):
-            DEPLOY.check_service_state(self.root, "inactive", False)
 
 
 if __name__ == "__main__":

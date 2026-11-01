@@ -1,6 +1,10 @@
 import copy
 import json
 import signal
+import os
+import subprocess
+import sys
+import textwrap
 import tempfile
 import threading
 import time
@@ -37,7 +41,7 @@ def result():
                 "question": "Is condition information lost?",
                 "observations": ["H readout regressed at longer training."],
                 "hypothesis": "A conditioning bottleneck causes the regression.",
-                "prior_attempts": ["H readout with Kabsch alignment"],
+                "prior_attempts": ["Earlier conditional baseline"],
                 "difference_from_prior": "Intervene on repeated conditioning, not the readout.",
                 "minimal_experiment": "One matched-budget conditioning ablation.",
                 "expected_outcomes": [
@@ -109,7 +113,7 @@ class ScoutTests(unittest.TestCase):
             "Generate diverse conditional structures."
         )
         (self.root / "study/research.md").write_text(
-            "Do not repeat the H/Kabsch control."
+            "Do not repeat the earlier control."
         )
         write(
             self.root / "study/research_inputs.json",
@@ -141,10 +145,11 @@ class ScoutTests(unittest.TestCase):
             self.root,
             config=HarnessConfig(),
             harness_factory=lambda config: harness,
+            deadline=options.pop("deadline", 30000),
             clock=lambda: self.now,
             **options,
         )
-        self.addCleanup(manager.close)
+        self.addCleanup(manager.shutdown)
         return manager
 
     def complete(self, manager):
@@ -212,21 +217,22 @@ class ScoutTests(unittest.TestCase):
         self.assertTrue(manager.launch_if_due())
         self.complete(manager)
 
-    def test_no_launch_without_active_gpu_job_or_after_stop(self):
+    def test_only_active_execute_stage_and_stop_gate_admission(self):
         manager = self.manager()
         self.activate(4, phase="review")
         self.assertFalse(manager.launch_if_due())
         self.activate(4, job_status="complete")
-        self.assertFalse(manager.launch_if_due())
-        self.activate(4)
+        self.assertTrue(manager.launch_if_due())
+        self.complete(manager)
+        self.activate(7)
+        self.now = 3000
         (self.root / "control/STOP").touch()
         self.assertFalse(manager.launch_if_due())
-        self.assertFalse((self.root / "control/scout/latest.json").exists())
 
-    def test_timeout_is_clipped_by_owner_lease_even_with_later_explicit_deadline(self):
+    def test_timeout_is_clipped_only_by_explicit_host_deadline(self):
         write(self.root / "control/ownership.json", {"expires_at": 1080})
         harness = FakeHarness()
-        manager = self.manager(harness, deadline=40000)
+        manager = self.manager(harness, deadline=1080)
         self.assertTrue(manager.launch_if_due())
         self.complete(manager)
         self.assertEqual(harness.calls[0]["timeout_seconds"], 75)
@@ -249,6 +255,79 @@ class ScoutTests(unittest.TestCase):
             release.set()
             self.assertEqual(self.complete(manager)["status"], "cancelled")
         self.assertFalse((self.root / "control/scout/latest.json").exists())
+
+    def test_shutdown_in_subprocess_cleans_spawn_race_and_descendants_before_exit(self):
+        executable = self.root / "fake-agent"
+        executable.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+            "pathlib.Path(os.environ['SCOUT_TEST_PIDS']).write_text(json.dumps([os.getpid(), child.pid]))\n"
+            "time.sleep(60)\n"
+        )
+        executable.chmod(0o755)
+        pids_file = self.root / "pids.json"
+        code = textwrap.dedent(
+            """\
+            import json, pathlib, sys, time
+            from research_loop import harness
+            from research_loop.harness import HarnessConfig
+            from research_loop.scout import ScoutManager
+            root, executable, pids = map(pathlib.Path, sys.argv[1:])
+            original_write = harness._write_json
+            def delayed_pid_publication(path, value):
+                if path.name == 'process.json' and value.get('pid'):
+                    time.sleep(0.3)
+                original_write(path, value)
+            harness._write_json = delayed_pid_publication
+            manager = ScoutManager(root, config=HarnessConfig(executable=str(executable)), deadline=time.time()+60)
+            assert manager.launch_if_due()
+            end = time.monotonic() + 5
+            while not pids.exists():
+                assert time.monotonic() < end, 'CLI did not spawn'
+                time.sleep(0.01)
+            manager.shutdown()
+            assert not manager.running
+            """
+        )
+        env = dict(os.environ, SCOUT_TEST_PIDS=str(pids_file))
+        try:
+            parent = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    code,
+                    str(self.root),
+                    str(executable),
+                    str(pids_file),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(parent.returncode, 0, parent.stderr)
+            self.assertTrue(pids_file.exists(), parent.stderr)
+            for pid in read(pids_file):
+                end = time.monotonic() + 2
+                while True:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    self.assertLess(
+                        time.monotonic(), end, f"CLI child {pid} survived shutdown"
+                    )
+                    time.sleep(0.01)
+
+        finally:
+            if pids_file.exists():
+                for pid in read(pids_file):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     def test_stop_marker_terminates_only_owned_cli_asynchronously(self):
         release = threading.Event()
@@ -288,7 +367,7 @@ class ScoutTests(unittest.TestCase):
         self.assertTrue(manager.launch_if_due())
         try:
             self.assertTrue(harness.entered.wait(1))
-            self.now = 20001
+            self.now = 30001
         finally:
             release.set()
             self.assertEqual(self.complete(manager)["status"], "cancelled")
@@ -339,8 +418,9 @@ class ScoutTests(unittest.TestCase):
         self.assertEqual(report["result"]["search_status"], "unavailable")
         self.assertEqual(report["result"]["sources"], [])
 
-    def test_missing_ownership_expiry_uses_existing_continuation_deadline(self):
-        write(self.root / "control/ownership.json", {})
+    def test_host_control_files_are_not_interpreted_by_scout(self):
+        (self.root / "control/ownership.json").write_text("not JSON")
+        (self.root / "control/continuation.json").write_text("not JSON")
         manager = self.manager()
         self.assertTrue(manager.launch_if_due())
         self.assertEqual(self.complete(manager)["deadline"], 30000)
@@ -349,8 +429,8 @@ class ScoutTests(unittest.TestCase):
         harness = FakeHarness()
         manager = self.manager(harness)
 
-        def prepare(root, state):
-            context = snapshot(root, state)
+        def prepare(root, state, **kwargs):
+            context = snapshot(root, state, **kwargs)
             self.now += 11
             return context
 
@@ -362,9 +442,9 @@ class ScoutTests(unittest.TestCase):
     def test_default_production_harness_enables_web_search(self):
         harness = FakeHarness()
         manager = ScoutManager(
-            self.root, config=HarnessConfig(), clock=lambda: self.now
+            self.root, config=HarnessConfig(), deadline=30000, clock=lambda: self.now
         )
-        self.addCleanup(manager.close)
+        self.addCleanup(manager.shutdown)
         with patch("research_loop.scout.CodexHarness", return_value=harness) as factory:
             self.assertTrue(manager.launch_if_due())
             self.complete(manager)
@@ -385,11 +465,13 @@ class ScoutTests(unittest.TestCase):
         write(folder / "iteration.json", {"status": "executed"})
         (folder / "review.md").write_text("Unpublished result must be omitted")
         workspace = self.root / "study/iterations/0003/workspace"
-        source = workspace / "protok/model/autoresearch_se3.py"
+        source = workspace / "model.py"
         source.parent.mkdir(parents=True)
         source.write_text("x" * 19000)
         write(self.root / "control/active-best.json", {"workspace": str(workspace)})
-        context = snapshot(self.root, read(self.root / "study/state.json"))
+        context = snapshot(
+            self.root, read(self.root / "study/state.json"), source_files=("model.py",)
+        )
         self.assertNotIn("Unpublished", json.dumps(context))
         self.assertTrue(context["best_source"][0]["truncated"])
         self.assertEqual(len(context["best_source"][0]["text"]), 18000)
@@ -422,6 +504,46 @@ class ScoutTests(unittest.TestCase):
                 mutate(response)
                 with self.assertRaises(ValueError):
                     validate_result(response)
+
+    def test_frozen_local_citations_preserve_useful_external_sources_and_provenance(
+        self,
+    ):
+        response = result()
+        local = str(self.root.resolve() / "study/research_inputs.json")
+        response["sources"].insert(
+            0,
+            {
+                "id": "local",
+                "title": "Frozen research inputs",
+                "url": local,
+                "kind": "prior_record",
+                "accessed": "context_only",
+            },
+        )
+        response["candidates"][0]["source_ids"].append("local")
+        manager = self.manager(FakeHarness(response=response))
+        self.assertTrue(manager.launch_if_due())
+        self.assertEqual(self.complete(manager)["status"], "completed")
+        report = read(self.root / "control/scout/latest.json")
+        self.assertEqual(len(report["result"]["sources"]), 2)
+        self.assertEqual(
+            report["source_provenance"][0]["origin"], "frozen_local_snapshot"
+        )
+        self.assertEqual(report["source_provenance"][1]["origin"], "external_reference")
+        for changes in (
+            {"url": "/etc/passwd"},
+            {"kind": "paper"},
+            {"accessed": "full_text"},
+        ):
+            invalid = copy.deepcopy(response)
+            invalid["sources"][0].update(changes)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                validate_result(invalid, local_evidence=[local])
+
+    def test_source_files_are_explicit_relative_and_bounded(self):
+        for paths in (("/etc/passwd",), ("../secret",), ("model.py",) * 9):
+            with self.subTest(paths=paths), self.assertRaises(ValueError):
+                self.manager(source_files=paths)
 
     def test_failed_web_calls_and_invalid_lines_are_not_retrieval_evidence(self):
         path = self.root / "events.jsonl"

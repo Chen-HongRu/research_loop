@@ -10,9 +10,9 @@ Meta Loop 复用同一 Study、Route、实验图与 Plan → Execute → Review�
 
 ## 探索策略与研究 Scout
 
-Study 可选用探索策略，为每轮分配研究类型，并在迭代边界冻结研究输入、Scout 建议和已发布洞见。ProTok 的 Scout 在 GPU 评价期间独立检索，结果仅供后续研究参考，不修改固定评价合同。策略与边界见[探索策略](docs/exploration.md)和 [Scout 说明](docs/scout.md)。
+Study 可选用探索策略，为每轮分配研究类型，并在迭代边界冻结研究输入、Scout 建议和已发布洞见。宿主按任务条件启动只读 Scout，结果供后续研究参考。策略与边界见[探索策略](docs/exploration.md)和 [Scout 说明](docs/scout.md)。
 
-`research-inputs/` 和 `verification/` 保留阿里云探索版本的输入与原始验证清单；该清单对应服务器冻结快照，并不认证本地合并后的目录。部署脚本只接受与其验证清单匹配的冻结版本。
+通用库位于 `src/research_loop/`；任务后端、固定指标、资源租约和部署操作位于 `integrations/`。ProTok 的输入和历史验证记录随接入代码保存在 `integrations/protok/`。
 
 ## 研究流程
 
@@ -96,13 +96,13 @@ study/
     plan|execute|review/attempt-001/
       prompt.md / context.json / schema.json
       stdout.jsonl / stderr.txt
-      response.json / process.json
+      response.json / completed.json / process.json
   workspace/                         按调查隔离的实验产物
 ```
 
 当前 `research.md` 保存全局理解，各路线文档保存该路线的当前理解；详细事实、条件、失败与来源留在实验节点。图中的 `base_experiment` 与 `references` 指向已发布节点，轮号只表示时间，不自动继承代码或证据。输入、输出版本与评价引用绑定具体调查。
 
-中断后再运行 `run` 可接纳已有成功收据的阶段，保留已采样队列、提案与裁决。缺失成功收据时停下核对效果，不自动重复可能有副作用的调用。确认需要新 attempt 后执行：
+中断后再运行 `run` 会复用已有完成回执；未完成的只读阶段保留原输出后，以新的 attempt 继续。未完成 Execute 保留现场，需先核对外部效果。Agent 输出会实时写入日志，完成结果原子落盘；输出中途被打断时不承诺从最后一个 token 接续。具体边界见[恢复说明](docs/recovery.md)。确认需要新 attempt 后执行：
 
 ```bash
 uv run research-loop retry studies/my-study-v2
@@ -121,7 +121,7 @@ uv run research-loop rebuild-frontiers studies/my-study-v2
 
 Review 可通过 `candidate_corrections` 对历史候选资格作有来源的纠正；控制器重建受影响视图并保留原测量。仅供最终验收的评价在循环外完成，不将最终分数送进 Review 或后续研究上下文。
 
-ProTok SE3 的冻结入口、六小时授权、当前停止状态与证据见 [研究接管集成说明](integrations/protok/README.md)。
+ProTok SE3 的任务后端、运行接管与部署记录见[接入说明](integrations/protok/README.md)。
 
 ## Cactus 真实接线
 
@@ -133,6 +133,7 @@ ProTok SE3 的冻结入口、六小时授权、当前停止状态与证据见 [�
 uvx ruff format src tests benchmarks/cactus
 uvx ruff check src tests benchmarks/cactus
 uv run python -m unittest discover -s tests -v
+PYTHONPATH=src:tests:. uv run python -m unittest discover -s integrations/protok/tests -v
 ```
 
 固定回复和假 CLI 测试用于验证控制、恢复与协议，不证明研究收益。Harness 选型与登录方式调研见 [调研记录](docs/harness-research.md)。

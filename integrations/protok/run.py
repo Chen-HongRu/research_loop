@@ -7,16 +7,26 @@ import fcntl
 import os
 import hashlib
 import json
+import sys
 import math
 import subprocess
+import shutil
 import threading
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+
 from research_loop import Study, initialize
-from research_loop.harness import CodexHarness, HarnessConfig, HarnessError
+from research_loop.harness import (
+    CodexHarness,
+    HarnessConfig,
+    HarnessError,
+    publish_completed_response,
+)
 from research_loop.protocol import validate_response
-from research_loop.protok import (
+from integrations.protok.backend import (
     CANDIDATE_FILES,
     METRIC,
     PROTOCOL,
@@ -252,6 +262,75 @@ def immutable_record(path, record):
         write(path, record)
 
 
+def completed_job(root, backend, workspace, iteration):
+    """Repair only publication of a frozen, fully settled backend measurement."""
+    root, workspace = Path(root), Path(workspace)
+    job = root / "control/jobs" / iteration
+    record = read(job / "job.json")
+    expected_action = "import" if iteration == "0001" else "evaluate"
+    if (
+        record.get("iteration") != iteration
+        or record.get("request") != {"action": expected_action}
+        or record.get("status") not in {"prepared", "submitted", "completed"}
+        or not record.get("fingerprint")
+        or not record.get("source_commit")
+    ):
+        raise ProTokError("Job has no recoverable frozen candidate identity")
+    baseline = read(root / "study/study.json")["baseline"]
+    source = job / "source"
+    for candidate in (workspace, source):
+        check_scope(candidate, baseline)
+        if signatures(candidate_bytes(candidate)) != record["source_signatures"]:
+            raise ProTokError("Retained candidate no longer matches frozen job source")
+    if git(source, "rev-parse", "HEAD") != record["source_commit"]:
+        raise ProTokError("Frozen job source commit changed")
+    receipt = backend.completed_receipt(
+        source, job / "runtime-config.json", record["fingerprint"]
+    )
+    if expected_action == "import":
+        imported = import_best(backend, receipt)
+        if imported["value"] != receipt["value"]:
+            raise ProTokError("Historical import disagrees with backend receipt")
+    result = {
+        **receipt,
+        "status": "completed",
+        "source_commit": record["source_commit"],
+        "artifact": {
+            "path": str(workspace / CANDIDATE_FILES[2]),
+            "version": record["fingerprint"],
+        },
+        "config_snapshot": str(job / "runtime-config.json"),
+        "frozen_source": str(source),
+    }
+    path = job / "result.json"
+    if path.exists():
+        saved = read(path)
+        # Keep original process/log evidence; revalidate its measured identity.
+        for name in (
+            "status",
+            "source_commit",
+            "artifact",
+            "config_snapshot",
+            "frozen_source",
+            "fingerprint",
+            "metric",
+            "value",
+            "verified",
+            "evidence",
+        ):
+            if saved.get(name) != result[name]:
+                raise ProTokError(
+                    "Published job result does not match authoritative receipt"
+                )
+        result = saved
+    else:
+        write(path, result)
+    if record["status"] != "completed":
+        record.update(status="completed", completed_at=time.time())
+        write(job / "job.json", record)
+    return result
+
+
 class ProTokHarness:
     def __init__(self, backend, root, delegate, deadline):
         self.backend, self.root, self.delegate, self.deadline = (
@@ -281,11 +360,11 @@ class ProTokHarness:
             saved = read(job / "job.json")
             if saved["request"] != request or saved["source_signatures"] != before:
                 raise ProTokError("Existing job cannot be replaced or rewound")
-            if saved["status"] != "completed":
+            if saved["status"] != "completed" and not (job / "result.json").exists():
                 raise ProTokError(
                     "Existing unfinished job has unknown effects; explicit recovery required"
                 )
-            return read(job / "result.json")
+            return completed_job(self.root, self.backend, workspace, iteration)
         job.mkdir(parents=True)
         record = {
             "status": "preparing",
@@ -390,6 +469,13 @@ class ProTokHarness:
         self.trusted_result = None
         self.errors = []
         workspace = Path(kwargs["workspace"])
+        outer = Path(kwargs["run_dir"]) if "run_dir" in kwargs else None
+        if outer is not None:
+            agent = outer / "agent"
+            agent.mkdir()
+            if (outer / "context.json").exists():
+                shutil.copyfile(outer / "context.json", agent / "context.json")
+            kwargs["run_dir"] = agent
         # Prior interface files cannot trigger a new allocation or supply feedback.
         result_path = workspace / "evaluation-result.json"
         request_path = workspace / "evaluation-request.json"
@@ -419,6 +505,8 @@ class ProTokHarness:
             immutable_record(
                 self.root / "control/diagnostics" / (iteration + ".json"), diagnostic
             )
+            if outer is not None:
+                publish_completed_response(outer, result)
             return result
         if request_path.exists():
             raise HarnessError("A duplicate evaluation request was left after Execute")
@@ -427,14 +515,27 @@ class ProTokHarness:
         trusted = self.trusted_result
         if trusted is None or read(result_path) != trusted:
             raise HarnessError("Agent altered the trusted evaluation interface result")
-        job = self.root / "control/jobs" / iteration
-        baseline = read(self.root / "study/study.json")["baseline"]
-        check_scope(workspace, baseline)
-        if (
-            signatures(candidate_bytes(workspace))
-            != read(job / "job.json")["source_signatures"]
-        ):
-            raise HarnessError("Agent candidate changed after completed evaluation")
+        result = self.validate_completed(result, workspace=workspace, run_dir=outer)
+        if outer is not None:
+            publish_completed_response(outer, result)
+        return result
+
+    def validate_completed(self, result, *, workspace, run_dir):
+        """Validate retained process output before accepting an Execute receipt."""
+        validate_response("execute", result)
+        workspace = Path(workspace)
+        iteration = workspace.parent.name
+        if result["outcome"] == "incomplete":
+            diagnostic = local_incomplete(
+                self.root, self.backend, workspace, iteration, result
+            )
+            immutable_record(
+                self.root / "control/diagnostics" / (iteration + ".json"), diagnostic
+            )
+            return result
+        if (workspace / "evaluation-request.json").exists():
+            raise HarnessError("A duplicate evaluation request was left after Execute")
+        trusted = completed_job(self.root, self.backend, workspace, iteration)
         expected_artifact = trusted["artifact"]
         measurements = result["measurements"]
         if (
@@ -627,19 +728,80 @@ def publish_control(root, study, backend):
             "backend_accounting": backend.inspect(),
             "published_at": time.time(),
         }
-        with journal.open("a") as handle:
-            handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+        temporary = journal.with_name(journal.name + ".tmp")
+        temporary.write_text(
+            "".join(
+                json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n"
+                for item in [*existing, row]
+            )
+        )
+        temporary.replace(journal)
     return state
 
 
+def _repair_completed_control(root, backend, study):
+    with study._lock():
+        state = study.status()
+        folder = study.root / "iterations" / f"{state['iteration']:04d}"
+        publication = folder / "publication.json"
+        if state["phase"] == "review" and publication.exists():
+            active = state.get("active_attempt")
+            if active:
+                study._check_attempt_stopped(study.root / active)
+            study._publish(state, folder, read(publication))
+        if state["phase"] == "done" and publication.exists():
+            publish_control(root, study, backend)
+            return True
+        return False
+
+
+def repair_completed_control(root, backend):
+    """Finish retained Review/control publication, without agents or allocation.
+
+    Supervisors may call this before STOP/deadline/new-allocation admission.
+    """
+    root = Path(root)
+    with (root / "control/runner.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        study = Study(root / "study")
+        repaired = _repair_completed_control(root, backend, study)
+        if repaired:
+            state = study.status()
+            path = root / "control/runner.json"
+            previous = read(path) if path.exists() else None
+            if not previous or (
+                previous.get("status") != "completed"
+                or previous.get("iteration") != state["iteration"]
+            ):
+                folder = root / "control/reconciliations"
+                number = len(list(folder.glob("runner-publication-*.json"))) + 1
+                evidence = folder / f"runner-publication-{number:03d}.json"
+                immutable_record(
+                    evidence,
+                    {
+                        "operator_action": "repair-retained-review-control-publication",
+                        "iteration": state["iteration"],
+                        "previous_runner": previous,
+                    },
+                )
+                record = dict(previous or {})
+                record.pop("error", None)
+                record.update(
+                    status="completed",
+                    iteration=state["iteration"],
+                    ended_at=time.time(),
+                    completion_provenance="retained-review-and-control-publication-repair",
+                    reconciliation=str(evidence),
+                )
+                write(path, record)
+        return repaired
+
+
 def _run_one(root, backend):
-    deadline = admission(root, backend)
     study = Study(Path(root) / "study")
+    _repair_completed_control(root, backend, study)
+    deadline = admission(root, backend)
     state = study.status()
-    if state["status"] != "ready":
-        raise ProTokError(
-            "Active/interrupted investigation requires explicit reconciliation; no automatic retry"
-        )
     config = HarnessConfig(**study.config["harness"])
     study.harness = ProTokHarness(backend, root, CodexHarness(config), deadline)
     try:
@@ -692,6 +854,89 @@ def run_one(root, backend):
         finally:
             record["ended_at"] = time.time()
             write(control / "runner.json", record)
+
+
+def reconcile_completed_execute(root, backend):
+    """Operator reconciliation of an interrupted agent using real backend evidence.
+
+    A new retained attempt explicitly records the operator action. The partial
+    agent response/process are never promoted to a successful agent execution.
+    Independent Review remains the next ordinary stage; STOP remains set.
+    """
+    root = Path(root)
+    study = Study(root / "study")
+    with (root / "control/runner.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with study._lock():
+            state = study.status()
+            relative = state.get("active_attempt")
+            if (
+                state["phase"] != "execute"
+                or state["status"] not in {"running", "needs_attention"}
+                or not relative
+                or state["calls"].get("execute") != relative
+                or state.get("accepted_calls", {}).get("execute")
+            ):
+                raise ProTokError(
+                    "Only an unaccepted interrupted Execute can be reconciled"
+                )
+            previous = study.root / relative
+            for path in (previous, previous / "agent"):
+                study._check_attempt_stopped(path)
+            iteration = f"{state['iteration']:04d}"
+            metadata = read(study.root / "iterations" / iteration / "iteration.json")
+            workspace = Path(metadata["workspace"])
+            trusted = completed_job(root, backend, workspace, iteration)
+            response = {
+                "outcome": "completed",
+                "markdown": (
+                    "Operator reconciliation of an interrupted Execute, using a verified "
+                    "completed fixed-backend receipt; no agent completion is asserted. "
+                    f"Observed {METRIC}={trusted['value']} under {PROTOCOL}; "
+                    f"candidate {trusted['fingerprint']}. No new evaluation or agent call. "
+                    "The original partial attempt is retained. Independent Review must "
+                    "assess source, evidence and limitations; mechanism remains unverified."
+                ),
+                "artifacts": [trusted["artifact"]],
+                "measurements": [
+                    {
+                        "candidate_id": trusted["fingerprint"],
+                        "artifact": trusted["artifact"],
+                        "evaluation_id": PROTOCOL,
+                        "comparison_scope": PROTOCOL,
+                        "metrics": [{"name": METRIC, "value": trusted["value"]}],
+                        "evidence": trusted["evidence"],
+                    }
+                ],
+            }
+            ProTokHarness(backend, root, None, 0).validate_completed(
+                response, workspace=workspace, run_dir=previous
+            )
+            directory = previous.parent
+            attempt = (
+                directory / f"attempt-{len(list(directory.glob('attempt-*'))) + 1:03d}"
+            )
+            attempt.mkdir()
+            if (previous / "context.json").exists():
+                shutil.copyfile(previous / "context.json", attempt / "context.json")
+            record = {
+                "operator_action": "reconcile-completed-backend-without-replay",
+                "previous_attempt": relative,
+                "backend_result": str(
+                    root / "control/jobs" / iteration / "result.json"
+                ),
+                "source_signatures": signatures(candidate_bytes(workspace)),
+                "call_count": state["call_count"],
+                "elapsed_seconds": state["elapsed_seconds"],
+            }
+            write(attempt / "reconciliation.json", record)
+            write(attempt / "response.json", response)
+            publish_completed_response(attempt, response)
+            state["calls"]["execute"] = str(attempt.relative_to(study.root))
+            state.get("accepted_calls", {}).pop("execute", None)
+            state.update(status="ready", active_attempt=None, error=None)
+            study._save(state)
+            return state
 
 
 def reconcile_local_incomplete(root, backend):
@@ -751,7 +996,14 @@ def main(argv=None):
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--project", type=Path, default=PROJECT)
     modes = parser.add_mutually_exclusive_group(required=True)
-    for mode in ("init", "run-one", "status", "reconcile-local-incomplete"):
+    for mode in (
+        "init",
+        "run-one",
+        "status",
+        "reconcile-local-incomplete",
+        "reconcile-completed-execute",
+        "repair-completed-control",
+    ):
         modes.add_argument("--" + mode, action="store_true")
     args = parser.parse_args(argv)
     root = args.root.resolve()
@@ -769,6 +1021,13 @@ def main(argv=None):
         result = init_study(root, backend)
     elif args.reconcile_local_incomplete:
         result = reconcile_local_incomplete(root, backend)
+    elif args.reconcile_completed_execute:
+        result = reconcile_completed_execute(root, backend)
+    elif args.repair_completed_control:
+        result = {
+            "repaired": repair_completed_control(root, backend),
+            "study": Study(root / "study").status(),
+        }
     else:
         result = run_one(root, backend)
     print(json.dumps(result, indent=2, ensure_ascii=False))

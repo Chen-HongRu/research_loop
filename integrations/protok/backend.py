@@ -220,7 +220,7 @@ class ProTokBackend:
             ]
         if (self.control / "continuation.json").exists():
             return command + [
-                str(Path(__file__).with_name("protok_continuation.py").resolve()),
+                str(Path(__file__).with_name("continuation.py").resolve()),
                 "--project",
                 str(self.project),
                 "--control",
@@ -327,7 +327,7 @@ class ProTokBackend:
             raise ProTokError("Canonical study is off or launch disabled")
         control = None
         if continuation and not (recover and preparing):
-            from .protok_continuation import validate_continuation
+            from .continuation import validate_continuation
 
             try:
                 _, _, control = validate_continuation(
@@ -399,6 +399,107 @@ class ProTokBackend:
         ):
             raise ProTokError("Original GPU budget exhausted")
 
+    def completed_receipt(self, workspace: Path, config_path: Path, fingerprint: str):
+        """Materialize completed evidence without evaluating or allocating anything.
+
+        STOP and exhausted allocation budgets do not prevent reading a receipt.
+        Ownership, the frozen configuration, source identity and settled accounting
+        remain mandatory. Only the protected source/config helper is executed.
+        """
+        config = self._config()
+        lease = _read(self.control / "ownership.json")
+        if not (
+            lease.get("schema") == 1
+            and self.owner_token
+            and lease.get("owner_token") == self.owner_token
+            and lease.get("project") == str(self.project)
+            and lease.get("handoff_acknowledged") is True
+            and _finite(lease.get("acknowledged_at"))
+            and lease["acknowledged_at"] <= time.time()
+            and lease.get("previous_owner")
+            and lease.get("evidence")
+        ):
+            raise ProTokError("Acknowledged matching owner required for receipt repair")
+        workspace, config_path = Path(workspace).resolve(), Path(config_path).resolve()
+        frozen = _read(config_path)
+        if frozen.get("workspace") != str(
+            workspace
+        ) or not self._receipt_config_matches(
+            frozen, config | {"workspace": str(workspace)}
+        ):
+            raise ProTokError("Frozen job configuration no longer matches the protocol")
+        for name in CANDIDATE_FILES:
+            path = workspace / name
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size > 4 * 1024 * 1024
+                or any(
+                    p.is_symlink()
+                    for p in path.parents
+                    if p != workspace and p.is_relative_to(workspace)
+                )
+            ):
+                raise ProTokError(
+                    "Frozen candidate must be a small regular source file"
+                )
+        validated = subprocess.run(
+            self._command(config_path, "prepare"),
+            capture_output=True,
+            text=True,
+            cwd=self.control,
+            timeout=120,
+        )
+        if (
+            validated.returncode
+            or json.loads(validated.stdout).get("fingerprint") != fingerprint
+        ):
+            raise ProTokError(
+                "Completed receipt does not match frozen job source identity"
+            )
+        root = Path(config["records_root"]) / fingerprint
+        state = _read(root / "state.json")
+        summary = _read(root / "summary.json")
+        if (
+            state.get("status") != "complete"
+            or _outstanding(state)
+            or state.get("fingerprint") != fingerprint
+            or summary.get("fingerprint") != fingerprint
+            or summary.get("protocol") != PROTOCOL
+            or summary.get("objective") != METRIC
+            or summary.get("quality_score_eligible") is not True
+            or not _finite(summary.get("value"))
+            or not self._receipt_config_matches(_read(root / "run-config.json"), frozen)
+            or self.inspect()["outstanding"]
+        ):
+            raise ProTokError("No complete, settled, candidate-bound backend receipt")
+        # A committed evaluator summary cannot erase an observed wrapper failure.
+        # These are small local process receipts, never dataset/cache contents.
+        for path in self.control.glob("evaluation-*/receipt.json"):
+            previous = _read(path)
+            if previous.get("fingerprint") == fingerprint and (
+                previous.get("error")
+                or previous.get("timed_out")
+                or previous.get("cancelled")
+                or ("exit_code" in previous and previous["exit_code"] != 0)
+            ):
+                raise ProTokError(
+                    f"Known failed evaluator wrapper receipt blocks reconciliation: {path}"
+                )
+        return {
+            "workspace": str(workspace),
+            "config_path": str(config_path),
+            "fingerprint": fingerprint,
+            "metric": METRIC,
+            "value": summary["value"],
+            "verified": True,
+            "evidence": [
+                str(root / name)
+                for name in ("state.json", "summary.json", "run-config.json")
+            ],
+            "provenance": "authoritative-record-reconciliation",
+        }
+
     def evaluate(
         self,
         workspace: Path,
@@ -420,6 +521,19 @@ class ProTokBackend:
         self.control.mkdir(parents=True, exist_ok=True)
         with (self.control / "protok.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if recover:
+                # A settled backend record needs no evaluator process, including
+                # when publication was interrupted after its allocation ended.
+                prepared = self.prepare_config(workspace, output)
+                record = (
+                    Path(self._config()["records_root"])
+                    / prepared["fingerprint"]
+                    / "state.json"
+                )
+                if record.exists() and _read(record).get("status") == "complete":
+                    return self.completed_receipt(
+                        workspace, output, prepared["fingerprint"]
+                    )
             # Gate before preparing or invoking the protected evaluator.
             self._gate(None, recover=recover, preparing=True)
             prepared = self.prepare_config(workspace, output)

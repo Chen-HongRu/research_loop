@@ -1,65 +1,46 @@
-# Background research scout
+# Background research Scout
 
-`ScoutManager` prepares external research advice while a submitted GPU experiment
-is running. It owns `control/scout/` only. It never modifies study research, routes,
-source code, evaluator configuration, job submission, or scientific authority.
+`ScoutManager` produces bounded, read-only external advice for a run root
+containing `study/` and `control/`. It owns `control/scout/` only. The host supplies
+a finite deadline, explicitly allowed relative source files, and any task-specific
+admission condition:
 
 ```python
-from research_loop.scout import ScoutManager
-
-scout = ScoutManager(run_root)
-# Call periodically from the server's scheduler, outside the control lock.
-scout.launch_if_due()
-# At server shutdown; returns without waiting for the search.
-scout.close()
+scout = ScoutManager(run_root, deadline=deadline, source_files=("model.py",))
+try:
+    scout.launch_if_due()
+finally:
+    scout.shutdown()
 ```
 
-The root contains `study/` and `control/`. The first search is due immediately
-after the active iteration has `phase=execute`, `status=running`, and its job has
-`status=submitted`. Subsequent searches need both three more published iterations
-and 1,800 seconds since the last attempt. The worker uses its own advisory file
-lock across manager instances. Failed searches consume the same cadence so an
-outage does not cause rapid retries.
+`launch_if_due()` returns immediately. It admits an executing, running iteration,
+uses an independent lock, and caps each attempt at 600 seconds including context
+preparation. Subsequent attempts need three more published iterations and 1,800
+seconds since the last attempt. Failed searches consume the same cadence.
+The host applies stricter job, lease or budget conditions before calling it.
 
-Each attempt has at most 600 seconds, including context preparation, and ends
-before the smaller of the continuation deadline and ownership lease expiry.
-An optional explicit `deadline` can further shorten that window. A launch needs
-at least 30 seconds of usable time. STOP and `close()` asynchronously terminate
-only the scout CLI's process group. Results arriving after stop or the attempt
-deadline remain in the run directory and are not published. Errors are recorded
-without propagating into GPU execution.
+Inputs are bounded excerpts of the goal, published research, routes, recent
+reviews and candidates, operator inputs, and explicitly named source files in
+the best candidate workspace. Scout does not scan datasets or checkpoints.
+Production uses `CodexHarness(config, web_search=True)` in the read-only sandbox.
 
-`close()` requests cancellation asynchronously. If a standalone host process
-exits immediately afterward, its daemon monitor can exit before signalling the
-detached CLI; the host must provide process-group cleanup on shutdown.
+Each attempt retains context, prompt, schema, streaming CLI output, response,
+process receipts, report and status under `control/scout/runs/<id>/`. Reports
+contain at most three candidate ideas with observations, hypotheses, prior
+attempts, contrasting predictions, minimal experiments and scope requirements.
+Ideas requiring more authority cannot claim to be ready to test.
 
-Inputs are a bounded frozen copy of the published study research and goal,
-route notes, the last three published reviews and candidate records,
-`study/research_inputs.json`, optional run-root `research_inputs.json`, and the
-current best candidate's model, loss, and configuration. The scout does not scan
-data or checkpoints. Historical ProTok evidence and operator inspiration can be
-added to `study/research_inputs.json`; its first 14,000 characters are included.
+External sources require public HTTP(S) URLs without credentials. A local source
+must be a `prior_record`, marked `context_only`, and name an exact path already
+present in the frozen input. The report records that provenance explicitly;
+local citations do not count as web retrieval. Completed web-tool events support
+retrieval status, while source claims remain unverified advice for Plan/Review.
 
-Production uses `CodexHarness(config, web_search=True)` in the read-only sandbox
-with live search enabled. `config` defaults to the study's harness configuration.
-Tests can supply `harness_factory(config)` and a clock; no network is required.
+A useful completed or degraded report atomically replaces `latest.json`.
+Exceptions and degraded reports without candidates preserve the previous report.
+The main loop consumes reports only at the next iteration boundary.
 
-Outputs live in `control/scout/runs/<id>/`: context, prompt, schema, CLI process
-receipt, stdout/stderr, response, report, and final status. A successful or
-explicitly degraded response is atomically published as `control/scout/latest.json`.
-An exception or a degraded search with no candidates preserves the previous
-report. `control/scout/status.json` describes
-the last attempt, and `launch_error.json` records admission/read errors.
-
-The report carries up to three candidates, each with source URLs, observations
-separate from hypotheses, similar prior experiments, the precise difference,
-discriminating outcomes, a minimal experiment, scope requirements, and a readiness
-label. Candidate IDs are `<run id>:C1`, `:C2`, and `:C3`. A candidate requiring
-authority outside the frozen contract cannot claim to be immediately testable.
-
-Search claims are checked against completed web-tool events in the CLI log. An
-absence of observable retrieval forces a degraded report; unavailable search is
-explicit. Event presence does not prove a paper's claims or implementation
-compatibility, so every report has `source_claims_verified=false` and is external
-advice requiring Plan/Review. The main loop freezes `latest.json` only at the next
-iteration boundary; an arriving report cannot mutate an active iteration.
+`close()` requests cancellation without blocking. Hosts call `shutdown()` before
+exiting; it settles the worker and cancellation watcher and cleans the owned CLI
+process group, including descendants. STOP or deadline cancellation prevents late
+publication. Search failures never propagate into the main experiment.

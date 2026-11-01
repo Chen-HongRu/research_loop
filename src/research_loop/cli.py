@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
+import threading
 from pathlib import Path
 
 from .core import Study, StudyError, initialize
 from .harness import HarnessConfig, HarnessError
 from .meta import MetaStudy
+
+
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,6 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         command = commands.add_parser(name, help=description)
         command.add_argument("study", type=Path)
     args = parser.parse_args(argv)
+    handle_sigterm = (
+        args.command == "run" and threading.current_thread() is threading.main_thread()
+    )
+    if handle_sigterm:
+        previous_sigterm = signal.signal(signal.SIGTERM, _interrupt)
     try:
         if args.command == "meta":
             if args.meta_command == "init":
@@ -145,8 +156,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except KeyboardInterrupt:
         print(
-            "Interrupted; inspect the retained attempt before retrying.",
+            "Interrupted; run again to recover completed or read-only work. "
+            "Incomplete Execute requires inspecting retained effects and explicit retry.",
             file=sys.stderr,
         )
         return 130
+    finally:
+        if handle_sigterm:
+            signal.signal(signal.SIGTERM, previous_sigterm)
     return 0

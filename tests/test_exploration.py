@@ -39,7 +39,7 @@ class ExplorationHarness(RecordedHarness):
                 "kind": slot["kind"],
                 "question": "Is condition information lost?",
                 "structural_change": "Inject the unchanged condition at each layer",
-                "prior_attempts": ["Historical X/H comparison"],
+                "prior_attempts": ["Historical architecture comparison"],
                 "difference_from_prior": "Change conditioning, not the old readout",
                 "contrasting_predictions": [
                     "Better under informative conditions",

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location(
     "dashboard",
-    Path(__file__).resolve().parents[1] / "integrations/protok/dashboard.py",
+    Path(__file__).resolve().parents[3] / "integrations/protok/dashboard.py",
 )
 DASH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DASH)

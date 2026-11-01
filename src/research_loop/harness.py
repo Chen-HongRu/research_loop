@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,7 +60,65 @@ def _now() -> str:
 
 
 def _write_json(path: Path, value: object) -> None:
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+    temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def publish_completed_response(run_dir: Path, result: dict) -> None:
+    """Atomically commit a successfully parsed and accepted response."""
+    if not isinstance(result, dict):
+        raise ValueError("A completed harness response must be an object")
+    run_dir = Path(run_dir)
+    process_path = run_dir / "process.json"
+    process = json.loads(process_path.read_text()) if process_path.exists() else {}
+    _write_json(run_dir / "response.json", result)
+    _write_json(
+        run_dir / "completed.json",
+        {
+            "version": 1,
+            "run_id": process.get("run_id"),
+            "completed_at": _now(),
+            "response": result,
+        },
+    )
+
+
+def completed_response(run_dir: Path) -> dict | None:
+    """Read explicit completion evidence, never a CLI's partial response file.
+
+    A receipt survives interruption after parsing succeeds but before final process
+    bookkeeping. Pre-receipt runs remain readable only with status=succeeded.
+    """
+    run_dir = Path(run_dir)
+    try:
+        process_path = run_dir / "process.json"
+        process = json.loads(process_path.read_text()) if process_path.exists() else {}
+        if not isinstance(process, dict):
+            return None
+        receipt_path = run_dir / "completed.json"
+        if receipt_path.exists():
+            receipt = json.loads(receipt_path.read_text())
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("version") != 1
+                or receipt.get("run_id") != process.get("run_id")
+                or not isinstance(receipt.get("response"), dict)
+            ):
+                return None
+            return receipt["response"]
+        if process.get("run_id") or process.get("status") != "succeeded":
+            return None
+        response = json.loads((run_dir / "response.json").read_text())
+        return response if isinstance(response, dict) else None
+    except (OSError, ValueError, UnicodeError):
+        return None
 
 
 def _terminate_group(process: subprocess.Popen) -> None:
@@ -113,6 +172,9 @@ def _execute(
         try:
             _write_json(run_dir / "process.json", record)
             process.communicate(input=prompt, timeout=config.timeout_seconds)
+            # The invocation owns this session, including any children surviving
+            # their leader. No agent CLI background process may outlive the run.
+            _terminate_group(process)
         except subprocess.TimeoutExpired as exc:
             _terminate_group(process)
             record.update(returncode=process.returncode, status="timed_out")
@@ -165,6 +227,7 @@ class _Harness:
         workspace = Path(workspace).resolve()
         run_dir = Path(run_dir).resolve()
         record = {
+            "run_id": uuid.uuid4().hex,
             "backend": self.backend,
             # Legacy fields retain the requested settings, not verified service identity.
             "model": self.config.model,
@@ -188,7 +251,7 @@ class _Harness:
         _write_json(run_dir / "process.json", record)
         try:
             result = self._run(prompt, schema, workspace, run_dir, writable, record)
-            _write_json(run_dir / "response.json", result)
+            publish_completed_response(run_dir, result)
             record["status"] = "succeeded"
             return result
         except BaseException as exc:

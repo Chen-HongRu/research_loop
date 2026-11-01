@@ -23,7 +23,13 @@ from .exploration import (
     validate_design,
     validate_exploration,
 )
-from .harness import AgentHarness, HarnessConfig, HarnessError, make_harness
+from .harness import (
+    AgentHarness,
+    HarnessConfig,
+    HarnessError,
+    completed_response,
+    make_harness,
+)
 from .protocol import SCHEMAS, prompt, validate_response
 from .strategy import debate_rounds, review_guidance, validate_strategy
 
@@ -302,9 +308,14 @@ class Study:
             if state["status"] not in {"needs_attention", "running"}:
                 raise StudyError("There is no interrupted or failed call to retry")
             active = state["active_attempt"]
+            if active and completed_response(self.root / active) is None:
+                self._check_attempt_stopped(self.root / active)
             if active and not (
                 state["phase"] == "execute"
-                and state.get("accepted_calls", {}).get("execute")
+                and (
+                    state.get("accepted_calls", {}).get("execute")
+                    or completed_response(self.root / active) is not None
+                )
             ):
                 state["calls"] = {
                     k: v for k, v in state["calls"].items() if v != active
@@ -327,6 +338,41 @@ class Study:
     def _folder(self, state: dict) -> Path:
         return self.root / "iterations" / f"{state['iteration']:04d}"
 
+    def _check_attempt_stopped(self, attempt: Path) -> None:
+        for receipt in (attempt / "process.json", attempt / "agent/process.json"):
+            if not receipt.exists():
+                continue
+            process = _read(receipt)
+            pid = process.get("pid")
+            if process.get("status") != "running" or type(pid) is not int or pid <= 0:
+                continue
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                pass
+            raise StudyError(
+                f"Retained attempt may still have an active CLI (PID {pid}); "
+                "wait or reconcile it before resuming"
+            )
+
+    def _can_resume(self, state: dict) -> bool:
+        if (
+            state["phase"] == "review"
+            and (self._folder(state) / "publication.json").exists()
+        ):
+            return True
+        active = state.get("active_attempt")
+        if not active:
+            return False
+        result = completed_response(self.root / active)
+        if result is None:
+            return state["phase"] != "execute"
+        # A completed response can still fail protocol or downstream semantic checks.
+        # Replaying it cannot resolve that rejection; require explicit reconciliation.
+        return (state.get("error") or "").startswith(("KeyboardInterrupt:", "OSError:"))
+
     def run(self, *, iterations: int = 1) -> dict:
         if type(iterations) is not int or iterations < 1:
             raise ValueError("iterations must be positive")
@@ -344,10 +390,7 @@ class Study:
                 if state["status"] == "stopped":
                     break
                 if state["status"] == "needs_attention":
-                    if (
-                        state["phase"] == "review"
-                        and (self._folder(state) / "publication.json").exists()
-                    ):
+                    if self._can_resume(state):
                         state["status"] = "ready"
                     else:
                         raise StudyError(
@@ -554,16 +597,30 @@ class Study:
         state["last_call_key"] = key
         if key in state["calls"]:
             attempt = self.root / state["calls"][key]
+            result = completed_response(attempt)
+            validate_completed = getattr(self.harness, "validate_completed", None)
             if (
-                not (attempt / "process.json").exists()
-                or _read(attempt / "process.json").get("status") != "succeeded"
+                result is not None
+                and phase == "execute"
+                and not state.get("accepted_calls", {}).get(key)
+                and validate_completed is not None
             ):
-                state["active_attempt"] = str(attempt.relative_to(self.root))
-                raise StudyError(
-                    "Interrupted call has no successful completion receipt"
+                result = validate_completed(
+                    result, workspace=workspace or self.workspace, run_dir=attempt
                 )
-            result = _read(attempt / "response.json")
-        else:
+            if result is None:
+                state["active_attempt"] = str(attempt.relative_to(self.root))
+                self._check_attempt_stopped(attempt)
+                if phase == "execute":
+                    raise StudyError(
+                        "Interrupted Execute has no successful completion receipt; "
+                        "inspect retained effects then explicitly retry; no action was repeated"
+                    )
+                # Keep the interrupted attempt as evidence. A fresh read-only call
+                # consumes the same persisted call and time budgets as any new call.
+                del state["calls"][key]
+                self._save(state)
+        if key not in state["calls"]:
             if (
                 self.config["max_calls"] is not None
                 and state["call_count"] >= self.config["max_calls"]

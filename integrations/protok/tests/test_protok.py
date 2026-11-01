@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from research_loop.protok import (
+from integrations.protok.backend import (
     CANDIDATE_FILES,
     EVALUATOR,
     METRIC,
@@ -181,7 +181,7 @@ class ProTokTests(unittest.TestCase):
         with (
             patch.object(self.backend, "inspect", return_value=status),
             patch(
-                "research_loop.protok_continuation.validate_continuation",
+                "integrations.protok.continuation.validate_continuation",
                 return_value=(None, None, control),
             ),
         ):
@@ -360,6 +360,108 @@ class ProTokTests(unittest.TestCase):
             self.backend.evaluate(self.workspace, self.output, 10, recover=True)
         self.assertFalse((self.root / "invoked").exists())
 
+    def test_completed_receipt_recovery_ignores_allocation_deadline_without_evaluating(
+        self,
+    ):
+        original = self.backend.evaluate(self.workspace, self.output, 10)
+        (self.root / "invoked").unlink()
+        (self.control / "STOP").touch()
+        lease = json.loads((self.control / "ownership.json").read_text())
+        self.write(
+            self.control / "ownership.json", lease | {"expires_at": time.time() - 1}
+        )
+        self.write(self.records / "session.json", {"deadline": time.time() - 1})
+        recovered = self.backend.evaluate(self.workspace, self.output, 10, recover=True)
+        self.assertEqual(recovered["fingerprint"], original["fingerprint"])
+        self.assertEqual(recovered["value"], original["value"])
+        self.assertEqual(recovered["provenance"], "authoritative-record-reconciliation")
+        self.assertFalse((self.root / "invoked").exists())
+        self.assertEqual((self.root / "launch-count").read_text(), "1")
+        (self.workspace / CANDIDATE_FILES[0]).write_text("# different source\n")
+        with self.assertRaisesRegex(ProTokError, "frozen job source identity"):
+            self.backend.completed_receipt(
+                self.workspace, self.output, original["fingerprint"]
+            )
+
+    def test_completed_receipt_requires_settled_accounting_and_matching_frozen_config(
+        self,
+    ):
+        original = self.backend.evaluate(self.workspace, self.output, 10)
+        state_path = self.records / original["fingerprint"] / "state.json"
+        state = json.loads(state_path.read_text())
+        self.write(
+            state_path,
+            state | {"attempts": [{"status": "running", "owned_job_id": "123"}]},
+        )
+        with self.assertRaisesRegex(ProTokError, "settled"):
+            self.backend.completed_receipt(
+                self.workspace, self.output, original["fingerprint"]
+            )
+        self.write(state_path, state)
+        self.write(
+            self.output, self.config | {"workspace": str(self.workspace), "seeds": [43]}
+        )
+        with self.assertRaisesRegex(ProTokError, "Frozen job configuration"):
+            self.backend.completed_receipt(
+                self.workspace, self.output, original["fingerprint"]
+            )
+        self.assertEqual((self.root / "launch-count").read_text(), "1")
+
+    def test_completed_summary_cannot_override_a_known_wrapper_failure(self):
+        for mode in (
+            "duplicate",
+            "nonzero",
+            "nonfinite",
+            "wrong-metric",
+            "stderr-only",
+        ):
+            with self.subTest(mode=mode):
+                (self.root / "mode").write_text(mode)
+                with self.assertRaises(ProTokError):
+                    self.backend.evaluate(self.workspace, self.output, 10)
+                prepared = self.backend.prepare_config(self.workspace, self.output)
+                state = json.loads(
+                    (self.records / prepared["fingerprint"] / "state.json").read_text()
+                )
+                self.assertEqual(state["status"], "complete")
+                (self.root / "invoked").unlink()
+                with self.assertRaisesRegex(
+                    ProTokError, "Known failed evaluator wrapper"
+                ):
+                    self.backend.completed_receipt(
+                        self.workspace, self.output, prepared["fingerprint"]
+                    )
+                self.assertFalse((self.root / "invoked").exists())
+                for path in self.control.glob("evaluation-*/receipt.json"):
+                    path.unlink()
+
+    def test_cancelled_timed_out_and_nonzero_receipt_metadata_block_reconstruction(
+        self,
+    ):
+        original = self.backend.evaluate(self.workspace, self.output, 10)
+        path = Path(original["receipt"])
+        for failure in (
+            {"cancelled": True},
+            {"timed_out": True},
+            {"exit_code": -15},
+            {"error": "observed failure"},
+        ):
+            with self.subTest(failure=failure):
+                self.write(path, original | failure)
+                with self.assertRaisesRegex(
+                    ProTokError, "Known failed evaluator wrapper"
+                ):
+                    self.backend.completed_receipt(
+                        self.workspace, self.output, original["fingerprint"]
+                    )
+        path.unlink()
+        receipt = self.backend.completed_receipt(
+            self.workspace, self.output, original["fingerprint"]
+        )
+        self.assertEqual(receipt["provenance"], "authoritative-record-reconciliation")
+        self.assertNotIn("exit_code", receipt)
+        self.assertEqual((self.root / "launch-count").read_text(), "1")
+
     def continuation(self):
         prepared = self.backend.prepare_config(self.workspace, self.output)
         for number in range(13):
@@ -415,8 +517,8 @@ class ProTokTests(unittest.TestCase):
         command = self.backend._command(self.output, "evaluate", recover=True)
         self.assertIn(
             str(
-                Path(__file__).resolve().parents[1]
-                / "src/research_loop/protok_continuation.py"
+                Path(__file__).resolve().parents[3]
+                / "integrations/protok/continuation.py"
             ),
             command,
         )
