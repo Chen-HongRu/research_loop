@@ -293,6 +293,12 @@ class ResearchBackendTests(unittest.TestCase):
         self.assertNotIn("('/', '/')", launcher)
         self.assertNotIn("('/home', '/home')", launcher)
         self.assertIn(repr((self.config["cache_root"], "/inputs/hidden")), launcher)
+        base = "/data/user/hongruchen/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu"
+        alias = (
+            "/data/user/hongruchen/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu"
+        )
+        self.assertIn(repr((base, alias)), launcher)
+        self.assertNotIn("('/data', '/data')", launcher)
         self.assertIn("/dev/nvidia", launcher)
         compile(launcher, "launcher", "exec")
 

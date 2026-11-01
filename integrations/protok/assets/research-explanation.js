@@ -69,6 +69,7 @@ function explainTechnical(technical,record) {
   return html;
 }
 function explanationMeasurements(record,node) {
+  if(node?.execution_kind==='research_script') return '<div class="explain-facts"><h4>研究证据与质量评分</h4><p>本轮通过研究脚本收集证据，不产生固定协议 RMSD，也不进入 RMSD Frontier。研究结论以独立 Review 为准。</p></div>';
   const fact=record.explanation?.facts || {}, values=fact.measurements || [], bases=fact.base_measurements || [];
   const imported=fact.imported || node?.imported, repeated=node?.duplicate_of || node?.same_ledger_result;
   let html='<div class="explain-facts"><h4>记录中的测量 · 控制器数值</h4>';
@@ -104,9 +105,9 @@ function explanationPanel(record,node,source) {
   const coverage=explanationCoverage(source);
   if(explanation.status!=='ready' || !content) {
     const message={unpublished:'本轮还没有已发布的 Review。此处不会把计划写成已经得到的结论。',pending:'等待独立的说明作者读取冻结记录。可先展开原始 Plan 与 Review。',running:'说明作者正在读取本轮已发布材料；研究运行器不等待此任务。',failed:'该轮说明生成未完成；保留失败原因，原始研究记录仍可读取。',insufficient:'缺少足够的已完成评审证据，暂不能生成科学结论。',stale:'冻结材料已变化，旧说明暂不展示，等待独立重建。'}[explanation.status] || '说明暂不可用。';
-    return continuationPlanPanel(record.plan_record,true)+'<div class="explain-empty"><h3>'+esc(EXPLANATION_STATUS[explanation.status] || '说明暂不可用')+'</h3><p>'+esc(message)+'</p>'+(explanation.reason?'<p class="source">'+esc(explanation.reason)+'</p>':'')+'</div>'+explanationMeasurements(record,node)+coverage;
+    return continuationPlanPanel(record.plan_record,true)+researchEvidencePanel(record.execution?.research)+'<div class="explain-empty"><h3>'+esc(EXPLANATION_STATUS[explanation.status] || '说明暂不可用')+'</h3><p>'+esc(message)+'</p>'+(explanation.reason?'<p class="source">'+esc(explanation.reason)+'</p>':'')+'</div>'+explanationMeasurements(record,node)+coverage;
   }
-  let html=continuationPlanPanel(record.plan_record,true)+'<div class="reading-toolbar" aria-label="研究说明阅读方式"><button data-reading-mode="steps" class="'+(state.mode==='steps'?'on':'')+'" aria-pressed="'+(state.mode==='steps')+'">逐步讲解</button><button data-reading-mode="brief" class="'+(state.mode==='brief'?'on':'')+'" aria-pressed="'+(state.mode==='brief')+'">30 秒简报</button><small>已发布材料的独立说明 · '+esc(clock(explanation.generated_at))+'</small></div>';
+  let html=continuationPlanPanel(record.plan_record,true)+researchEvidencePanel(record.execution?.research)+'<div class="reading-toolbar" aria-label="研究说明阅读方式"><button data-reading-mode="steps" class="'+(state.mode==='steps'?'on':'')+'" aria-pressed="'+(state.mode==='steps')+'">逐步讲解</button><button data-reading-mode="brief" class="'+(state.mode==='brief'?'on':'')+'" aria-pressed="'+(state.mode==='brief')+'">30 秒简报</button><small>已发布材料的独立说明 · '+esc(clock(explanation.generated_at))+'</small></div>';
   if(state.mode==='steps') html+='<div class="reading-steps" role="group" aria-label="讲解步骤">'+READING_STEPS.map((label,i)=>'<button data-reading-step="'+i+'" class="'+(state.step===i?'on':'')+'" aria-current="'+(state.step===i?'step':'false')+'"><b>'+String(i+1).padStart(2,'0')+'</b>'+label+'</button>').join('')+'</div>';
   const section=(title,body)=>'<section class="explain-section"><h3>'+esc(title)+'</h3>'+body+'</section>';
   const goalSource=explanation.sources?.find(s=>s.id===explanation.facts?.goal_source);

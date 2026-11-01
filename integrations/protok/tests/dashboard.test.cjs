@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {gitLayout, graphParent, drawGraph, renderProgress, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {gitLayout, graphParent, drawGraph, renderProgress, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -67,6 +67,38 @@ test('Continuation progress labels inherited planning without claiming another c
   assert.equal((elements.get('phases').innerHTML.match(/沿用 #0001 · 无新增调用/g)||[]).length,2);
   assert.doesNotMatch(elements.get('phases').innerHTML,/0 次调用|1 次调用/);
   vm.runInContext('data=null;',context);
+});
+
+test('Research scripts show evidence instead of a missing quality score', () => {
+  const node={execution_kind:'research_script',job_status:'completed',published:true};
+  assert.equal(ui.nodeResult(node),'研究证据已评审');
+  assert.equal(ui.nodeResult({...node,job_status:'failed'}),'研究脚本失败 · 已评审');
+  assert.equal(ui.nodeResult({...node,job_status:'blocked',published:false}),'研究作业待核账');
+  const research={iteration:'0017',status:'completed',owned_job_id:'901',gpu_seconds:30,allocated_gpu_seconds:180,outputs:['probe/metrics.json','probe/<script>.png'],evidence:['control/research-jobs/0017/state.json'],source:'control/research-jobs/0017/receipt.json',execution_identity:'execution-v1'};
+  const rendered=ui.researchEvidencePanel(research);
+  for(const text of ['研究脚本 · 证据计算','脚本执行完成','没有 RMSD 评分','probe/metrics.json','分配 GPU 秒','execution-v1']) assert.ok(rendered.includes(text),text);
+  assert.doesNotMatch(rendered,/<script>|<img|"gpu_seconds"\s*:/);
+  const pending=ui.explanationPanel({id:'active:0017',execution:{research},explanation:{status:'unpublished'}},node);
+  assert.match(pending,/已收集的证据产物/);
+  assert.match(pending,/不产生固定协议 RMSD，也不进入 RMSD Frontier/);
+  assert.doesNotMatch(pending,/本轮没有可在此确认的已发布且已核查测量/);
+});
+
+test('Unknown research effects remain visible and resource labels do not count them as formal scoring', () => {
+  context.researchProgress={state:{iteration:16,phase:'done',status:'ready'},nodes:[],formal_gpu_seconds:300,research_gpu_seconds:30,debug_gpu_seconds:5,outstanding:[{mode:'research',status:'unknown',attempts:[]}]};
+  vm.runInContext('data=researchProgress;',context);
+  ui.renderProgress();
+  const status=elements.get('statusline').innerHTML;
+  assert.match(status,/研究脚本作业 状态待确认/);
+  assert.match(status,/正式评分 300 GPU 秒 · 研究脚本 30 GPU 秒 · 调试 5 GPU 秒/);
+  assert.doesNotMatch(status,/无待核账 GPU 作业/);
+  vm.runInContext('data=null;',context);
+});
+
+test('A script Plan exposes the research contract as a key output', () => {
+  const rendered=ui.agentCard({phase:'plan',accepted:true,output:{decision:'investigate',contract:{action:'Run the declared probe'},research_contract:{question:'Which explanation survives?',observables:[{id:'o1',method:'Compare direct gradients',timing:'Same frozen checkpoint'}],execution:{mode:'script',entrypoint:'research/probe.py',outputs:['metrics.json']}}}},0);
+  for(const text of ['研究问题与验证合同','直接观测量','观测时点','Compare direct gradients','验证脚本','research/probe.py']) assert.ok(rendered.includes(text),text);
+  assert.doesNotMatch(rendered,/其他结构化输出/);
 });
 
 test('Structured output is labeled prose, with links for exact code and evidence IDs', () => {

@@ -1451,5 +1451,215 @@ class HistoryViewTests(unittest.TestCase):
             )
 
 
+class ResearchScriptDashboardTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.put(
+            "study/state.json",
+            {"iteration": 1, "phase": "execute", "status": "running"},
+        )
+        self.put(
+            "study/iterations/0001/iteration.json", {"id": "0001", "status": "planned"}
+        )
+        self.put("control/runner.json", {"status": "running"})
+        self.backend = {
+            "records": [],
+            "scored_records": 0,
+            "outstanding": [],
+            "used_gpu_seconds": 30,
+            "research_gpu_seconds": 20,
+            "debug_gpu_seconds": 5,
+            "total_gpu_seconds": 35,
+            "research_outstanding": [],
+        }
+
+    def put(self, name, value):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+        return path
+
+    def research(self, identity="0001", status="running"):
+        prefix = "control/research-jobs/" + identity + "/"
+        job = {
+            "purpose": "research",
+            "quality_score_eligible": False,
+            "iteration": identity,
+            "execution": {"mode": "script"},
+            "allocated_seconds": 60,
+            "source_identity": "source",
+            "execution_identity": "execution",
+            "status": "prepared",
+        }
+        self.put(prefix + "job.json", job)
+        self.put(
+            prefix + "state.json",
+            {
+                "purpose": "research",
+                "status": "running",
+                "attempts": [
+                    {"status": "running", "owned_job_id": "123"},
+                ],
+            },
+        )
+        if status != "running":
+            self.put(
+                prefix + ("blocked.json" if status == "blocked" else "receipt.json"),
+                {
+                    **{
+                        key: job[key]
+                        for key in (
+                            "purpose",
+                            "quality_score_eligible",
+                            "iteration",
+                            "allocated_seconds",
+                            "source_identity",
+                            "execution_identity",
+                        )
+                    },
+                    "status": status,
+                    "owned_job_id": "123",
+                    "terminal_state": "COMPLETED"
+                    if status == "completed"
+                    else "FAILED"
+                    if status == "failed"
+                    else None,
+                    "gpu_seconds": None if status == "blocked" else 20,
+                    "outputs": [str(self.root / prefix / "artifacts/probe.json")],
+                    "evidence": [prefix + "state.json"],
+                    "error": "retained failure" if status != "completed" else None,
+                },
+            )
+        return prefix
+
+    def snapshot(self):
+        self.put("control/backend-snapshot.json", self.backend)
+        return DASH.snapshot(self.root, snapshot_only=True)
+
+    def test_script_plan_is_visible_before_any_job_is_submitted(self):
+        attempt = "iterations/0001/plan/attempt-001"
+        output = {
+            "decision": "investigate",
+            "contract": {"action": "Collect mechanism evidence"},
+            "research_contract": {"execution": {"mode": "script"}},
+        }
+        self.put("study/" + attempt + "/response.json", output)
+        self.put(
+            "study/" + attempt + "/process.json",
+            {"run_id": "plan-1", "status": "succeeded"},
+        )
+        self.put(
+            "study/" + attempt + "/completed.json",
+            {"version": 1, "run_id": "plan-1", "response": output},
+        )
+        state = DASH.read(self.root / "study/state.json")
+        self.put(
+            "study/state.json",
+            {
+                **state,
+                "plan_ref": attempt + "/response.json",
+                "calls": {"plan-0": attempt},
+                "accepted_calls": {"plan-0": True},
+            },
+        )
+        result = self.snapshot()
+        node = result["nodes"][0]
+        self.assertEqual(node["execution_kind"], "research_script")
+        self.assertIsNone(node["job_status"])
+        self.assertIsNone(node["value"])
+        self.assertEqual(node["attempts"], [])
+        self.assertEqual(result["outstanding"], [])
+
+    def test_running_research_is_waiting_without_formal_score(self):
+        prefix = self.research()
+        self.backend["research_outstanding"] = [str(self.root / prefix)]
+        result = self.snapshot()
+        self.assertEqual(result["progress"]["title"], "研究脚本进行中（记录状态）")
+        node = result["nodes"][0]
+        self.assertEqual(
+            (node["execution_kind"], node["job_status"]), ("research_script", "running")
+        )
+        self.assertFalse(node["eligible"])
+        self.assertIsNone(node["value"])
+        self.assertIsNone(node["provisional_value"])
+        self.assertEqual(node["attempts"][0]["owned_job_id"], "123")
+        self.assertEqual(result["outstanding"], result["research_outstanding"])
+        research = DASH.execution_details(self.root, "0001")["research"]
+        self.assertEqual(research["mode"], "script")
+        self.assertEqual(research["allocated_gpu_seconds"], 60)
+
+    def test_settled_script_receipts_are_evidence_not_quality(self):
+        for status in ("completed", "failed", "blocked"):
+            with self.subTest(status=status):
+                prefix = self.research(status=status)
+                payload = self.put(
+                    prefix + "artifacts/probe.json",
+                    {"secret": "OUTPUT PAYLOAD MUST NOT BE READ"},
+                )
+                original = Path.read_text
+
+                def metadata_only(path, *args, **kwargs):
+                    if path == payload:
+                        raise AssertionError("dashboard opened computational output")
+                    return original(path, *args, **kwargs)
+
+                with patch.object(Path, "read_text", metadata_only):
+                    research = DASH.execution_details(self.root, "0001")["research"]
+                    result = self.snapshot()
+                self.assertEqual(research["status"], status)
+                self.assertEqual(
+                    research["source"],
+                    prefix
+                    + ("blocked.json" if status == "blocked" else "receipt.json"),
+                )
+                self.assertEqual(research["outputs"], [str(payload)])
+                self.assertEqual(
+                    research["gpu_seconds"], None if status == "blocked" else 20
+                )
+                self.assertFalse(result["nodes"][0]["eligible"])
+                self.assertIsNone(result["nodes"][0]["value"])
+                # Each subcase replaces its prior terminal metadata.
+                (
+                    self.root
+                    / prefix
+                    / ("blocked.json" if status == "blocked" else "receipt.json")
+                ).unlink()
+
+    def test_budget_counts_research_once_and_operator_job_creates_no_node(self):
+        prefix = self.research("9001")
+        self.backend["research_outstanding"] = [str(self.root / prefix)]
+        result = self.snapshot()
+        self.assertEqual(
+            (
+                result["gpu_seconds"],
+                result["formal_gpu_seconds"],
+                result["research_gpu_seconds"],
+                result["debug_gpu_seconds"],
+            ),
+            (35, 10, 20, 5),
+        )
+        self.assertEqual([node["id"] for node in result["nodes"]], ["0001"])
+        self.assertEqual(result["research_outstanding"][0]["iteration"], "9001")
+        self.assertEqual(result["progress"]["title"], "作业状态待核对")
+
+    def test_unknown_effects_and_mismatched_receipt_cannot_claim_running_or_success(
+        self,
+    ):
+        self.backend["research_outstanding"] = ["/unrecognized/effect"]
+        self.assertEqual(self.snapshot()["progress"]["title"], "作业状态待核对")
+        prefix = self.research(status="completed")
+        path = self.root / prefix / "receipt.json"
+        receipt = json.loads(path.read_text())
+        receipt["source_identity"] = "different"
+        self.put(prefix + "receipt.json", receipt)
+        self.backend["research_outstanding"] = [str(self.root / prefix)]
+        self.assertEqual(
+            DASH.execution_details(self.root, "0001")["research"]["status"], "unknown"
+        )
+        self.assertEqual(self.snapshot()["progress"]["title"], "作业状态待核对")
+
+
 if __name__ == "__main__":
     unittest.main()

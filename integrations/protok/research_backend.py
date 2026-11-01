@@ -290,6 +290,15 @@ def _launcher(config, remote, execution, inputs):
             "Research sandbox requires the verified existing Python environment"
         )
     mounts = [(p, p) for p in ("/usr", "/lib", "/lib64", "/bin", "/sys", prefix, base)]
+    # The venv executable targets uv's stable 3.12 alias, which is itself a
+    # symlink to the versioned base. Mounting only the resolved base leaves that
+    # executable symlink dangling inside the empty sandbox root.
+    mounts += [
+        (
+            base,
+            "/data/user/hongruchen/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu",
+        )
+    ]
     mounts += [
         (remote + "/code", "/workspace"),
         (remote + "/inputs.json", "/inputs.json"),

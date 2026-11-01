@@ -76,6 +76,137 @@ def relative(path, root):
     return str(path.relative_to(root))
 
 
+def research_metadata(root, identity):
+    """Read bounded controller metadata, never script outputs or frozen code."""
+    root = Path(root)
+    if not re.fullmatch(r"[0-9]{4,}", str(identity)):
+        return None
+    directory = root / "control/research-jobs" / identity
+
+    def small(name):
+        path = directory / name
+        try:
+            path.resolve().relative_to(root.resolve())
+            if path.is_symlink() or path.stat().st_size > 96_000:
+                return {}
+            value = json.loads(path.read_text())
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError, UnicodeError):
+            return {}
+
+    job = small("job.json")
+    if (
+        job.get("purpose") != "research"
+        or job.get("quality_score_eligible") is not False
+        or job.get("iteration") != identity
+        or not isinstance(job.get("execution"), dict)
+        or job.get("execution", {}).get("mode") != "script"
+        or not all(
+            isinstance(job.get(key), str) and job[key]
+            for key in ("source_identity", "execution_identity")
+        )
+        or type(job.get("allocated_seconds")) is not int
+        or job["allocated_seconds"] < 0
+    ):
+        return None
+    state = small("state.json")
+    native = (
+        next(iter(state.get("attempts", [])), {})
+        if state.get("purpose") == "research"
+        and isinstance(state.get("attempts"), list)
+        else {}
+    )
+    native = native if isinstance(native, dict) else {}
+    receipt_name = (
+        "receipt.json" if (directory / "receipt.json").exists() else "blocked.json"
+    )
+    receipt = small(receipt_name)
+    valid_receipt = (
+        bool(receipt)
+        and all(
+            receipt.get(key) == job.get(key)
+            for key in (
+                "purpose",
+                "quality_score_eligible",
+                "iteration",
+                "source_identity",
+                "execution_identity",
+                "allocated_seconds",
+            )
+        )
+        and (
+            receipt.get("status") == "blocked"
+            and receipt.get("gpu_seconds") is None
+            or receipt.get("status") in {"completed", "failed"}
+            and type(receipt.get("gpu_seconds")) is int
+            and 0 <= receipt["gpu_seconds"] <= job["allocated_seconds"]
+        )
+    )
+    observed = receipt if valid_receipt else native
+    status = (
+        receipt["status"]
+        if valid_receipt
+        else "unknown"
+        if receipt or (directory / receipt_name).exists()
+        else native.get("status") or job.get("status")
+    )
+    attempt = {
+        key: observed.get(key)
+        for key in ("owned_job_id", "terminal_state", "exit_code", "gpu_seconds")
+    }
+    attempt["status"] = status
+    return {
+        "iteration": identity,
+        "purpose": "research",
+        "quality_score_eligible": False,
+        "mode": "script",
+        "status": status,
+        **{
+            key: attempt[key]
+            for key in ("owned_job_id", "terminal_state", "exit_code", "gpu_seconds")
+        },
+        "allocated_gpu_seconds": job["allocated_seconds"],
+        "execution_identity": job["execution_identity"],
+        "source_identity": job["source_identity"],
+        "outputs": receipt.get("outputs", []) if valid_receipt else [],
+        "evidence": receipt.get("evidence", []) if valid_receipt else [],
+        "error": receipt.get("error")
+        if valid_receipt
+        else "研究作业凭据与提交元数据不匹配或不可读"
+        if (directory / receipt_name).exists()
+        else None,
+        "attempts": [attempt],
+        "source": relative(
+            directory
+            / (receipt_name if (directory / receipt_name).exists() else "state.json"),
+            root,
+        ),
+    }
+
+
+def research_outstanding(root, backend):
+    records = []
+    for reference in backend.get("research_outstanding", []):
+        match = re.search(r"(?:^|/)research-jobs/([0-9]{4,})/?$", str(reference))
+        identity = match[1] if match else None
+        metadata = research_metadata(root, identity) if identity else None
+        records.append(
+            {
+                "iteration": identity,
+                "record": f"control/research-jobs/{identity}"
+                if identity
+                else str(reference),
+                "mode": "research",
+                "status": metadata.get("status") if metadata else "unknown",
+                "attempts": metadata.get("attempts", []) if metadata else [],
+                "source": metadata.get("source")
+                if metadata
+                else "backend.research_outstanding",
+            }
+        )
+    return records
+
+
 def agent_outputs(root, folder):
     """Small structured agent receipts only; partial responses are never outputs."""
     _, published, saved, current = iteration_context(root, folder)
@@ -297,10 +428,12 @@ def progress(root, state, backend, runner, agents):
         )
     if state.get("stop_reason"):
         reason("停止原因", state["stop_reason"], "study/state.json")
+    research_records = research_outstanding(root, backend)
     outstanding = backend.get("outstanding", [])
     waiting = []
+    research_waiting = []
     if (
-        outstanding
+        (outstanding or research_records)
         and state.get("phase") == "execute"
         and state.get("status") in {"running", "ready"}
         and runner.get("status") == "running"
@@ -332,6 +465,24 @@ def progress(root, state, backend, runner, agents):
                 )
             ):
                 waiting.append(record)
+        for record in research_records:
+            attempts = record["attempts"]
+            if (
+                record["iteration"] == str(state.get("iteration", 0)).zfill(4)
+                and record["status"] == "running"
+                and attempts
+                and all(
+                    attempt.get("status") == "running"
+                    and re.fullmatch(
+                        r"[1-9][0-9]*", str(attempt.get("owned_job_id", ""))
+                    )
+                    and not attempt.get("terminal_state")
+                    and not attempt.get("exit_code")
+                    and attempt.get("gpu_seconds") is None
+                    for attempt in attempts
+                )
+            ):
+                research_waiting.append(record)
     if waiting:
         jobs = "、".join(str(a["owned_job_id"]) for r in waiting for a in r["attempts"])
         reason(
@@ -339,12 +490,27 @@ def progress(root, state, backend, runner, agents):
             f"作业 {jobs} 已提交，正在等待结束；控制器随后会收集结果和核账凭据。此处展示本地记录状态。",
             "backend.outstanding",
         )
-    unresolved = len(outstanding) - len(waiting)
+    if research_waiting:
+        jobs = "、".join(
+            str(a["owned_job_id"])
+            for record in research_waiting
+            for a in record["attempts"]
+        )
+        reason(
+            "本轮研究脚本等待完成",
+            f"研究作业 {jobs} 正在等待结束与核账；脚本证据不构成正式质量评分。",
+            "backend.research_outstanding",
+        )
+    unresolved = (
+        len(outstanding) - len(waiting) + len(research_records) - len(research_waiting)
+    )
     if unresolved:
         reason(
-            "评估记录未结束",
-            f"{unresolved} 条记录未完成或缺少终态、核账凭据；新增评估须等待完成或协调已有记录。",
-            "backend.outstanding",
+            "作业记录未结束" if research_records else "评估记录未结束",
+            f"{unresolved} 条记录未完成或缺少终态、核账凭据；新增计算须等待完成或协调已有记录。",
+            "backend.outstanding · backend.research_outstanding"
+            if research_records
+            else "backend.outstanding",
         )
     active = state.get("active_attempt")
     current_agent = next((a for a in agents if a["source"] == f"study/{active}"), None)
@@ -388,6 +554,16 @@ def progress(root, state, backend, runner, agents):
         title, message = (
             "正式评估进行中（记录状态）",
             "正在等待本轮作业完成。控制器会收集结果、核账并继续独立 Review；当前显示的是本地作业记录。",
+        )
+    elif research_waiting and not unresolved:
+        title, message = (
+            "研究脚本进行中（记录状态）",
+            "正在等待本轮研究作业完成。控制器随后收集脚本证据并核账；此作业不产生正式质量评分。",
+        )
+    elif unresolved:
+        title, message = (
+            "作业状态待核对",
+            "已有作业缺少可信运行状态或终态核账；请核对保留的控制器记录。",
         )
     elif status == "running":
         title, message = (
@@ -743,6 +919,7 @@ def snapshot(root, *, snapshot_only=False):
         job = read(job_path(root, identity) / "job.json", {})
         receipt = read(job_path(root, identity) / "result.json", {})
         record = records.get(job.get("record_name") or job.get("fingerprint"), {})
+        research = research_metadata(root, identity)
         agents = agent_outputs(root, folder)
         _, published, saved, current = iteration_context(root, folder)
         review = (
@@ -796,11 +973,15 @@ def snapshot(root, *, snapshot_only=False):
         # Some retained proposals record an action category, with intent in prose.
         if proposal_action in {"propose", "evaluate", "resume", "import"}:
             proposal_action = proposal.get("markdown")
-        eligible = published and any(
-            c.get("valid")
-            and c.get("verified")
-            and c.get("candidate_id") == receipt.get("fingerprint")
-            for c in review.get("candidate_reviews", [])
+        eligible = (
+            research is None
+            and published
+            and any(
+                c.get("valid")
+                and c.get("verified")
+                and c.get("candidate_id") == receipt.get("fingerprint")
+                for c in review.get("candidate_reviews", [])
+            )
         )
         active = int(identity) == state.get("iteration")
         live = state.get("status") if active else "reviewed"
@@ -808,6 +989,13 @@ def snapshot(root, *, snapshot_only=False):
         nodes.append(
             {
                 "id": identity,
+                "execution_kind": "research_script"
+                if research
+                or (accepted_plan.get("research_contract") or {})
+                .get("execution", {})
+                .get("mode")
+                == "script"
+                else "fixed_evaluation",
                 "route": meta.get("route_title", "路线选择中"),
                 "route_id": meta.get("route_id"),
                 "base": meta.get("base_experiment"),
@@ -827,12 +1015,14 @@ def snapshot(root, *, snapshot_only=False):
                 "eligible": eligible,
                 "value": receipt.get("value") if eligible else None,
                 "provisional_value": record.get("summary", {}).get("value")
-                if not eligible
+                if not eligible and not research
                 else None,
                 "imported": receipt.get("provenance")
                 == "historical-import-no-allocation",
-                "attempts": record.get("attempts", []),
-                "job_status": job.get("status"),
+                "attempts": research["attempts"]
+                if research
+                else record.get("attempts", []),
+                "job_status": research["status"] if research else job.get("status"),
                 "source_commit": job.get("source_commit"),
                 "title": plan.split("\n")[0][:150],
                 "action": accepted_plan.get("contract", {}).get("action"),
@@ -975,7 +1165,9 @@ def snapshot(root, *, snapshot_only=False):
         "scout": scout_snapshot(root),
         "best": {"id": best.get("experiment_id"), "metrics": best.get("metrics", {})},
         "gpu_seconds": backend.get("total_gpu_seconds", backend["used_gpu_seconds"]),
-        "formal_gpu_seconds": backend["used_gpu_seconds"],
+        "formal_gpu_seconds": backend["used_gpu_seconds"]
+        - backend.get("research_gpu_seconds", 0),
+        "research_gpu_seconds": backend.get("research_gpu_seconds", 0),
         "debug_gpu_seconds": backend.get("debug_gpu_seconds", 0),
         "debug": {
             "phase": debug_flow.get("phase"),
@@ -987,7 +1179,8 @@ def snapshot(root, *, snapshot_only=False):
         if debug_budget or state.get("debugging")
         else None,
         "scored_records": backend["scored_records"],
-        "outstanding": backend["outstanding"],
+        "outstanding": backend["outstanding"] + research_outstanding(root, backend),
+        "research_outstanding": research_outstanding(root, backend),
         "nodes": nodes,
         "frontier": frontier,
         "routes": read(study / "routes/index.json", {}),
@@ -1061,6 +1254,7 @@ def execution_details(root, identity):
         )
     failure = read(debug / "failure.json", {})
     result = {
+        "research": research_metadata(root, identity),
         "job": {
             key: job.get(key)
             for key in ("status", "fingerprint", "source_commit", "record_name")
