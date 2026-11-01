@@ -85,7 +85,26 @@ def write(path, value):
 def recover_owned(root, runner, backend):
     """Reconcile existing attempts only; protected recovery forbids submission."""
     runner.reconcile_debug_allocations(root, backend)
-    outstanding = backend.inspect()["outstanding"]
+    from integrations.protok.research_backend import run_script
+
+    status = backend.inspect()
+    research = status.get("research_outstanding", [])
+    for directory in research:
+        job = read(Path(directory) / "job.json")
+        run_script(
+            backend,
+            root=root,
+            iteration=Path(directory).name,
+            source=root / "control/research-sources" / Path(directory).name / "source",
+            execution=job["execution"],
+            deadline=job["deadline"],
+            recover=True,
+        )
+    if research:
+        status = backend.inspect()
+    if status.get("research_outstanding"):
+        raise RuntimeError("Unreconciled research allocation remains")
+    outstanding = status["outstanding"]
     for row in outstanding:
         jobs = [
             job_path(root, folder.name)
@@ -133,7 +152,9 @@ def drive(root, runner, backend, *, clock=time.time):
         if (control / "HANDOFF").exists() and state and state["phase"] == "done":
             return "handoff"
         status = backend.inspect()
-        if status["outstanding"] and not (state and state.get("debugging")):
+        if status.get("research_outstanding") or (
+            status["outstanding"] and not (state and state.get("debugging"))
+        ):
             raise RuntimeError("Outstanding job requires explicit reconciliation")
         remaining = lease["deadline"] - clock()
         spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
@@ -141,8 +162,10 @@ def drive(root, runner, backend, *, clock=time.time):
             raise RuntimeError("Historical GPU accounting decreased")
         reserve = backend._config()["reserve_gpu_seconds"]
         fresh = state is None or state["phase"] == "done"
+        minimum = 60 if (control / "research-policy.json").exists() else 1800
         if fresh and (
-            remaining < 1800 or spent + 1800 + reserve > lease["additional_gpu_seconds"]
+            remaining < minimum
+            or spent + minimum + reserve > lease["additional_gpu_seconds"]
         ):
             return "budget"
         if not (root / "study/study.json").exists():

@@ -70,6 +70,13 @@ class RuntimeDeployTests(unittest.TestCase):
             DEPLOY.check_boundary(self.root, self.backend)
         self.assertEqual(stop.read_text(), "Operator intervention")
 
+    def test_pending_research_job_prevents_runtime_handoff(self):
+        self.backend.inspect.return_value["research_outstanding"] = [
+            {"status": "running"}
+        ]
+        with self.assertRaisesRegex(RuntimeError, "Outstanding"):
+            DEPLOY.check_boundary(self.root, self.backend)
+
     def test_debug_upgrade_requires_certified_preparation_and_unchanged_stop(self):
         failure = {
             "version": 1,
@@ -105,6 +112,12 @@ class RuntimeDeployTests(unittest.TestCase):
             DEPLOY.check_debug_boundary(self.root, self.backend)["iteration"], 9
         )
         self.assertTrue(stop.exists())
+        self.backend.inspect.return_value["research_outstanding"] = [
+            {"status": "running"}
+        ]
+        with self.assertRaisesRegex(RuntimeError, "Outstanding"):
+            DEPLOY.check_debug_boundary(self.root, self.backend)
+        self.backend.inspect.return_value["research_outstanding"] = []
         stop.write_text("A newer user stop\n")
         with self.assertRaisesRegex(RuntimeError, "STOP changed"):
             DEPLOY.check_debug_boundary(self.root, self.backend)

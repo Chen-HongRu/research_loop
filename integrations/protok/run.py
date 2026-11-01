@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import fcntl
 import os
 import hashlib
@@ -43,6 +44,7 @@ from integrations.protok.backend import (
     ProTokBackend,
     ProTokError,
 )
+from integrations.protok.research_execution import policy as research_policy
 
 PROJECT = Path(
     os.environ.get(
@@ -183,30 +185,48 @@ def signatures(contents):
     return {name: hashlib.sha256(value).hexdigest() for name, value in contents.items()}
 
 
-def check_scope(workspace, baseline):
+def check_scope(workspace, baseline, *, allow_research=False):
     changed = set(
         git(workspace, "diff", "--name-only", "-z", baseline, "--").split("\0")
     )
     changed |= set(git(workspace, "ls-files", "--others", "-z").split("\0"))
-    extra = changed - set(CANDIDATE_FILES) - INTERFACE_FILES - {""}
+    allowed = set(CANDIDATE_FILES) | INTERFACE_FILES | {""}
+    if allow_research:
+        from integrations.protok.research_execution import research_files
+
+        allowed.update(research_files(workspace))
+    extra = changed - allowed
     if extra:
         raise ProTokError(
             "Agent changed files outside candidate scope: " + ", ".join(sorted(extra))
         )
-    candidate_bytes(workspace)
+    return candidate_bytes(workspace)
 
 
-def freeze_source(project, workspace, destination, baseline):
-    check_scope(workspace, baseline)
+def freeze_source(
+    project,
+    workspace,
+    destination,
+    baseline,
+    *,
+    allow_research=False,
+    include_research=False,
+):
+    check_scope(workspace, baseline, allow_research=allow_research)
     contents = candidate_bytes(workspace)
+    if include_research:
+        from integrations.protok.research_execution import research_files
+
+        contents.update(research_files(workspace))
     subprocess.run(
         ["git", "clone", "--shared", "--quiet", str(project), str(destination)],
         check=True,
     )
     git(destination, "checkout", "--detach", baseline)
     for name, value in contents.items():
+        (destination / name).parent.mkdir(parents=True, exist_ok=True)
         (destination / name).write_bytes(value)
-    git(destination, "add", "--", *CANDIDATE_FILES)
+    git(destination, "add", "--", *contents)
     if git(destination, "diff", "--cached", "--name-only"):
         git(
             destination,
@@ -293,15 +313,36 @@ def admission(root, backend, *, require_idle=True):
             "An acknowledged active bounded continuation lease is required"
         )
     status = backend.inspect()
-    if require_idle and status["outstanding"]:
+    if require_idle and (status["outstanding"] or status.get("research_outstanding")):
         raise ProTokError(
             "Outstanding original record requires explicit operator reconciliation"
         )
     return min(continuation["deadline"], owner["expires_at"])
 
 
-def local_incomplete(root, backend, workspace, iteration, result):
-    """Establish that a local rejection contains no measured or unknown effects."""
+def static_candidate_fault(contents):
+    """Return a demonstrated static source fault; propagate unverified parsing."""
+    for name, value in contents.items():
+        try:
+            if name.endswith(".py"):
+                ast.parse(value, filename=name)
+            elif name.endswith(".json"):
+                json.loads(value)
+        except (SyntaxError, json.JSONDecodeError) as error:
+            return {
+                "path": name,
+                "type": type(error).__name__,
+                "message": error.msg,
+                "line": error.lineno,
+                "column": error.offset
+                if isinstance(error, SyntaxError)
+                else error.colno,
+            }
+    return None
+
+
+def local_incomplete(root, backend, workspace, iteration, result, *, run_dir=None):
+    """Separate a demonstrated static source fault from an unsubmitted interruption."""
     validate_response("execute", result)
     if (
         result["outcome"] != "incomplete"
@@ -322,17 +363,55 @@ def local_incomplete(root, backend, workspace, iteration, result):
                 "Local rejection cannot retain an evaluation interface file"
             )
     baseline = read(Path(root) / "study/study.json")["baseline"]
-    check_scope(workspace, baseline)
-    if backend.inspect()["outstanding"]:
+    contents, source_error = None, None
+    try:
+        contents = check_scope(
+            workspace, baseline, allow_research=research_policy(root) is not None
+        )
+    except (ProTokError, OSError) as error:
+        source_error = f"{type(error).__name__}: {error}"
+    effects = backend.inspect()
+    if (
+        effects["outstanding"]
+        or effects.get("debug_outstanding")
+        or effects.get("research_outstanding")
+    ):
         raise ProTokError(
             "Outstanding backend effects cannot be accepted as a local rejection"
         )
+    fault = None
+    if contents is not None:
+        try:
+            fault = static_candidate_fault(contents)
+        except (UnicodeError, ValueError) as error:
+            source_error = f"{type(error).__name__}: {error}"
     return {
         "iteration": iteration,
-        "source_signatures": signatures(candidate_bytes(workspace)),
+        "attempt": str(Path(run_dir).resolve()) if run_dir is not None else None,
+        "source_signatures": signatures(contents) if contents is not None else None,
+        "source_error": source_error,
+        "candidate_fault": fault,
+        "classification": "candidate-fault" if fault else "unsubmitted-interruption",
         "response": result,
-        "provenance": "local-preflight-rejection-no-evaluation",
+        "provenance": "local-static-check-no-evaluation",
     }
+
+
+def retain_local_incomplete(root, backend, workspace, iteration, result, *, run_dir):
+    diagnostic = local_incomplete(
+        root, backend, workspace, iteration, result, run_dir=run_dir
+    )
+    attempt = Path(run_dir).name if run_dir is not None else "unbound"
+    immutable_record(
+        Path(root) / "control/diagnostics" / iteration / (attempt + ".json"),
+        diagnostic,
+    )
+    if diagnostic["classification"] != "candidate-fault":
+        raise HarnessError(
+            "Execute interrupted before submission; no candidate fault was established. "
+            "Preserve this Execute and Plan for explicit reconciliation and retry"
+        )
+    return diagnostic
 
 
 def immutable_record(path, record):
@@ -378,7 +457,7 @@ def certify_candidate_failure(root, backend, workspace, iteration):
     record = read(job / "job.json")
     baseline = read(root / "study/study.json")["baseline"]
     for source in (workspace, job / "source"):
-        check_scope(source, baseline)
+        check_scope(source, baseline, allow_research=research_policy(root) is not None)
         if signatures(candidate_bytes(source)) != record["source_signatures"]:
             raise ProTokError("Failed candidate changed after its source was frozen")
     if git(job / "source", "rev-parse", "HEAD") != record["source_commit"]:
@@ -456,7 +535,9 @@ def completed_job(root, backend, workspace, iteration):
     baseline = read(root / "study/study.json")["baseline"]
     source = job / "source"
     for candidate in (workspace, source):
-        check_scope(candidate, baseline)
+        check_scope(
+            candidate, baseline, allow_research=research_policy(root) is not None
+        )
         if signatures(candidate_bytes(candidate)) != record["source_signatures"]:
             raise ProTokError("Retained candidate no longer matches frozen job source")
     if git(source, "rev-parse", "HEAD") != record["source_commit"]:
@@ -524,6 +605,10 @@ class ProTokHarness:
         self.recoverable_failure = None
 
     def evaluate_request(self, workspace, iteration, request, stop, deadline):
+        if request == {"action": "research"}:
+            from integrations.protok.research_execution import execute_script
+
+            return execute_script(self, workspace, iteration, stop, deadline)
         if request not in ({"action": "import"}, {"action": "evaluate"}):
             raise ProTokError("Request must contain exactly action=import or evaluate")
         if (iteration == "0001") != (request["action"] == "import"):
@@ -533,11 +618,23 @@ class ProTokHarness:
         if stop.is_set() or time.time() >= deadline:
             raise ProTokError("Execute ended; no evaluation may launch")
         admission(self.root, self.backend)
+        research_enabled = research_policy(self.root) is not None
+        if research_enabled:
+            from integrations.protok.research_execution import frozen_contract
+
+            contract = frozen_contract(self.root, iteration, required=False)
+            if contract and contract["execution"]["mode"] != "fixed_evaluation":
+                raise ProTokError(
+                    "Formal submission differs from the frozen execution mode"
+                )
         baseline = read(self.root / "study/study.json")["baseline"]
-        check_scope(workspace, baseline)
+        check_scope(workspace, baseline, allow_research=research_enabled)
         before = signatures(candidate_bytes(workspace))
         metadata = Path(workspace).parent / "iteration.json"
-        recovery = read(metadata).get("operator_resume") if metadata.exists() else None
+        recovery_metadata = read(metadata) if metadata.exists() else {}
+        recovery = recovery_metadata.get("continuation") or recovery_metadata.get(
+            "operator_resume"
+        )
         if recovery and before != recovery["source_signatures"]:
             raise ProTokError("Operator continuation changed the unmeasured candidate")
         job = self.root / "control/jobs" / iteration
@@ -560,7 +657,11 @@ class ProTokHarness:
         }
         write(job / "job.json", record)
         commit, frozen = freeze_source(
-            self.backend.project, workspace, job / "source", baseline
+            self.backend.project,
+            workspace,
+            job / "source",
+            baseline,
+            allow_research=research_enabled,
         )
         prepared = self.backend.prepare_config(
             job / "source", job / "runtime-config.json"
@@ -583,7 +684,7 @@ class ProTokHarness:
                 cancel_event=stop,
             )
             receipt["provenance"] = "new-fixed-protocol-evaluation"
-        check_scope(workspace, baseline)
+        check_scope(workspace, baseline, allow_research=research_enabled)
         if signatures(candidate_bytes(workspace)) != frozen:
             raise ProTokError("Agent candidate changed after source freeze")
         if (
@@ -654,6 +755,9 @@ class ProTokHarness:
             raise HarnessError("Continuation deadline reached or control/STOP set")
         kwargs["timeout_seconds"] = min(kwargs["timeout_seconds"], remaining, 3600)
         kwargs["prompt"] += "\n\n" + submission_instructions()
+        from integrations.protok.research_execution import instructions
+
+        kwargs["prompt"] += instructions(self.root)
         environment = self.root / "control/execution-environment.json"
         if environment.exists():
             kwargs["prompt"] += (
@@ -704,18 +808,22 @@ class ProTokHarness:
                 )
             raise HarnessError(self.errors[-1])
         if result.get("outcome") == "incomplete" and self.trusted_result is None:
-            diagnostic = local_incomplete(
-                self.root, self.backend, workspace, iteration, result
-            )
-            immutable_record(
-                self.root / "control/diagnostics" / (iteration + ".json"), diagnostic
+            retain_local_incomplete(
+                self.root, self.backend, workspace, iteration, result, run_dir=outer
             )
             if outer is not None:
                 publish_completed_response(outer, result)
             return result
         if request_path.exists():
             raise HarnessError("A duplicate evaluation request was left after Execute")
-        if not result_path.exists() or read(result_path).get("status") != "completed":
+        if not result_path.exists() or (
+            read(result_path).get("status") != "completed"
+            and not (
+                self.trusted_result
+                and self.trusted_result.get("purpose") == "research"
+                and self.trusted_result.get("status") == "failed"
+            )
+        ):
             raise HarnessError("Execute ended without a completed trusted evaluation")
         trusted = self.trusted_result
         if trusted is None or read(result_path) != trusted:
@@ -742,6 +850,23 @@ class ProTokHarness:
         validate_response("execute", result)
         workspace = Path(workspace)
         iteration = workspace.parent.name
+        submission = workspace / RECEIPT
+        if submission.exists() and read(submission) == {"action": "research"}:
+            from integrations.protok.research_execution import completed_script
+
+            trusted = completed_script(self.root, workspace, iteration)
+            if (
+                result["outcome"]
+                != ("completed" if trusted["status"] == "completed" else "incomplete")
+                or result["artifacts"] != [trusted["artifact"]]
+                or result["measurements"]
+                or (workspace / "evaluation-request.json").exists()
+                or read(workspace / "evaluation-result.json") != trusted
+            ):
+                raise HarnessError(
+                    "Execute response does not match the unscored research receipt"
+                )
+            return result
         if result["outcome"] == "incomplete":
             decision = self.root / "control/debug" / iteration / "decision.json"
             if decision.exists():
@@ -752,6 +877,7 @@ class ProTokHarness:
                 budget = DebugBudget(
                     decision.parent, scope_id=iteration, limit_gpu_seconds=1800
                 ).status()
+                effects = self.backend.inspect()
                 if (
                     saved.get("status") != "failed"
                     or saved.get("response") != result
@@ -761,19 +887,21 @@ class ProTokHarness:
                     or result["measurements"]
                     or budget["active_attempt"] is not None
                     or budget["breached"]
-                    or self.backend.inspect()["outstanding"]
-                    or self.backend.inspect().get("debug_outstanding")
+                    or effects["outstanding"]
+                    or effects.get("debug_outstanding")
+                    or effects.get("research_outstanding")
                 ):
                     raise HarnessError(
                         "Debug failure has unresolved effects or altered evidence"
                     )
-                check_scope(workspace, read(self.root / "study/study.json")["baseline"])
+                check_scope(
+                    workspace,
+                    read(self.root / "study/study.json")["baseline"],
+                    allow_research=research_policy(self.root) is not None,
+                )
                 return result
-            diagnostic = local_incomplete(
-                self.root, self.backend, workspace, iteration, result
-            )
-            immutable_record(
-                self.root / "control/diagnostics" / (iteration + ".json"), diagnostic
+            retain_local_incomplete(
+                self.root, self.backend, workspace, iteration, result, run_dir=run_dir
             )
             return result
         if (workspace / "evaluation-request.json").exists():
@@ -834,13 +962,13 @@ Ordinary-case failures, actual training nonfinite values, fixed backend gate fai
 invalid metrics, transport errors and unknown evaluation effects still require stopping
 dependent work and preserving receipts. Never weaken or edit those fixed checks.
 On such an actual error return incomplete with no measurements; do not fabricate or relaunch.
-For an ordinary-case local candidate precheck failure before any evaluation request, return incomplete
-with artifacts=[] and measurements=[] and report the actual failure and uncertainty.
-This is an unmeasured candidate rejection for independent Review, not an infrastructure
-failure or a fabricated score. Review uses candidate_reviews=[] for no measurements,
-retains the existing measured best, records what failed and what remains unattributed,
-and should continue with another route while the window remains. Transport
-errors and unknown actual evaluation effects require pause and reconciliation.
+For a local failure before any evaluation request, return incomplete with artifacts=[]
+and measurements=[] and report the actual failure and uncertainty. The controller may
+accept an unmeasured candidate rejection for independent Review only after demonstrating
+a Python syntax error or invalid candidate JSON in the three authorized candidate files.
+Review then uses candidate_reviews=[], retains the measured best, and records the fault.
+An unconfirmed local precheck failure, transport error, or unknown evaluation effect
+requires pausing the original Execute and preserving its Plan for reconciliation.
 Independent Review must inspect actual source and receipt, verify measurement, preserve
 limitations, update both route/global research, and continue. A worse candidate is useful
 evidence, not a reason to stop. Continue until deadline or real execution failure.
@@ -1312,8 +1440,13 @@ def reconcile_local_incomplete(root, backend):
             response = read(attempt / "response.json")
             iteration = f"{state['iteration']:04d}"
             metadata = read(study.root / "iterations" / iteration / "iteration.json")
-            diagnostic = local_incomplete(
-                root, backend, Path(metadata["workspace"]), iteration, response
+            diagnostic = retain_local_incomplete(
+                root,
+                backend,
+                Path(metadata["workspace"]),
+                iteration,
+                response,
+                run_dir=attempt,
             )
             record = {
                 **diagnostic,

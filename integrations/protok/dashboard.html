@@ -45,7 +45,7 @@
     <section class="panel" aria-labelledby="graphTitle">
       <div class="toolbar between"><div><h2 id="graphTitle">代码演化</h2><small id="graphSubtitle">像读 Git 历史一样，回溯每次调查的代码起点。</small></div><div class="toolbar"><button id="graphBtn" class="on" aria-pressed="true">代码继承</button><button id="routesBtn" aria-pressed="false">研究路线</button></div></div>
       <div class="toolbar" style="margin-top:13px"><select id="sourceFilter" aria-label="突出显示历史阶段"><option value="">所有阶段</option></select><select id="routeFilter" aria-label="突出显示研究路线"><option value="">所有路线</option></select><label class="muted" style="font-size:12px"><input type="checkbox" id="refs"> 显示证据引用</label></div>
-      <div id="graphLegend" class="graph-note"><span><i class="legend-line"></i>代码起点 → 本轮</span><span><i class="legend-line dashed"></i>证据引用</span><span style="color:var(--amber)">┄ 同版本结果导入</span></div>
+      <div id="graphLegend" class="graph-note"><span><i class="legend-line"></i>代码起点 → 本轮</span><span style="color:var(--green)">┄ 同一研究的执行续跑</span><span><i class="legend-line dashed"></i>证据引用</span><span style="color:var(--amber)">┄ 同版本结果导入</span></div>
       <div id="graphExplanation" class="caption">上新下旧，每行是一次调查；分支轨道只用于排线，同列不代表同一研究路线。路线由标签标明。</div>
       <div class="git-scroll" id="graphWrap"><div id="graph" class="git-log" aria-label="按时间倒序的代码继承历史"></div></div>
       <div id="routeWrap" class="route-cards" hidden></div>
@@ -152,7 +152,7 @@ function bindExperiments(container) { container.querySelectorAll('[data-node]').
 function renderProgress() {
   const state = data.state || {}, progress = data.progress || {}, current = activeNode();
   $('current').textContent = state.iteration == null ? '—' : '#'+String(state.iteration).padStart(4,'0');
-  $('currentSub').textContent = (current?.route || '路线选择中')+' · '+phaseName(state.phase)+(current?.inquiry_kind?' · '+translated(current.inquiry_kind):'');
+  $('currentSub').textContent = (current?.continuation_of?'执行续跑 · 沿用研究 #'+String(current.research_iteration).split(':').at(-1)+' · ':'')+(current?.route || '路线选择中')+' · '+phaseName(state.phase)+(current?.inquiry_kind?' · '+translated(current.inquiry_kind):'');
   $('gpu').textContent = data.gpu_seconds == null ? '—' : (data.gpu_seconds/3600).toFixed(2)+' 小时';
   const effectiveDeadline = data.effective_deadline ?? data.deadline;
   const deadline = timestamp(effectiveDeadline), remaining = deadline == null ? null : Math.max(0, Math.floor((deadline-Date.now())/1000));
@@ -165,9 +165,9 @@ function renderProgress() {
   const stageRows = progress.stages || [];
   $('phases').innerHTML = PHASES.map((key,index) => {
     const row = stageRows.find(stage => stage.key === key) || {};
-    const active = state.phase === key, complete = ['completed','succeeded','published','done'].includes(row.status) || (!row.status && index < PHASES.indexOf(state.phase));
+    const active = state.phase === key, complete = ['completed','succeeded','published','done','inherited'].includes(row.status) || (!row.status && index < PHASES.indexOf(state.phase));
     const css = active && (data.stop || ['needs_attention','stopped'].includes(state.status)) ? 'blocked' : active ? 'active' : complete ? 'complete' : '';
-    const label = row.duration_seconds != null ? duration(row.duration_seconds) : active ? (STATUS[state.status] || '当前阶段') : complete ? '已完成' : '尚未开始';
+    const label = row.inherited_from ? '沿用 #'+row.inherited_from+' · 无新增调用' : row.duration_seconds != null ? duration(row.duration_seconds) : active ? (STATUS[state.status] || '当前阶段') : complete ? '已完成' : '尚未开始';
     return '<div class="phase-item '+css+'"><strong>'+esc(phaseName(key))+'</strong><small>'+esc(label)+(row.attempts ? ' · '+row.attempts+' 次调用' : '')+'</small></div>';
   }).join('');
   const reasons = progress.reasons || (state.error ? [{title:'当前错误', detail:state.error}] : []);
@@ -186,6 +186,12 @@ function renderProgress() {
 }
 
 // Git lanes reserve the next expected parent. Route IDs never influence positions.
+function graphParent(node) { return node.continuation_of || node.base || node.imported_from; }
+function graphOrigin(node) {
+  const parent=data.nodes.find(item=>item.id===graphParent(node));
+  const label=parent?nodeLabel(parent):'#'+graphParent(node);
+  return node.continuation_of?'续自 '+label:node.base?'起点 '+label:node.imported_from?'同版本导入':node.source_id==='ledger'?'早期账本，未经 Loop 评审':'独立基线';
+}
 function gitLayout(nodes) {
   const ordered = [...nodes].sort((a,b) => nodeOrder(b)-nodeOrder(a)), lanes = [], positions = {};
   for (const [row,node] of ordered.entries()) {
@@ -193,7 +199,7 @@ function gitLayout(nodes) {
     if (lane < 0) { lane = lanes.indexOf(null); if (lane < 0) lane = lanes.length; }
     positions[node.id] = {lane, row, x:18+lane*23, y:row*102+51};
     lanes[lane] = null;
-    const parent=node.base || node.imported_from;
+    const parent=graphParent(node);
     if (parent && !lanes.includes(parent)) lanes[lane] = parent;
   }
   return {ordered, positions, width:Math.max(56, ...Object.values(positions).map(position => position.x+38))};
@@ -205,11 +211,11 @@ function drawGraph() {
   if (!ordered.length) { $('graph').innerHTML = '<div class="empty">尚无调查节点。首次路线选择开始后会出现在这里。</div>'; return; }
   let svg = '<defs><marker id="codeArrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6" fill="#8ab8ff"/></marker><marker id="refArrow" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0 0 L5 2.5 L0 5" fill="#a99bc9"/></marker></defs>';
   for (const node of ordered) {
-    const child = positions[node.id], parent = positions[node.base];
+    const child = positions[node.id], parentId=graphParent(node), parent = positions[node.continuation_of || node.base];
     if (parent) {
-      const active = node.id === selected || node.base === selected;
+      const active = node.id === selected || parentId === selected;
       const path = parent.x === child.x ? `M${parent.x},${parent.y-8} V${child.y+8}` : `M${parent.x},${parent.y-8} C${parent.x},${parent.y-28} ${child.x},${parent.y-25} ${child.x},${parent.y-44} V${child.y+8}`;
-      svg += '<path d="'+path+'" fill="none" stroke="'+COLORS[child.lane%COLORS.length]+'" stroke-width="'+(active?2.6:1.7)+'" opacity="'+(active?1:.65)+'" marker-end="url(#codeArrow)"><title>代码继承：#'+esc(node.base)+' → #'+esc(node.id)+'</title></path>';
+      svg += '<path d="'+path+'" fill="none" stroke="'+(node.continuation_of?'#72dfb3':COLORS[child.lane%COLORS.length])+'" '+(node.continuation_of?'stroke-dasharray="2 4" ':'')+'stroke-width="'+(active?2.6:1.7)+'" opacity="'+(active?1:.65)+'" marker-end="url(#codeArrow)"><title>'+esc(node.continuation_of?'执行续跑：#'+parentId+' → #'+node.id+'；沿用研究 #'+node.research_iteration+' 的 Plan':'代码继承：#'+node.base+' → #'+node.id)+'</title></path>';
     }
     const origin=positions[node.imported_from];
     if (origin && !parent) svg+=`<path d="M${origin.x},${origin.y-8} C${origin.x},${origin.y-28} ${child.x},${origin.y-25} ${child.x},${origin.y-44} V${child.y+8}" fill="none" stroke="#f2cb85" stroke-width="1.8" stroke-dasharray="7 4"><title>同版本结果导入：${esc(node.imported_from)} → ${esc(node.id)}；不增加新评价结果</title></path>`;
@@ -224,7 +230,7 @@ function drawGraph() {
     svg += '<circle cx="'+point.x+'" cy="'+point.y+'" r="'+(node.id === selected?7:5)+'" fill="'+(node.published?color:'#151f30')+'" stroke="'+color+'" stroke-width="2"><title>#'+esc(node.id)+'</title></circle>';
     if(node.frontier_current===true)svg+=`<circle cx="${point.x}" cy="${point.y}" r="10" fill="none" stroke="#72dfb3" stroke-width="1.3"/>`;
   }
-  $('graph').innerHTML = '<svg class="git-rail" width="'+width+'" height="'+height+'" aria-hidden="true">'+svg+'</svg><div style="margin-left:'+width+'px">'+ordered.map(node => '<button class="git-row '+(node.id===selected?'selected ':'')+((filter && node.route_id!==filter)||(sourceFilter && node.source_id!==sourceFilter)?'other-route':'')+'" data-node="'+esc(node.id)+'" aria-pressed="'+(node.id===selected)+'"><div class="row-top"><span class="commit-id">'+esc(nodeLabel(node))+'</span><span class="score '+nodeTone(node)+'">'+esc(nodeResult(node))+'</span></div><div class="row-action" title="'+esc(explanationEntry(node)?.question || node.action_summary || node.action || node.title || node.route)+'">'+esc(excerpt(explanationEntry(node)?.title || node.action_summary || node.action || node.title || node.route || '路线选择中',100))+'</div><div class="row-meta">'+badge(node.route || node.source_label || '待选择','route')+'<span>'+esc(node.base?'起点 '+nodeLabel(data.nodes.find(item=>item.id===node.base)):node.imported_from?'同版本导入':node.source_id==='ledger'?'早期账本，未经 Loop 评审':'独立基线')+'</span><span class="graph-frontier">'+(node.frontier_current===true?'◎ 当前 Frontier':node.frontier_reached===true?'◇ 曾进入 Frontier':'')+'</span><span>'+esc(node.frontier_exclusion_reason?'资格已排除':node.imported?'历史导入':node.published?'已发布':STATUS[node.status] || '未发布')+'</span></div></button>').join('')+'</div>';
+  $('graph').innerHTML = '<svg class="git-rail" width="'+width+'" height="'+height+'" aria-hidden="true">'+svg+'</svg><div style="margin-left:'+width+'px">'+ordered.map(node => '<button class="git-row '+(node.id===selected?'selected ':'')+((filter && node.route_id!==filter)||(sourceFilter && node.source_id!==sourceFilter)?'other-route':'')+'" data-node="'+esc(node.id)+'" aria-pressed="'+(node.id===selected)+'"><div class="row-top"><span class="commit-id">'+esc(nodeLabel(node))+'</span><span class="score '+nodeTone(node)+'">'+esc(nodeResult(node))+'</span></div><div class="row-action" title="'+esc(explanationEntry(node)?.question || node.action_summary || node.action || node.title || node.route)+'">'+esc(excerpt(explanationEntry(node)?.title || node.action_summary || node.action || node.title || node.route || '路线选择中',100))+'</div><div class="row-meta">'+badge(node.route || node.source_label || '待选择','route')+'<span>'+esc(graphOrigin(node))+'</span><span class="graph-frontier">'+(node.frontier_current===true?'◎ 当前 Frontier':node.frontier_reached===true?'◇ 曾进入 Frontier':'')+'</span><span>'+esc(node.frontier_exclusion_reason?'资格已排除':node.imported?'历史导入':node.published?'已发布':STATUS[node.status] || '未发布')+'</span></div></button>').join('')+'</div>';
   bindExperiments($('graph'));
 }
 function drawRoutes() {
@@ -341,7 +347,7 @@ function updateView() {
   $('refs').disabled = !git; $('graphLegend').hidden = !git;
   $('graphTitle').textContent = git ? '代码演化' : '研究路线';
   $('graphSubtitle').textContent = git ? '像读 Git 历史一样，回溯每次调查的代码起点。' : '追踪同一研究问题下的尝试、结论与后续条件。';
-  $('graphExplanation').textContent = git ? '上新下旧，每行是一轮调查或一条早期账本；分支轨道只用于排线，阶段和路线由标签标明。'+(filter || $('sourceFilter').value?' 当前突出选中范围，其他节点保留为继承上下文。':'') : '按研究问题分组，组内按时间由早到晚排列；› 只表示先后，不表示代码继承。现有记录未定义路线之间的父子关系。';
+  $('graphExplanation').textContent = git ? '上新下旧，每行是一条调查、执行续跑或早期账本记录；绿色点线表示沿用原 Plan 的续跑，分支轨道只用于排线。'+(filter || $('sourceFilter').value?' 当前突出选中范围，其他节点保留为继承上下文。':'') : '按研究问题分组，组内按时间由早到晚排列；› 只表示先后，不表示代码继承。现有记录未定义路线之间的父子关系。';
 }
 function renderSnapshot() {
   const current = activeNode();
@@ -369,6 +375,7 @@ function renderDetailHeader() {
   const contextOpen=$('context').querySelector('details')?.open || false;
   $('context').innerHTML = '<div class="context-box"><div class="toolbar"><span class="muted">代码起点</span> '+(node.base?experimentLink(node.base):'<span>独立基线，无 Study 父版本</span>')+'<span class="muted" style="margin-left:10px">研究路线</span> '+badge((node.route_id || '')+' · '+node.route,'route')+(node.inquiry_kind?badge(translated(node.inquiry_kind)):'')+'</div><p><span class="muted">额外证据引用</span> '+(references.length?references.map(id=>experimentLink(id)).join('、'):'无')+'</p>'+(node.action_summary || node.action?'<p><span class="muted">'+esc(node.action_summary_label || '行动摘录')+'</span> '+esc(excerpt(node.action_summary || node.action,230))+'</p>':'')+(jobs?'<p><span class="muted">评估回执</span> '+esc(jobs)+'</p>':'')+'</div>';
   if (node.source_commit) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p><span class="muted">冻结源码版本</span> <code title="'+esc(node.source_commit)+'">'+esc(node.source_commit.slice(0,12))+'</code></p>');
+  if (node.continuation_of) $('context').querySelector('.context-box').insertAdjacentHTML('afterbegin','<p class="green">执行续跑：从 '+experimentLink(node.continuation_of)+' 的候选源码继续，沿用 '+experimentLink(node.research_iteration,'研究 Plan')+'；原始 Plan 的代码对照为 '+(node.plan_base?experimentLink(node.plan_base):'独立基线')+'。</p>');
   if (node.imported_from) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p><span class="muted">同版本结果导入</span> '+experimentLink(node.imported_from)+'；不增加新评价结果。</p>');
   if (node.same_ledger_result) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p><span class="muted">同一账本结果</span> '+experimentLink(node.same_ledger_result)+'</p>');
   if (node.frontier_exclusion_reason) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p class="amber">该候选当前资格已排除：'+esc(node.frontier_exclusion_reason)+'，不参与 Frontier 指标曲线。</p>');
@@ -393,7 +400,7 @@ function executePanel(record) {
 }
 function agentCard(agent, index) {
   const output = agent.output || {}, phase = agent.phase, key = 'agent-'+(agent.key || index)+'-'+(agent.attempt || index);
-  const status = agent.published ? (phase==='plan'?'合同已发布':phase==='review'?'Review 已发布':'已发布') : agent.accepted ? '控制器已接纳' : STATUS[agent.status] || agent.status || '状态未确认';
+  const status = agent.inherited ? '原调查已接纳的合同' : agent.published ? (phase==='plan'?'合同已发布':phase==='review'?'Review 已发布':'已发布') : agent.accepted ? '控制器已接纳' : STATUS[agent.status] || agent.status || '状态未确认';
   const tone = agent.published || agent.accepted ? 'green' : ['failed','interrupted','timed_out'].includes(agent.status) ? 'red' : 'amber';
   const meta = [agent.round != null ? '选择轮次 '+agent.round : null, agent.attempt ? String(agent.attempt).replace(/^attempt-/, 'attempt ') : null, agent.duration_seconds != null ? duration(agent.duration_seconds) : null, agent.started_at ? clock(agent.started_at) : null].filter(Boolean).join(' · ');
   let body = '';
@@ -432,7 +439,7 @@ function agentCard(agent, index) {
   const full = '<div class="agent-output">'+body+'</div>'+(agent.source?disclosure(key+'-source','记录来源','<div class="source">'+esc(agent.source)+'</div>'):'');
   const role=agent.role || {plan:'Planner',execute:'Executor',review:'Reviewer',judge:'Judge',proposal:'Advocate'}[phase] || phase;
   const suffix={proposal:'提案',critique:'质疑',response:'回应'}[phase];
-  const header = '<div class="agent-header"><h3>'+esc(role+(suffix?' · '+suffix:''))+'</h3>'+badge(status,tone)+'</div><div class="agent-provenance">'+esc(meta || '调用时间未记录')+'</div>';
+  const header = '<div class="agent-header"><h3>'+esc(role+(agent.inherited?' · 原始 Plan':suffix?' · '+suffix:''))+'</h3>'+badge(status,tone)+'</div><div class="agent-provenance">'+esc(meta || '调用时间未记录')+(agent.inherited?' · 原调查的调用回执，本次续跑不重复计数':'')+'</div>';
   return '<article class="agent-card">'+header+(['critique','response'].includes(phase)?disclosure(key+'-discussion',phase==='critique'?'查看质疑':'查看回应',full):full)+'</article>';
 }
 function renderDetail() {
@@ -456,8 +463,9 @@ function renderDetail() {
     if (tab === 'selection') {
       prefix = '<div class="subtoolbar"><button id="keyOutputs" class="'+(!discussion?'on':'')+'">关键提案与 Judge</button><button id="allOutputs" class="'+(discussion?'on':'')+'">包含质疑与回应</button></div><div class="caption">按调用顺序阅读。提案和讨论是研究决策，不是新增实验证据。</div>';
       if (!discussion) agents = agents.filter(agent=>!['critique','response'].includes(agent.phase));
+      if (detail.plan_record?.kind==='execution_continuation') prefix+='<div class="notice">本次执行沿用 '+experimentLink(detail.plan_record.plan_iteration,'原调查 #'+detail.plan_record.plan_iteration+' 的提案与路线决定')+'，没有重新选择研究路线。</div>';
     }
-    if (tab==='plan' && detail.plan_record?.kind==='operator_resume') body.innerHTML=operatorPlanPanel(detail.plan_record)+agents.map(agentCard).join('');
+    if (tab==='plan' && detail.plan_record) body.innerHTML=continuationPlanPanel(detail.plan_record)+agents.map(agentCard).join('');
     else if (agents.length) body.innerHTML = prefix+agents.map(agentCard).join('');
     else if (tab==='selection' && detail.selection && Object.keys(detail.selection).length) body.innerHTML = prefix+structured(detail.selection);
     else if (detail[tab] && typeof detail[tab]==='string' && detail[tab]!=='暂无记录') body.innerHTML = '<div class="notice">已保存的研究文档；此记录未提供可确认的 Agent 调用元数据。</div>'+markdown(detail[tab]);

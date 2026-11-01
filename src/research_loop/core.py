@@ -33,6 +33,7 @@ from .harness import (
     publish_completed_response,
 )
 from .protocol import SCHEMAS, prompt, validate_response
+from .research_contract import validate_research_execution
 from .strategy import debate_rounds, review_guidance, validate_strategy
 
 
@@ -86,6 +87,7 @@ def initialize(
     selection: dict | None = None,
     strategy: dict | None = None,
     exploration: dict | None = None,
+    research_execution: dict | None = None,
 ) -> Path:
     root = Path(root).resolve()
     workspace = Path(workspace).resolve() if workspace else root / "workspace"
@@ -102,6 +104,7 @@ def initialize(
             raise ValueError(f"{name} must be a positive integer")
     strategy = validate_strategy(strategy)
     exploration = validate_exploration(exploration)
+    research_execution = validate_research_execution(research_execution)
     policy = {"seed": 0, "debate_rounds": 1, "max_resamples": 1}
     if selection:
         if set(selection) - set(policy):
@@ -164,6 +167,9 @@ def initialize(
             "selection": policy,
             "strategy": strategy,
             **({"exploration": exploration} if exploration else {}),
+            **(
+                {"research_execution": research_execution} if research_execution else {}
+            ),
         },
     )
     _write(root / "routes/index.json", {})
@@ -200,6 +206,7 @@ class Study:
             )
         self.strategy = validate_strategy(self.config.get("strategy"))
         self.exploration = validate_exploration(self.config.get("exploration"))
+        validate_research_execution(self.config.get("research_execution"))
         self.workspace = Path(self.config["workspace"])
         self.harness = harness or make_harness(HarnessConfig(**self.config["harness"]))
         self._run_start = None
@@ -553,6 +560,201 @@ class Study:
         )
         self._save(state)
 
+    def _continue_execution(
+        self, state: dict, *, source_iteration: str, continuation: dict
+    ) -> None:
+        """Reserve an execution record for an accepted, unmeasured Plan.
+
+        The adapter holds the study lock and supplies operator reconciliation;
+        this path never samples a research allocation or asks for another Plan.
+        """
+        if (
+            not isinstance(source_iteration, str)
+            or not source_iteration.isdigit()
+            or source_iteration != f"{int(source_iteration):04d}"
+            or int(source_iteration) < 1
+        ):
+            raise StudyError("Invalid continuation source iteration")
+        required = {
+            "source_iteration",
+            "source_workspace_ref",
+            "plan_ref",
+            "authorization",
+            "reconciliation",
+            "directive",
+            "source_signatures",
+        }
+        if (
+            not isinstance(continuation, dict)
+            or not required <= continuation.keys()
+            or continuation["source_iteration"] != source_iteration
+        ):
+            raise StudyError("Invalid execution continuation record")
+        source = self.root / "iterations" / source_iteration
+        source_metadata = _read(source / "iteration.json")
+        publication = _read(source / "publication.json")
+        published = publication["state_after"]
+        if (
+            source_metadata.get("status") != "reviewed"
+            or publication["metadata"] != source_metadata
+            or not published.get("accepted_calls", {}).get("execute")
+            or published.get("execution_ref")
+            != str(Path(published["calls"]["execute"]) / "response.json")
+        ):
+            raise StudyError("Continuation requires a published accepted Execute")
+        execution = _read(self.root / published["execution_ref"])
+        if (
+            execution.get("outcome") != "incomplete"
+            or execution.get("artifacts") != []
+            or execution.get("measurements") != []
+            or source_metadata.get("output_artifacts") != []
+        ):
+            raise StudyError("Continuation requires an unmeasured incomplete Execute")
+        version = continuation["source_workspace_ref"]
+        if not version or version != source_metadata.get("workspace_ref"):
+            raise StudyError("Continuation source workspace version changed")
+        plan_ref = continuation["plan_ref"]
+        plan_path = Path(plan_ref) if isinstance(plan_ref, str) else Path()
+        if (
+            plan_path.is_absolute()
+            or ".." in plan_path.parts
+            or len(plan_path.parts) < 4
+            or plan_path.parts[0] != "iterations"
+            or not plan_path.parts[1].isdigit()
+            or not 1 <= int(plan_path.parts[1]) <= int(source_iteration)
+        ):
+            raise StudyError("Invalid original Plan reference")
+        owner = self.root / "iterations" / plan_path.parts[1]
+        owner_publication = _read(owner / "publication.json")
+        owner_state = owner_publication["state_after"]
+        plan_keys = [
+            key
+            for key, call in owner_state["calls"].items()
+            if key.startswith("plan-")
+            and str(Path(call) / "response.json") == plan_ref
+            and owner_state.get("accepted_calls", {}).get(key)
+        ]
+        if (
+            owner_publication["metadata"].get("status") != "reviewed"
+            or owner_state.get("plan_ref") != plan_ref
+            or not plan_keys
+        ):
+            raise StudyError("Continuation Plan must be an accepted published Plan")
+        plan = _read(self.root / plan_ref)
+        if plan.get("decision") != "investigate":
+            raise StudyError("Continuation requires an investigating Plan")
+        if (self.root / "goal.md").read_bytes() != (
+            owner / "context/goal.md"
+        ).read_bytes():
+            raise StudyError("Continuation requires the original frozen goal")
+        current_config = _read(self.root / "study.json")
+        original_config = _read(owner / "context/study.before.json")
+        # Capability policy may evolve for future Plans. The accepted Plan keeps
+        # its owner's policy; every other study setting remains its contract.
+        if {k: v for k, v in current_config.items() if k != "research_execution"} != {
+            k: v for k, v in original_config.items() if k != "research_execution"
+        }:
+            raise StudyError("Continuation requires the original study configuration")
+        if self.config != current_config:
+            raise StudyError("Reload the current study configuration")
+        number = int(source_iteration) + 1
+        if state["status"] != "ready" or not (
+            (state["iteration"] == int(source_iteration) and state["phase"] == "done")
+            or (
+                state["iteration"] == number
+                and state["phase"] in {"selection", "execute"}
+            )
+        ):
+            raise StudyError("Continuation is not at the source execution boundary")
+        if (
+            self.config["max_iterations"] is not None
+            and number > self.config["max_iterations"]
+        ):
+            raise StudyError("Continuation exceeds the physical iteration budget")
+        if state["iteration"] == int(source_iteration):
+            self._begin(state)
+        folder = self._folder(state)
+        metadata = _read(folder / "iteration.json")
+        workdir = folder / "workspace" if self.config["allow_write"] else self.workspace
+        expected = {
+            "route_id": source_metadata["route_id"],
+            "base_experiment": plan["base_experiment"],
+            "references": plan["references"],
+            "input_artifacts": plan["input_artifacts"],
+            "output_artifacts": [],
+            "evaluation_refs": owner_publication["metadata"]["evaluation_refs"],
+            "workspace": str(workdir),
+            "workspace_ref": version,
+            "status": "planned",
+            "route_title": source_metadata["route_title"],
+            "continuation": continuation,
+        }
+        if metadata.get("id") != f"{number:04d}" or metadata.get(
+            "previous_iteration"
+        ) != int(source_iteration):
+            raise StudyError("Unexpected continuation target identity")
+        if "continuation" in metadata:
+            if any(metadata.get(key) != value for key, value in expected.items()):
+                raise StudyError("Existing continuation target does not match")
+        elif (
+            state["phase"] == "selection"
+            and metadata.get("status") == "selecting"
+            and not state["calls"]
+        ):
+            if any(
+                p.name not in {"context", "iteration.json"} for p in folder.iterdir()
+            ):
+                raise StudyError("Unexpected unowned continuation target contents")
+            metadata.update(expected)
+            _write(folder / "iteration.json", metadata)
+        else:
+            raise StudyError("Existing iteration belongs to another investigation")
+        selected = owner_state["selected"]
+        if state["phase"] == "execute" and (
+            state.get("plan_ref") != plan_ref
+            or state.get("route_id") != expected["route_id"]
+            or state.get("selected") != selected
+        ):
+            raise StudyError("Existing continuation state does not match")
+
+        def preserve(path: Path, value: str) -> None:
+            if path.exists():
+                if path.read_text() != value:
+                    raise StudyError(
+                        "Existing continuation file does not match: " + str(path)
+                    )
+            else:
+                _atomic_text(path, value)
+
+        preserve(folder / "plan.md", (owner / "plan.md").read_text())
+        for name in ("local-evaluations.after.json", "context/route.before.md"):
+            preserve(folder / name, (owner / name).read_text())
+        if self.config["allow_write"]:
+            if not workdir.exists():
+                _git(
+                    self.workspace, "worktree", "add", "--detach", str(workdir), version
+                )
+            if _git(workdir, "rev-parse", "HEAD") != version or _git(
+                workdir, "rev-parse", "--path-format=absolute", "--git-common-dir"
+            ) != _git(
+                self.workspace,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ):
+                raise StudyError(
+                    "Unexpected continuation workspace version or repository"
+                )
+        if state["phase"] == "execute":
+            return
+        state.update(
+            route_id=expected["route_id"],
+            phase="execute",
+            plan_ref=plan_ref,
+            selected=selected,
+        )
+        self._save(state)
+
     def _context(self, folder: Path) -> dict:
         config = _read(folder / "context/study.before.json")
         evaluation = config["global_evaluation"]
@@ -568,11 +770,28 @@ class Study:
             "frontiers": views,
             "routes": _read(folder / "context/routes.before.json"),
         }
-        slot = allocation(config.get("exploration"), int(folder.name))
+        metadata = _read(folder / "iteration.json")
+        continuation = metadata.get("continuation")
+        scientific_folder = folder
+        scientific_config = config
+        if continuation:
+            context["execution_continuation"] = continuation
+            scientific_folder = (
+                self.root / "iterations" / Path(continuation["plan_ref"]).parts[1]
+            )
+            scientific_config = _read(scientific_folder / "context/study.before.json")
+        research_execution = validate_research_execution(
+            scientific_config.get("research_execution")
+        )
+        if research_execution:
+            context["research_execution"] = research_execution
+        slot = allocation(
+            scientific_config.get("exploration"), int(scientific_folder.name)
+        )
         if slot:
             context["exploration"] = slot
             for name in ("research_inputs", "scout_inputs", "recent_insights"):
-                path = folder / "context" / f"{name}.json"
+                path = scientific_folder / "context" / f"{name}.json"
                 context[name] = _read(path) if path.exists() else None
         return context
 
@@ -1183,15 +1402,17 @@ class Study:
         return commit
 
     def _review_before(self, folder: Path, route_id: str) -> None:
-        if (self.root / "study.json").read_text() != (
-            folder / "context/study.before.json"
-        ).read_text():
+        current_config = _read(self.root / "study.json")
+        frozen_config = _read(folder / "context/study.before.json")
+        if {k: v for k, v in current_config.items() if k != "research_execution"} != {
+            k: v for k, v in frozen_config.items() if k != "research_execution"
+        }:
             raise StudyError(
                 "Study configuration changed during the investigation; reconcile the frozen contract"
             )
-        if (self.root / "goal.md").read_text() != (
+        if (self.root / "goal.md").read_bytes() != (
             folder / "context/goal.md"
-        ).read_text():
+        ).read_bytes():
             raise StudyError(
                 "Study goal changed during the investigation; reconcile the frozen contract"
             )

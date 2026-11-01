@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 
+from . import research_contract
+
 
 KINDS = ("architecture", "diagnostic", "refinement")
 
@@ -65,6 +67,8 @@ def route_candidates(slot, routes, experiments):
 
 
 def stage_schema(phase, context, schemas):
+    if context.get("research_execution") and phase == "plan":
+        return research_contract.plan_schema(schemas[phase])
     slot = context.get("exploration")
     if not slot or phase not in ("proposal", "review"):
         return schemas[phase]
@@ -105,6 +109,8 @@ def stage_schema(phase, context, schemas):
 
 
 def validate_design(phase, value, context):
+    if context.get("research_execution") and phase == "plan":
+        research_contract.validate_contract(value)
     if context.get("exploration") and phase == "proposal":
         design = value["research_design"]
         for key in (
@@ -115,17 +121,25 @@ def validate_design(phase, value, context):
         ):
             if not design[key].strip():
                 raise ValueError(f"Empty research design {key}")
-        if len(design["contrasting_predictions"]) < 2:
+        if (
+            not context.get("research_execution")
+            and len(design["contrasting_predictions"]) < 2
+        ):
             raise ValueError(
                 "An exploration proposal needs at least two contrasting predictions"
             )
 
 
 def guidance(phase, context):
+    research = (
+        research_contract.guidance(phase) if context.get("research_execution") else ""
+    )
     slot = context.get("exploration")
     if not slot:
-        return ""
-    common = f"""
+        return research
+    common = (
+        research
+        + f"""
 This iteration is allocated to {slot["kind"]}. This is a research allocation, not
 a new measurement protocol or expanded tool permission. Architecture means a
 change to representation, readout, conditioning, message computation or functional
@@ -141,9 +155,15 @@ Consider an informative negative result as useful, but say what it would rule ou
 Keep conclusions within the actual evaluation scope. Do not manufacture missing
 diagnostics or infer that one bounded negative result disproves an entire method.
 """
+    )
     if phase == "proposal":
-        common += """
-Fill research_design with a concrete structural difference, relevant earlier
+        intervention = (
+            "intervention or measurement design (a model change is optional)"
+            if context.get("research_execution")
+            else "structural difference"
+        )
+        common += f"""
+Fill research_design with a concrete {intervention}, relevant earlier
 attempts, at least two contrasting predicted outcomes and the smallest useful
 test. Repeating a historical approach needs an explicit unresolved comparison or
 a materially different controlled intervention.
@@ -169,5 +189,13 @@ Keep working research documents compact (aim under 6000 characters globally and
 3000 for this route). Link immutable prior Reviews for historical detail instead
 of repeating every signature, polling event and unchanged check. Preserve active
 questions, contradictions, failures and provenance; never overwrite raw evidence.
+"""
+    if context.get("research_execution"):
+        common += """
+For this opt-in research workflow, contrasting_predictions may be empty for
+descriptive measurements or derivations. Competing explanations and differing
+predictions are mandatory for mechanism claims and are frozen in Plan. The legacy
+structural_change field describes the intervention or measurement design; it does
+not require modifying the model or performing training.
 """
     return common

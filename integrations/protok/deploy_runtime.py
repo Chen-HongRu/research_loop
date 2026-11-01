@@ -64,7 +64,11 @@ def check_boundary(root, backend):
                 "Latest job is not completed or a reviewed debug rejection"
             )
     status = backend.inspect()
-    if status["outstanding"] or status.get("debug_outstanding"):
+    if (
+        status["outstanding"]
+        or status.get("debug_outstanding")
+        or status.get("research_outstanding")
+    ):
         raise RuntimeError("Outstanding evaluation effects prevent a handoff")
     return state
 
@@ -92,7 +96,11 @@ def check_debug_boundary(root, backend):
     if (stop.read_text() if stop.exists() else None) != preparation.get("stop_before"):
         raise RuntimeError("STOP changed after the explicit debug preparation")
     status = backend.inspect()
-    if status["outstanding"] or status.get("debug_outstanding"):
+    if (
+        status["outstanding"]
+        or status.get("debug_outstanding")
+        or status.get("research_outstanding")
+    ):
         raise RuntimeError(
             "Outstanding effects prevent starting a prepared debug session"
         )

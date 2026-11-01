@@ -72,7 +72,8 @@ def _read(path):
 
 def _request(value, name):
     if value is not None and (
-        set(value) != {"action"} or value["action"] not in ("evaluate", "import")
+        set(value) != {"action"}
+        or value["action"] not in ("evaluate", "import", "research")
     ):
         raise SubmissionError(f"Invalid request in {name}")
     return value
@@ -126,8 +127,8 @@ def submit(workspace, action="evaluate"):
     A failure before replacement removes only this call's staging file. A failure
     after replacement preserves the published request; retry observes its state.
     """
-    if action not in ("evaluate", "import"):
-        raise SubmissionError("Action must be evaluate or import")
+    if action not in ("evaluate", "import", "research"):
+        raise SubmissionError("Action must be evaluate, import or research")
     with _locked(workspace) as directory:
         current = _state(directory)
         if "action" in current and current["action"] != action:
@@ -174,7 +175,9 @@ def main(argv=None):
         subparser.add_argument("--workspace", required=True)
         if command == "submit":
             subparser.add_argument(
-                "--action", choices=("evaluate", "import"), default="evaluate"
+                "--action",
+                choices=("evaluate", "import", "research"),
+                default="evaluate",
             )
     args = parser.parse_args(argv)
     try:

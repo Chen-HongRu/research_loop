@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.backend import METRIC, PROTOCOL, ProTokBackend
 from integrations.protok.explanation import explanation_coverage, explanation_status
+from integrations.protok.plan_provenance import execution_plan
 from integrations.protok.run import job_path
 from research_loop.harness import completed_response
 
@@ -239,6 +240,24 @@ def operator_plan_record(root, folder):
     }
 
 
+def continuation_plan_record(root, folder):
+    record = execution_plan(root, folder.name)
+    if record is None:
+        return None
+    owner = root / "study/iterations" / record["plan_iteration"]
+    planner = next(
+        (
+            agent
+            for agent in agent_outputs(root, owner)
+            if agent["phase"] == "plan"
+            and agent["accepted"]
+            and agent["source"] + "/response.json" == record["plan_ref"]
+        ),
+        None,
+    )
+    return {**record, "planner": planner}
+
+
 def activity(agents):
     return {
         "attempts": len(agents),
@@ -399,6 +418,13 @@ def progress(root, state, backend, runner, agents):
         if cause:
             reason("本次调试原因", cause, "study/" + state["debugging"])
     stages = []
+    identity = f"{state.get('iteration', 0):04d}"
+    metadata = read(root / "study/iterations" / identity / "iteration.json", {})
+    continuation = (
+        execution_plan(root, identity)
+        if metadata.get("continuation") or metadata.get("operator_resume")
+        else None
+    )
     order = ["selection", "plan", "execute", "review"]
     for key in order:
         relevant = [
@@ -446,10 +472,15 @@ def progress(root, state, backend, runner, agents):
             stage_duration = sum(timings) if timings else None
         if phase == key:
             stage_status = status or "unknown"
+        inherited_from = None
+        if continuation and key in {"selection", "plan"} and not relevant:
+            stage_status = "inherited"
+            inherited_from = continuation["plan_iteration"]
         stages.append(
             {
                 "key": key,
                 "status": stage_status,
+                "inherited_from": inherited_from,
                 "attempts": count,
                 "duration_seconds": stage_duration,
             }
@@ -739,7 +770,26 @@ def snapshot(root, *, snapshot_only=False):
             ),
             {},
         )
+        continuation = (
+            execution_plan(root, identity)
+            if meta.get("continuation") or meta.get("operator_resume")
+            else None
+        )
         selected = current.get("selected") or saved.get("selected") or {}
+        if continuation:
+            accepted_plan = continuation["output"]
+            selected = (
+                read(
+                    study
+                    / "iterations"
+                    / continuation["plan_iteration"]
+                    / "publication.json",
+                    {},
+                )
+                .get("state_after", {})
+                .get("selected")
+                or {}
+            )
         judge = selected.get("judge", {})
         proposal = selected.get("proposal", {})
         proposal_action = proposal.get("action")
@@ -761,6 +811,13 @@ def snapshot(root, *, snapshot_only=False):
                 "route": meta.get("route_title", "路线选择中"),
                 "route_id": meta.get("route_id"),
                 "base": meta.get("base_experiment"),
+                "continuation_of": continuation["source_iteration"]
+                if continuation
+                else None,
+                "research_iteration": continuation["plan_iteration"]
+                if continuation
+                else identity,
+                "plan_base": accepted_plan.get("base_experiment"),
                 "references": meta.get("references", []),
                 "status": live
                 if active
@@ -1044,17 +1101,26 @@ def execution_details(root, identity):
 def details(root, identity):
     folder = root / "study/iterations" / identity
     selection = read(folder / "selection.json", {})
+    plan_record = continuation_plan_record(root, folder) or operator_plan_record(
+        root, folder
+    )
     return {
-        "plan": prose(folder / "plan.md"),
+        "plan": plan_record["output"].get("markdown", "")
+        if plan_record and plan_record["kind"] == "execution_continuation"
+        else prose(folder / "plan.md"),
         "review": prose(folder / "review.md"),
         "selection": selection,
         "agents": agent_outputs(root, folder),
-        "plan_record": operator_plan_record(root, folder),
+        "plan_record": plan_record,
         "execution": execution_details(root, identity),
         "explanation": explanation_status(root, identity),
         "metadata": read(folder / "iteration.json", {}),
         "sources": {
-            key: relative(folder / name, root)
+            key: plan_record["plan_ref"]
+            if key == "plan"
+            and plan_record
+            and plan_record["kind"] == "execution_continuation"
+            else relative(folder / name, root)
             for key, name in (
                 ("plan", "plan.md"),
                 ("review", "review.md"),
@@ -1331,6 +1397,13 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
                 "label": label + " #" + original,
                 "declared_base": node.get("base"),
                 "base": source_id + ":" + node["base"] if node.get("base") else None,
+                "continuation_of": source_id + ":" + node["continuation_of"]
+                if node.get("continuation_of")
+                else None,
+                "research_iteration": source_id + ":" + node["research_iteration"],
+                "plan_base": source_id + ":" + node["plan_base"]
+                if node.get("plan_base")
+                else None,
                 "references": [
                     source_id + ":" + ref for ref in node.get("references", [])
                 ],
@@ -1346,6 +1419,8 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
                 if source_id == "active"
                 else False,
             }
+            if node.get("continuation_of"):
+                merged["label"] += " · 续跑研究 #" + node["research_iteration"]
             nodes.append(merged)
         for route_id, route in local.get("routes", {}).items():
             routes[source_id + ":" + route_id] = {

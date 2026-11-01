@@ -1,0 +1,737 @@
+"""Isolated, receipted Slurm script execution; never a formal quality evaluation."""
+
+from __future__ import annotations
+
+import base64
+import fcntl
+import hashlib
+import json
+import math
+from pathlib import Path, PurePosixPath
+import re
+import shlex
+import shutil
+import time
+
+from integrations.protok.backend import CANDIDATE_FILES, PROTOCOL, ProTokError
+from integrations.protok.continuation import _load_backend, validate_continuation
+
+MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+LOG_BYTES = 65536
+
+
+def _read(path):
+    return json.loads(Path(path).read_text())
+
+
+def _write(path, value):
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+    temporary.replace(path)
+
+
+def _relative(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_./-]+", value):
+        raise ProTokError("Script paths must be bounded relative paths")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(p in {".", ".."} for p in value.split("/")):
+        raise ProTokError("Script paths must not traverse directories")
+    return value
+
+
+def _execution(value, policy):
+    if (
+        set(value)
+        != {"mode", "entrypoint", "gpu", "time_limit_seconds", "inputs", "outputs"}
+        or value["mode"] != "script"
+    ):
+        raise ProTokError("Invalid research execution envelope")
+    if value["gpu"] is not True:
+        raise ProTokError(
+            "CPU-only scheduling is unverified; use a charged single-GPU allocation even for CPU scripts"
+        )
+    limit = value["time_limit_seconds"]
+    if type(limit) is not int or not 1 <= limit <= min(
+        1800, policy["max_time_limit_seconds"]
+    ):
+        raise ProTokError("Research time exceeds the authorized debug-partition limit")
+    allocated = math.ceil(limit / 60) * 60
+    if allocated > policy["max_time_limit_seconds"]:
+        raise ProTokError("Rounded Slurm allocation exceeds the research policy")
+    entry = _relative(value["entrypoint"])
+    if not entry.startswith("research/") or not entry.endswith(".py"):
+        raise ProTokError("Research entrypoint must be research/*.py")
+    if not isinstance(value["outputs"], list) or len(value["outputs"]) > 64:
+        raise ProTokError("Declare at most 64 research output files")
+    for name in value["outputs"]:
+        _relative(name)
+    if len(set(value["outputs"])) != len(value["outputs"]):
+        raise ProTokError("Duplicate research outputs")
+    if not isinstance(value["inputs"], list) or len(value["inputs"]) > 16:
+        raise ProTokError("Declare at most 16 research inputs")
+    names = []
+    for item in value["inputs"]:
+        if (
+            set(item) != {"name", "source", "role"}
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", item["name"])
+            or not isinstance(item["role"], str)
+            or not item["role"].strip()
+        ):
+            raise ProTokError("Invalid named research input")
+        allowed_roles = {"development", "exploratory"}
+        if item["source"] == "teacher" or (
+            isinstance(item["source"], str) and item["source"].startswith("checkpoint:")
+        ):
+            allowed_roles |= {"reference", "model"}
+        if item["role"] not in allowed_roles:
+            raise ProTokError(
+                "Research input role is outside development/exploratory or model/reference scope"
+            )
+        names.append(item["name"])
+    if len(set(names)) != len(names):
+        raise ProTokError("Duplicate research input name")
+    return allocated
+
+
+def _source_identity(source, config):
+    """Select and hash only locked/candidate/research source, never Git or artifacts."""
+    signatures, total = {}, 0
+    names = set(config["locked_files"]) | set(CANDIDATE_FILES)
+    research = source / "research"
+    if research.is_symlink():
+        raise ProTokError("Research source cannot be a symlink")
+    if research.exists():
+        for path in research.rglob("*"):
+            if path.is_symlink():
+                raise ProTokError("Research source cannot contain symlinks")
+            if not path.is_dir():
+                names.add(str(path.relative_to(source)))
+    for name in sorted(names):
+        _relative(name)
+        path = source / name
+        if any(
+            parent.is_symlink()
+            for parent in [path, *path.parents]
+            if parent == source or source in parent.parents
+        ):
+            raise ProTokError("Frozen research source cannot contain symlinks")
+        if not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
+            raise ProTokError(
+                "Frozen research source contains a non-source/large artifact"
+            )
+        if path.suffix not in {
+            ".py",
+            ".json",
+            ".md",
+            ".txt",
+            ".csv",
+            ".sh",
+            ".toml",
+            ".yaml",
+            ".yml",
+        }:
+            raise ProTokError(
+                "Frozen research source must contain only small source files"
+            )
+        total += path.stat().st_size
+        if total > 32 * 1024 * 1024 or len(signatures) >= 1024:
+            raise ProTokError(
+                "Frozen research source exceeds its bounded source envelope"
+            )
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if name in config["locked_files"] and digest != config["locked_files"][name]:
+            raise ProTokError(
+                "Frozen locked source differs from canonical source: " + name
+            )
+        signatures[name] = digest
+    return hashlib.sha256(
+        json.dumps(signatures, sort_keys=True).encode()
+    ).hexdigest(), sorted(names)
+
+
+def _inputs(root, config, execution, iteration):
+    result = []
+    for item in execution["inputs"]:
+        source = item["source"]
+        provenance = {"source": source}
+        if source in {"hidden_cache", "targets"}:
+            path = config["cache_root" if source == "hidden_cache" else "target_root"]
+        elif source == "teacher":
+            path = _read(Path(config["template"]) / config["fixed_config"])[
+                "teacher_checkpoint"
+            ]
+        else:
+            match = re.fullmatch(r"checkpoint:([0-9]{4,}):([0-9]+)", source)
+            if not match or int(match[1]) >= int(iteration):
+                raise ProTokError(
+                    "Checkpoint inputs require an earlier published Study iteration"
+                )
+            source_id, step = match.groups()
+            folder = root / "study/iterations" / source_id
+            metadata = _read(folder / "iteration.json")
+            if (
+                metadata["status"] != "reviewed"
+                or not (folder / "publication.json").is_file()
+            ):
+                raise ProTokError("Checkpoint source has no published Review")
+            from integrations.protok.run import job_path
+
+            job = job_path(root, source_id)
+            record, receipt = _read(job / "job.json"), _read(job / "result.json")
+            identity = record["fingerprint"]
+            state = _read(
+                Path(config["records_root"])
+                / record.get("record_name", identity)
+                / "state.json"
+            )
+            summary = state.get("summary", {})
+            attempts = state.get("attempts", [])
+            if (
+                record["status"] != "completed"
+                or receipt.get("status") != "completed"
+                or receipt.get("fingerprint") != identity
+                or state.get("status") != "complete"
+                or state.get("fingerprint") != identity
+                or summary.get("protocol") != PROTOCOL
+                or summary.get("quality_score_eligible") is not True
+                or len(attempts) != 1
+            ):
+                raise ProTokError(
+                    "Checkpoint has no matching completed fixed-backend receipt"
+                )
+            attempt = attempts[0]
+            if (
+                attempt.get("seed") != 42
+                or attempt.get("terminal_state") != "COMPLETED"
+                or attempt.get("exit_code") != "0:0"
+                or type(attempt.get("gpu_seconds")) not in (int, float)
+                or not math.isfinite(attempt["gpu_seconds"])
+                or attempt["gpu_seconds"] < 0
+                or not re.fullmatch(
+                    r"[1-9][0-9]*", str(attempt.get("owned_job_id", ""))
+                )
+                or int(step) not in {0, 1000, 2000}
+            ):
+                raise ProTokError(
+                    "Checkpoint allocation or requested save step is unverified"
+                )
+            remote = attempt["remote"]
+            if not Path(remote).is_relative_to(Path(config["remote_root"])):
+                raise ProTokError(
+                    "Checkpoint remote path is outside the canonical experiment root"
+                )
+            path = remote + f"/train/checkpoint-step-{int(step)}.pt"
+            provenance.update(
+                iteration=source_id,
+                fingerprint=identity,
+                owned_job_id=attempt["owned_job_id"],
+                receipt=str(job / "result.json"),
+                step=int(step),
+            )
+        if (
+            not isinstance(path, str)
+            or not path.startswith("/")
+            or ".." in PurePosixPath(path).parts
+        ):
+            raise ProTokError("Research input must resolve to a trusted absolute path")
+        result.append(
+            {
+                **item,
+                "path": path,
+                "mount": "/inputs/" + item["name"],
+                "provenance": provenance,
+            }
+        )
+    return result
+
+
+def _input_metadata(fixed, config, inputs):
+    """One bounded root-manifest/stat read per input, no tensor/checkpoint reads."""
+    probe = f"""import json,os
+from pathlib import Path
+items={inputs!r}
+for item in items:
+ path=Path(item["path"]); info=path.stat()
+ item["metadata"]={{"size":info.st_size,"mtime_ns":info.st_mtime_ns,"ino":info.st_ino,"resolved_path":str(path.resolve())}}
+ if item["source"] in {{"hidden_cache","targets"}}:
+  if not path.is_dir(): raise ValueError("Configured cache is not a directory")
+  with (path/"manifest.json").open() as stream: text=stream.read(262145)
+  if len(text)>262144: raise ValueError("Cache root manifest exceeds 256 KiB")
+  manifest=json.loads(text);splits=manifest.get("splits",{{}})
+  if set(splits)-{{"train","val"}}: raise ValueError("Cache includes undeclared test/holdout splits")
+  if not manifest.get("identity") or manifest.get("complete") is not True: raise ValueError("Configured cache is incomplete or unidentified")
+  item["metadata"].update(identity=manifest["identity"],format=manifest.get("format"),splits={{name:meta.get("rows") for name,meta in splits.items()}},exposure="whole configured development cache; no final or holdout use")
+ elif not path.is_file(): raise ValueError("Model/checkpoint input is not a regular file")
+print(json.dumps(items))
+"""
+    result = json.loads(
+        fixed.ssh(
+            config, shlex.join([config["remote_python"], "-c", probe]), timeout=120
+        )
+    )
+    if len(result) != len(inputs) or any(
+        {k: v for k, v in item.items() if k != "metadata"} != original
+        for item, original in zip(result, inputs)
+    ):
+        raise ProTokError("Input metadata probe changed its admitted paths/roles")
+    return result
+
+
+def _launcher(config, remote, execution, inputs):
+    """Trusted launcher with an empty root and explicit read-only mounts."""
+    # The shell writes this generated Python launcher; no agent shell is evaluated.
+    prefix = "/data/user/hongruchen/projects/ProTok/.venv"
+    base = (
+        "/data/user/hongruchen/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu"
+    )
+    if config["remote_python"] != prefix + "/bin/python":
+        raise ProTokError(
+            "Research sandbox requires the verified existing Python environment"
+        )
+    mounts = [(p, p) for p in ("/usr", "/lib", "/lib64", "/bin", "/sys", prefix, base)]
+    mounts += [
+        (remote + "/code", "/workspace"),
+        (remote + "/inputs.json", "/inputs.json"),
+    ]
+    mounts += [(item["path"], item["mount"]) for item in inputs]
+    script = f"""import os,re,subprocess,sys
+visible=os.environ.get("CUDA_VISIBLE_DEVICES", "")
+if not visible or "," in visible: raise RuntimeError("Exactly one Slurm-assigned GPU is required")
+row=subprocess.check_output(["nvidia-smi","--query-gpu=index,uuid","--format=csv,noheader","-i",visible],text=True).strip().splitlines()
+if len(row)!=1: raise RuntimeError("GPU identity is ambiguous")
+index,uuid=[x.strip() for x in row[0].split(",")]
+if not re.fullmatch(r"[0-9]+",index) or not uuid.startswith("GPU-"): raise RuntimeError("Unsupported GPU identity")
+args=["/bin/bwrap","--unshare-user","--unshare-pid","--as-pid-1","--unshare-net","--unshare-ipc","--unshare-uts","--die-with-parent","--new-session","--cap-drop","ALL","--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/inputs"]
+for src,dst in {mounts!r}: args += ["--ro-bind",src,dst]
+if os.path.isfile("/etc/ld.so.cache"): args += ["--ro-bind","/etc/ld.so.cache","/etc/ld.so.cache"]
+args += ["--bind",{remote + "/output"!r},"/output"]
+for dev in ["/dev/nvidiactl","/dev/nvidia"+index,"/dev/nvidia-uvm","/dev/nvidia-uvm-tools"]:
+ if os.path.exists(dev): args += ["--dev-bind",dev,dev]
+for key,value in {{"HOME":"/tmp/home","PATH":"/usr/bin:/bin","TMPDIR":"/tmp","PYTHONPATH":"/workspace:/workspace/scripts","PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1","OMP_NUM_THREADS":"1","CUDA_VISIBLE_DEVICES":uuid,"TORCHINDUCTOR_CACHE_DIR":"/tmp/torch","TRITON_CACHE_DIR":"/tmp/triton"}}.items(): args += ["--setenv",key,value]
+args += ["--chdir","/output",{config["remote_python"]!r},"-B",{str(PurePosixPath("/workspace") / execution["entrypoint"])!r}]
+os.execve(args[0],args,{{"PATH":"/usr/bin:/bin"}})
+"""
+    return script
+
+
+def _batch(config, remote, execution, inputs, allocated):
+    launcher = _launcher(config, remote, execution, inputs)
+    directives = {
+        "partition": "debug",
+        "nodes": 1,
+        "ntasks": 1,
+        "gres": "gpu:1",
+        "cpus-per-task": config["cpus"],
+        "mem": config["mem"],
+        "time": f"00:{allocated // 60:02d}:00",
+        "output": remote + "/slurm.log",
+        "error": remote + "/slurm.log",
+        "chdir": remote,
+    }
+    if any(
+        not re.fullmatch(r"[A-Za-z0-9_./:+-]+", str(v)) for v in directives.values()
+    ):
+        raise ProTokError("Unsafe research Slurm directive")
+    return "\n".join(
+        [
+            "#!/bin/bash",
+            *[f"#SBATCH --{k}={v}" for k, v in directives.items()],
+            "set -euo pipefail",
+            "ulimit -f 16384",
+            "exec >" + shlex.quote(remote + "/run.log") + " 2>&1",
+            shlex.quote(config["remote_python"]) + " - <<'RESEARCH_LAUNCHER'",
+            launcher,
+            "RESEARCH_LAUNCHER",
+            "",
+        ]
+    )
+
+
+def _collect(fixed, config, remote, outputs, record):
+    collector = f"""import base64,json,os,stat
+from pathlib import Path
+root=Path({remote + "/output"!r}); result={{"files":[],"errors":[]}}; total=0
+for name in {outputs!r}:
+ try:
+  path=root/name
+  if any(p.is_symlink() for p in [path,*path.parents] if p==root or root in p.parents): raise ValueError("symlink output")
+  info=path.stat()
+  if not stat.S_ISREG(info.st_mode): raise ValueError("nonregular output")
+  total+=info.st_size
+  if total>{MAX_OUTPUT_BYTES}: raise ValueError("declared output total exceeds 16 MiB")
+  fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+  with os.fdopen(fd,"rb") as f: data=f.read(info.st_size+1)
+  if len(data)!=info.st_size: raise ValueError("output size changed")
+  result["files"].append({{"name":name,"data":base64.b64encode(data).decode()}})
+ except Exception as e: result["errors"].append(name+": "+str(e))
+try:
+ with open({remote + "/run.log"!r},"rb") as f:
+  f.seek(0,2); size=f.tell(); f.seek(max(0,size-{LOG_BYTES})); result["stdout_tail"]=base64.b64encode(f.read({LOG_BYTES})).decode()
+except OSError as e: result["stdout_tail"]="";result["errors"].append("stdout: "+str(e))
+print(json.dumps(result))
+"""
+    result = json.loads(
+        fixed.ssh(
+            config, shlex.join([config["remote_python"], "-c", collector]), timeout=120
+        )
+    )
+    destination = record / "artifacts"
+    destination.mkdir(exist_ok=True)
+    paths, total = [], 0
+    for item in result["files"]:
+        name = _relative(item["name"])
+        if name not in outputs:
+            raise ProTokError("Remote collector returned an undeclared artifact")
+        data = base64.b64decode(item["data"], validate=True)
+        total += len(data)
+        if total > MAX_OUTPUT_BYTES:
+            raise ProTokError("Remote research output exceeds collection cap")
+        path = destination / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        paths.append(str(path))
+    tail = base64.b64decode(result["stdout_tail"], validate=True)
+    if len(tail) > LOG_BYTES:
+        raise ProTokError("Remote stdout exceeds tail cap")
+    (record / "stdout-tail.log").write_bytes(tail)
+    return paths, result["errors"]
+
+
+def run_script(
+    backend,
+    *,
+    root,
+    iteration,
+    source,
+    execution,
+    deadline,
+    cancel_event=None,
+    recover=False,
+):
+    """Run one script allocation or reconcile its same owned Slurm job, never resubmit."""
+    root, source = Path(root).resolve(), Path(source).resolve()
+    if not re.fullmatch(r"[0-9]{4,}", iteration) or not isinstance(execution, dict):
+        raise ProTokError("Invalid research iteration/execution")
+    if type(deadline) not in (int, float) or not math.isfinite(deadline):
+        raise ProTokError("Finite original research deadline required")
+    control = root / "control"
+    policy = _read(control / "research-policy.json")
+    if (
+        policy.get("version") != 1
+        or not isinstance(policy.get("authorization"), str)
+        or not policy["authorization"].strip()
+        or type(policy.get("max_time_limit_seconds")) is not int
+    ):
+        raise ProTokError("Explicit version 1 research policy required")
+    allocated = _execution(execution, policy)
+    identity, source_names = _source_identity(source, backend._config())
+    if not (source / execution["entrypoint"]).is_file():
+        raise ProTokError("Research entrypoint missing from frozen source")
+    record = control / "research-jobs" / iteration
+    with (control / "protok.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        existing = (
+            _read(record / "job.json") if (record / "job.json").exists() else None
+        )
+        lease = _read(control / "continuation.json")
+        owner = _read(control / "ownership.json")
+        if existing:
+            if (
+                existing["source_identity"] != identity
+                or existing["execution"] != execution
+                or existing["deadline"] != deadline
+                or existing["policy"] != policy
+                or existing["owner"] != owner
+                or existing["continuation"] != lease
+            ):
+                raise ProTokError(
+                    "Retained research job identity/authorization changed"
+                )
+            if (record / "receipt.json").exists():
+                return _read(record / "receipt.json")
+            if not recover:
+                raise ProTokError(
+                    "Research submission has retained effects; recover the same job"
+                )
+            fixed, config = _load_backend(backend.project, lease)
+            config = fixed.load_config(backend.project / "autoresearch-run.json")
+            if config != existing["base_config"]:
+                raise ProTokError(
+                    "Research recovery configuration differs from its owned allocation"
+                )
+            state = _read(record / "state.json")
+            attempt = state["attempts"][0]
+            if attempt["status"] == "prepared":
+                raise ProTokError(
+                    "Recovery cannot submit a retained prepared research job"
+                )
+            inputs = existing["inputs"]
+        else:
+            if recover:
+                raise ProTokError("No retained research job to recover")
+            fixed, config, admitted = validate_continuation(
+                backend.project,
+                control,
+                backend.owner_token,
+                backend.project / "autoresearch-run.json",
+            )
+            if deadline > admitted["effective_deadline"]:
+                raise ProTokError("Research cannot extend the original lease")
+            status = backend.inspect()
+            spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
+            if (
+                status["outstanding"]
+                or status.get("research_outstanding")
+                or status.get("debug_outstanding")
+                or spent < 0
+                or spent + allocated + config["reserve_gpu_seconds"]
+                > lease["additional_gpu_seconds"]
+                or deadline - time.time() < allocated
+                or (cancel_event is not None and cancel_event.is_set())
+            ):
+                raise ProTokError(
+                    "Research allocation does not fit the original settled budget/deadline"
+                )
+            inputs = _inputs(root, config, execution, iteration)
+            inputs = _input_metadata(fixed, config, inputs)
+            execution_identity = hashlib.sha256(
+                json.dumps(
+                    {
+                        "source_identity": identity,
+                        "execution": execution,
+                        "inputs": inputs,
+                        "iteration": iteration,
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            remote = (
+                config["remote_root"]
+                + "/research-loop-scripts/"
+                + iteration
+                + "-"
+                + identity[:16]
+            )
+            _batch(
+                config, remote, execution, inputs, allocated
+            )  # Validate before publishing effects.
+            record.mkdir(parents=True)
+            existing = {
+                "purpose": "research",
+                "quality_score_eligible": False,
+                "source_identity": identity,
+                "execution_identity": execution_identity,
+                "iteration": iteration,
+                "execution": execution,
+                "gpu": True,
+                "allocated_seconds": allocated,
+                "status": "prepared",
+                "remote": remote,
+                "deadline": deadline,
+                "inputs": inputs,
+                "policy": policy,
+                "base_config": config,
+                "owner": owner,
+                "continuation": lease,
+            }
+            attempt = {
+                "seed": 42,
+                "directory": "allocation",
+                "mode": "research",
+                "budget_seconds": allocated,
+                "status": "prepared",
+                "remote": remote,
+            }
+            state = {"purpose": "research", "status": "prepared", "attempts": [attempt]}
+            _write(record / "job.json", existing)
+            _write(record / "state.json", state)
+        original_ssh = fixed.ssh
+        watching = True
+
+        def live():
+            if (
+                (control / "STOP").exists()
+                or time.time() >= deadline
+                or (cancel_event is not None and cancel_event.is_set())
+                or _read(control / "ownership.json") != owner
+                or _read(control / "continuation.json") != lease
+            ):
+                raise KeyboardInterrupt(
+                    "Research stopped or original lease changed/expired"
+                )
+
+        def ssh(config, command, **kwargs):
+            if watching and re.fullmatch(r"squeue -h -j [1-9][0-9]* -o %T", command):
+                live()
+            return original_ssh(config, command, **kwargs)
+
+        fixed.ssh = ssh
+        error, outputs = None, []
+        try:
+            if not recover:
+                live()
+                staging = record / "staging"
+                staging.mkdir()
+                (staging / "code").mkdir()
+                for name in source_names:
+                    destination = staging / "code" / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source / name, destination)
+                (staging / "code/autoresearch-se3.sbatch").write_text(
+                    _batch(config, existing["remote"], execution, inputs, allocated)
+                )
+                _write(
+                    staging / "inputs.json",
+                    {
+                        "inputs": inputs,
+                        "source_identity": identity,
+                        "purpose": "research",
+                        "execution_identity": existing["execution_identity"],
+                        "instructions": "Read each input through its mount field under /inputs; path is host provenance and is not a sandbox path. Configured full caches are exposed read-only only for declared development/exploratory use, never final evaluation.",
+                    },
+                )
+                fixed.ssh(
+                    config,
+                    "mkdir -p "
+                    + shlex.quote(str(Path(existing["remote"]).parent))
+                    + " && mkdir "
+                    + shlex.quote(existing["remote"])
+                    + " && mkdir "
+                    + shlex.quote(existing["remote"] + "/output"),
+                )
+                fixed.run(
+                    [
+                        "rsync",
+                        "-a",
+                        "-e",
+                        "ssh -o BatchMode=yes -o ClearAllForwardings=yes",
+                        str(staging) + "/",
+                        config["ssh_host"] + ":" + existing["remote"] + "/",
+                    ],
+                    timeout=600,
+                )
+                live()
+                if deadline - time.time() < allocated:
+                    raise ProTokError(
+                        "Staging exhausted the original allocation window"
+                    )
+                fixed.submit(config, record, state, attempt)
+            if attempt["status"] in {"submitting", "running"}:
+                watching = not recover
+                fixed.wait_for_job(
+                    config,
+                    {"deadline": min(deadline, time.time()) if recover else deadline},
+                    record,
+                    state,
+                    attempt,
+                )
+            if attempt["status"] not in {"finished", "complete"}:
+                raise ProTokError("Research allocation did not complete successfully")
+        except BaseException as failure:
+            error = f"{type(failure).__name__}: {failure}"
+            watching = False
+            if attempt["status"] in {"submitting", "running"}:
+                fixed.cancel_interrupted(config, record, state)
+                try:
+                    fixed.wait_for_job(
+                        config, {"deadline": time.time()}, record, state, attempt
+                    )
+                except BaseException as reconciliation:
+                    error += f"; reconciliation: {type(reconciliation).__name__}: {reconciliation}"
+        finally:
+            fixed.ssh = original_ssh
+        settled = all(
+            key in attempt
+            for key in ("gpu_seconds", "terminal_state", "exit_code", "owned_job_id")
+        )
+        unsubmitted = attempt["status"] == "prepared"
+        cpu_seconds = None
+        if settled:
+            try:
+                job_id = str(attempt["owned_job_id"])
+                if not re.fullmatch(r"[1-9][0-9]*", job_id):
+                    raise ProTokError("Invalid owned research job ID")
+                rows = (
+                    fixed.ssh(
+                        config,
+                        f"sacct -n -X -j {job_id} --format=JobIDRaw,CPUTimeRAW --parsable2",
+                    )
+                    .strip()
+                    .splitlines()
+                )
+                rows = [
+                    line.split("|") for line in rows if line.split("|", 1)[0] == job_id
+                ]
+                if (
+                    len(rows) != 1
+                    or len(rows[0]) < 2
+                    or not re.fullmatch(r"[0-9]+", rows[0][1])
+                ):
+                    raise ProTokError("Missing unambiguous allocated CPU accounting")
+                cpu_seconds = int(rows[0][1])
+            except Exception as cpu_accounting:
+                error = (
+                    error + "; " if error else ""
+                ) + f"CPU accounting: {cpu_accounting}"
+            try:
+                outputs, problems = _collect(
+                    fixed, config, existing["remote"], execution["outputs"], record
+                )
+                if problems:
+                    error = (error + "; " if error else "") + "; ".join(problems)
+            except Exception as collection:
+                error = (
+                    error + "; " if error else ""
+                ) + f"output collection: {collection}"
+        seconds = attempt.get("gpu_seconds", 0 if unsubmitted else None)
+        if seconds is not None and (
+            type(seconds) not in (int, float)
+            or not math.isfinite(seconds)
+            or seconds < 0
+            or int(seconds) != seconds
+        ):
+            settled, unsubmitted, seconds = False, False, None
+            error = (
+                error + "; " if error else ""
+            ) + "Invalid authoritative allocation accounting"
+        receipt = {
+            "purpose": "research",
+            "quality_score_eligible": False,
+            "status": "completed"
+            if settled and error is None
+            else "failed"
+            if settled or unsubmitted
+            else "blocked",
+            "source_identity": identity,
+            "execution_identity": existing["execution_identity"],
+            "iteration": iteration,
+            "gpu": True,
+            "allocated_seconds": allocated,
+            "gpu_seconds": int(seconds) if seconds is not None else None,
+            "cpu_seconds": cpu_seconds if settled else 0 if unsubmitted else None,
+            "cpu_accounting": "Slurm CPUTimeRAW allocated CPU-seconds; not process CPU utilization",
+            "owned_job_id": attempt.get("owned_job_id"),
+            "terminal_state": attempt.get("terminal_state"),
+            "exit_code": attempt.get("exit_code"),
+            "inputs": inputs,
+            "outputs": outputs,
+            "evidence": [
+                str(record / "job.json"),
+                str(record / "state.json"),
+                *(
+                    [str(record / "stdout-tail.log")]
+                    if (record / "stdout-tail.log").exists()
+                    else []
+                ),
+            ],
+            "error": error,
+        }
+        existing["status"] = receipt["status"]
+        _write(record / "job.json", existing)
+        _write(
+            record
+            / ("blocked.json" if receipt["status"] == "blocked" else "receipt.json"),
+            receipt,
+        )
+        return receipt

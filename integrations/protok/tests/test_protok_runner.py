@@ -290,9 +290,91 @@ class ProTokRunnerTests(unittest.TestCase):
             "artifacts": [],
             "measurements": [],
         }
-        RUNNER.local_incomplete(
+        diagnostic = RUNNER.local_incomplete(
             self.root, self.backend, self.workspace, "0002", response
         )
+        self.assertEqual(diagnostic["classification"], "unsubmitted-interruption")
+        self.assertEqual(self.backend.evaluations, 0)
+
+    def test_local_static_fault_requires_source_evidence_not_report_words(self):
+        response = {
+            "outcome": "incomplete",
+            "markdown": "SyntaxError: candidate failed its numerical check.",
+            "artifacts": [],
+            "measurements": [],
+        }
+        attempt = self.root / "study/iterations/0002/execute/attempt-001"
+        diagnostic = RUNNER.local_incomplete(
+            self.root,
+            self.backend,
+            self.workspace,
+            "0002",
+            response,
+            run_dir=attempt,
+        )
+        self.assertEqual(diagnostic["classification"], "unsubmitted-interruption")
+        self.assertIsNone(diagnostic["candidate_fault"])
+        self.assertEqual(diagnostic["attempt"], str(attempt))
+        self.assertEqual(diagnostic["source_signatures"], self.backend.initial)
+        for name, source, error_type in (
+            (CANDIDATE_FILES[0], "def broken(:\n", "SyntaxError"),
+            (CANDIDATE_FILES[2], '{"broken":', "JSONDecodeError"),
+        ):
+            with self.subTest(name=name):
+                path = self.workspace / name
+                original = path.read_bytes()
+                path.write_text(source)
+                with patch.object(
+                    RUNNER, "candidate_bytes", wraps=RUNNER.candidate_bytes
+                ) as read_source:
+                    diagnostic = RUNNER.local_incomplete(
+                        self.root, self.backend, self.workspace, "0002", response
+                    )
+                self.assertEqual(read_source.call_count, 1)
+                self.assertEqual(diagnostic["classification"], "candidate-fault")
+                self.assertEqual(diagnostic["candidate_fault"]["type"], error_type)
+                self.assertEqual(diagnostic["candidate_fault"]["path"], name)
+                path.write_bytes(original)
+        (self.workspace / CANDIDATE_FILES[2]).unlink()
+        diagnostic = RUNNER.local_incomplete(
+            self.root, self.backend, self.workspace, "0002", response
+        )
+        self.assertEqual(diagnostic["classification"], "unsubmitted-interruption")
+        self.assertIsNone(diagnostic["source_signatures"])
+        self.assertIn("small regular source file", diagnostic["source_error"])
+        self.assertEqual(self.backend.evaluations, 0)
+
+    def test_retained_incomplete_transport_receipt_is_not_accepted(self):
+        from research_loop.harness import publish_completed_response
+
+        response = {
+            "outcome": "incomplete",
+            "markdown": "linkat failed with ENOENT; no request was published.",
+            "artifacts": [],
+            "measurements": [],
+        }
+        iteration = self.workspace.parent.name
+        legacy = self.control / "diagnostics" / (iteration + ".json")
+        RUNNER.write(legacy, {"provenance": "local-preflight-rejection-no-evaluation"})
+        previous = legacy.read_bytes()
+        for number in (1, 2):
+            attempt = self.root / f"study/iterations/0002/execute/attempt-{number:03d}"
+            attempt.mkdir(parents=True)
+            publish_completed_response(attempt, response)
+            with self.assertRaisesRegex(HarnessError, "before submission"):
+                self.harness.validate_completed(
+                    response, workspace=self.workspace, run_dir=attempt
+                )
+            diagnostic = RUNNER.read(
+                self.control / "diagnostics" / iteration / (attempt.name + ".json")
+            )
+            self.assertEqual(diagnostic["classification"], "unsubmitted-interruption")
+            self.assertEqual(diagnostic["attempt"], str(attempt))
+        self.assertEqual(legacy.read_bytes(), previous)
+        self.assertEqual(
+            len(list((self.control / "diagnostics" / iteration).glob("*.json"))), 2
+        )
+        self.assertFalse((self.control / "jobs").exists())
         self.assertEqual(self.backend.evaluations, 0)
 
     def test_parent_interfaces_are_cleared_once_and_current_submission_is_retained(
@@ -802,13 +884,13 @@ class ProTokRunnerTests(unittest.TestCase):
                 workspace = Path(kwargs["workspace"])
                 if self.reject_locally:
                     (workspace / CANDIDATE_FILES[0]).write_text(
-                        "# rejected fixture candidate\n"
+                        "def rejected_fixture(:\n"
                     )
                     return {
                         "outcome": "incomplete",
                         "artifacts": [],
                         "measurements": [],
-                        "markdown": "Fixture tiny-gradient precheck failed; no measurement or GPU request; attribution unresolved.",
+                        "markdown": "Fixture static syntax precheck failed; no measurement or GPU request; attribution unresolved.",
                     }
                 RUNNER.write(
                     workspace / "evaluation-request.json", {"action": "import"}
@@ -956,6 +1038,127 @@ class ProTokRunnerTests(unittest.TestCase):
             [node["status"] for node in RUNNER.Study(self.root / "study").graph()],
             ["reviewed"] * 3,
         )
+
+    def test_unsubmitted_interruption_preserves_plan_then_retries_one_evaluation(self):
+        from research_loop.harness import completed_response
+
+        (self.project / "autoresearch-report.md").write_text("Historical best.\n")
+        RUNNER.git(self.project, "add", "--", "autoresearch-report.md")
+        RUNNER.git(
+            self.project,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "-m",
+            "Historical report",
+        )
+        (self.root / "study/study.json").unlink()
+        with patch.object(
+            RUNNER, "BEST_COMMIT", RUNNER.git(self.project, "rev-parse", "HEAD")
+        ):
+            RUNNER.init_study(self.root, self.backend)
+
+        class InterruptedHarness(RecordedHarness):
+            interrupt = True
+
+            def response(self, phase, context, kwargs):
+                if phase != "execute":
+                    return super().response(phase, context, kwargs)
+                workspace = Path(kwargs["workspace"])
+                iteration = workspace.parent.name
+                if iteration == "0002":
+                    (workspace / CANDIDATE_FILES[0]).write_text(
+                        "# valid intervention\n"
+                    )
+                    if self.interrupt:
+                        self.interrupt = False
+                        return {
+                            "outcome": "incomplete",
+                            "artifacts": [],
+                            "measurements": [],
+                            "markdown": "linkat failed with ENOENT before publication.",
+                        }
+                submit(
+                    workspace, action="import" if iteration == "0001" else "evaluate"
+                )
+                until = time.monotonic() + 5
+                while submission_status(workspace)["status"] not in {
+                    "completed",
+                    "failed",
+                }:
+                    if time.monotonic() >= until:
+                        raise AssertionError("No controlled backend result")
+                    time.sleep(0.01)
+                receipt = submit(
+                    workspace, action="import" if iteration == "0001" else "evaluate"
+                )["result"]
+                if receipt["status"] != "completed":
+                    raise AssertionError(receipt)
+                return {
+                    "outcome": "completed",
+                    "markdown": "Measured through the controlled submission API.",
+                    "artifacts": [receipt["artifact"]],
+                    "measurements": [
+                        {
+                            "candidate_id": receipt["fingerprint"],
+                            "artifact": receipt["artifact"],
+                            "evaluation_id": PROTOCOL,
+                            "comparison_scope": PROTOCOL,
+                            "metrics": [{"name": METRIC, "value": receipt["value"]}],
+                            "evidence": receipt["evidence"],
+                        }
+                    ],
+                }
+
+        delegate = InterruptedHarness()
+        delegate.stop_after = 2
+        study = RUNNER.Study(self.root / "study")
+        with patch.object(RUNNER, "CodexHarness", return_value=delegate):
+            RUNNER.run_one(self.root, self.backend)
+            delegate.base = "0001"
+            with self.assertRaisesRegex(HarnessError, "before submission"):
+                RUNNER.run_one(self.root, self.backend)
+            paused = study.status()
+            self.assertEqual(
+                (paused["iteration"], paused["phase"], paused["status"]),
+                (2, "execute", "needs_attention"),
+            )
+            attempt = study.root / paused["calls"]["execute"]
+            raw = completed_response(attempt / "agent")
+            self.assertIn("linkat", raw["markdown"])
+            self.assertIsNone(completed_response(attempt))
+            raw_bytes = (attempt / "agent/response.json").read_bytes()
+            plan_path = study.root / paused["plan_ref"]
+            plan_bytes = plan_path.read_bytes()
+            workspace = Path(
+                RUNNER.read(study.root / "iterations/0002/iteration.json")["workspace"]
+            )
+            self.assertEqual(submission_status(workspace)["status"], "not_submitted")
+            self.assertFalse((self.control / "jobs/0002").exists())
+            self.assertFalse((study.root / "iterations/0002/publication.json").exists())
+            self.assertEqual(delegate.count("review"), 1)
+            self.assertEqual(self.backend.evaluations, 0)
+            self.assertEqual(self.backend.inspect()["outstanding"], [])
+            diagnostic = RUNNER.read(
+                self.control / "diagnostics/0002" / (attempt.name + ".json")
+            )
+            self.assertEqual(diagnostic["classification"], "unsubmitted-interruption")
+            self.assertEqual(diagnostic["attempt"], str(attempt))
+            plan_count = delegate.count("plan")
+            retried = study.retry()
+            self.assertEqual((retried["iteration"], retried["phase"]), (2, "execute"))
+            self.assertNotIn("execute", retried["calls"])
+            (self.control / "STOP").unlink()
+            completed = RUNNER.run_one(self.root, self.backend)
+        self.assertEqual((completed["iteration"], completed["phase"]), (2, "done"))
+        self.assertEqual(delegate.count("plan"), plan_count)
+        self.assertEqual(delegate.count("review"), 2)
+        self.assertEqual(self.backend.evaluations, 1)
+        self.assertEqual(plan_path.read_bytes(), plan_bytes)
+        self.assertEqual((attempt / "agent/response.json").read_bytes(), raw_bytes)
+        self.assertTrue((study.root / "iterations/0002/publication.json").exists())
 
 
 if __name__ == "__main__":

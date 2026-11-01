@@ -235,6 +235,9 @@ class ProTokBackend:
             debug_used += seconds
             if budget.get("active_attempt") is not None:
                 debug_outstanding.append(str(path))
+        from integrations.protok.research_execution import research_usage
+
+        research = research_usage(self.control)
         return dict(
             project=str(self.project),
             protocol=PROTOCOL,
@@ -243,9 +246,12 @@ class ProTokBackend:
             record_count=len(states),
             records=receipts,
             scored_records=sum(s.get("mode") == "scored" for _, s in states),
-            used_gpu_seconds=used,
+            formal_gpu_seconds=used,
+            research_gpu_seconds=research["gpu_seconds"],
+            research_outstanding=research["outstanding"],
+            used_gpu_seconds=used + research["gpu_seconds"],
             debug_gpu_seconds=debug_used,
-            total_gpu_seconds=used + debug_used,
+            total_gpu_seconds=used + research["gpu_seconds"] + debug_used,
             debug_outstanding=debug_outstanding,
             outstanding=outstanding,
             off=(self.project / ".autoresearch-off").exists(),
@@ -405,6 +411,10 @@ class ProTokBackend:
                 )
             except (ValueError, RuntimeError, OSError) as error:
                 raise ProTokError(f"Continuation admission failed: {error}") from error
+        if status.get("research_outstanding"):
+            raise ProTokError(
+                "Research allocation must settle before formal evaluation"
+            )
         if status["outstanding"] and not (
             recover
             and (

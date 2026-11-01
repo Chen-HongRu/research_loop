@@ -34,17 +34,31 @@ A crash after claiming needs reconciliation; it never permits a second submissio
 The controller clears unchanged parent-checkpoint interfaces once before Execute,
 and retains all current-iteration submission evidence on reentry.
 
-For an explicitly authorized, published stop before any submission or job:
+An unsubmitted infrastructure interruption preserves the current investigation,
+accepted scientific Plan and candidate workspace. It does not enter Review as a
+scientific rejection. After explicit authorization and reconciliation:
 
 ```sh
 uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --resume-unsubmitted --authorization 'User authorized repair and continuation'
 uv run python integrations/protok/deploy_runtime.py --root RUN_ROOT --runtime RUNTIME --resume-submission
 ```
 
-Preparation retains STOP and immutable failure history. Deployment checks the
-matching preparation and HANDOFF; the next iteration inherits exactly the
-unmeasured candidate under an operator Plan, then receives an independent Review.
-Source identity is checked before allocation. Existing budget/deadline stay fixed.
+Preparation retains STOP and immutable per-attempt evidence. Deployment checks
+the matching preparation and HANDOFF. An unpublished Execute continues in the
+same iteration with only its unaccepted call pointer retired. An already published
+incomplete investigation receives an append-only execution continuation: its
+original scientific Plan and modified candidate checkpoint remain authoritative;
+the execution directive is recorded separately. Neither path samples another
+proposal, creates a Planner call, or resets usage/budgets/deadlines. Pending,
+accepted or unknown formal/debug/research effects block resubmission.
+
+Only a controller-confirmed syntax or candidate JSON error qualifies for a local
+candidate rejection. Valid or unverified source with no submission is retained as
+an interruption. Failure classification and explicit recovery validation inspect
+the three already-read candidate source files (about 18 KB for the current
+candidate; elapsed time unmeasured). They read no dataset or checkpoint and add no
+normal execution startup work. Published continuation refuses demonstrated static
+faults; same-iteration Execute may still repair its interrupted partial source.
 
 Run status with the correct project path from the existing ownership record:
 

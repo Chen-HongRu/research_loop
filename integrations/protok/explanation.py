@@ -19,10 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from integrations.protok.backend import CANDIDATE_FILES, METRIC
+from integrations.protok.plan_provenance import execution_plan
 from integrations.protok.run import job_path
 from research_loop.harness import CodexHarness, HarnessConfig, completed_response
 
 VERSION = "research-explanation-2"
+CONTINUATION_VERSION = VERSION + "-execution-continuation-1"
 MAX_FILE_BYTES = 96_000
 # Historical publication envelopes include frozen writes and reach ~130KB. This
 # metadata-only allowance does not apply to code, receipts, configs, or datasets.
@@ -108,6 +110,9 @@ PROMPT = """你是只读研究说明作者，面向懂神经网络但不熟悉�
 前后公式必须同时引用 actual_source 和 base_source 中可直接核对的 Python 代码。缺任何一侧则 formulas=[]，写明缺失。
 实际修改及技术前后状态必须引用实际代码或完成的 Execute/Review。流程必须引用实际代码。
 明确实际声明的 base_experiment，不能猜上一轮或最佳轮为对照。导入历史结果不能描述为本轮新训练。
+facts.continuation 存在时，plan_ref 是已接受且完成的原始科学 Plan，假说与计划中的代码修改属于 plan_iteration。
+execution_iteration 是中断后的执行续接记录；execution_directive 仅为操作授权与续接指令，不是新 Planner 调用或新假说。
+续接记录中的实际测量与 Review 属于该执行记录；不能仅因续接就声称提出了新假说或改变了候选方案。
 不得复述 RMSD、误差数值、百分比、分数或指标差值；它们由独立权威元数据面板呈现。
 含 RMSD、重建误差、评分或分数的句子不得出现数字；测量条件也由独立面板呈现。
 不得修改测量有效性或资格。facts 是控制器记录，不是你能重写的结论。
@@ -234,13 +239,72 @@ def collect_material(root, identity):
         add(folder / "context" / name, "frozen_context")
     if saved.get("selected"):
         add(folder / "publication.json", "selection", saved["selected"])
+    marked_continuation = "continuation" in meta or "operator_resume" in meta
+    proof_paths = []
+    continuation = (
+        execution_plan(root, identity, evidence_paths=proof_paths)
+        if marked_continuation
+        else None
+    )
+    # Repaired acceptance/completion proof must also invalidate a failed lookup.
+    stamps.extend(_stamp(root, root / relative) for relative in proof_paths)
+    if continuation is not None:
+        plan_directory = (root / continuation["plan_ref"]).parent
+        for relative in continuation["evidence_paths"]:
+            path = root / relative
+            if path.parent == plan_directory:
+                # The exact completed Plan is added below with its receipt bounds.
+                continue
+            if path.name == "publication.json":
+                proof = _json(root, path, MAX_PUBLICATION_BYTES)
+                if proof is not None:
+                    proof = {
+                        "metadata": proof.get("metadata"),
+                        "state_after": {
+                            key: proof.get("state_after", {}).get(key)
+                            for key in (
+                                "plan_ref",
+                                "selected",
+                                "calls",
+                                "accepted_calls",
+                            )
+                        },
+                    }
+                    add(path, "continuation_evidence", proof)
+                else:
+                    missing.append(relative)
+            else:
+                add(path, "continuation_evidence")
+        add(
+            folder / "iteration.json",
+            "execution_directive",
+            {
+                key: continuation[key]
+                for key in (
+                    "kind",
+                    "source_iteration",
+                    "target_iteration",
+                    "plan_iteration",
+                    "plan_ref",
+                    "authorization",
+                    "directive",
+                    "legacy",
+                )
+            },
+        )
     for key in ("plan_ref", "execution_ref", "review_ref"):
-        ref = saved.get(key)
+        inherited = key == "plan_ref" and continuation is not None
+        ref = (
+            continuation["plan_ref"].removeprefix("study/")
+            if inherited
+            else saved.get(key)
+        )
+        owner = continuation["plan_iteration"] if inherited else identity
         if (
             not isinstance(ref, str)
             or not re.fullmatch(
                 r"iterations/"
-                + re.escape(identity)
+                + re.escape(owner)
                 + r"/(?:plan|execute|review)/[A-Za-z0-9_./-]+/response.json",
                 ref,
             )
@@ -299,6 +363,24 @@ def collect_material(root, identity):
         or publication.get("created_at")
         or meta.get("created_at"),
     }
+    if marked_continuation:
+        facts.update(
+            plan_iteration=continuation["plan_iteration"] if continuation else None,
+            execution_iteration=identity,
+            continuation={
+                key: continuation[key]
+                for key in (
+                    "kind",
+                    "source_iteration",
+                    "target_iteration",
+                    "plan_iteration",
+                    "plan_ref",
+                    "legacy",
+                )
+            }
+            if continuation
+            else None,
+        )
     for c in eligible:
         value = c.get("metrics", {}).get(METRIC)
         if type(value) in (int, float) and math.isfinite(value):
@@ -403,7 +485,7 @@ def collect_material(root, identity):
     )
     # Hash configuration/stat tuples, never artifact contents.
     stamps.append(_stamp(root, root / "study/study.json"))
-    source_identity = _identity(stamps)
+    source_identity = _identity(stamps, continuation=marked_continuation)
     return {
         "published": True,
         "sources": sources,
@@ -419,10 +501,17 @@ def _cache(root, identity):
     return Path(root) / "presentation/explanations" / (_id(identity) + ".json")
 
 
-def _identity(dependencies):
+def _identity(dependencies, *, continuation=False):
     return hashlib.sha256(
         json.dumps(
-            [VERSION, "gpt-6.1-sol", "medium", TIMEOUT, dependencies], sort_keys=True
+            [
+                CONTINUATION_VERSION if continuation else VERSION,
+                "gpt-6.1-sol",
+                "medium",
+                TIMEOUT,
+                dependencies,
+            ],
+            sort_keys=True,
         ).encode()
     ).hexdigest()
 
@@ -455,13 +544,16 @@ def _writer_active(root, identity):
 
 
 def _cached_state(root, identity, *, writer_owned=False):
-    """Stat-only scientific invalidation; never reread source/config contents."""
+    """Stat source dependencies; read bounded metadata for continuation format."""
     cached = _json(root, _cache(root, identity)) or {}
     if not cached:
         return {"status": "pending", "source_identity": None}
+    meta = _json(root, root / "study/iterations" / identity / "iteration.json") or {}
+    marked_continuation = "continuation" in meta or "operator_resume" in meta
     deps = cached.get("dependencies", [])
     if not deps or _identity(
-        [_stamp(root, root / dep[0]) for dep in deps]
+        [_stamp(root, root / dep[0]) for dep in deps],
+        continuation=marked_continuation,
     ) != cached.get("source_identity"):
         return {
             "status": "stale",
@@ -566,7 +658,12 @@ def validate_content(content, material):
     _validate(content)
     sources = {s["id"]: s for s in material["sources"]}
     facts = material.get("facts", {})
-    known_ids = {facts.get("iteration"), facts.get("base_experiment")}
+    known_ids = {
+        facts.get("iteration"),
+        facts.get("base_experiment"),
+        facts.get("plan_iteration"),
+        (facts.get("continuation") or {}).get("source_iteration"),
+    }
     for source in sources.values():
         if source["kind"] in {"metadata", "base_metadata"}:
             try:
@@ -841,7 +938,8 @@ def generate_one(
                         [
                             _stamp(root, root / dep[0])
                             for dep in material["dependencies"]
-                        ]
+                        ],
+                        continuation="execution_iteration" in material["facts"],
                     )
                     != material["source_identity"]
                 ):

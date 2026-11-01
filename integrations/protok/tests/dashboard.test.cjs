@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {gitLayout, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {gitLayout, graphParent, drawGraph, renderProgress, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -40,6 +40,33 @@ test('Git rows follow time; tracks follow code parents, independently of routes 
 test('References and missing parents never create imaginary code nodes', () => {
   const graph = ui.gitLayout([{id:'0003',base:'0000',references:['0002']},{id:'0002',base:null}]);
   assert.deepEqual(Object.keys(graph.positions).sort(), ['0002','0003']);
+});
+
+test('Execution continuation follows retained source with a distinct edge and original Plan', () => {
+  const nodes=[{id:'0001',base:null,research_iteration:'0001'}, {id:'0002',base:null,continuation_of:'0001',research_iteration:'0001'}];
+  assert.equal(ui.graphParent(nodes[1]),'0001');
+  const graph=ui.gitLayout(nodes);
+  assert.equal(graph.positions['0002'].lane,graph.positions['0001'].lane);
+  context.continuationNodes=nodes;
+  vm.runInContext('data={nodes:continuationNodes};',context);
+  elements.get('routeFilter').value='';
+  elements.get('sourceFilter').value='';
+  document.getElementById('graph').querySelectorAll=()=>[];
+  ui.drawGraph();
+  assert.match(elements.get('graph').innerHTML,/stroke-dasharray="2 4"/);
+  assert.match(elements.get('graph').innerHTML,/执行续跑：#0001 → #0002；沿用研究 #0001 的 Plan/);
+  assert.doesNotMatch(elements.get('graph').innerHTML,/代码继承：#0001 → #0002/);
+  vm.runInContext('data=null;',context);
+});
+
+test('Continuation progress labels inherited planning without claiming another call', () => {
+  context.continuationProgress={state:{iteration:2,phase:'execute',status:'ready'},nodes:[{id:'active:0002',local_id:'0002',continuation_of:'active:0001',research_iteration:'active:0001'}],progress:{stages:[{key:'selection',status:'inherited',inherited_from:'0001',attempts:0},{key:'plan',status:'inherited',inherited_from:'0001',attempts:0}]}};
+  vm.runInContext('data=continuationProgress;',context);
+  ui.renderProgress();
+  assert.match(elements.get('currentSub').textContent,/执行续跑 · 沿用研究 #0001/);
+  assert.equal((elements.get('phases').innerHTML.match(/沿用 #0001 · 无新增调用/g)||[]).length,2);
+  assert.doesNotMatch(elements.get('phases').innerHTML,/0 次调用|1 次调用/);
+  vm.runInContext('data=null;',context);
 });
 
 test('Structured output is labeled prose, with links for exact code and evidence IDs', () => {
@@ -268,4 +295,16 @@ test('Operator recovery Plan keeps scientific origin and never masquerades as a 
   assert.match(pending,/恢复评测计划 · 操作员授权/);
   assert.match(pending,/本轮尚未发布/);
   assert.doesNotMatch(pending,/未提供可确认的 Agent 调用元数据/);
+});
+
+test('Proven continuation shows the original Planner contract and separates execution authorization', () => {
+  context.inheritedFixture={nodes:[{id:'history-1:0014',source_id:'history-1',label:'历史1 #0014'},{id:'history-1:0015',source_id:'history-1'}],sources:[{id:'history-1'}]};
+  vm.runInContext("data=inheritedFixture;selected='history-1:0015';detail={id:selected,source_id:'history-1'}",context);
+  const plan={kind:'execution_continuation',plan_iteration:'0014',source_iteration:'0014',target_iteration:'0015',plan_ref:'study/iterations/0014/plan/attempt-001/response.json',authorization:'Authorized <script>bad</script>',directive:'Submit preserved candidate',planner:{key:'plan-0',phase:'plan',role:'Planner',attempt:'attempt-001',status:'completed',accepted:true,published:true,output:{contract:{action:'Original controlled intervention',question:'Original research question'},markdown:'Original hypothesis'}}};
+  const rendered=ui.continuationPlanPanel(plan);
+  for(const text of ['沿用','原始 Plan','没有新增 Planner 调用','原调查已接纳的合同','原调查的调用回执，本次续跑不重复计数','Original controlled intervention','Original research question','Original hypothesis','本次续跑授权与执行指令','data-node="history-1:0014"']) assert.ok(rendered.includes(text),text);
+  assert.doesNotMatch(rendered,/<script>|恢复评测计划 · 操作员授权|未提供可确认的 Agent 调用元数据/);
+  const pending=ui.explanationPanel({id:'history-1:0015',explanation:{status:'unpublished'},plan_record:plan},{});
+  assert.match(pending,/阅读原始研究合同与 Planner 输出/);
+  assert.match(pending,/Original controlled intervention/);
 });

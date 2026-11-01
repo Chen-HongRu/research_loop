@@ -246,6 +246,155 @@ class AgentOutputTests(unittest.TestCase):
         receipt.unlink()
         self.assertIsNone(DASH.details(self.root, "0001")["plan_record"])
 
+    def continuation(self, *, legacy=False):
+        output = {
+            "decision": "investigate",
+            "base_experiment": None,
+            "contract": {"action": "Original scientific intervention"},
+            "markdown": "Original scientific question and controls",
+        }
+        attempt = self.attempt("plan/attempt-001", output)
+        plan_ref = attempt + "/response.json"
+        source_meta = {
+            "id": "0001",
+            "status": "reviewed",
+            "workspace_ref": "candidate-checkpoint",
+        }
+        self.put(self.prefix + "/iteration.json", source_meta)
+        self.put(
+            self.prefix + "/publication.json",
+            {
+                "metadata": source_meta,
+                "state_after": {
+                    "plan_ref": plan_ref,
+                    "calls": {"plan-0": attempt},
+                    "accepted_calls": {"plan-0": True},
+                },
+            },
+        )
+        marker = {
+            "source_iteration": "0001",
+            "source_workspace_ref": "candidate-checkpoint",
+            "authorization": "User authorized continuation",
+            "directive": "Submit retained candidate and collect actual receipt",
+            "plan_ref": plan_ref,
+        }
+        state = {
+            "iteration": 2,
+            "phase": "execute",
+            "status": "ready",
+            "plan_ref": plan_ref,
+        }
+        if legacy:
+            marker = {
+                "source_iteration": "0001",
+                "target_iteration": "0002",
+                "source_workspace_ref": "candidate-checkpoint",
+            }
+            state.update(
+                plan_ref="iterations/0002/operator-plan/response.json",
+                selected={"source": "operator"},
+            )
+            self.put(
+                "study/iterations/0002/operator-plan/operator.json",
+                {"source": "operator", "authorization": "User authorized", **marker},
+            )
+            self.put(
+                "study/iterations/0002/operator-plan/response.json",
+                {
+                    "decision": "investigate",
+                    "base_experiment": "0001",
+                    "contract": {"action": "Evaluate frozen source"},
+                    "markdown": "Retained execution instruction",
+                },
+            )
+        self.put(
+            "study/iterations/0002/iteration.json",
+            {
+                "id": "0002",
+                "status": "planned",
+                "base_experiment": "0001" if legacy else None,
+                "workspace_ref": "resumed-checkpoint",
+                "operator_resume" if legacy else "continuation": marker,
+            },
+        )
+        self.put("study/state.json", state)
+        return state, output
+
+    def test_continuation_displays_original_planner_without_new_call(self):
+        _, original_plan = self.continuation()
+        original = {
+            path: path.read_bytes() for path in (self.root / "study").rglob("*.json")
+        }
+        detail = DASH.details(self.root, "0002")
+        record = detail["plan_record"]
+        self.assertEqual(record["kind"], "execution_continuation")
+        self.assertEqual(record["plan_iteration"], "0001")
+        self.assertEqual(record["output"], original_plan)
+        self.assertEqual(record["planner"]["role"], "Planner")
+        self.assertTrue(record["planner"]["accepted"])
+        self.assertEqual(detail["plan"], original_plan["markdown"])
+        self.assertEqual(detail["sources"]["plan"], record["plan_ref"])
+        self.assertEqual(detail["agents"], [])
+        self.assertEqual(DASH.activity(detail["agents"])["attempts"], 0)
+        self.assertEqual({path: path.read_bytes() for path in original}, original)
+
+    def test_legacy_operator_record_resolves_original_scientific_plan(self):
+        self.continuation(legacy=True)
+        record = DASH.details(self.root, "0002")["plan_record"]
+        self.assertEqual(record["kind"], "execution_continuation")
+        self.assertTrue(record["legacy"])
+        self.assertEqual(record["source_iteration"], "0001")
+        self.assertEqual(
+            record["output"]["contract"]["action"], "Original scientific intervention"
+        )
+        self.assertEqual(record["directive"], "Retained execution instruction")
+
+    def test_continuation_edges_keep_scoped_research_identity(self):
+        self.continuation()
+        result = DASH.view_snapshot(self.root, snapshot_only=True)
+        node = next(n for n in result["nodes"] if n["local_id"] == "0002")
+        self.assertEqual(node["continuation_of"], "active:0001")
+        self.assertEqual(node["research_iteration"], "active:0001")
+        self.assertIn("续跑研究 #0001", node["label"])
+        self.assertEqual(node["agent_activity"]["attempts"], 0)
+        self.assertEqual(node["action"], "Original scientific intervention")
+        inherited = [
+            stage
+            for stage in result["progress"]["stages"]
+            if stage["key"] in {"selection", "plan"}
+        ]
+        self.assertEqual(len(inherited), 2)
+        for stage in inherited:
+            self.assertEqual(stage["status"], "inherited")
+            self.assertEqual(stage["inherited_from"], "0001")
+            self.assertEqual(stage["attempts"], 0)
+
+    def test_published_continuation_resolves_after_current_iteration_advances(self):
+        state, _ = self.continuation()
+        path = self.root / "study/iterations/0002/iteration.json"
+        meta = {**DASH.read(path), "status": "reviewed"}
+        self.put(str(path.relative_to(self.root)), meta)
+        self.put(
+            "study/iterations/0002/publication.json",
+            {"metadata": meta, "state_after": state},
+        )
+        self.put("study/state.json", {"iteration": 3, "phase": "selection"})
+        self.assertEqual(
+            DASH.details(self.root, "0002")["plan_record"]["plan_iteration"], "0001"
+        )
+
+    def test_invalid_continuation_does_not_promote_unaccepted_plan(self):
+        self.continuation()
+        source = self.root / self.prefix / "publication.json"
+        publication = DASH.read(source)
+        publication["state_after"]["accepted_calls"] = {}
+        self.put(str(source.relative_to(self.root)), publication)
+        self.assertIsNone(DASH.details(self.root, "0002")["plan_record"])
+        self.assertIsNone(
+            DASH.snapshot(self.root, snapshot_only=True)["nodes"][-1]["continuation_of"]
+        )
+
     def attempt(
         self,
         suffix,

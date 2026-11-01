@@ -39,6 +39,15 @@ function operatorPlanPanel(plan,compact=false) {
   body+=disclosure(key+'-source','授权与原始计划凭证','<p>'+esc(plan.authorization)+'</p><div class="source">'+esc(plan.source)+'<br>'+esc(plan.receipt_source)+'</div>'+markdown(plan.output?.markdown));
   return '<article class="agent-card"><div class="agent-header"><h3>恢复评测计划 · 操作员授权</h3>'+badge('计划已冻结采用','green')+'</div><div class="agent-provenance">此记录是恢复指令，不计为 Planner 调用。</div>'+body+'</article>';
 }
+function continuationPlanPanel(plan,compact=false) {
+  if(plan?.kind!=='execution_continuation') return operatorPlanPanel(plan,compact);
+  const key='continued-plan-'+plan.target_iteration;
+  const origin=experimentLink(plan.plan_iteration,'研究 #'+plan.plan_iteration);
+  const notice='<div class="notice"><strong>沿用 '+origin+' 的原始 Plan</strong><p>当前 #'+esc(plan.target_iteration)+' 是执行续跑记录，从 '+experimentLink(plan.source_iteration)+' 保留的候选源码继续。研究问题、合同与 Planner 输出均来自原调查，没有新增 Planner 调用。</p></div>';
+  const original=plan.planner ? agentCard({...plan.planner,inherited:true},0) : '<article class="agent-card"><h3>原始已接纳 Plan</h3>'+structured(plan.output)+'</article>';
+  const directive=disclosure(key+'-directive','本次续跑授权与执行指令','<p>'+esc(plan.authorization)+'</p>'+markdown(plan.directive)+'<div class="source">'+esc(plan.plan_ref)+'</div>');
+  return notice+(compact?disclosure(key+'-original','阅读原始研究合同与 Planner 输出',original):original)+directive;
+}
 function renderMath(latex,display=true) {
   try {
     return katex.renderToString(String(latex),{displayMode:display,throwOnError:true,trust:false,strict:'error',maxSize:15,maxExpand:500,output:'htmlAndMathml'});
@@ -95,9 +104,9 @@ function explanationPanel(record,node,source) {
   const coverage=explanationCoverage(source);
   if(explanation.status!=='ready' || !content) {
     const message={unpublished:'本轮还没有已发布的 Review。此处不会把计划写成已经得到的结论。',pending:'等待独立的说明作者读取冻结记录。可先展开原始 Plan 与 Review。',running:'说明作者正在读取本轮已发布材料；研究运行器不等待此任务。',failed:'该轮说明生成未完成；保留失败原因，原始研究记录仍可读取。',insufficient:'缺少足够的已完成评审证据，暂不能生成科学结论。',stale:'冻结材料已变化，旧说明暂不展示，等待独立重建。'}[explanation.status] || '说明暂不可用。';
-    return operatorPlanPanel(record.plan_record,true)+'<div class="explain-empty"><h3>'+esc(EXPLANATION_STATUS[explanation.status] || '说明暂不可用')+'</h3><p>'+esc(message)+'</p>'+(explanation.reason?'<p class="source">'+esc(explanation.reason)+'</p>':'')+'</div>'+explanationMeasurements(record,node)+coverage;
+    return continuationPlanPanel(record.plan_record,true)+'<div class="explain-empty"><h3>'+esc(EXPLANATION_STATUS[explanation.status] || '说明暂不可用')+'</h3><p>'+esc(message)+'</p>'+(explanation.reason?'<p class="source">'+esc(explanation.reason)+'</p>':'')+'</div>'+explanationMeasurements(record,node)+coverage;
   }
-  let html='<div class="reading-toolbar" aria-label="研究说明阅读方式"><button data-reading-mode="steps" class="'+(state.mode==='steps'?'on':'')+'" aria-pressed="'+(state.mode==='steps')+'">逐步讲解</button><button data-reading-mode="brief" class="'+(state.mode==='brief'?'on':'')+'" aria-pressed="'+(state.mode==='brief')+'">30 秒简报</button><small>已发布材料的独立说明 · '+esc(clock(explanation.generated_at))+'</small></div>';
+  let html=continuationPlanPanel(record.plan_record,true)+'<div class="reading-toolbar" aria-label="研究说明阅读方式"><button data-reading-mode="steps" class="'+(state.mode==='steps'?'on':'')+'" aria-pressed="'+(state.mode==='steps')+'">逐步讲解</button><button data-reading-mode="brief" class="'+(state.mode==='brief'?'on':'')+'" aria-pressed="'+(state.mode==='brief')+'">30 秒简报</button><small>已发布材料的独立说明 · '+esc(clock(explanation.generated_at))+'</small></div>';
   if(state.mode==='steps') html+='<div class="reading-steps" role="group" aria-label="讲解步骤">'+READING_STEPS.map((label,i)=>'<button data-reading-step="'+i+'" class="'+(state.step===i?'on':'')+'" aria-current="'+(state.step===i?'step':'false')+'"><b>'+String(i+1).padStart(2,'0')+'</b>'+label+'</button>').join('')+'</div>';
   const section=(title,body)=>'<section class="explain-section"><h3>'+esc(title)+'</h3>'+body+'</section>';
   const goalSource=explanation.sources?.find(s=>s.id===explanation.facts?.goal_source);

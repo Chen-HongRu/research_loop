@@ -1,4 +1,4 @@
-"""Audited continuation of a published, unsubmitted candidate in a new iteration."""
+"""Audited continuation of an unsubmitted Execute with its original scientific Plan."""
 
 from __future__ import annotations
 
@@ -11,12 +11,19 @@ from pathlib import Path
 
 from research_loop import Study
 from research_loop.protocol import validate_response
+from research_loop.submission import INTERFACE_FILES, LOCK, status as submission_status
 
-from integrations.protok.backend import CANDIDATE_FILES, ProTokError
+from integrations.protok.backend import ProTokError
+
+PUBLISHED_EXECUTION_DIRECTIVE = (
+    "Use the controller-provided target workspace and retained source checkpoint. "
+    "Candidate source is frozen: do not reapply the original scientific changes or "
+    "follow old workspace paths embedded in the original Plan. Submit once through "
+    "the controller submission API and collect the actual receipt for independent Review."
+)
 
 
 def _runner():
-    # The runner imports this module at its continuation boundary.
     from integrations.protok import run
 
     return run
@@ -44,7 +51,11 @@ def _budget(root, backend, study):
             "Resume requires the original active lease and allocation window"
         )
     status = backend.inspect()
-    if status["outstanding"] or status.get("debug_outstanding"):
+    if (
+        status["outstanding"]
+        or status.get("debug_outstanding")
+        or status.get("research_outstanding")
+    ):
         raise ProTokError("Outstanding or unknown evaluation effects prevent resume")
     spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
     allowance = lease["additional_gpu_seconds"]
@@ -74,6 +85,16 @@ def _budget(root, backend, study):
         raise ProTokError("Original Study iteration budget exhausted")
 
 
+def _mode(record):
+    return record.get("mode", "published_continuation")
+
+
+def _prepared_state(record):
+    if "prepared_state" in record:
+        return record["prepared_state"]
+    return {**record["state_before"], "status": "ready", "stop_reason": None}
+
+
 def _identity(root, record):
     run = _runner()
     source = root / "study/iterations" / record["source_iteration"]
@@ -81,33 +102,53 @@ def _identity(root, record):
     if metadata["workspace_ref"] != record["source_workspace_ref"]:
         raise ProTokError("Source candidate version changed")
     workspace = Path(metadata["workspace"])
-    contents = run.candidate_bytes(workspace)
-    for name, content in contents.items():
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(workspace),
-                "show",
-                f"{metadata['workspace_ref']}:{name}",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        if result.stdout != content:
-            raise ProTokError("Candidate differs from its published Git version")
+    contents = run.check_scope(
+        workspace,
+        run.read(root / "study/study.json")["baseline"],
+        allow_research=run.research_policy(root) is not None,
+    )
+    if _mode(record) != "same_iteration":
+        try:
+            fault = run.static_candidate_fault(contents)
+        except (UnicodeError, ValueError) as error:
+            raise ProTokError(
+                "Published candidate static parsing is unverified"
+            ) from error
+        if fault is not None:
+            raise ProTokError(
+                "Published candidate has a static source fault and cannot resume unchanged: "
+                + fault["path"]
+                + " ("
+                + fault["type"]
+                + ")"
+            )
+        for name, content in contents.items():
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(workspace),
+                    "show",
+                    f"{metadata['workspace_ref']}:{name}",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            if result.stdout != content:
+                raise ProTokError("Candidate differs from its published Git version")
     if run.signatures(contents) != record["source_signatures"]:
         raise ProTokError("Source candidate identity changed")
-    for name in (
-        "evaluation-request.json",
-        "evaluation-result.json",
-        "evaluation-submission.json",
-    ):
+    if run.git(workspace, "rev-parse", "HEAD") != record["source_workspace_ref"]:
+        raise ProTokError("Source workspace HEAD changed")
+    for name in INTERFACE_FILES - {LOCK}:
         path = workspace / name
         if path.exists() or path.is_symlink():
             raise ProTokError("Source has a retained submission/request/result")
-    if (root / "control/jobs" / record["source_iteration"]).exists():
-        raise ProTokError("Source already has an evaluation job")
+    if submission_status(workspace)["status"] != "not_submitted":
+        raise ProTokError("Source submission is not confirmed not_submitted")
+    for namespace in ("jobs", "debug"):
+        if (root / "control" / namespace / record["source_iteration"]).exists():
+            raise ProTokError("Source already has an evaluation job or debug effects")
 
 
 def _unchanged(root, record):
@@ -115,6 +156,136 @@ def _unchanged(root, record):
         if (root / name).read_text() != text:
             raise ProTokError("Protected protocol, history or budget changed: " + name)
     _identity(root, record)
+
+
+def _original_plan(study, source_id):
+    """Follow published legacy operator continuations to the accepted research Plan."""
+    run = _runner()
+    current = source_id
+    while True:
+        folder = study.root / "iterations" / current
+        metadata = run.read(folder / "iteration.json")
+        publication = folder / "publication.json"
+        state = (
+            run.read(publication)["state_after"]
+            if publication.exists()
+            else study.status()
+        )
+        continuation = metadata.get("continuation")
+        legacy = metadata.get("operator_resume")
+        if continuation:
+            plan_ref = continuation["plan_ref"]
+            break
+        if legacy:
+            parent = legacy["source_iteration"]
+            if not parent.isdigit() or not 1 <= int(parent) < int(current):
+                raise ProTokError("Invalid legacy continuation parent")
+            parent_folder = study.root / "iterations" / parent
+            parent_publication = run.read(parent_folder / "publication.json")
+            parent_metadata = run.read(parent_folder / "iteration.json")
+            parent_state = parent_publication["state_after"]
+            if parent_publication[
+                "metadata"
+            ] != parent_metadata or not parent_state.get("accepted_calls", {}).get(
+                "execute"
+            ):
+                raise ProTokError(
+                    "Legacy continuation parent is not a matching publication"
+                )
+            parent_execute = run.read(study.root / parent_state["execution_ref"])
+            if (
+                parent_execute.get("outcome") != "incomplete"
+                or parent_execute.get("artifacts") != []
+                or parent_execute.get("measurements") != []
+                or legacy.get("source_workspace_ref", parent_metadata["workspace_ref"])
+                != parent_metadata["workspace_ref"]
+            ):
+                raise ProTokError(
+                    "Legacy parent is not the unchanged unmeasured source"
+                )
+            current = parent
+            continue
+        plan_ref = state["plan_ref"]
+        break
+    path = Path(plan_ref)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or len(path.parts) < 4
+        or path.parts[0] != "iterations"
+        or not path.parts[1].isdigit()
+        or not 1 <= int(path.parts[1]) <= int(source_id)
+    ):
+        raise ProTokError("Invalid original Plan reference")
+    owner = study.root / "iterations" / path.parts[1]
+    publication = owner / "publication.json"
+    if publication.exists():
+        published = run.read(publication)
+        owner_state = published["state_after"]
+        if published["metadata"] != run.read(owner / "iteration.json"):
+            raise ProTokError("Original Plan publication changed")
+    elif path.parts[1] == source_id:
+        owner_state = study.status()
+    else:
+        raise ProTokError("Original Plan owner is not published")
+    if owner_state.get("plan_ref") != plan_ref or not any(
+        key.startswith("plan-")
+        and str(Path(call) / "response.json") == plan_ref
+        and owner_state.get("accepted_calls", {}).get(key)
+        for key, call in owner_state["calls"].items()
+    ):
+        raise ProTokError("Original Plan is not an accepted scientific Plan")
+    plan = run.read(study.root / plan_ref)
+    validate_response("plan", plan)
+    if plan["decision"] != "investigate":
+        raise ProTokError("Resume requires an investigating original Plan")
+    current_config = run.read(study.root / "study.json")
+    original_config = run.read(owner / "context/study.before.json")
+    if (
+        {
+            key: value
+            for key, value in current_config.items()
+            if key != "research_execution"
+        }
+        != {
+            key: value
+            for key, value in original_config.items()
+            if key != "research_execution"
+        }
+        or study.config != current_config
+        or (study.root / "goal.md").read_bytes()
+        != (owner / "context/goal.md").read_bytes()
+    ):
+        raise ProTokError("Original frozen scientific protocol changed")
+    return plan_ref
+
+
+def _same_iteration(state, folder):
+    return (
+        state["phase"] == "execute"
+        and state["status"] in {"needs_attention", "running"}
+        and not state.get("accepted_calls", {}).get("execute")
+        and not (folder / "publication.json").exists()
+    )
+
+
+def _published_source(run, state, folder, metadata):
+    publication = run.read(folder / "publication.json")
+    if (
+        (state["status"], state["phase"], state.get("stop_reason"))
+        != ("stopped", "done", "review")
+        or metadata["status"] != "reviewed"
+        or publication["metadata"] != metadata
+        or {
+            k: v
+            for k, v in publication["state_after"].items()
+            if k != "elapsed_seconds"
+        }
+        != {k: v for k, v in state.items() if k != "elapsed_seconds"}
+        or state["elapsed_seconds"] < publication["state_after"]["elapsed_seconds"]
+        or not state.get("accepted_calls", {}).get("execute")
+    ):
+        raise ProTokError("Source Review publication does not match the stopped state")
 
 
 def validate_prepared(root, backend):
@@ -126,7 +297,7 @@ def validate_prepared(root, backend):
     if pending != {**record, "status": "prepared"}:
         raise ProTokError("Resume preparation differs from immutable evidence")
     study = Study(root / "study")
-    expected = {**record["state_before"], "status": "ready", "stop_reason": None}
+    expected = _prepared_state(record)
     if study.status() != expected:
         raise ProTokError("Prepared live state changed")
     stop = root / "control/STOP"
@@ -144,7 +315,7 @@ def validate_prepared(root, backend):
 
 
 def prepare_resume(root, backend, *, authorization: str):
-    """Prepare a new investigation; never reopen or rewrite the published source."""
+    """Retire an unaccepted Execute or prepare an immutable published continuation."""
     run = _runner()
     root = Path(root).resolve()
     if not authorization.strip():
@@ -159,60 +330,75 @@ def prepare_resume(root, backend, *, authorization: str):
         for lock in (supervisor, runner):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         pending_path = control / "resume-submission.json"
+        state = study.status()
+        source_id = f"{state['iteration']:04d}"
+        folder = study.root / "iterations" / source_id
+        record = None
         if pending_path.exists():
             pending = run.read(pending_path)
-            if pending["authorization"] != authorization:
-                raise ProTokError("An existing resume authorization cannot be replaced")
-            if pending.get("status") == "begun":
-                raise ProTokError("Resume has already begun; use the normal runner")
-            record = run.read(Path(pending["reconciliation"]))
-        else:
-            state = study.status()
-            if (state["status"], state["phase"], state.get("stop_reason")) != (
-                "stopped",
-                "done",
-                "review",
+            saved = run.read(Path(pending["reconciliation"]))
+            if pending != {**saved, "status": pending.get("status")} or pending.get(
+                "status"
+            ) not in {"prepared", "begun"}:
+                raise ProTokError("Invalid pending resume evidence")
+            if pending["status"] == "prepared":
+                if pending["authorization"] != authorization:
+                    raise ProTokError(
+                        "An existing resume authorization cannot be replaced"
+                    )
+                record = saved
+            elif not (
+                _same_iteration(state, folder)
+                and state["calls"].get("execute") != saved.get("source_attempt")
+            ) and not (
+                state["status"] == "stopped"
+                and state["phase"] == "done"
+                and source_id != saved["source_iteration"]
             ):
-                raise ProTokError("Only a published Review stop can resume submission")
-            source_id = f"{state['iteration']:04d}"
-            folder = study.root / "iterations" / source_id
+                return pending
+        if record is None:
             metadata = run.read(folder / "iteration.json")
-            publication = run.read(folder / "publication.json")
-            if (
-                metadata["status"] != "reviewed"
-                or {
-                    k: v
-                    for k, v in publication["state_after"].items()
-                    if k != "elapsed_seconds"
-                }
-                != {k: v for k, v in state.items() if k != "elapsed_seconds"}
-                or state["elapsed_seconds"]
-                < publication["state_after"]["elapsed_seconds"]
-            ):
-                raise ProTokError(
-                    "Source Review publication does not match the stopped state"
-                )
-            if not state.get("accepted_calls", {}).get("execute"):
-                raise ProTokError("Source Execute was not accepted")
-            execute = run.read(study.root / state["execution_ref"])
-            review = run.read(study.root / state["review_ref"])
-            if (
-                execute["outcome"] != "incomplete"
-                or execute["artifacts"]
-                or execute["measurements"]
-                or review["decision"] != "stop"
-            ):
-                raise ProTokError(
-                    "Source must be a reviewed, unmeasured incomplete Execute"
-                )
+            same = _same_iteration(state, folder)
+            if state.get("debugging"):
+                raise ProTokError("Active debug recovery prevents unsubmitted resume")
+            if same:
+                attempt = state["calls"].get("execute")
+                if not attempt or state.get("active_attempt") not in (None, attempt):
+                    raise ProTokError(
+                        "Unaccepted Execute attempt identity is unresolved"
+                    )
+                if state.get("execution_ref") not in (
+                    None,
+                    str(Path(attempt) / "response.json"),
+                ):
+                    raise ProTokError(
+                        "Unaccepted Execute response identity is unresolved"
+                    )
+                mode = "same_iteration"
+                evidence_name = f"resume-execute-{source_id}-{Path(attempt).name}.json"
+            else:
+                _published_source(run, state, folder, metadata)
+                execute = run.read(study.root / state["execution_ref"])
+                review = run.read(study.root / state["review_ref"])
+                if (
+                    execute["outcome"] != "incomplete"
+                    or execute["artifacts"]
+                    or execute["measurements"]
+                    or review["decision"] != "stop"
+                ):
+                    raise ProTokError(
+                        "Source must be a reviewed, unmeasured incomplete Execute"
+                    )
+                attempt = state["calls"]["execute"]
+                mode = "published_continuation"
+                evidence_name = f"resume-submission-{source_id}.json"
             for relative in state["calls"].values():
                 study._check_attempt_stopped(study.root / relative)
             stop = control / "STOP"
             if not stop.exists():
                 raise ProTokError("Explicit STOP is required while preparing resume")
-            evidence = (
-                control / "reconciliations" / f"resume-submission-{source_id}.json"
-            )
+            evidence = control / "reconciliations" / evidence_name
+            plan_ref = _original_plan(study, source_id)
             names = [
                 "control/ownership.json",
                 "control/continuation.json",
@@ -234,19 +420,49 @@ def prepare_resume(root, backend, *, authorization: str):
             names += [
                 str((study.root / state[key]).relative_to(root))
                 for key in ("plan_ref", "execution_ref", "review_ref")
+                if state.get(key)
             ]
+            names.append(str((study.root / plan_ref).relative_to(root)))
+            names += [
+                str((study.root / attempt / name).relative_to(root))
+                for name in (
+                    "context.json",
+                    "process.json",
+                    "response.json",
+                    "agent/process.json",
+                    "agent/response.json",
+                )
+                if (study.root / attempt / name).exists()
+            ]
+            prepared = copy.deepcopy(state)
+            prepared.update(status="ready", stop_reason=None)
+            if same:
+                prepared["calls"].pop("execute", None)
+                prepared.get("accepted_calls", {}).pop("execute", None)
+                prepared.update(active_attempt=None, error=None, execution_ref=None)
             record = {
                 "source": "operator",
+                "mode": mode,
                 "authorization": authorization,
                 "source_iteration": source_id,
-                "target_iteration": f"{state['iteration'] + 1:04d}",
+                "target_iteration": source_id
+                if same
+                else f"{state['iteration'] + 1:04d}",
+                "source_attempt": attempt,
                 "source_workspace_ref": metadata["workspace_ref"],
                 "source_signatures": run.signatures(
                     run.candidate_bytes(metadata["workspace"])
                 ),
+                "plan_ref": plan_ref,
+                "directive": (
+                    "Resume the original unsubmitted Execute using the controller submission API; retain its scientific Plan and collect the actual receipt for independent Review."
+                    if same
+                    else PUBLISHED_EXECUTION_DIRECTIVE
+                ),
                 "route_id": metadata["route_id"],
                 "route_title": metadata["route_title"],
                 "state_before": state,
+                "prepared_state": prepared,
                 "stop_before": stop.read_text(),
                 "runner_before": run.read(control / "runner.json"),
                 "protected": {name: (root / name).read_text() for name in names},
@@ -258,7 +474,7 @@ def prepare_resume(root, backend, *, authorization: str):
             run.write(pending_path, {**record, "status": "prepared"})
         _unchanged(root, record)
         _budget(root, backend, study)
-        expected = {**record["state_before"], "status": "ready", "stop_reason": None}
+        expected = _prepared_state(record)
         if study.status() not in (record["state_before"], expected):
             raise ProTokError("Live state changed during resume preparation")
         stop = control / "STOP"
@@ -279,7 +495,7 @@ def prepare_resume(root, backend, *, authorization: str):
 
 
 def begin_pending(study, backend):
-    """Create the next frozen operator Plan after runner admission (runner lock held)."""
+    """Start only the prepared execution boundary; never ask for another Plan."""
     run = _runner()
     root = study.root.parent
     path = root / "control/resume-submission.json"
@@ -293,121 +509,53 @@ def begin_pending(study, backend):
         ) not in {"prepared", "begun"}:
             raise ProTokError("Invalid pending resume evidence")
         state = study.status()
-        target = int(record["target_iteration"])
         if pending["status"] == "begun":
-            if state["iteration"] < target:
+            if state["iteration"] < int(record["target_iteration"]):
                 raise ProTokError("Begun resume lost its target iteration")
             return
         _unchanged(root, record)
         _budget(root, backend, study)
         if (root / "control/STOP").exists():
             raise ProTokError("Resume STOP must be cleared by deployment")
-        marker = {
-            key: record[key]
-            for key in (
-                "source_iteration",
-                "target_iteration",
-                "source_workspace_ref",
-                "source_signatures",
-                "reconciliation",
-            )
-        }
-        if (
-            state["iteration"] == target - 1
-            and state["phase"] == "done"
-            and state["status"] == "ready"
-        ):
-            expected = {
-                **record["state_before"],
-                "status": "ready",
-                "stop_reason": None,
-            }
-            if state != expected:
+        if _mode(record) == "same_iteration":
+            if state != _prepared_state(record):
                 raise ProTokError("Prepared live state changed before beginning resume")
-            study._begin(state)
-        if (
-            state["iteration"] != target
-            or state["status"] != "ready"
-            or state["phase"] not in {"selection", "execute"}
-        ):
-            raise ProTokError("Resume target is not at the expected Plan boundary")
-        folder = study._folder(state)
-        metadata = run.read(folder / "iteration.json")
-        if metadata.get("operator_resume", marker) != marker:
-            raise ProTokError("Conflicting resume target metadata")
-        metadata["operator_resume"] = marker
-        run.write(folder / "iteration.json", metadata)
-        if state["phase"] == "selection":
-            message = (
-                f"Operator-authorized first fixed-protocol evaluation of the unchanged candidate from {record['source_iteration']}. "
-                "The source remains an unmeasured incomplete investigation. Do not edit candidate source or change protocol. "
-                "Submit using the runtime evaluation API, collect its actual receipt, then request independent Review. "
-                "No experimental success or model call is asserted by this operator Plan."
-            )
-            plan = copy.deepcopy(
-                run.read(study.root / record["state_before"]["plan_ref"])
-            )
-            plan.update(
-                decision="investigate",
-                markdown=message,
-                base_experiment=record["source_iteration"],
-                references=[record["source_iteration"]],
-                input_artifacts=[
-                    {
-                        "path": str(
-                            Path(
-                                run.read(
-                                    root
-                                    / "study/iterations"
-                                    / record["source_iteration"]
-                                    / "iteration.json"
-                                )["workspace"]
-                            )
-                            / name
-                        ),
-                        "version": record["source_workspace_ref"],
-                    }
-                    for name in CANDIDATE_FILES
-                ],
-                stop_reason=None,
-            )
-            plan["contract"].update(action=message, rationale=message)
-            validate_response("plan", plan)
-            receipt_dir = folder / "operator-plan"
-            receipt_dir.mkdir(exist_ok=True)
-            run.immutable_record(
-                receipt_dir / "operator.json",
-                {
-                    "source": "operator",
-                    **marker,
-                    "authorization": record["authorization"],
-                },
-            )
-            run.immutable_record(receipt_dir / "response.json", plan)
-            proposal = {
-                "route_id": record["route_id"],
-                "route_title": record["route_title"],
-                "action": message,
-                "base_experiment": record["source_iteration"],
-                "references": [record["source_iteration"]],
-                "markdown": message,
+        else:
+            continuation = {
+                key: record[key]
+                for key in (
+                    "source_iteration",
+                    "source_workspace_ref",
+                    "source_signatures",
+                    "authorization",
+                    "reconciliation",
+                )
             }
-            state["selected"] = {
-                "source": "operator",
-                "proposal": proposal,
-                "judge": {"source": "operator", "action": message},
-            }
-            state["calls"][f"plan-{state['selection_round']}"] = str(
-                receipt_dir.relative_to(study.root)
+            continuation.update(
+                plan_ref=record.get("plan_ref")
+                or _original_plan(study, record["source_iteration"]),
+                directive=record.get(
+                    "directive",
+                    PUBLISHED_EXECUTION_DIRECTIVE,
+                ),
             )
-            study._save(state)
-            study._accept_plan(state, folder, plan)
-        workspace = Path(run.read(folder / "iteration.json")["workspace"])
-        if (
-            run.signatures(run.candidate_bytes(workspace))
-            != record["source_signatures"]
-        ):
-            raise ProTokError(
-                "Resume target source differs from the authorized candidate"
+            if state["iteration"] == int(
+                record["source_iteration"]
+            ) and state != _prepared_state(record):
+                raise ProTokError("Prepared live state changed before beginning resume")
+            study._continue_execution(
+                state,
+                source_iteration=record["source_iteration"],
+                continuation=continuation,
             )
+            workspace = Path(
+                run.read(study._folder(study.status()) / "iteration.json")["workspace"]
+            )
+            if (
+                run.signatures(run.candidate_bytes(workspace))
+                != record["source_signatures"]
+            ):
+                raise ProTokError(
+                    "Resume target source differs from the authorized candidate"
+                )
         run.write(path, {**record, "status": "begun"})

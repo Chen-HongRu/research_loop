@@ -95,6 +95,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         git,
         immutable_record,
         read,
+        research_policy,
         signatures,
         write,
     )
@@ -126,7 +127,8 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
     debug.mkdir(parents=True, exist_ok=True)
     budget = DebugBudget(debug, scope_id=iteration, limit_gpu_seconds=1800)
     baseline = read(root / "study/study.json")["baseline"]
-    check_scope(workspace, baseline)
+    allow_research = research_policy(root) is not None
+    check_scope(workspace, baseline, allow_research=allow_research)
     _no_interface(workspace, failure.get("submission"))
     immutable_record(debug / "failure.json", failure)
     flow_path = debug / "flow.json"
@@ -160,12 +162,13 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         write(flow_path, state)
 
     def finish(reason, result=None):
-        check_scope(workspace, baseline)
+        check_scope(workspace, baseline, allow_research=allow_research)
         _no_interface(workspace, failure.get("submission"))
         accounting = budget.status()
         if accounting["active_attempt"] is not None or accounting["breached"]:
             raise HarnessError("Cannot finish with unresolved debug accounting")
-        if harness.backend.inspect()["outstanding"]:
+        effects = harness.backend.inspect()
+        if effects["outstanding"] or effects.get("research_outstanding"):
             raise HarnessError("Cannot finish with unresolved formal effects")
         if result is None:
             result = {
@@ -198,7 +201,13 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         if not source.exists():
             if temporary.exists():
                 shutil.rmtree(temporary)
-            freeze_source(harness.backend.project, workspace, temporary, baseline)
+            freeze_source(
+                harness.backend.project,
+                workspace,
+                temporary,
+                baseline,
+                allow_research=allow_research,
+            )
             temporary.rename(source)
         expected = signatures(candidate_bytes(workspace))
         if signatures(candidate_bytes(source)) != expected:
@@ -207,7 +216,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         return git(source, "rev-parse", "HEAD"), expected, prepared
 
     while True:
-        check_scope(workspace, baseline)
+        check_scope(workspace, baseline, allow_research=allow_research)
         _no_interface(workspace, failure.get("submission"))
         pending = (state["phase"] == "smoke" and state.get("smoke_submitted")) or (
             state["phase"] == "formal" and state.get("formal_submitted")
@@ -268,14 +277,14 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                     _RepairDelegate(harness.delegate, root, state["deadline"]),
                 )
             except HarnessError as error:
-                check_scope(workspace, baseline)
+                check_scope(workspace, baseline, allow_research=allow_research)
                 _no_interface(workspace, failure.get("submission"))
                 for attempt in directory.glob("attempt-*"):
                     _stopped(attempt, read)
                 return finish(
                     "repair Agent failed without known external effects: " + str(error)
                 )
-            check_scope(workspace, baseline)
+            check_scope(workspace, baseline, allow_research=allow_research)
             _no_interface(workspace, failure.get("submission"))
             changed = signatures(candidate_bytes(workspace))
             if changed == state["failed_signatures"]:

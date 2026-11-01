@@ -2,6 +2,7 @@
 
 import copy
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -133,6 +134,314 @@ class ExplanationTests(unittest.TestCase):
         (self.root / (self.prefix + "execute/attempt-001/process.json")).unlink()
         material = ex.collect_material(self.root, "0001")
         self.assertNotIn("execution_ref", {s["kind"] for s in material["sources"]})
+
+    def test_ordinary_material_preserves_historical_cache_identity(self):
+        with patch.object(ex, "execution_plan") as resolver:
+            material = ex.collect_material(self.root, "0001")
+            resolver.assert_not_called()
+        paths = [
+            self.prefix + "iteration.json",
+            self.prefix + "publication.json",
+            self.prefix + "context/goal.md",
+            self.prefix + "context/study.before.json",
+            self.prefix + "context/route.before.md",
+        ]
+        for phase in ("plan", "execute", "review"):
+            folder = self.prefix + phase + "/attempt-001/"
+            paths.extend(
+                folder + name
+                for name in (
+                    "response.json",
+                    "completed.json",
+                    "process.json",
+                    "response.json",
+                )
+            )
+        paths.extend(
+            (
+                self.prefix + "candidates.json",
+                "control/jobs/0001/recovery.json",
+                "control/jobs/0001/result.json",
+            )
+        )
+        paths.extend("control/jobs/0001/source/" + name for name in CANDIDATE_FILES)
+        paths.append("study/study.json")
+        root = self.root.resolve()
+        dependencies = [ex._stamp(root, root / path) for path in paths]
+        expected = hashlib.sha256(
+            json.dumps(
+                [
+                    "research-explanation-2",
+                    "gpt-6.1-sol",
+                    "medium",
+                    240,
+                    dependencies,
+                ],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(material["dependencies"], dependencies)
+        self.assertEqual(material["source_identity"], expected)
+        for key in ("plan_iteration", "execution_iteration", "continuation"):
+            self.assertNotIn(key, material["facts"])
+
+    def continuation(self, *, legacy=False):
+        original = {
+            "decision": "investigate",
+            "contract": {"question": "original hypothesis"},
+        }
+        self.put(self.prefix + "plan/attempt-001/response.json", original)
+        source_meta = json.loads(
+            (self.root / (self.prefix + "iteration.json")).read_text()
+        )
+        source_meta["workspace_ref"] = "iterations/0001/workspace"
+        self.put(self.prefix + "iteration.json", source_meta)
+        source_publication = json.loads(
+            (self.root / (self.prefix + "publication.json")).read_text()
+        )
+        source_publication["metadata"] = source_meta
+        state = source_publication["state_after"]
+        state["calls"] = {"plan-001": "iterations/0001/plan/attempt-001"}
+        state["accepted_calls"] = {"plan-001": True}
+        self.put(self.prefix + "publication.json", source_publication)
+        marker = {
+            "source_iteration": "0001",
+            "target_iteration": "0002",
+            "source_workspace_ref": source_meta["workspace_ref"],
+        }
+        target = "study/iterations/0002/"
+        target_state = {}
+        if legacy:
+            target_state["plan_ref"] = "iterations/0002/operator-plan/response.json"
+            target_state["selected"] = {"source": "operator"}
+            self.put(
+                target + "operator-plan/operator.json",
+                {
+                    **marker,
+                    "source": "operator",
+                    "authorization": "resume authorized",
+                },
+            )
+            self.put(
+                target + "operator-plan/response.json",
+                {
+                    "decision": "investigate",
+                    "base_experiment": "0001",
+                    "contract": {},
+                    "markdown": "continue execution",
+                },
+            )
+        else:
+            marker.update(
+                plan_ref=state["plan_ref"],
+                authorization="resume authorized",
+                directive="continue execution",
+            )
+            target_state["plan_ref"] = state["plan_ref"]
+        metadata = {
+            "id": "0002",
+            "status": "reviewed",
+            "base_experiment": None,
+            "operator_resume" if legacy else "continuation": marker,
+        }
+        self.put(target + "iteration.json", metadata)
+        for phase, key in (("execute", "execution_ref"), ("review", "review_ref")):
+            ref = f"iterations/0002/{phase}/attempt-001/response.json"
+            self.put("study/" + ref, {"markdown": "resumed " + phase})
+            self.put(
+                str(Path("study/" + ref).parent / "process.json"),
+                {"status": "succeeded"},
+            )
+            target_state[key] = ref
+        self.put(
+            target + "publication.json",
+            {"metadata": metadata, "state_after": target_state},
+        )
+        return original
+
+    def test_inherited_plan_new_and_legacy_are_original_completed_evidence(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                original = self.continuation(legacy=legacy)
+                with patch.object(ex, "CodexHarness") as harness:
+                    material = ex.collect_material(self.root, "0002")
+                    harness.assert_not_called()
+                plans = [s for s in material["sources"] if s["kind"] == "plan_ref"]
+                self.assertEqual(len(plans), 1)
+                self.assertEqual(
+                    plans[0]["path"], self.prefix + "plan/attempt-001/response.json"
+                )
+                self.assertEqual(json.loads(plans[0]["text"]), original)
+                self.assertEqual(material["facts"]["plan_iteration"], "0001")
+                self.assertEqual(material["facts"]["execution_iteration"], "0002")
+                self.assertEqual(material["facts"]["continuation"]["legacy"], legacy)
+                directives = [
+                    s for s in material["sources"] if s["kind"] == "execution_directive"
+                ]
+                self.assertEqual(
+                    json.loads(directives[0]["text"])["directive"], "continue execution"
+                )
+                self.assertIn(
+                    "continuation_evidence", {s["kind"] for s in material["sources"]}
+                )
+                self.assertNotIn("plan_ref", material["missing_material"])
+
+    def test_inherited_plan_requires_matching_accepted_and_completed_reference(self):
+        for invalid in ("mismatch", "unaccepted", "incomplete"):
+            with self.subTest(invalid=invalid):
+                self.continuation()
+                if invalid == "mismatch":
+                    path = "study/iterations/0002/publication.json"
+                    value = json.loads((self.root / path).read_text())
+                    value["state_after"]["plan_ref"] = (
+                        "iterations/0001/plan/attempt-002/response.json"
+                    )
+                elif invalid == "unaccepted":
+                    path = self.prefix + "publication.json"
+                    value = json.loads((self.root / path).read_text())
+                    value["state_after"]["accepted_calls"]["plan-001"] = False
+                else:
+                    path = self.prefix + "plan/attempt-001/process.json"
+                    value = {"status": "interrupted"}
+                self.put(path, value)
+                material = ex.collect_material(self.root, "0002")
+                self.assertNotIn("plan_ref", {s["kind"] for s in material["sources"]})
+                self.assertIsNone(material["facts"]["continuation"])
+                self.assertIn("plan_ref", material["missing_material"])
+
+    def test_inherited_plan_receipt_retains_small_file_bound(self):
+        original = self.continuation()
+        original["markdown"] = "x" * ex.MAX_FILE_BYTES
+        self.put(self.prefix + "plan/attempt-001/response.json", original)
+        material = ex.collect_material(self.root, "0002")
+        self.assertNotIn("plan_ref", {s["kind"] for s in material["sources"]})
+        self.assertIn("plan_ref", material["missing_material"])
+        self.assertLessEqual(
+            sum(len(s["text"].encode()) for s in material["sources"]),
+            ex.MAX_TOTAL_BYTES,
+        )
+
+    def test_repaired_original_acceptance_invalidates_rejected_continuation_cache(self):
+        self.continuation()
+        path = self.root / (self.prefix + "publication.json")
+        publication = json.loads(path.read_text())
+        publication["state_after"]["accepted_calls"]["plan-001"] = False
+        path.write_text(json.dumps(publication))
+        material = ex.collect_material(self.root, "0002")
+        self.assertIsNone(material["facts"]["continuation"])
+        ex._write(
+            ex._cache(self.root, "0002"),
+            {
+                "status": "ready",
+                "source_identity": material["source_identity"],
+                "dependencies": material["dependencies"],
+            },
+        )
+        self.assertEqual(
+            ex._cached_state(self.root.resolve(), "0002")["status"], "ready"
+        )
+        publication["state_after"]["accepted_calls"]["plan-001"] = True
+        path.write_text(json.dumps(publication))
+        self.assertEqual(
+            ex._cached_state(self.root.resolve(), "0002")["status"], "stale"
+        )
+        repaired = ex.collect_material(self.root, "0002")
+        self.assertEqual(repaired["facts"]["plan_iteration"], "0001")
+        self.assertIn("plan_ref", {s["kind"] for s in repaired["sources"]})
+
+    def test_old_legacy_cache_is_recollected_without_invalidating_ordinary_cache(self):
+        harness = Mock()
+        harness.run.return_value = self.content()
+        ex.generate_one(self.root, "0001", harness=harness)
+        self.assertEqual(ex.explanation_status(self.root, "0001")["status"], "ready")
+        self.continuation(legacy=True)
+        # The old collector saw the operator marker but used only local refs and
+        # the ordinary v2 token; it had no inherited Plan proof dependencies.
+        with patch.object(ex, "execution_plan", return_value=None):
+            old_material = ex.collect_material(self.root, "0002")
+        old_identity = ex._identity(old_material["dependencies"])
+        old_material["source_identity"] = old_identity
+        for key in ("plan_iteration", "execution_iteration", "continuation"):
+            old_material["facts"].pop(key)
+        ex._write(ex._material_path(self.root, "0002", old_identity), old_material)
+        material = ex.collect_material(self.root, "0002")
+        review_id = next(
+            s["id"] for s in material["sources"] if s["kind"] == "review_ref"
+        )
+        content = self.content()
+        for field in ("overview", "question", "goal_connection", "change"):
+            content[field]["source_ids"] = [review_id]
+        for field in ("before", "after"):
+            content["technical"][field]["source_ids"] = [review_id]
+        for status in ("ready", "insufficient"):
+            with self.subTest(status=status):
+                ex._write(
+                    ex._cache(self.root, "0002"),
+                    {
+                        "status": status,
+                        "source_identity": old_identity,
+                        "dependencies": old_material["dependencies"],
+                    },
+                )
+                self.assertEqual(
+                    ex.explanation_status(self.root, "0002")["status"], "stale"
+                )
+                harness = Mock()
+                harness.run.return_value = content
+                with patch.object(
+                    ex, "collect_material", wraps=ex.collect_material
+                ) as collect:
+                    result = ex.generate_one(self.root, "0002", harness=harness)
+                    collect.assert_called_once_with(self.root.resolve(), "0002")
+                self.assertEqual(result["status"], "ready")
+                self.assertEqual(result["source_identity"], material["source_identity"])
+                self.assertNotEqual(result["source_identity"], old_identity)
+                harness.run.assert_called_once()
+
+    def test_every_continuation_proof_dependency_invalidates_cached_material(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                self.continuation(legacy=legacy)
+                material = ex.collect_material(self.root, "0002")
+                proof = ex.execution_plan(self.root, "0002")
+                dependencies = {
+                    str((self.root / dep[0]).resolve().relative_to(self.root.resolve()))
+                    for dep in material["dependencies"]
+                }
+                self.assertTrue(set(proof["evidence_paths"]) <= dependencies)
+                for relative in proof["evidence_paths"]:
+                    with self.subTest(path=relative):
+                        ex._write(
+                            ex._cache(self.root, "0002"),
+                            {
+                                "status": "ready",
+                                "source_identity": material["source_identity"],
+                                "dependencies": material["dependencies"],
+                            },
+                        )
+                        self.assertEqual(
+                            ex._cached_state(self.root.resolve(), "0002")["status"],
+                            "ready",
+                        )
+                        path = self.root / relative
+                        if path.exists():
+                            stat = path.stat()
+                            os.utime(
+                                path,
+                                ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000),
+                            )
+                            self.assertEqual(
+                                ex._cached_state(self.root.resolve(), "0002")["status"],
+                                "stale",
+                            )
+                            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                        else:
+                            self.put(relative, {})
+                            self.assertEqual(
+                                ex._cached_state(self.root.resolve(), "0002")["status"],
+                                "stale",
+                            )
+                            path.unlink()
 
     def test_numeric_authority_import_and_incompatible(self):
         material = ex.collect_material(self.root, "0001")

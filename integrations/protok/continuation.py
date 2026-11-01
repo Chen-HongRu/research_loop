@@ -308,6 +308,7 @@ def install_hooks(
     validate_poll=None,
     recover=False,
     fresh_attempt=None,
+    control_dir=None,
 ):
     """Install narrow hooks; backend.evaluate acquires its original global lock."""
     fresh_attempt = _fresh_id(fresh_attempt)
@@ -453,6 +454,15 @@ def install_hooks(
             if not _finite_number(now) or deadline - now < bound:
                 raise RuntimeError("Insufficient wall deadline for whole allocation")
             used = backend.used_gpu_seconds(record_root)
+            from integrations.protok.research_execution import research_usage
+
+            research = research_usage(control_dir) if control_dir is not None else None
+            if research is not None:
+                if research["outstanding"]:
+                    raise RuntimeError(
+                        "Unsettled research allocation prevents formal submission"
+                    )
+                used += research["gpu_seconds"]
             if not _finite_number(used) or used < accounted:
                 raise RuntimeError("Cumulative GPU accounting decreased below anchor")
             accounted = used
@@ -555,6 +565,7 @@ def launch(
         validate_poll=lambda: validate_lease(receipt_recovery=False),
         recover=recover,
         fresh_attempt=fresh_attempt,
+        control_dir=control_dir,
     )
     return backend.main(["--config", str(config_path), "--evaluate"])
 
