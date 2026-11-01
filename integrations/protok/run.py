@@ -991,6 +991,10 @@ def run_one(root, backend):
             "iteration_before": read(Path(root) / "study/state.json")["iteration"],
         }
         write(control / "runner.json", record)
+        write(
+            control / "status.json",
+            {**record, "phase": read(Path(root) / "study/state.json")["phase"]},
+        )
         try:
             state = _run_one(root, backend)
             record.update(

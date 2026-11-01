@@ -74,12 +74,36 @@ def _live(control, owner_token, deadline):
 
 
 def bounded_smoke_script(original, config, remote, seed, seconds):
-    """Retain native smoke/trainer/gates; amend only allocation/time receipt caps.
+    """Use the formal preflight gates without the setup-only baseline test suite.
 
     Slurm rounds time limits to whole minutes, so admission supplies a whole-minute
     bound no larger than the remaining debug grant or original wall window.
     """
     script = original(config, remote, seed, smoke_only=True, include_smoke=False)
+    focused = [
+        line
+        for line in script.splitlines()
+        if line.endswith(" " + shlex.quote(remote + "/focused-tests.json"))
+    ]
+    if len(focused) != 1:
+        raise ValueError("Pinned native setup test layout changed")
+    command = shlex.split(focused[0])
+    if (
+        len(command) != 4
+        or command[:2] != [config["remote_python"], "-c"]
+        or not all(
+            name in command[2]
+            for name in (
+                "unittest",
+                "test_autoresearch_se3_model.py",
+                "test_autoresearch_se3_training.py",
+            )
+        )
+    ):
+        raise ValueError("Pinned native setup test command changed")
+    # This suite compares against the original three-layer initialization. The
+    # formal protocol permits architecture changes and does not run this suite.
+    script = script.replace(focused[0] + "\n", "")
     hours, rest = divmod(seconds, 3600)
     minutes, seconds_part = divmod(rest, 60)
     directive = "#SBATCH --time=00:30:00"
@@ -89,6 +113,91 @@ def bounded_smoke_script(original, config, remote, seed, seconds):
     return script.replace(
         directive, f"#SBATCH --time={hours:02d}:{minutes:02d}:{seconds_part:02d}"
     ).replace(wall, f" {seconds} " + shlex.quote(remote + "/wall-time.json"))
+
+
+def collect_smoke(backend, config, record, attempt):
+    """Collect the native smoke artifacts without inventing a setup-test pass."""
+    root = record / attempt["directory"] / "artifacts"
+    names = [
+        "wall-time.json",
+        "gpu-utilization.csv",
+        "smoke/completion.json",
+        "smoke/startup.json",
+        "smoke/config.json",
+        "smoke/args.json",
+        "smoke/candidate_config.json",
+        "smoke/convergence.json",
+        "smoke/train.csv",
+        "smoke/smoke-validation/step-3/eval.csv",
+        "smoke/gate-initial.json",
+        "smoke/gate-final.json",
+    ]
+    if config["compile"]:
+        names.append("smoke/compile-parity.json")
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            backend.ssh(config, "cat " + shlex.quote(attempt["remote"] + "/" + name))
+        )
+    backend.collect_logs(config, record, attempt)
+
+
+def summarize_smoke(backend, config, record, attempt):
+    """Apply the native formal preflight's wall, real-update and gate contract.
+
+    Debug reads the canonical inputs; formal still performs its own input staging
+    and smoke in a fresh allocation. No debug checkpoint or metric is reused.
+    """
+    root = record / attempt["directory"] / "artifacts"
+    wall = read(root / "wall-time.json")
+    elapsed = wall.get("elapsed_seconds")
+    if (
+        wall.get("status") != "complete"
+        or wall.get("budget_seconds") != attempt["budget_seconds"]
+        or type(elapsed) not in (int, float)
+        or not math.isfinite(elapsed)
+        or not 0 < elapsed <= attempt["budget_seconds"]
+    ):
+        raise ValueError("Allocation did not complete within the per-seed cap")
+    smoke = read(root / "smoke/completion.json")
+    if (
+        smoke.get("status") != "smoke_complete"
+        or smoke.get("optimizer_step") != 3
+        or smoke.get("quality_score_eligible") is not False
+    ):
+        raise ValueError("Missing ineligible three-update real smoke receipt")
+    backend.gate_check(root, "smoke/gate-initial.json", attempt["seed"], 0)
+    backend.gate_check(root, "smoke/gate-final.json", attempt["seed"], 3)
+    if config["compile"]:
+        parity = read(root / "smoke/compile-parity.json")
+        expected = dict(
+            status="pass",
+            protocol=backend.PROTOCOL,
+            seed=attempt["seed"],
+            optimizer_step=3,
+            proteins=2,
+            k=4,
+            training_and_evaluation_outputs_checked=True,
+            declared_loss_checked=True,
+            active_parameter_gradients_checked=True,
+            rng_reset=True,
+            weights_updated=False,
+            compile_boundary="torch.compile(model, dynamic=True)",
+        )
+        if any(parity.get(key) != value for key, value in expected.items()):
+            raise ValueError("Missing successful trained compile-parity gate")
+    return dict(
+        seed=attempt["seed"],
+        mode="smoke",
+        check_scope="formal_preflight",
+        quality_score_eligible=False,
+        completion=smoke,
+        startup=read(root / "smoke/startup.json"),
+        performance=backend.gpu_utilization(root / "gpu-utilization.csv"),
+        gpu_seconds=attempt["gpu_seconds"],
+        artifacts=str(root),
+    )
 
 
 def _last_exception(text):
@@ -391,8 +500,8 @@ def run_debug(
                 )
             if attempt["status"] not in {"finished", "complete"}:
                 raise RuntimeError("Debug allocation failed or remains unreconciled")
-            backend.collect(operational, record, attempt)
-            summary = backend.summarize_seed(operational, record, attempt)
+            collect_smoke(backend, operational, record, attempt)
+            summary = summarize_smoke(backend, operational, record, attempt)
             if summary.get("quality_score_eligible") is not False:
                 raise ValueError("Debug smoke must not be quality-score eligible")
             if backend.fingerprint(config, backend.source_boundary(config)) != identity:

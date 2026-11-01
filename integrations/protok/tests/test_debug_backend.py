@@ -1,12 +1,15 @@
 import hashlib
 import fcntl
 from pathlib import Path
+import shlex
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from integrations.protok import debug_backend as debug
+from integrations.protok.backend import PROTOCOL
 from research_loop.debug_budget import DebugBudget
 
 
@@ -85,8 +88,16 @@ class FakeNative:
     @staticmethod
     def batch_script(config, remote, seed, *, smoke_only, include_smoke):
         assert smoke_only and not include_smoke
+        focused = shlex.join(
+            [
+                config["remote_python"],
+                "-c",
+                "unittest test_autoresearch_se3_model.py test_autoresearch_se3_training.py",
+                remote + "/focused-tests.json",
+            ]
+        )
         return (
-            "#!/bin/bash\n#SBATCH --time=00:30:00\n"
+            "#!/bin/bash\n#SBATCH --time=00:30:00\n" + focused + "\n"
             "python scripts/train_autoresearch_se3.py --smoke --no-compile --check-compiled\n"
             f"python write-wall.py 1800 {remote}/wall-time.json\n"
         )
@@ -172,6 +183,7 @@ class DebugBackendTests(unittest.TestCase):
             "remote_root": "/remote/formal",
             "compile": True,
             "time_limit": "00:30:00",
+            "remote_python": "python",
         }
         self.config_path = self.control / "runtime.json"
         debug.write(self.config_path, self.config)
@@ -223,6 +235,20 @@ class DebugBackendTests(unittest.TestCase):
         load.start()
         self.addCleanup(validate.stop)
         self.addCleanup(load.stop)
+        collect = patch.object(
+            debug,
+            "collect_smoke",
+            side_effect=lambda native, *args: native.collect(*args),
+        )
+        summarize = patch.object(
+            debug,
+            "summarize_smoke",
+            side_effect=lambda native, *args: native.summarize_seed(*args),
+        )
+        collect.start()
+        summarize.start()
+        self.addCleanup(collect.stop)
+        self.addCleanup(summarize.stop)
 
     def run_attempt(self, name="debug-1", *, recover=False):
         return debug.run_debug(
@@ -479,6 +505,175 @@ class DebugBackendTests(unittest.TestCase):
                 recover=True,
             )
         self.assertEqual(self.scheduler.commands.count("sbatch"), 1)
+
+
+class FormalPreflightTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.record = Path(temporary.name)
+        self.attempt = {
+            "seed": 42,
+            "directory": "seed-42-attempt-1",
+            "budget_seconds": 1740,
+            "gpu_seconds": 60,
+            "remote": "/remote/debug",
+        }
+        self.root = self.record / self.attempt["directory"] / "artifacts"
+        self.config = {"compile": True, "remote_python": "python"}
+        self.native = SimpleNamespace(
+            PROTOCOL=PROTOCOL,
+            gate_check=Mock(),
+            gpu_utilization=Mock(return_value={"gpu_utilization_samples": 12}),
+        )
+        debug.write(
+            self.root / "wall-time.json",
+            {"status": "complete", "elapsed_seconds": 58.0, "budget_seconds": 1740},
+        )
+        debug.write(
+            self.root / "smoke/completion.json",
+            {
+                "status": "smoke_complete",
+                "optimizer_step": 3,
+                "quality_score_eligible": False,
+            },
+        )
+        debug.write(self.root / "smoke/startup.json", {"startup_seconds": 1})
+        self.parity = {
+            "status": "pass",
+            "protocol": PROTOCOL,
+            "seed": 42,
+            "optimizer_step": 3,
+            "proteins": 2,
+            "k": 4,
+            "training_and_evaluation_outputs_checked": True,
+            "declared_loss_checked": True,
+            "active_parameter_gradients_checked": True,
+            "rng_reset": True,
+            "weights_updated": False,
+            "compile_boundary": "torch.compile(model, dynamic=True)",
+        }
+        debug.write(self.root / "smoke/compile-parity.json", self.parity)
+
+    def summarize(self):
+        return debug.summarize_smoke(
+            self.native, self.config, self.record, self.attempt
+        )
+
+    def test_script_keeps_actual_native_trainer_without_setup_or_formal_training(self):
+        original = FakeNative.batch_script(
+            self.config,
+            self.attempt["remote"],
+            42,
+            smoke_only=True,
+            include_smoke=False,
+        )
+        script = debug.bounded_smoke_script(
+            FakeNative.batch_script, self.config, self.attempt["remote"], 42, 1740
+        )
+        training = [
+            line
+            for line in original.splitlines()
+            if "train_autoresearch_se3.py" in line
+        ]
+        self.assertEqual(
+            [
+                line
+                for line in script.splitlines()
+                if "train_autoresearch_se3.py" in line
+            ],
+            training,
+        )
+        self.assertEqual(len(training), 1)
+        self.assertTrue(
+            all(
+                flag in training[0]
+                for flag in ("--smoke", "--no-compile", "--check-compiled")
+            )
+        )
+        self.assertNotIn("focused-tests.json", script)
+        self.assertNotIn("unittest", script)
+        self.assertIn("#SBATCH --time=00:29:00", script)
+        self.assertIn(" 1740 /remote/debug/wall-time.json", script)
+        with self.assertRaisesRegex(ValueError, "setup test layout changed"):
+            debug.bounded_smoke_script(
+                lambda *a, **k: original.replace("focused-tests.json", "other.json"),
+                self.config,
+                self.attempt["remote"],
+                42,
+                1740,
+            )
+
+    def test_actual_smoke_receipts_use_native_gates_and_never_become_a_score(self):
+        result = self.summarize()
+        self.assertEqual(result["check_scope"], "formal_preflight")
+        self.assertIs(result["quality_score_eligible"], False)
+        self.assertEqual(
+            self.native.gate_check.call_args_list,
+            [
+                call(self.root, "smoke/gate-initial.json", 42, 0),
+                call(self.root, "smoke/gate-final.json", 42, 3),
+            ],
+        )
+        self.assertFalse((self.root / "focused-tests.json").exists())
+        self.assertNotIn("metric", result)
+        self.assertNotIn("value", result)
+
+    def test_invalid_wall_update_and_every_compiled_gate_field_are_rejected(self):
+        wall_path = self.root / "wall-time.json"
+        wall = debug.read(wall_path)
+        for bad in (
+            {"budget_seconds": 1800},
+            {"elapsed_seconds": 1741},
+            {"status": "failed"},
+        ):
+            with self.subTest(wall=bad):
+                debug.write(wall_path, wall | bad)
+                with self.assertRaisesRegex(ValueError, "per-seed cap"):
+                    self.summarize()
+        debug.write(wall_path, wall)
+        completion = self.root / "smoke/completion.json"
+        smoke = debug.read(completion)
+        for bad in (
+            {"optimizer_step": 2},
+            {"quality_score_eligible": True},
+            {"status": "complete"},
+        ):
+            with self.subTest(completion=bad):
+                debug.write(completion, smoke | bad)
+                with self.assertRaisesRegex(ValueError, "three-update"):
+                    self.summarize()
+        debug.write(completion, smoke)
+        for key in self.parity:
+            with self.subTest(parity=key):
+                debug.write(
+                    self.root / "smoke/compile-parity.json",
+                    {k: v for k, v in self.parity.items() if k != key},
+                )
+                with self.assertRaisesRegex(ValueError, "compile-parity"):
+                    self.summarize()
+
+    def test_native_initial_or_final_math_gate_failure_still_blocks_success(self):
+        for failed in ("smoke/gate-initial.json", "smoke/gate-final.json"):
+            with self.subTest(gate=failed):
+
+                def gate(root, name, seed, step):
+                    if name == failed:
+                        raise ValueError("SE(3) gate failed: " + name)
+
+                self.native.gate_check.side_effect = gate
+                with self.assertRaisesRegex(ValueError, "SE\\(3\\) gate failed"):
+                    self.summarize()
+
+    def test_collection_never_fabricates_focused_tests_and_keeps_compile_evidence(self):
+        native = SimpleNamespace(ssh=Mock(return_value="{}"), collect_logs=Mock())
+        debug.collect_smoke(native, self.config, self.record, self.attempt)
+        commands = [item.args[1] for item in native.ssh.call_args_list]
+        self.assertIn("cat /remote/debug/smoke/compile-parity.json", commands)
+        self.assertFalse(any("focused-tests.json" in command for command in commands))
+        native.collect_logs.assert_called_once_with(
+            self.config, self.record, self.attempt
+        )
 
 
 if __name__ == "__main__":

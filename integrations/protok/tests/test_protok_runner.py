@@ -167,6 +167,24 @@ class ProTokRunnerTests(unittest.TestCase):
     def command(self, *args):
         subprocess.run(args, check=True, capture_output=True)
 
+    def test_resumed_runner_publishes_current_status_before_execution(self):
+        state = {"iteration": 9, "status": "ready", "phase": "execute"}
+        RUNNER.write(self.root / "study/state.json", state)
+        RUNNER.write(
+            self.control / "status.json",
+            {"status": "paused", "error": "previous reconciled failure"},
+        )
+
+        def execute(root, backend):
+            current = RUNNER.read(self.control / "status.json")
+            self.assertEqual(current["status"], "running")
+            self.assertEqual(current["phase"], "execute")
+            self.assertNotIn("error", current)
+            return state
+
+        with patch.object(RUNNER, "_run_one", side_effect=execute):
+            self.assertEqual(RUNNER.run_one(self.root, self.backend), state)
+
     def request(self, action="import", iteration="0001"):
         return self.harness.evaluate_request(
             self.workspace, iteration, {"action": action}, self.stop, self.deadline

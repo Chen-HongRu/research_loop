@@ -66,6 +66,10 @@ The controller freezes each revision, runs the pinned unscored three-update smok
 and gates, and uses failure evidence for the next bounded repair. Every allocation
 fits the remaining debug allowance and the original wall deadline. Slurm rounds
 limits to minutes, so requests round down; a residual below 60 seconds ends debug.
+Debug applies the formal preflight's real-update, native math-gate and compiled
+parity checks using canonical inputs. The setup-only legacy baseline equality
+suite does not constrain new architectures. No setup-test pass is synthesized;
+formal evaluation still stages its inputs and repeats its own preflight.
 
 Passing debug triggers a fresh full 30-minute formal allocation, including when
 the source fingerprint already has a historical record. Its explicit attempt ID
