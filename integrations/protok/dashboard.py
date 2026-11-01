@@ -194,6 +194,51 @@ def accepted_output(agents, phase):
     )
 
 
+def operator_plan_record(root, folder):
+    """Accepted operator Plans have their own receipt, never a model invocation."""
+    meta, published, saved, current = iteration_context(root, folder)
+    state = saved if published else current
+    expected = f"iterations/{folder.name}/operator-plan/response.json"
+    marker = meta.get("operator_resume")
+    selected = state.get("selected") or {}
+    if (
+        state.get("plan_ref") != expected
+        or not isinstance(selected, dict)
+        or selected.get("source") != "operator"
+        or not isinstance(marker, dict)
+        or marker.get("target_iteration") != folder.name
+        or not re.fullmatch(r"[0-9]{4,}", str(marker.get("source_iteration", "")))
+    ):
+        return None
+    directory = folder / "operator-plan"
+    receipt = read(directory / "operator.json", {})
+    output = read(directory / "response.json", {})
+    if (
+        not isinstance(receipt, dict)
+        or not isinstance(output, dict)
+        or receipt.get("source") != "operator"
+        or not isinstance(receipt.get("authorization"), str)
+        or not receipt["authorization"].strip()
+        or any(receipt.get(key) != value for key, value in marker.items())
+        or output.get("decision") != "investigate"
+        or output.get("base_experiment") != marker["source_iteration"]
+        or not isinstance(output.get("contract"), dict)
+    ):
+        return None
+    return {
+        "kind": "operator_resume",
+        "accepted": True,
+        "published": published,
+        "source_iteration": marker["source_iteration"],
+        "target_iteration": folder.name,
+        "source_workspace_ref": marker.get("source_workspace_ref"),
+        "authorization": receipt["authorization"],
+        "source": relative(directory / "response.json", root),
+        "receipt_source": relative(directory / "operator.json", root),
+        "output": output,
+    }
+
+
 def activity(agents):
     return {
         "attempts": len(agents),
@@ -1004,6 +1049,7 @@ def details(root, identity):
         "review": prose(folder / "review.md"),
         "selection": selection,
         "agents": agent_outputs(root, folder),
+        "plan_record": operator_plan_record(root, folder),
         "execution": execution_details(root, identity),
         "explanation": explanation_status(root, identity),
         "metadata": read(folder / "iteration.json", {}),

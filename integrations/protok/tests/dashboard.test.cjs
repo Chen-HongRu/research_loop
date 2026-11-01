@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {gitLayout, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage};', context);
+vm.runInContext(script+'\nglobalThis.ui = {gitLayout, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -255,4 +255,17 @@ test('Local formula renderer blocks trusted HTML and catches malformed TeX', () 
   assert.match(ui.renderMath('\\notARealCommand{'),/暂不能可靠显示/);
   assert.doesNotMatch(ui.renderMath('\\href{javascript:alert(1)}{x}'),/<a |href="javascript:/);
   assert.doesNotMatch(ui.markdown('![x](https://example.com/x.png) [x](data:text/html,test)'),/<img|href="data:/);
+});
+
+test('Operator recovery Plan keeps scientific origin and never masquerades as a Planner call', () => {
+  context.operatorFixture={nodes:[{id:'active:0014',local_id:'0014',source_id:'active',label:'当前 #0014'},{id:'active:0015',local_id:'0015',source_id:'active'}],sources:[{id:'active'}]};
+  vm.runInContext("data=operatorFixture;selected='active:0015';detail={id:selected,source_id:'active'}",context);
+  const plan={kind:'operator_resume',target_iteration:'0015',source_iteration:'0014',authorization:'Authorized <script>bad</script>',source:'study/iterations/0015/operator-plan/response.json',receipt_source:'study/iterations/0015/operator-plan/operator.json',output:{decision:'investigate',base_experiment:'0014',contract:{action:'Frozen candidate',evaluation:'Fixed protocol'},markdown:'Retained operator instruction'}};
+  const rendered=ui.operatorPlanPanel(plan);
+  for(const text of ['恢复评测计划 · 操作员授权','没有新增 Planner 模型调用','原始研究 Plan #0014','data-node="active:0014"','Fixed protocol','operator-plan/operator.json']) assert.ok(rendered.includes(text),text);
+  assert.doesNotMatch(rendered,/<script>|<h3>Planner|调用已完成/);
+  const pending=ui.explanationPanel({id:'active:0015',explanation:{status:'unpublished'},plan_record:plan},{});
+  assert.match(pending,/恢复评测计划 · 操作员授权/);
+  assert.match(pending,/本轮尚未发布/);
+  assert.doesNotMatch(pending,/未提供可确认的 Agent 调用元数据/);
 });

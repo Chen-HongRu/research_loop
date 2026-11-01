@@ -176,6 +176,76 @@ class AgentOutputTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         return path
 
+    def operator_plan(self):
+        marker = {
+            "source_iteration": "0000",
+            "target_iteration": "0001",
+            "source_workspace_ref": "frozen-source",
+            "source_signatures": {"model.py": "recorded-version"},
+            "reconciliation": "control/reconciliation.json",
+        }
+        state = {
+            "iteration": 1,
+            "phase": "execute",
+            "status": "running",
+            "call_count": 7,
+            "plan_ref": "iterations/0001/operator-plan/response.json",
+            "selected": {"source": "operator"},
+        }
+        self.put("study/state.json", state)
+        self.put(
+            self.prefix + "/iteration.json",
+            {"id": "0001", "status": "planned", "operator_resume": marker},
+        )
+        self.put(
+            self.prefix + "/operator-plan/operator.json",
+            {"source": "operator", "authorization": "Authorized resume", **marker},
+        )
+        output = {
+            "decision": "investigate",
+            "base_experiment": "0000",
+            "contract": {"action": "Evaluate the frozen candidate"},
+            "markdown": "Retained operator instruction",
+        }
+        self.put(self.prefix + "/operator-plan/response.json", output)
+        return state, output
+
+    def test_operator_plan_is_visible_without_inventing_an_agent_call(self):
+        _, output = self.operator_plan()
+        original = (self.root / "study/state.json").read_bytes()
+        result = DASH.details(self.root, "0001")
+        self.assertEqual(result["plan_record"]["kind"], "operator_resume")
+        self.assertEqual(result["plan_record"]["source_iteration"], "0000")
+        self.assertEqual(result["plan_record"]["output"], output)
+        self.assertTrue(result["plan_record"]["accepted"])
+        self.assertFalse(result["plan_record"]["published"])
+        self.assertEqual(result["agents"], [])
+        self.assertEqual((self.root / "study/state.json").read_bytes(), original)
+
+    def test_published_operator_plan_uses_frozen_reference_after_loop_advances(self):
+        state, _ = self.operator_plan()
+        meta = DASH.read(self.root / self.prefix / "iteration.json")
+        self.put(self.prefix + "/iteration.json", {**meta, "status": "reviewed"})
+        self.put(self.prefix + "/publication.json", {"state_after": state})
+        self.put("study/state.json", {"iteration": 2, "phase": "plan"})
+        result = DASH.details(self.root, "0001")["plan_record"]
+        self.assertIsNotNone(result)
+        self.assertTrue(result["published"])
+
+    def test_unaccepted_or_mismatched_operator_receipts_are_not_promoted(self):
+        state, _ = self.operator_plan()
+        self.put("study/state.json", {**state, "plan_ref": None})
+        self.assertIsNone(DASH.details(self.root, "0001")["plan_record"])
+        self.put("study/state.json", state)
+        receipt = self.root / self.prefix / "operator-plan/operator.json"
+        value = DASH.read(receipt)
+        self.put(
+            str(receipt.relative_to(self.root)), {**value, "target_iteration": "9999"}
+        )
+        self.assertIsNone(DASH.details(self.root, "0001")["plan_record"])
+        receipt.unlink()
+        self.assertIsNone(DASH.details(self.root, "0001")["plan_record"])
+
     def attempt(
         self,
         suffix,

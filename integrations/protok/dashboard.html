@@ -457,7 +457,8 @@ function renderDetail() {
       prefix = '<div class="subtoolbar"><button id="keyOutputs" class="'+(!discussion?'on':'')+'">关键提案与 Judge</button><button id="allOutputs" class="'+(discussion?'on':'')+'">包含质疑与回应</button></div><div class="caption">按调用顺序阅读。提案和讨论是研究决策，不是新增实验证据。</div>';
       if (!discussion) agents = agents.filter(agent=>!['critique','response'].includes(agent.phase));
     }
-    if (agents.length) body.innerHTML = prefix+agents.map(agentCard).join('');
+    if (tab==='plan' && detail.plan_record?.kind==='operator_resume') body.innerHTML=operatorPlanPanel(detail.plan_record)+agents.map(agentCard).join('');
+    else if (agents.length) body.innerHTML = prefix+agents.map(agentCard).join('');
     else if (tab==='selection' && detail.selection && Object.keys(detail.selection).length) body.innerHTML = prefix+structured(detail.selection);
     else if (detail[tab] && typeof detail[tab]==='string' && detail[tab]!=='暂无记录') body.innerHTML = '<div class="notice">已保存的研究文档；此记录未提供可确认的 Agent 调用元数据。</div>'+markdown(detail[tab]);
     else body.innerHTML = prefix+'<div class="empty">'+(tab==='review'?'尚无完成的 Review。执行结果返回并经过独立评审后，这里会显示判断、发现与路线决定。':tab==='plan'?'尚无完成的 Plan。可以先查看“提案与决策”了解正在考虑的行动。':'尚无完成的提案输出。')+'</div>';
