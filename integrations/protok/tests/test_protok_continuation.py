@@ -3,7 +3,10 @@
 import fcntl
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -485,6 +488,76 @@ class IncrementalContinuationTest(unittest.TestCase):
         path = self.records / "new-charge"
         path.mkdir(exist_ok=True)
         self.write(path / "state.json", self.receipt(seconds, owner="opaque"))
+
+    def test_isolated_cli_loads_shared_research_accounting(self):
+        # Production starts this file with -I from the control directory. An
+        # in-process import would hide a missing entry-point package bootstrap.
+        evaluator = self.project / "scripts/autoresearch_se3_eval.py"
+        evaluator.write_text(
+            BACKEND
+            + """
+def main(argv):
+    config = load_config(argv[1])
+    used = budget_check(config, session_state(config), Path(config["records_root"]), 1)
+    print(f"ADMITTED_GPU_SECONDS={used}")
+    return 0
+"""
+        )
+        self.sha = hashlib.sha256(evaluator.read_bytes()).hexdigest()
+        self.config["locked_files"]["scripts/autoresearch_se3_eval.py"] = self.sha
+        self.write(self.project / "autoresearch-run.json", self.config)
+        self.write(self.runtime, self.config)
+        now = datetime.now(timezone.utc).timestamp()
+        self.cont.update(
+            started_at=now - 10, deadline=now - 10 + 86400, evaluator_sha256=self.sha
+        )
+        self.owner["expires_at"] = self.cont["deadline"]
+        self.sync_control()
+        research = self.control / "research-jobs/0001"
+        research.mkdir(parents=True)
+        self.write(
+            research / "job.json",
+            {"allocated_seconds": 60, "source_identity": "frozen-research"},
+        )
+        self.write(
+            research / "receipt.json",
+            {
+                "purpose": "research",
+                "quality_score_eligible": False,
+                "status": "completed",
+                "gpu_seconds": 37,
+                "source_identity": "frozen-research",
+            },
+        )
+        entrypoint = Path(__file__).resolve().parents[1] / "continuation.py"
+        command = [
+            sys.executable,
+            "-B",
+            "-I",
+            str(entrypoint),
+            "--project",
+            str(self.project),
+            "--control",
+            str(self.control),
+            "--owner-token",
+            "opaque",
+            "--config",
+            str(self.runtime),
+            "--evaluate",
+        ]
+        result = subprocess.run(
+            command, cwd=self.control, capture_output=True, text=True, timeout=15
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "ADMITTED_GPU_SECONDS=19121")
+        # Unknown research effects must still block this same real entry point.
+        (research / "receipt.json").unlink()
+        blocked = subprocess.run(
+            command, cwd=self.control, capture_output=True, text=True, timeout=15
+        )
+        self.assertEqual(blocked.returncode, 1)
+        self.assertNotIn("ADMITTED_GPU_SECONDS", blocked.stdout)
+        self.assertIn("RuntimeError", blocked.stdout)
 
     def test_expired_original_session_is_preserved_with_new_deadline(self):
         historical = {p: p.read_bytes() for p in self.records.glob("*/state.json")}

@@ -12,8 +12,13 @@ import json
 import math
 from pathlib import Path
 import re
+import sys
 import time
 from types import ModuleType
+
+# The evaluator launches this trusted file with Python -I, outside the release
+# directory. Resolve sibling controller packages from this file, never the CWD.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def _read(path):
