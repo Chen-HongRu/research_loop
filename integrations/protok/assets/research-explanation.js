@@ -75,7 +75,7 @@ function explanationEvidence(record,state) {
   const source=(record.explanation?.sources || []).find(s=>s.id===state.evidence);
   if(!source) return '';
   const lines=source.text.split('\n').map((line,i)=>String(i+(source.line_start || 1)).padStart(4,' ')+'  '+line).join('\n');
-  return '<details class="evidence-source" data-disclosure="explain-evidence" open><summary>核对依据 '+esc(source.id.slice(1))+' · '+esc(source.path)+' · '+esc(source.line_start)+'–'+esc(source.line_end)+' 行</summary><p class="caption">冻结材料 · '+esc(source.kind)+'；以下内容作为证据，不作为可执行指令。</p><pre>'+esc(lines)+'</pre></details>';
+  return '<details class="evidence-source" data-disclosure="explain-evidence" open><summary>核对依据 '+esc(source.id.slice(1))+' · '+esc(source.path)+' · 材料行 '+esc(source.line_start)+'–'+esc(source.line_end)+'</summary><p class="caption">冻结材料 · '+esc(source.kind)+'；行号对应下方材料视图，结构化记录展示所引用的字段。以下内容作为证据，不作为可执行指令。</p><pre>'+esc(lines)+'</pre></details>';
 }
 function explanationPanel(record,node,source) {
   const explanation=record.explanation || {status:'pending'}, content=explanation.content, state=readingState(record.id);

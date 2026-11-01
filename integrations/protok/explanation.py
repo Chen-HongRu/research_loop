@@ -553,11 +553,6 @@ def _validate(value, schema=SCHEMA):
             or re.search(r"<\s*/?\s*[A-Za-z][^>]*>", value)
         ):
             raise ValueError("Invalid explanation text/HTML")
-        if (
-            re.search(r"\d", value)
-            and re.search(r"RMSD|重建误差|评分|分数|" + re.escape(METRIC), value, re.I)
-        ) or re.search(r"\d+(?:\.\d+)?\s*(?:[%％ÅÅ]|angstrom|埃|百分比)", value, re.I):
-            raise ValueError("Metric figures belong to authoritative panel")
     elif kind == "boolean" and type(value) is not bool:
         raise ValueError("Invalid boolean")
     if "enum" in schema and value not in schema["enum"]:
@@ -569,6 +564,29 @@ def validate_content(content, material):
         raise ValueError("Explanation content exceeds byte limit")
     _validate(content)
     sources = {s["id"]: s for s in material["sources"]}
+    facts = material.get("facts", {})
+    known_ids = {facts.get("iteration"), facts.get("base_experiment")}
+    for source in sources.values():
+        if source["kind"] in {"metadata", "base_metadata"}:
+            try:
+                metadata = json.loads(source["text"])
+                known_ids.add(metadata.get("id"))
+            except (ValueError, AttributeError):
+                pass
+    known_ids = {
+        value
+        for value in known_ids
+        if isinstance(value, str) and re.fullmatch(r"[0-9]{4,}", value)
+    }
+    id_pattern = (
+        re.compile(
+            r"(?<![\d.])(?:"
+            + "|".join(re.escape(value) for value in sorted(known_ids))
+            + r")(?![\d.])"
+        )
+        if known_ids
+        else None
+    )
 
     def walk(item):
         if isinstance(item, dict):
@@ -581,6 +599,18 @@ def validate_content(content, material):
         elif isinstance(item, list):
             for child in item:
                 walk(child)
+        elif isinstance(item, str):
+            # Known experiment identifiers are names, never measurement quantities.
+            masked = id_pattern.sub("实验标识", item) if id_pattern else item
+            if (
+                re.search(r"\d", masked)
+                and re.search(
+                    r"RMSD|重建误差|评分|分数|" + re.escape(METRIC), masked, re.I
+                )
+            ) or re.search(
+                r"\d+(?:\.\d+)?\s*(?:[%％ÅÅ]|angstrom|埃|百分比)", item, re.I
+            ):
+                raise ValueError("Metric figures belong to authoritative panel")
 
     walk(content)
     for statement in [
@@ -701,7 +731,9 @@ def generate_one(
         handle.write(json.dumps({"iteration": identity, "pid": os.getpid()}))
         handle.flush()
         current = _cached_state(root, identity, writer_owned=True)
-        if current.get("interrupted"):
+        if current.get("interrupted") or (
+            retry_failed and current["status"] == "failed"
+        ):
             material = _json(
                 root,
                 _material_path(root, identity, current["source_identity"]),
@@ -715,7 +747,10 @@ def generate_one(
                 try:
                     validate_content(recovered, material)
                     current.update(
-                        status="ready", content=recovered, generated_at=_now()
+                        status="ready",
+                        content=recovered,
+                        generated_at=_now(),
+                        reused_completed_response=True,
                     )
                     current.pop("interrupted", None)
                     current.pop("reason", None)
@@ -769,6 +804,11 @@ def generate_one(
                     / material["source_identity"]
                 )
                 staging.mkdir(parents=True, exist_ok=True)
+                if retry_failed and (
+                    (staging / "run/response.json").exists()
+                    or (staging / "run/completed.json").exists()
+                ):
+                    (staging / "run").rename(staging / f"run.previous.{time.time_ns()}")
                 (staging / "run").mkdir(parents=True, exist_ok=True)
                 _write(staging / "inputs.json", material)
                 _write(staging / "execution.json", execution)

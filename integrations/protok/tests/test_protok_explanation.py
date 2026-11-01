@@ -587,6 +587,76 @@ class ExplanationTests(unittest.TestCase):
             generate.call_args.kwargs["codex_executable"], "/usr/local/bin/codex"
         )
 
+    def test_metric_guard_allows_only_known_experiment_identifiers(self):
+        material = ex.collect_material(self.root, "0001")
+        material["facts"]["base_experiment"] = "0007"
+        content = self.content()
+        content["question"]["text"] = (
+            "能否降低目标重建误差？实际声明的 base_experiment 为 0007；本轮为0001。"
+        )
+        ex.validate_content(content, material)
+        for text in (
+            "RMSD 对照为9999",
+            "RMSD从2到1",
+            "RMSD为0.0001",
+            "RMSD为10001",
+            "0001 Å",
+            "1.88 Å",
+            "0007%",
+        ):
+            content["question"]["text"] = text
+            with self.assertRaisesRegex(ValueError, "Metric figures"):
+                ex.validate_content(content, material)
+
+    def test_explicit_retry_reuses_valid_completed_response_without_model(self):
+        content = self.content()
+
+        def execute(argv, *, run_dir, **kwargs):
+            (run_dir / "response.json").write_text(json.dumps(content))
+
+        with patch("research_loop.harness._execute", side_effect=execute):
+            ready = ex.generate_one(self.root, "0001")
+        response = next(
+            (self.root / "presentation/staging/0001").glob("*/run/response.json")
+        )
+        original = response.read_bytes()
+        ready.pop("content")
+        ready.update(status="failed", reason="previous validation false positive")
+        ex._write(ex._cache(self.root, "0001"), ready)
+        harness = Mock()
+        recovered = ex.generate_one(
+            self.root, "0001", retry_failed=True, harness=harness
+        )
+        self.assertEqual(recovered["status"], "ready")
+        self.assertTrue(recovered["reused_completed_response"])
+        harness.run.assert_not_called()
+        self.assertEqual(response.read_bytes(), original)
+
+    def test_invalid_completed_response_is_preserved_before_explicit_rerun(self):
+        bad = self.content()
+        bad["title"] = "RMSD从2到1"
+
+        def execute(argv, *, run_dir, **kwargs):
+            (run_dir / "response.json").write_text(json.dumps(bad))
+
+        with patch("research_loop.harness._execute", side_effect=execute):
+            self.assertEqual(ex.generate_one(self.root, "0001")["status"], "failed")
+        harness = Mock()
+        harness.run.return_value = self.content()
+        self.assertEqual(
+            ex.generate_one(self.root, "0001", retry_failed=True, harness=harness)[
+                "status"
+            ],
+            "ready",
+        )
+        preserved = next(
+            (self.root / "presentation/staging/0001").glob(
+                "*/run.previous.*/response.json"
+            )
+        )
+        self.assertEqual(json.loads(preserved.read_text()), bad)
+        harness.run.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
