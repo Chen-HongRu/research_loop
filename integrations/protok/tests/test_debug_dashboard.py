@@ -8,6 +8,63 @@ class DebugDashboardTests(unittest.TestCase):
     put = fixtures.AgentOutputTests.put
     attempt = fixtures.AgentOutputTests.attempt
 
+    def test_current_submitted_job_is_waiting_normally_not_missing_accounting(self):
+        identity = "f" * 64
+        self.put(
+            "control/jobs/0001/job.json",
+            {"status": "submitted", "fingerprint": identity},
+        )
+        state = {"iteration": 1, "phase": "execute", "status": "running"}
+        row = {
+            "record": identity,
+            "mode": "scored",
+            "status": "reserved",
+            "attempts": [
+                {"owned_job_id": "789230", "status": "running"},
+            ],
+        }
+        backend = {"outstanding": [row]}
+        progress = fixtures.DASH.progress(
+            self.root, state, backend, {"status": "running"}, []
+        )
+        self.assertEqual(progress["title"], "正式评估进行中（记录状态）")
+        self.assertEqual(progress["reasons"][0]["title"], "本轮正式评估等待完成")
+        self.assertIn("789230", progress["reasons"][0]["detail"])
+        self.assertNotIn("缺少", progress["reasons"][0]["detail"])
+        self.assertEqual(backend["outstanding"], [row])
+
+    def test_ambiguous_unbound_or_paused_job_keeps_the_reconciliation_warning(self):
+        identity = "f" * 64
+        self.put(
+            "control/jobs/0001/job.json",
+            {"status": "submitted", "fingerprint": identity},
+        )
+        state = {"iteration": 1, "phase": "execute", "status": "running"}
+        attempt = {"owned_job_id": "789230", "status": "running"}
+        for changes, record_id, runner in (
+            ({"terminal_state": "COMPLETED"}, identity, {"status": "running"}),
+            ({"owned_job_id": None}, identity, {"status": "running"}),
+            ({"status": "submitting"}, identity, {"status": "running"}),
+            ({}, "a" * 64, {"status": "running"}),
+            ({}, identity, {"status": "paused"}),
+        ):
+            with self.subTest(changes=changes, record_id=record_id, runner=runner):
+                backend = {
+                    "outstanding": [
+                        {
+                            "record": record_id,
+                            "mode": "scored",
+                            "status": "reserved",
+                            "attempts": [attempt | changes],
+                        }
+                    ]
+                }
+                progress = fixtures.DASH.progress(self.root, state, backend, runner, [])
+                self.assertIn(
+                    "评估记录未结束", [r["title"] for r in progress["reasons"]]
+                )
+                self.assertNotEqual(progress["title"], "正式评估进行中（记录状态）")
+
     def test_budget_view_separates_debug_from_formal_and_shows_reserved_allowance(self):
         self.put(
             "study/state.json",

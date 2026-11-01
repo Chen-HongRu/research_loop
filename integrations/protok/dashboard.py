@@ -231,10 +231,53 @@ def progress(root, state, backend, runner, agents):
         )
     if state.get("stop_reason"):
         reason("停止原因", state["stop_reason"], "study/state.json")
-    if backend.get("outstanding"):
+    outstanding = backend.get("outstanding", [])
+    waiting = []
+    if (
+        outstanding
+        and state.get("phase") == "execute"
+        and state.get("status") in {"running", "ready"}
+        and runner.get("status") == "running"
+        and not any(record.get("error") for record in (state, control, runner))
+        and not (root / "control/STOP").exists()
+    ):
+        job = read(
+            job_path(root, str(state.get("iteration", 0)).zfill(4)) / "job.json", {}
+        )
+        expected = job.get("record_name") or job.get("fingerprint")
+        for record in outstanding:
+            attempts = record.get("attempts", [])
+            if (
+                expected
+                and (record.get("record") or record.get("fingerprint")) == expected
+                and job.get("status") == "submitted"
+                and record.get("mode") == "scored"
+                and record.get("status") in {"reserved", "submitted", "running"}
+                and attempts
+                and all(
+                    attempt.get("status") == "running"
+                    and re.fullmatch(
+                        r"[1-9][0-9]*", str(attempt.get("owned_job_id", ""))
+                    )
+                    and not attempt.get("terminal_state")
+                    and not attempt.get("exit_code")
+                    and attempt.get("gpu_seconds") is None
+                    for attempt in attempts
+                )
+            ):
+                waiting.append(record)
+    if waiting:
+        jobs = "、".join(str(a["owned_job_id"]) for r in waiting for a in r["attempts"])
+        reason(
+            "本轮正式评估等待完成",
+            f"作业 {jobs} 已提交，正在等待结束；控制器随后会收集结果和核账凭据。此处展示本地记录状态。",
+            "backend.outstanding",
+        )
+    unresolved = len(outstanding) - len(waiting)
+    if unresolved:
         reason(
             "评估记录未结束",
-            f"{len(backend['outstanding'])} 条记录未完成或缺少终态、核账凭据；新增评估须等待完成或协调已有记录。",
+            f"{unresolved} 条记录未完成或缺少终态、核账凭据；新增评估须等待完成或协调已有记录。",
             "backend.outstanding",
         )
     active = state.get("active_attempt")
@@ -274,6 +317,11 @@ def progress(root, state, backend, runner, agents):
         title, message = (
             "运行器已暂停",
             "控制记录禁止启动下一次评估；已有作业的终态以评估凭据为准。",
+        )
+    elif waiting and not unresolved:
+        title, message = (
+            "正式评估进行中（记录状态）",
+            "正在等待本轮作业完成。控制器会收集结果、核账并继续独立 Review；当前显示的是本地作业记录。",
         )
     elif status == "running":
         title, message = (
