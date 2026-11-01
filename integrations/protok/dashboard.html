@@ -1,24 +1,507 @@
 <!doctype html>
-<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ProTok · 研究现场</title>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Loop · 研究现场</title>
 <style>
-:root{--bg:#0c1220;--panel:#141e30;--line:#2b3850;--muted:#9baac2;--text:#e5edf9;--mint:#67e3b4;--blue:#84b5ff;--yellow:#f3cd7c}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 system-ui,-apple-system,sans-serif}header{padding:25px 32px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:20px}h1{margin:0;font-size:26px;letter-spacing:-.7px}small,.muted{color:var(--muted)}button,select{font:inherit;color:var(--text);background:#1c2a40;border:1px solid var(--line);border-radius:8px;padding:7px 13px;cursor:pointer}button.on{background:#284a55;border-color:var(--mint);color:var(--mint)}button:hover{border-color:var(--blue)}main{padding:24px 32px;max-width:1800px;margin:auto}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card,.panel{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:18px}.card b{display:block;font-size:27px;margin:5px 0}.card:first-child b{color:var(--mint)}.live{color:var(--mint)}.error{color:#ffa3a3}.phase{display:flex;gap:8px;margin-top:14px}.phase span{flex:1;text-align:center;border-bottom:3px solid var(--line);padding:8px 0;color:var(--muted)}.phase .active{color:var(--mint);border-color:var(--mint)}.phase .past{border-color:#4c887d}.wide{margin:17px 0}.wide h2{font-size:17px;margin:0 0 8px}.layout{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(350px,1fr);gap:18px}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}.scroll{overflow:auto;max-height:660px}#graph{min-width:700px}svg{display:block;width:100%}.legend{font-size:12px;color:var(--muted);margin:10px 0}.node{cursor:pointer}.node:hover rect{stroke:white;stroke-width:2}.node text{pointer-events:none}.tabs{display:flex;gap:5px;flex-wrap:wrap;margin:14px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.8 system-ui;margin:0}#detailBody{max-height:640px;overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:11px 7px;border-bottom:1px solid var(--line)}tr[data-id]{cursor:pointer}tr[data-id]:hover{background:#22324b}h3{margin:0;font-size:18px}.tag{display:inline-block;border:1px solid var(--line);border-radius:5px;padding:1px 7px;font-size:12px;margin:3px 4px 3px 0}.footer{font-size:12px;color:var(--muted);padding:20px 0}.statusline{margin-top:10px;display:flex;gap:18px;flex-wrap:wrap}#chart{height:240px}.mobile{display:none}@media(max-width:1000px){.layout{grid-template-columns:minmax(0,1fr)}.cards{grid-template-columns:repeat(2,1fr)}header,main{padding:18px}#detailBody{max-height:500px}}
+:root{color-scheme:dark;--bg:#0d1422;--panel:#151f30;--inset:#101a2a;--line:#2a3850;--text:#e4ecf7;--muted:#a0afc5;--green:#72dfb3;--blue:#8ab8ff;--amber:#f2cb85;--red:#ffacac}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,select,input{font:inherit}button,select{color:var(--text);background:#1c2a40;border:1px solid var(--line);border-radius:7px;padding:6px 11px;cursor:pointer}button:hover,select:hover{border-color:var(--blue)}button:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offset:3px}button.on,button[aria-pressed="true"]{border-color:var(--green);color:var(--green);background:#203b3d}button:disabled{opacity:.5;cursor:default}button.link{padding:0;background:none;border:0;color:var(--blue);font-size:inherit}a{color:var(--blue);overflow-wrap:anywhere}h1,h2,h3,h4,p{margin-top:0}h1{font-size:27px;letter-spacing:-.6px;margin-bottom:4px}h2{font-size:18px;margin-bottom:5px}h3{font-size:16px;margin-bottom:8px}h4{font-size:14px;margin-bottom:6px}small,.muted{color:var(--muted)}small{font-size:12px}.green{color:var(--green)}.amber{color:var(--amber)}.red{color:var(--red)}.eyebrow{font-size:11px;font-weight:650;letter-spacing:1.6px;color:var(--green);margin-bottom:5px}header{border-bottom:1px solid var(--line);padding:22px 30px;display:flex;justify-content:space-between;gap:20px;align-items:center}.connection{text-align:right;font-size:12px;color:var(--muted)}main{max-width:1840px;margin:auto;padding:22px 30px}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:11px;min-width:0}.card{padding:16px 18px}.card b{display:block;font-size:26px;line-height:1.4;margin:5px 0}.card:first-child b{color:var(--green)}.panel{padding:18px}.wide{margin:16px 0}.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.between{justify-content:space-between}.caption{font-size:12px;color:var(--muted);margin:6px 0 12px}.progress-title{display:flex;justify-content:space-between;gap:12px;align-items:start}.progress-title h2{margin:0 0 5px}.phase{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:15px}.phase-item{border-top:3px solid var(--line);padding:9px 8px 1px;color:var(--muted)}.phase-item strong{display:block;font-size:13px;font-weight:550}.phase-item small{font-size:11px}.phase-item.active{border-color:var(--green);color:var(--green)}.phase-item.complete{border-color:#497c72}.phase-item.blocked{border-color:var(--amber);color:var(--amber)}.reasons{display:grid;gap:8px;margin-top:12px}.reason{border-left:3px solid var(--amber);background:#302b23;padding:9px 12px;border-radius:0 6px 6px 0;overflow-wrap:anywhere}.reason p{margin:2px 0}.reason small{display:block}.statusline{margin-top:12px;display:flex;gap:8px 20px;flex-wrap:wrap;color:var(--muted);font-size:12px}.layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:16px;align-items:start}.graph-note{display:flex;gap:12px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:12px;padding:10px 0}.legend-line{display:inline-block;vertical-align:middle;width:24px;border-top:2px solid var(--blue);margin-right:5px}.legend-line.dashed{border-top:2px dashed #a99bc9}.git-scroll{max-height:660px;overflow:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.git-log{position:relative;min-width:520px}.git-rail{position:absolute;left:0;top:0;overflow:visible}.git-row{height:102px;padding:9px 10px;text-align:left;display:block;width:100%;border:0;border-bottom:1px solid #253148;border-radius:0;background:transparent;position:relative;overflow:hidden}.git-row:hover{background:#1b2b42}.git-row.selected{background:#20364b;box-shadow:inset 3px 0 var(--blue)}.git-row.other-route{opacity:.42}.git-row .row-top{display:flex;align-items:center;justify-content:space-between;gap:10px}.commit-id{color:var(--blue);font:600 13px ui-monospace,SFMono-Regular,monospace}.row-action{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:3px 0;font-size:13px}.row-meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;overflow:hidden;white-space:nowrap}.badge{display:inline-block;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:11px;line-height:1.7;font-weight:450;vertical-align:middle;max-width:100%;overflow-wrap:anywhere}.badge.green{border-color:#396052;background:#1d3a33}.badge.amber{border-color:#6d5734;background:#392f22}.badge.red{border-color:#714343;background:#3b272e}.badge.route{border-color:#415474;color:#bad0ed}.score{font:600 13px ui-monospace,SFMono-Regular,monospace;white-space:nowrap}.empty{color:var(--muted);padding:24px 15px;background:var(--inset);border:1px dashed var(--line);border-radius:7px}.route-cards{display:grid;gap:12px;max-height:660px;overflow:auto}.route-card{border:1px solid var(--line);border-radius:8px;padding:13px;background:var(--inset)}.route-card p{font-size:12px;color:var(--muted);margin:7px 0}.route-history{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.route-history button{font-size:12px;padding:4px 8px}.chart-section{margin-top:18px}.chart-section h3{margin:0}#chart{width:100%;height:210px;display:block}.detail-heading{display:flex;justify-content:space-between;align-items:start;gap:12px}.detail-heading h2{margin:0 0 5px}.detail-heading .toolbar{justify-content:flex-end;flex-shrink:0}.tabs{display:flex;gap:5px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:12px;margin:14px 0}.tabs button{font-size:13px}.detail-body{max-height:900px;overflow:auto;overflow-wrap:anywhere;padding:0 3px 4px 0}.detail-meta{font-size:12px;color:var(--muted)}.context-box{border:1px solid var(--line);border-radius:8px;padding:11px 13px;background:var(--inset);margin-bottom:13px;font-size:12px}.context-box .toolbar{gap:5px}.context-box p{margin:4px 0}.facts{margin:0;display:grid;grid-template-columns:minmax(82px,auto) minmax(0,1fr);gap:8px 13px;font-size:13px}.facts dt{color:var(--muted)}.facts dd{margin:0;min-width:0;overflow-wrap:anywhere}.facts .facts{grid-template-columns:90px minmax(0,1fr)}.field-list{margin:0;padding-left:19px}.field-list li{margin-bottom:5px}.fact-block{border-top:1px solid var(--line);padding-top:12px;margin-top:12px}.agent-card{border:1px solid var(--line);border-radius:9px;padding:14px;margin-bottom:13px;background:var(--inset)}.agent-header{display:flex;align-items:center;justify-content:space-between;gap:9px;flex-wrap:wrap;margin-bottom:5px}.agent-header h3{margin:0}.agent-provenance{font-size:11px;color:var(--muted);margin-bottom:11px}.agent-output>.prose>p:last-child{margin-bottom:0}.agent-action{font-size:14px;font-weight:550;border-left:2px solid var(--blue);padding-left:11px;margin:10px 0}.agent-error{color:var(--red);font-size:13px}.source{font:11px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--muted);word-break:break-all}.prose{font-size:13px;line-height:1.85;overflow-wrap:anywhere}.prose p{margin:0 0 10px}.prose h2{font-size:17px;margin:18px 0 8px}.prose h3{font-size:15px;margin:16px 0 6px}.prose h4{font-size:14px;margin:14px 0 5px}.prose ul,.prose ol{padding-left:22px;margin:7px 0 12px}.prose li{margin-bottom:5px}.prose blockquote{margin:10px 0;border-left:3px solid #506485;padding:4px 12px;color:#bbc9dd}.prose pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0a121f;border:1px solid var(--line);border-radius:6px;padding:11px;font:12px/1.75 ui-monospace,SFMono-Regular,monospace;overflow:auto}.prose code{font:12px/1.7 ui-monospace,SFMono-Regular,monospace;background:#26334a;padding:1px 4px;border-radius:3px}.prose pre code{background:none;padding:0}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px;margin:9px 0}th,td{text-align:left;border:1px solid var(--line);padding:7px 9px;vertical-align:top}th{background:#1c2a40}details{margin:10px 0}summary{cursor:pointer;color:var(--blue);font-size:12px;padding:3px 0}details>.prose,details>.facts{margin-top:9px}.subtoolbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.subtoolbar button{font-size:12px;padding:4px 9px}.notice{background:#242c3d;border:1px solid var(--line);border-radius:7px;padding:10px 12px;color:#becbe0;font-size:12px;margin-bottom:12px}.scout{margin:16px 0 0}.scout h3{margin:0}.footer{font-size:11px;color:var(--muted);padding:22px 1px 4px}.loading{color:var(--muted)}[hidden]{display:none!important}
+@media(min-width:1500px){.layout{grid-template-columns:minmax(0,1fr) minmax(0,1.1fr)}}@media(max-width:1050px){.layout{grid-template-columns:minmax(0,1fr)}.detail-body{max-height:none}.git-scroll{max-height:530px}header,main{padding:18px}.cards{gap:9px}.card{padding:13px}.card b{font-size:23px}}@media(max-width:620px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.connection{max-width:135px}.phase{gap:4px}.phase-item{padding:7px 1px}.phase-item strong{font-size:11px}.phase-item small{font-size:10px}.detail-heading{display:block}.detail-heading .toolbar{justify-content:flex-start;margin-top:9px}.panel{padding:13px}header,main{padding:13px}.facts{grid-template-columns:80px minmax(0,1fr)}h1{font-size:23px}}
+.cards{grid-template-columns:repeat(3,minmax(0,1fr))}.card:first-child b{color:var(--text)}
+.frontier-panel{margin:0 0 16px;padding:22px;border-color:#35594f;background:linear-gradient(125deg,#172c30 0,#151f30 48%)}.frontier-panel h2{font-size:23px}.frontier-content{display:grid;grid-template-columns:minmax(190px,.27fr) minmax(0,1fr);gap:24px;align-items:center}.frontier-best{font:650 36px/1.4 ui-monospace,SFMono-Regular,monospace;color:var(--green);letter-spacing:-1.4px;margin:8px 0}.frontier-best small{font-size:17px;color:var(--green);letter-spacing:0}.frontier-members{display:flex;gap:5px;flex-wrap:wrap;margin:10px 0}.frontier-members button{font-size:11px;padding:3px 7px}.frontier-legend{font-size:12px;color:var(--muted);display:grid;gap:5px;margin-top:16px}.mark-dot,.mark-ring,.mark-diamond{display:inline-block;width:10px;height:10px;margin-right:8px;vertical-align:middle;background:var(--blue);border-radius:50%}.mark-ring{background:var(--green);outline:1px solid var(--green);outline-offset:3px}.mark-diamond{background:var(--green);border-radius:0;transform:rotate(45deg);width:8px;height:8px}.mark-dot.ledger{background:none;border:1.5px solid var(--muted)}.frontier-chart-wrap{min-width:0;position:relative}#frontierChart{display:block;width:100%;height:300px;touch-action:pan-y}.plot-point{cursor:pointer;outline:none}.plot-point:hover .point-halo,.plot-point:focus .point-halo,.plot-point.inspected .point-halo{opacity:1}.point-halo{opacity:0;transition:opacity .1s}.frontier-readout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr) auto;gap:15px;align-items:center;background:#0f1c29;border:1px solid #36544d;border-radius:8px;padding:14px 16px;margin-top:10px}.exact-value{font:550 clamp(15px,1.7vw,23px)/1.5 ui-monospace,SFMono-Regular,monospace;color:var(--green);overflow-wrap:anywhere}.frontier-inspect-meta{font-size:12px;color:var(--muted);margin-top:4px}.frontier-scrub{display:flex;gap:12px;align-items:center;margin:12px 0 0}.frontier-scrub input{width:100%;min-width:70px;accent-color:var(--green);cursor:ew-resize}.frontier-scrub button{padding:3px 10px;font-size:17px}.frontier-bottom{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:7px}.source-badges{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.source-badges button{font-size:11px;padding:3px 8px}.frontier-note{font-size:11px;color:var(--muted);margin:8px 0 0}.graph-frontier{font-size:10px;color:var(--green);white-space:nowrap}.ledger-record{border-color:#435269}.ledger-record .badge{color:var(--muted)}
+@media(max-width:1050px){.frontier-content{grid-template-columns:1fr}.frontier-summary{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:4px 20px;align-items:start}.frontier-legend{margin-top:8px}.frontier-readout{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.frontier-readout>button{grid-column:1/-1;justify-self:start}.frontier-panel{padding:18px}.frontier-content{gap:12px}}@media(max-width:620px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.cards .card:last-child{grid-column:1/-1}.frontier-panel{padding:14px}.frontier-panel h2{font-size:21px}.frontier-best{font-size:28px}.frontier-readout{grid-template-columns:1fr}.frontier-summary{grid-template-columns:1fr}.frontier-legend{display:flex;gap:8px 16px;flex-wrap:wrap;margin-top:5px}.frontier-content{gap:5px}.frontier-scrub{gap:6px}#frontierChart{height:260px}.frontier-readout{padding:12px}.frontier-panel .toolbar button{font-size:11px;padding:5px 8px}}
 </style>
-<header><div><small>RESEARCH LOOP / PROTOK SE3</small><h1>研究现场</h1><small>看清正在做什么、为什么做，以及结果如何改变下一步。</small></div><div style="text-align:right"><span id="connection" class="live">连接中</span><br><small id="updated">—</small><br><small>只读 · 每 5 秒刷新</small></div></header>
-<main><div class="cards"><div class="card"><small>已通过 Review 的最佳 RMSD</small><b id="best">—</b><small id="bestSub">—</small></div><div class="card"><small>当前调查</small><b id="current">—</b><small id="currentSub">—</small></div><div class="card"><small>累计 GPU 用量</small><b id="gpu">—</b><small>含接管前历史；在途作业结束后核账</small></div><div class="card"><small>本次窗口剩余</small><b id="remaining">—</b><small id="deadline">—</small></div></div>
-<section class="panel wide"><h2 id="now">正在读取现场…</h2><div id="intent" class="muted"></div><div class="phase" id="phases"></div><div class="statusline muted" id="statusline"></div></section>
-<div class="layout"><section class="panel"><div class="toolbar"><button class="on" id="graphBtn">探索图</button><button id="listBtn">实验列表</button><select id="routeFilter"><option value="">所有路线</option></select><label class="muted"><input type="checkbox" id="refs"> 显示证据引用</label></div><div class="legend">实线：代码继承　虚线：证据引用　绿色：当前最佳　黄色：执行中　灰色：无质量测量</div><div class="scroll" id="graphWrap"><svg id="graph" role="img" aria-label="实验继承与证据引用图"></svg></div><div class="scroll" id="listWrap" hidden><table><thead><tr><th>实验 / 路线</th><th>RMSD Å</th><th>状态</th></tr></thead><tbody id="rows"></tbody></table></div><div style="border-top:1px solid var(--line);margin-top:15px;padding-top:15px"><b>已审阅指标与历史最优</b><div class="legend">蓝点：单次测量　绿线：截至该实验的最优；无测量节点不记为 0。</div><svg id="chart" role="img" aria-label="RMSD与最优曲线"></svg></div></section>
-<section class="panel"><div class="toolbar"><h3 id="detailTitle">实验详情</h3><button id="follow" style="margin-left:auto">跟随当前</button><button id="researchBtn">全局研究</button></div><div id="detailMeta" class="muted"></div><div class="tabs" id="tabs"><button data-tab="plan" class="on">Plan · 做什么</button><button data-tab="execute">Execute · 发生什么</button><button data-tab="review">Review · 学到什么</button><button data-tab="selection">选择依据</button><button data-tab="route">路线知识</button></div><pre id="detailBody">点击图中节点查看原始研究记录。</pre></section></div><div class="footer">固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100 debug/30 分钟。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板不发起训练、模型调用或远程轮询。</div></main>
+</head>
+<body>
+<header>
+  <div><div class="eyebrow">RESEARCH LOOP / PROTOK SE3</div><h1>研究现场</h1><small>追踪每次研究决策、代码演化与已核查的发现。</small></div>
+  <div class="connection"><span id="connection">正在连接…</span><br><span id="updated">—</span><br><span id="sourceName">只读观察 · 每 5 秒刷新</span></div>
+</header>
+<main>
+  <section class="panel frontier-panel" aria-labelledby="frontierTitle">
+    <div class="toolbar between"><div><div class="eyebrow">GLOBAL FRONTIER / RMSD ↓</div><h2 id="frontierTitle">研究前沿</h2></div><div class="toolbar" id="frontierViews" aria-label="Frontier 图显示范围"><button data-chart-view="frontier" class="on" aria-pressed="true">Frontier 演进</button><button data-chart-view="all" aria-pressed="false">全部实验</button><button data-chart-view="recent" aria-pressed="false">最近 10 轮</button></div></div>
+    <div class="frontier-content">
+      <div class="frontier-summary"><div><small>当前已发布 Frontier · RMSD 越低越好</small><div class="frontier-best" id="best">—</div><small id="bestSub">正在读取正式 Frontier…</small><div class="frontier-members" id="frontierMembers"></div></div><div class="frontier-legend"><span><i class="mark-ring"></i>当前 Frontier</span><span><i class="mark-diamond"></i>发布时进入 Frontier</span><span><i class="mark-dot"></i>其他已核查测量</span><span><i class="mark-dot ledger"></i>早期账本，未经本 Loop 评审</span></div></div>
+      <div class="frontier-chart-wrap"><svg id="frontierChart" role="group" aria-label="Frontier 演进交互图"></svg><div id="chartRange" class="frontier-note"></div></div>
+    </div>
+    <div class="frontier-readout" id="frontierReadout" aria-live="polite"><div><b id="inspectTitle">选择图中实验</b><div id="inspectStatus" class="frontier-inspect-meta">悬停查看，点击固定</div></div><div><div id="inspectValue" class="exact-value">—</div><div id="inspectDelta" class="frontier-inspect-meta"></div></div><button id="frontierDetails" disabled>查看该轮记录</button><div id="inspectProvenance" class="frontier-inspect-meta" style="grid-column:1/-1" hidden></div></div>
+    <div class="frontier-scrub"><button id="frontierPrev" aria-label="上一个图中实验">‹</button><input id="frontierSlider" type="range" min="0" max="0" value="0" step="1" disabled aria-label="滑动查看 Frontier 和实验的精确 RMSD"><button id="frontierNext" aria-label="下一个图中实验">›</button></div>
+    <div class="frontier-bottom"><span id="frontierPosition">尚无可浏览的测量</span><span>悬停 / 滑动查看精确值 · 点击固定 · 绿阶梯为当前有效证据的累计最优</span></div>
+    <div class="frontier-note" id="frontierNote"></div><div class="frontier-note" id="historyCoverage"></div><div class="source-badges" id="sourceBadges"></div>
+  </section>
+  <div class="cards">
+    <div class="card"><small>当前调查</small><b id="current">—</b><small id="currentSub">—</small></div>
+    <div class="card"><small>累计 GPU 用量</small><b id="gpu">—</b><small>含接管前历史；回执核账后更新</small></div>
+    <div class="card"><small>本次授权窗口</small><b id="remaining">—</b><small id="deadline">—</small></div>
+  </div>
+  <section class="panel wide" aria-labelledby="now">
+    <div class="progress-title"><div><div class="eyebrow">当前进度</div><h2 id="now">正在读取研究状态…</h2><div id="intent" class="muted"></div></div><span id="goal" class="badge">目标尚未判定</span></div>
+    <div class="phase" id="phases"></div><div id="reasons" class="reasons"></div><div id="statusline" class="statusline"></div>
+  </section>
+  <div class="layout">
+    <section class="panel" aria-labelledby="graphTitle">
+      <div class="toolbar between"><div><h2 id="graphTitle">代码演化</h2><small id="graphSubtitle">像读 Git 历史一样，回溯每次调查的代码起点。</small></div><div class="toolbar"><button id="graphBtn" class="on" aria-pressed="true">代码继承</button><button id="routesBtn" aria-pressed="false">研究路线</button></div></div>
+      <div class="toolbar" style="margin-top:13px"><select id="sourceFilter" aria-label="突出显示历史阶段"><option value="">所有阶段</option></select><select id="routeFilter" aria-label="突出显示研究路线"><option value="">所有路线</option></select><label class="muted" style="font-size:12px"><input type="checkbox" id="refs"> 显示证据引用</label></div>
+      <div id="graphLegend" class="graph-note"><span><i class="legend-line"></i>代码起点 → 本轮</span><span><i class="legend-line dashed"></i>证据引用</span><span style="color:var(--amber)">┄ 同版本结果导入</span></div>
+      <div id="graphExplanation" class="caption">上新下旧，每行是一次调查；分支轨道只用于排线，同列不代表同一研究路线。路线由标签标明。</div>
+      <div class="git-scroll" id="graphWrap"><div id="graph" class="git-log" aria-label="按时间倒序的代码继承历史"></div></div>
+      <div id="routeWrap" class="route-cards" hidden></div>
+    </section>
+    <section class="panel" aria-labelledby="detailTitle">
+      <div class="detail-heading"><div><div class="eyebrow">调查记录 / AGENT 输出</div><h2 id="detailTitle">正在读取…</h2></div><div class="toolbar"><button id="follow" aria-pressed="true">跟随当前</button><button id="researchBtn">全局研究</button></div></div>
+      <div id="detailMeta" class="detail-meta"></div><div id="context" style="margin-top:12px"></div>
+      <div class="tabs" id="tabs" role="tablist" aria-label="调查输出"><button role="tab" aria-selected="true" data-tab="plan" class="on">Plan · 调查合同</button><button role="tab" aria-selected="false" data-tab="review">Review · 判断与发现</button><button role="tab" aria-selected="false" data-tab="selection">提案与决策</button><button role="tab" aria-selected="false" data-tab="route">研究知识</button></div>
+      <div id="detailBody" class="detail-body" aria-live="polite"><div class="loading">正在载入 Agent 输出…</div></div>
+    </section>
+  </div>
+  <section class="panel scout" id="scoutPanel" hidden><div class="toolbar between"><h3>Scout · 外部研究输入</h3><span id="scoutStatus" class="badge"></span></div><div id="scoutBody"></div></section>
+  <div class="footer">固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板读取本地研究记录与回执，不发起训练、模型调用或远程轮询。Execution 仅显示阶段与结果状态。</div>
+</main>
 <script>
-const $=id=>document.getElementById(id), phases=['selection','plan','execute','review','done'], phaseNames=['路线选择','计划冻结','执行 / GPU评测','独立评审','发布'], esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let data,selected=null,tab='plan',detail={},following=true,detailVersion='',mode='graph',loadedId='';
-const val=x=>x==null?'未测量':Number(x).toFixed(4), time=x=>new Date(x*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
-async function api(path){const r=await fetch(path,{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);return r.json()}
-function nodeColor(n){return n.id===data.best.id?'#67e3b4':n.status==='running'?'#f3cd7c':n.value!=null?'#84b5ff':'#8794aa'}
-function render(){const s=data.state,cur=data.nodes.find(n=>+n.id===s.iteration);$('best').textContent=val(Object.values(data.best.metrics)[0])+' Å';$('bestSub').textContent='实验 '+(data.best.id||'—')+' · 仅已发布、有效且已核查的测量';$('current').textContent='#'+String(s.iteration).padStart(4,'0');$('currentSub').textContent=(cur?.route||'路线选择中')+' · '+(phaseNames[phases.indexOf(s.phase)]||s.phase);$('gpu').textContent=(data.gpu_seconds/3600).toFixed(2)+' 小时';const mins=Math.max(0,Math.floor((data.deadline-Date.now()/1000)/60));$('remaining').textContent=mins>=60?Math.floor(mins/60)+' 小时 '+mins%60+' 分':mins+' 分';$('deadline').textContent='截止 '+time(data.deadline)+' 北京时间';$('now').textContent=(data.stop?'已设置停止标记 · ':s.status==='running'?'正在进行 · ':s.status+' · ')+(phaseNames[phases.indexOf(s.phase)]||s.phase);$('intent').textContent=cur?.title&&cur.title!=='暂无记录'?'本轮 Plan：'+cur.title.split(/[。\n]/)[0]+'。':'正在比较候选路线，尚未冻结 Plan。';$('phases').innerHTML=phases.map((p,i)=>'<span class="'+(p===s.phase?'active':i<phases.indexOf(s.phase)?'past':'')+'">'+phaseNames[i]+'</span>').join('');const jobs=data.outstanding.flatMap(r=>r.attempts||[]).map(a=>'作业 '+a.owned_job_id+' · '+a.status);$('statusline').textContent=(data.snapshot_only?'归档快照 · 非实时HPC · 最后核账 '+time(data.backend_observed_at)+'　|　':'')+(jobs.length?jobs.join(' / '):'无在途 GPU 作业')+'　|　角色调用 '+s.call_count+' 次　|　全局计分预约 '+data.scored_records+' 次'+(s.error?'　|　'+s.error:'');$('updated').textContent='本地记录读取于 '+time(data.observed_at);const filter=$('routeFilter').value,opts=Object.entries(data.routes);$('routeFilter').innerHTML='<option value="">所有路线</option>'+opts.map(([id,r])=>'<option value="'+esc(id)+'">'+esc(id+' · '+r.title)+'</option>').join('');$('routeFilter').value=filter;drawGraph();drawChart();$('rows').innerHTML=data.nodes.filter(n=>!filter||n.route_id===filter).map(n=>'<tr data-id="'+n.id+'"><td><b>#'+n.id+'</b><br>'+esc(n.route)+'</td><td>'+val(n.value)+(n.provisional_value!=null?'<br>待审 '+val(n.provisional_value):'')+'</td><td>'+esc(n.status)+(n.imported?'<br>历史导入':'')+'</td></tr>').join('');$('rows').querySelectorAll('tr').forEach(el=>el.onclick=()=>choose(el.dataset.id));if(following&&cur)selected=cur.id;showDetail()}
-function drawGraph(){const filter=$('routeFilter').value,nodes=data.nodes.filter(n=>!filter||n.route_id===filter),pos={},depth={};for(const n of data.nodes)depth[n.id]=n.base?(depth[n.base]||0)+1:0;const occupied={};for(const n of nodes){const d=depth[n.id],row=occupied[d]||0;occupied[d]=row+1;pos[n.id]={x:25+d*245,y:20+row*96}}const width=Math.max(720,...Object.values(pos).map(p=>p.x+225)),height=Math.max(200,...Object.values(pos).map(p=>p.y+90));$('graph').setAttribute('viewBox',`0 0 ${width} ${height}`);$('graph').style.height=height+'px';let svg='<defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#778ca9"/></marker></defs>';const edge=(from,to,dash)=>{const a=pos[from],b=pos[to];if(!a||!b)return;const x=a.x+205,y=a.y+35;svg+=`<path d="M${x},${y} C${x+30},${y} ${b.x-30},${b.y+35} ${b.x},${b.y+35}" fill="none" stroke="${dash?'#43516b':'#778ca9'}" stroke-dasharray="${dash?'5 5':''}" marker-end="url(#arrow)"/>`};for(const n of nodes){if(n.base)edge(n.base,n.id,false);if($('refs').checked)for(const ref of n.references)if(ref!==n.base)edge(ref,n.id,true)}for(const n of nodes){const p=pos[n.id],color=nodeColor(n);svg+=`<g class="node" data-id="${n.id}"><rect x="${p.x}" y="${p.y}" width="205" height="72" rx="9" fill="#1a2940" stroke="${color}" stroke-width="${selected===n.id?3:1}"/><text x="${p.x+12}" y="${p.y+23}" fill="${color}" font-size="13">#${n.id} · ${esc(n.route.slice(0,14))}</text><text x="${p.x+12}" y="${p.y+46}" fill="#e5edf9" font-size="15">${n.value!=null?val(n.value)+' Å':n.provisional_value!=null?'待审 '+val(n.provisional_value):n.status==='running'?'● '+(phaseNames[phases.indexOf(n.phase)]||n.phase):'无质量测量'}</text><text x="${p.x+12}" y="${p.y+63}" fill="#9baac2" font-size="10">${n.imported?'历史导入 · 非新训练':n.published?'已发布 Review':'尚未发布'}</text></g>`}$('graph').innerHTML=svg;$('graph').querySelectorAll('.node').forEach(el=>el.onclick=()=>choose(el.dataset.id))}
-function drawChart(){const pts=data.nodes.filter(n=>n.value!=null);if(!pts.length){$('chart').innerHTML='';return}const W=720,H=240,l=60,r=22,t=20,b=35,vs=pts.map(n=>n.value),lo=Math.min(...vs)-.04,hi=Math.max(...vs)+.04,max=Math.max(...data.nodes.map(n=>+n.id)),x=id=>l+(+id-1)/Math.max(1,max-1)*(W-l-r),y=v=>t+(hi-v)/(hi-lo)*(H-t-b);let out='';for(let i=0;i<4;i++){const v=lo+(hi-lo)*i/3,Y=y(v);out+=`<line x1="${l}" x2="${W-r}" y1="${Y}" y2="${Y}" stroke="#2b3850"/><text x="4" y="${Y+4}" fill="#9baac2" font-size="11">${v.toFixed(2)}</text>`}let best=Infinity,path='';for(const n of pts){best=Math.min(best,n.value);path+=(path?' L':'M')+x(n.id)+','+y(best);out+=`<circle cx="${x(n.id)}" cy="${y(n.value)}" r="5" fill="#84b5ff" data-id="${n.id}" style="cursor:pointer"><title>#${n.id}: ${n.value} Å</title></circle><text x="${x(n.id)-14}" y="${H-10}" fill="#9baac2" font-size="11">${n.id}</text>`}out=`<path d="${path}" fill="none" stroke="#67e3b4" stroke-width="2"/>`+out;$('chart').setAttribute('viewBox',`0 0 ${W} ${H}`);$('chart').innerHTML=out;$('chart').querySelectorAll('circle').forEach(el=>el.onclick=()=>choose(el.dataset.id))}
-async function choose(id){following=false;selected=id;detailVersion='';drawGraph();await showDetail()}
-async function showDetail(){if(!selected)return;const id=selected,n=data.nodes.find(n=>n.id===id);if(loadedId!==id)$('detailBody').textContent='正在读取 #'+id+' 的记录…';$('detailTitle').textContent='#'+id+' · '+(n?.route||'');$('detailMeta').textContent=(n?.base?'代码起点 #'+n.base:'无 Study 父版本')+'　|　'+(n?.published?'已发布':'处理中')+'　|　RMSD '+val(n?.value)+(n?.provisional_value!=null?' · 待审 '+val(n.provisional_value):'');const version=id+':'+data.observed_at;if(version!==detailVersion){const d=await api('/api/node/'+id);if(selected!==id)return;detail=d;detailVersion=version;loadedId=id}$('detailBody').textContent=detail[tab]||'本阶段尚无完成记录；正在运行的阶段需等回执返回。'}
-$('routeFilter').onchange=()=>{drawGraph();render()};$('refs').onchange=drawGraph;$('graphBtn').onclick=()=>{mode='graph';$('graphWrap').hidden=false;$('listWrap').hidden=true;$('graphBtn').classList.add('on');$('listBtn').classList.remove('on')};$('listBtn').onclick=()=>{mode='list';$('graphWrap').hidden=true;$('listWrap').hidden=false;$('listBtn').classList.add('on');$('graphBtn').classList.remove('on')};$('tabs').querySelectorAll('button').forEach(el=>el.onclick=()=>{tab=el.dataset.tab;$('tabs').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===el));showDetail()});$('follow').onclick=()=>{following=true;detailVersion='';render()};$('researchBtn').onclick=async()=>{following=false;selected=null;$('detailTitle').textContent='全局 research.md';$('detailMeta').textContent='当前研究理解与证据；完整原文';$('detailBody').textContent=(await api('/api/research')).text};async function refresh(){try{data=await api('/api/snapshot');$('connection').textContent='● 记录已连接';$('connection').className='live';render()}catch(e){$('connection').textContent='读取失败 · '+e.message;$('connection').className='error'}}refresh();setInterval(refresh,5000);
-</script></html>
+'use strict';
+const $ = id => document.getElementById(id);
+const PHASES = ['selection', 'plan', 'execute', 'review', 'done'];
+const PHASE_NAMES = {selection:'路线选择', plan:'Plan · 调查合同', execute:'执行与评测', review:'Review · 独立评审', done:'发布与下一轮'};
+const LABELS = {
+  decision:'决策', choice:'选中提案', action:'具体行动', rationale:'研究依据', evaluation:'评价方法', decision_criteria:'判断标准', evidence_required:'所需证据', timeout_seconds:'等待上限（秒）',
+  base_experiment:'代码起点', references:'证据引用', input_artifacts:'输入版本', output_artifacts:'产物版本', contract:'调查合同', local_evaluation:'局部评价', stop_reason:'停止原因', route_id:'路线编号', route_title:'研究路线',
+  route_status:'路线状态', route_reason:'路线判断依据', resume_condition:'恢复条件', goal_status:'目标状态', candidate_reviews:'候选核查', candidate_corrections:'历史候选纠正', knowledge_changes:'新增认识',
+  candidate_id:'候选标识', valid:'方法有效', verified:'证据已核查', reason:'依据', path:'路径', version:'版本', metrics:'指标', value:'数值', unit:'单位', direction:'优化方向',
+  protocol:'评价协议', comparison_scope:'可比范围', data_role:'数据角色', allow_feedback:'允许研究反馈', objectives:'目标指标', constraints:'约束', id:'标识', name:'名称', operator:'关系',
+  candidates:'采样候选', queue_after:'后续采样队列', counter:'采样序号', seed:'采样种子', proposals:'候选提案', judge:'Judge 决策', rounds:'选择轮次', title:'标题', summary:'摘要', findings:'发现', suggestions:'建议',
+  topic:'主题', sources:'来源', source:'来源', url:'链接', query:'检索词', evidence:'证据', confidence:'可信程度', limitations:'限制', relevance:'相关性', proposed_action:'建议行动',
+  inquiry_kind:'调查类型', inquiry_type:'调查类型', expected_information_gain:'预期信息增益', expected_value:'预期价值', hypothesis:'假设', risk:'风险', risks:'风险', falsification:'反证条件', research_question:'研究问题', recommendation:'建议',
+  search_status:'检索状态', search_notes:'检索说明', evidence_status:'证据状态', source_claims_verified:'外部主张已核查', started_at:'开始时间', finished_at:'本次结束时间', findings_finished_at:'这份建议的发布时间', published_through:'已参考的研究进度', claim:'主张', motivation:'研究动机', experiment:'建议实验', question:'研究问题', contrast:'关键对照', discriminating_outcomes:'可区分的结果', source_ids:'引用来源',
+  research_design:'研究设计', kind:'研究类型', structural_change:'结构改动', prior_attempts:'已有尝试', difference_from_prior:'与已有工作的差异', contrasting_predictions:'相互区分的预测', minimal_test:'最小验证', scope_requirements:'所需权限与范围', scout_idea_ids:'参考的 Scout 建议', insight:'研究洞见', observed:'实际观察', supported:'证据支持的结论', unresolved:'尚未解决', next_discriminating_test:'下一项区分性实验', actual_kind:'实际研究类型', allocation_respected:'符合本轮研究分配', allocation_reason:'分配判断依据', observations:'已有观察', minimal_experiment:'最小实验', expected_outcomes:'预期的不同结果', ready_to_test:'已具备实验条件', accessed:'实际读取范围',
+  fingerprint:'评价结果标识', status:'记录状态', created_at:'创建时间', error:'保留错误', attempts:'作业回执', owned_job_id:'作业编号', terminal_state:'终态', exit_code:'退出状态', gpu_seconds:'GPU 秒', quality_score_eligible:'后端质量计分资格', evaluation_id:'评价协议编号',
+};
+const VALUES = {active:'继续研究', paused:'暂停', closed:'关闭', met:'已达到', not_met:'未达到', undetermined:'尚未判定', investigate:'开展调查', reselect:'返回重选', stop:'停止', continue:'继续', select:'选择', resample:'重新采样', minimize:'越低越好', maximize:'越高越好', development:'开发集', architecture:'架构探索', diagnostic:'诊断研究', refinement:'局部改进', unreviewed_external_advice:'未经评审的外部建议', full_text:'全文', abstract:'摘要', code:'代码', context_only:'仅上下文，未检索核实', paper:'论文', official_code:'官方代码', prior_record:'已有记录', true:'是', false:'否'};
+const STATUS = {running:'进行中', ready:'等待推进', needs_attention:'需要处理', stopped:'已停止', paused:'已暂停', reviewed:'Review 已发布', planned:'Plan 已冻结', executed:'执行已返回', selecting:'路线选择中', completed:'调用已完成', succeeded:'调用已完成', failed:'失败', interrupted:'已中断', timed_out:'超时', partial:'输出未完成', pending:'尚未开始', unknown:'状态未确认', unrecorded:'状态未记录', published:'已发布', accepted:'已接纳', submitted:'作业已提交', prepared:'作业已准备', preparing:'准备中', unavailable:'暂无记录', degraded:'检索不完整，保留既有建议'};
+const COLORS = ['#8ab8ff','#c4a0ef','#73cbbd','#e3b879','#de99ae','#9cbb80'];
+let data = null, selected = null, detail = null, following = true, tab = 'plan', view = 'git', discussion = false, globalView = false, research = '', detailSignature = '', detailToken = 0, detailError = false;
+let chartView='frontier', frontierPinned=null, frontierHover=null, chartModel=null;
+const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const translated = value => VALUES[String(value)] || String(value ?? '—');
+const score = value => value == null || !Number.isFinite(Number(value)) ? '未测量' : Number(value).toFixed(4);
+const phaseName = key => PHASE_NAMES[key] || key || '—';
+function timestamp(value) { if (value == null || value === '') return null; const n = typeof value === 'number' ? value * 1000 : Date.parse(value); return Number.isFinite(n) ? n : null; }
+function clock(value) { const n = timestamp(value); return n == null ? '时间未记录' : new Date(n).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai', hour12:false}); }
+function duration(seconds) { if (seconds == null || !Number.isFinite(Number(seconds))) return '耗时未记录'; const n = Math.max(0, Math.floor(Number(seconds))); return n >= 3600 ? Math.floor(n/3600)+' 小时 '+Math.floor(n%3600/60)+' 分' : n >= 60 ? Math.floor(n/60)+' 分 '+n%60+' 秒' : n+' 秒'; }
+function badge(text, tone = '') { return '<span class="badge '+tone+'">'+esc(text)+'</span>'; }
+function nodeOrder(node) { return node.sequence ?? Number(node.local_id || node.id); }
+function nodeLabel(node) { return node?.label || (node ? '#'+node.id : '—'); }
+function activeNode() { return data.nodes.find(node=>data.active_node_id ? node.id===data.active_node_id : +(node.local_id || node.id)===+data.state.iteration); }
+function resolveReference(id) { if (String(id).includes(':') || !data?.sources) return String(id); const source=detail?.source_id || data.nodes.find(node=>node.id===selected)?.source_id || 'active'; return source+':'+id; }
+function experimentLink(id, label) { const resolved=resolveReference(id),node=data?.nodes.find(item=>item.id===resolved);return '<button class="link" data-node="'+esc(resolved)+'">'+esc(label || (node?nodeLabel(node):'#'+id))+'</button>'; }
+function exactScore(value) { return typeof value==='number' && Number.isFinite(value) ? String(value) : '未测量'; }
+async function api(path) { const result = await fetch(path, {cache:'no-store'}); if (!result.ok) throw new Error('HTTP '+result.status); return result.json(); }
+
+// Render a small, escaped Markdown subset locally; agent prose never becomes trusted HTML.
+function inline(text) {
+  const tokens = [];
+  const token = html => { const key = '\u0000'+tokens.length+'\u0000'; tokens.push(html); return key; };
+  let value = String(text).replace(/`([^`]+)`/g, (_, code) => token('<code>'+esc(code)+'</code>'));
+  value = value.replace(/\[([^\]\n]+)\]\(([^\s)]+)\)/g, (all, label, url) => /^https?:\/\//i.test(url) ? token('<a href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'+esc(label)+'</a>') : label);
+  value = esc(value).replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>').replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+  return value.replace(/\u0000(\d+)\u0000/g, (_, index) => tokens[Number(index)]);
+}
+function markdown(text) {
+  if (!text || text === '暂无记录') return '<div class="empty">尚无完成记录。</div>';
+  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
+  let html = '', i = 0;
+  const special = line => /^\s*$|^#{1,6}\s|^\s*```|^\s*[-*+]\s|^\s*\d+[.)]\s|^\s*>|^\s*---+\s*$/.test(line);
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    if (/^\s*```/.test(line)) {
+      const lang = line.trim().slice(3).trim(); const block = []; i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) block.push(lines[i++]);
+      i++;
+      if (lang === 'json') { try { html += structured(JSON.parse(block.join('\n'))); continue; } catch (_) { /* Retain malformed output as escaped prose. */ } }
+      html += '<pre><code>'+esc(block.join('\n'))+'</code></pre>'; continue;
+    }
+    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+    if (heading) { const level = Math.min(4, heading[1].length+1); html += '<h'+level+'>'+inline(heading[2])+'</h'+level+'>'; i++; continue; }
+    if (/^\s*---+\s*$/.test(line)) { html += '<hr>'; i++; continue; }
+    if (i+1 < lines.length && line.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[i+1])) {
+      const cells = row => row.trim().replace(/^\||\|$/g,'').split('|').map(cell => cell.trim());
+      html += '<div class="table-wrap"><table><thead><tr>'+cells(line).map(cell => '<th>'+inline(cell)+'</th>').join('')+'</tr></thead><tbody>'; i += 2;
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) html += '<tr>'+cells(lines[i++]).map(cell => '<td>'+inline(cell)+'</td>').join('')+'</tr>';
+      html += '</tbody></table></div>'; continue;
+    }
+    if (/^\s*>/.test(line)) { const quote = []; while (i < lines.length && /^\s*>/.test(lines[i])) quote.push(lines[i++].replace(/^\s*>\s?/,'')); html += '<blockquote>'+markdown(quote.join('\n'))+'</blockquote>'; continue; }
+    const list = /^\s*(?:([-*+])|\d+[.)])\s+/.exec(line);
+    if (list) {
+      const tag = list[1] ? 'ul' : 'ol', pattern = list[1] ? /^\s*[-*+]\s+/ : /^\s*\d+[.)]\s+/;
+      html += '<'+tag+'>';
+      while (i < lines.length && pattern.test(lines[i])) {
+        let item = lines[i++].replace(pattern,'');
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !special(lines[i])) item += '\n'+lines[i++].trim();
+        html += '<li>'+inline(item).replace(/\n/g,'<br>')+'</li>';
+      }
+      html += '</'+tag+'>'; continue;
+    }
+    const paragraph = [line]; i++;
+    while (i < lines.length && !special(lines[i]) && !(i+1 < lines.length && lines[i].includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[i+1]))) paragraph.push(lines[i++]);
+    html += '<p>'+inline(paragraph.join('\n')).replace(/\n/g,'<br>')+'</p>';
+  }
+  return '<div class="prose">'+html+'</div>';
+}
+function structured(value, key = '') {
+  if (value == null) return '<span class="muted">未指定</span>';
+  if (typeof value === 'boolean') return badge(value ? '是' : '否', value ? 'green' : '');
+  if (Array.isArray(value)) {
+    if (!value.length) return '<span class="muted">无</span>';
+    return '<ul class="field-list">'+value.map(item => '<li>'+structured(item, key)+'</li>').join('')+'</ul>';
+  }
+  if (typeof value === 'object') return '<dl class="facts">'+Object.entries(value).map(([name, item]) => '<dt>'+esc(LABELS[name] || name.replace(/_/g,' '))+'</dt><dd>'+structured(item, name)+'</dd>').join('')+'</dl>';
+  if ((key === 'base_experiment' || key === 'references') && /^\d{4,}$/.test(String(value))) return experimentLink(String(value));
+  if (key === 'url' && /^https?:\/\//i.test(String(value))) return '<a href="'+esc(value)+'" target="_blank" rel="noopener noreferrer">'+esc(value)+'</a>';
+  if (['started_at','finished_at','findings_finished_at','created_at'].includes(key)) return esc(clock(value));
+  if (key==='status') return badge(STATUS[value] || value);
+  return typeof value === 'string' ? markdown(translated(value)) : esc(value);
+}
+function facts(value, keys) { const object = Object.fromEntries(keys.filter(key => value[key] != null).map(key => [key, value[key]])); return Object.keys(object).length ? structured(object) : ''; }
+function disclosure(key, title, body, open = false) { return '<details data-disclosure="'+esc(key)+'"'+(open?' open':'')+'><summary>'+esc(title)+'</summary>'+body+'</details>'; }
+function excerpt(text, limit = 180) { const value=String(text || '').replace(/^#+\s*/,'').trim(); return value.length>limit ? value.slice(0,limit)+'…' : value; }
+function readingField(key, label, value) {
+  const content=typeof value==='string' && value.length>450 ? markdown(excerpt(value,240))+disclosure(key,'展开完整'+label,markdown(value)) : structured(value);
+  return '<div class="fact-block"><h4>'+esc(label)+'</h4>'+content+'</div>';
+}
+function bindExperiments(container) { container.querySelectorAll('[data-node]').forEach(button => button.onclick = () => choose(button.dataset.node)); }
+
+function renderProgress() {
+  const state = data.state || {}, progress = data.progress || {}, current = activeNode();
+  $('current').textContent = state.iteration == null ? '—' : '#'+String(state.iteration).padStart(4,'0');
+  $('currentSub').textContent = (current?.route || '路线选择中')+' · '+phaseName(state.phase)+(current?.inquiry_kind?' · '+translated(current.inquiry_kind):'');
+  $('gpu').textContent = data.gpu_seconds == null ? '—' : (data.gpu_seconds/3600).toFixed(2)+' 小时';
+  const effectiveDeadline = data.effective_deadline ?? data.deadline;
+  const deadline = timestamp(effectiveDeadline), remaining = deadline == null ? null : Math.max(0, Math.floor((deadline-Date.now())/1000));
+  $('remaining').textContent = remaining == null ? '未记录' : remaining === 0 ? '窗口已结束' : duration(remaining);
+  $('deadline').textContent = deadline == null ? '授权截止时间未记录' : '截止 '+clock(effectiveDeadline)+' 北京时间';
+  $('now').textContent = progress.title || ((data.stop ? '已设置停止标记' : STATUS[state.status] || state.status || '状态未确认')+' · '+phaseName(state.phase));
+  $('intent').textContent = progress.message || current?.action || '本轮尚未冻结调查合同。';
+  $('goal').textContent = '目标 '+translated(state.goal_status || 'undetermined');
+  $('goal').className = 'badge '+(state.goal_status === 'met' ? 'green' : '');
+  const stageRows = progress.stages || [];
+  $('phases').innerHTML = PHASES.map((key,index) => {
+    const row = stageRows.find(stage => stage.key === key) || {};
+    const active = state.phase === key, complete = ['completed','succeeded','published','done'].includes(row.status) || (!row.status && index < PHASES.indexOf(state.phase));
+    const css = active && (data.stop || ['needs_attention','stopped'].includes(state.status)) ? 'blocked' : active ? 'active' : complete ? 'complete' : '';
+    const label = row.duration_seconds != null ? duration(row.duration_seconds) : active ? (STATUS[state.status] || '当前阶段') : complete ? '已完成' : '尚未开始';
+    return '<div class="phase-item '+css+'"><strong>'+esc(phaseName(key))+'</strong><small>'+esc(label)+(row.attempts ? ' · '+row.attempts+' 次调用' : '')+'</small></div>';
+  }).join('');
+  const reasons = progress.reasons || (state.error ? [{title:'当前错误', detail:state.error}] : []);
+  $('reasons').innerHTML = reasons.map(reason => '<div class="reason"><strong>'+esc(reason.title)+'</strong><p>'+esc(reason.detail || reason.message || '')+'</p>'+(reason.source ? '<small>'+esc(reason.source)+'</small>' : '')+'</div>').join('');
+  const jobs = (data.outstanding || []).flatMap(row => row.attempts || []).map(attempt => '作业 '+(attempt.owned_job_id || '待绑定')+' · '+(attempt.terminal_state || attempt.status || '待核账'));
+  const bits = [data.snapshot_only ? '归档快照 · 非实时 HPC · 核账时间 '+clock(data.backend_observed_at) : '读取本地控制记录与后端回执', jobs.length ? jobs.join(' / ') : '无待核账 GPU 作业', '角色调用 '+(state.call_count ?? '—')+' 次'];
+  if (progress.active_role) bits.push((state.status==='running'?'当前角色 ':'最近调用角色 ')+progress.active_role);
+  if (progress.elapsed_seconds != null) bits.push((state.status==='running'?'本次调用已用 ':'最近调用耗时 ')+duration(progress.elapsed_seconds));
+  if (data.runner?.status) bits.push('Runner '+(STATUS[data.runner.status] || data.runner.status));
+  $('statusline').innerHTML = bits.map(bit => '<span>'+esc(bit)+'</span>').join('');
+  $('updated').textContent = '记录读取于 '+clock(data.observed_at);
+  $('sourceName').textContent = (data.study_name || '当前目录')+' · 每 5 秒刷新';
+  $('sourceName').title = data.study_root || '';
+}
+
+// Git lanes reserve the next expected parent. Route IDs never influence positions.
+function gitLayout(nodes) {
+  const ordered = [...nodes].sort((a,b) => nodeOrder(b)-nodeOrder(a)), lanes = [], positions = {};
+  for (const [row,node] of ordered.entries()) {
+    let lane = lanes.indexOf(node.id);
+    if (lane < 0) { lane = lanes.indexOf(null); if (lane < 0) lane = lanes.length; }
+    positions[node.id] = {lane, row, x:18+lane*23, y:row*102+51};
+    lanes[lane] = null;
+    const parent=node.base || node.imported_from;
+    if (parent && !lanes.includes(parent)) lanes[lane] = parent;
+  }
+  return {ordered, positions, width:Math.max(56, ...Object.values(positions).map(position => position.x+38))};
+}
+function nodeTone(node) { return node.frontier_current===true ? 'green' : node.status === 'needs_attention' ? 'red' : !node.published && node.source_id!=='ledger' ? 'amber' : ''; }
+function nodeResult(node) { return node.source_id==='ledger' ? node.value!=null?'账本 '+score(node.value)+' Å':STATUS[node.status] || node.status || '无测量' : node.value != null ? score(node.value)+' Å' : node.provisional_value != null ? '待审 '+score(node.provisional_value) : node.imported ? '历史导入' : !node.published ? (STATUS[node.status] || phaseName(node.phase)) : '无质量测量'; }
+function drawGraph() {
+  const {ordered, positions, width} = gitLayout(data.nodes), filter = $('routeFilter').value, sourceFilter=$('sourceFilter').value, height = ordered.length*102;
+  if (!ordered.length) { $('graph').innerHTML = '<div class="empty">尚无调查节点。首次路线选择开始后会出现在这里。</div>'; return; }
+  let svg = '<defs><marker id="codeArrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6" fill="#8ab8ff"/></marker><marker id="refArrow" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0 0 L5 2.5 L0 5" fill="#a99bc9"/></marker></defs>';
+  for (const node of ordered) {
+    const child = positions[node.id], parent = positions[node.base];
+    if (parent) {
+      const active = node.id === selected || node.base === selected;
+      const path = parent.x === child.x ? `M${parent.x},${parent.y-8} V${child.y+8}` : `M${parent.x},${parent.y-8} C${parent.x},${parent.y-28} ${child.x},${parent.y-25} ${child.x},${parent.y-44} V${child.y+8}`;
+      svg += '<path d="'+path+'" fill="none" stroke="'+COLORS[child.lane%COLORS.length]+'" stroke-width="'+(active?2.6:1.7)+'" opacity="'+(active?1:.65)+'" marker-end="url(#codeArrow)"><title>代码继承：#'+esc(node.base)+' → #'+esc(node.id)+'</title></path>';
+    }
+    const origin=positions[node.imported_from];
+    if (origin && !parent) svg+=`<path d="M${origin.x},${origin.y-8} C${origin.x},${origin.y-28} ${child.x},${origin.y-25} ${child.x},${origin.y-44} V${child.y+8}" fill="none" stroke="#f2cb85" stroke-width="1.8" stroke-dasharray="7 4"><title>同版本结果导入：${esc(node.imported_from)} → ${esc(node.id)}；不增加新评价结果</title></path>`;
+    if ($('refs').checked) for (const ref of node.references || []) {
+      const reference = positions[ref]; if (!reference || ref === node.base) continue;
+      const edgeX = width-5;
+      svg += `<path d="M${reference.x+7},${reference.y} C${edgeX},${reference.y} ${edgeX},${child.y} ${child.x+8},${child.y}" fill="none" stroke="#a99bc9" stroke-dasharray="3 5" opacity=".75" marker-end="url(#refArrow)"><title>证据引用：#${esc(ref)} → #${esc(node.id)}；不继承代码</title></path>`;
+    }
+  }
+  for (const node of ordered) {
+    const point = positions[node.id], color = node.frontier_current===true ? '#72dfb3' : COLORS[point.lane%COLORS.length];
+    svg += '<circle cx="'+point.x+'" cy="'+point.y+'" r="'+(node.id === selected?7:5)+'" fill="'+(node.published?color:'#151f30')+'" stroke="'+color+'" stroke-width="2"><title>#'+esc(node.id)+'</title></circle>';
+    if(node.frontier_current===true)svg+=`<circle cx="${point.x}" cy="${point.y}" r="10" fill="none" stroke="#72dfb3" stroke-width="1.3"/>`;
+  }
+  $('graph').innerHTML = '<svg class="git-rail" width="'+width+'" height="'+height+'" aria-hidden="true">'+svg+'</svg><div style="margin-left:'+width+'px">'+ordered.map(node => '<button class="git-row '+(node.id===selected?'selected ':'')+((filter && node.route_id!==filter)||(sourceFilter && node.source_id!==sourceFilter)?'other-route':'')+'" data-node="'+esc(node.id)+'" aria-pressed="'+(node.id===selected)+'"><div class="row-top"><span class="commit-id">'+esc(nodeLabel(node))+'</span><span class="score '+nodeTone(node)+'">'+esc(nodeResult(node))+'</span></div><div class="row-action" title="'+esc(node.action_summary || node.action || node.title || node.route)+'">'+esc(excerpt(node.action_summary || node.action || node.title || node.route || '路线选择中',100))+'</div><div class="row-meta">'+badge(node.route || node.source_label || '待选择','route')+'<span>'+esc(node.base?'起点 '+nodeLabel(data.nodes.find(item=>item.id===node.base)):node.imported_from?'同版本导入':node.source_id==='ledger'?'早期账本，未经 Loop 评审':'独立基线')+'</span><span class="graph-frontier">'+(node.frontier_current===true?'◎ 当前 Frontier':node.frontier_reached===true?'◇ 曾进入 Frontier':'')+'</span><span>'+esc(node.frontier_exclusion_reason?'资格已排除':node.imported?'历史导入':node.published?'已发布':STATUS[node.status] || '未发布')+'</span></div></button>').join('')+'</div>';
+  bindExperiments($('graph'));
+}
+function drawRoutes() {
+  const filter = $('routeFilter').value,source=$('sourceFilter').value, routes = Object.entries(data.routes || {}).filter(([id]) => (!filter || id === filter) && (!source || id.startsWith(source+':')));
+  $('routeWrap').innerHTML = routes.length ? routes.map(([id,route]) => {
+    const nodes = data.nodes.filter(node => node.route_id === id);
+    return '<article class="route-card"><div class="toolbar between"><strong>'+esc(id+' · '+route.title)+'</strong>'+badge(translated(route.status),route.status==='active'?'green':'amber')+'</div><p>'+esc(route.reason || '尚无路线评审理由。')+'</p><div class="route-history">'+nodes.map(node => '<button data-node="'+esc(node.id)+'" class="'+(node.id===selected?'on':'')+'">'+esc(nodeLabel(node))+' · '+esc(node.value==null?'无已审测量':score(node.value))+'</button>').join('<span class="muted" aria-label="时间先后">›</span>')+'</div>'+(route.resume_condition?'<p>恢复条件：'+esc(route.resume_condition)+'</p>':'')+'</article>';
+  }).join('') : '<div class="empty">尚无研究路线；新路线会在 Plan 冻结后出现。</div>';
+  bindExperiments($('routeWrap'));
+}
+function drawChart() {
+  const frontier=data.frontier || {}, model=frontierPlot(frontier,data.nodes,chartView), current=(frontier.points || []).filter(point=>point.current);
+  chartModel=model;
+  const best=current.length?Math.min(...current.map(point=>point.value)):null;
+  $('best').innerHTML=best==null?'—':esc(best.toFixed(6))+' <small>Å</small>';
+  $('best').title=best==null?'当前成员尚不可确认':exactScore(best)+' Å';
+  $('bestSub').textContent=!frontier.available ? frontier.reason || '正式 Frontier 记录不可用，不推断当前成员。' : frontier.current_membership_complete===false ? 'Frontier 正在发布，等待成员证据完整。' : current.length ? current.length+' 个当前成员 · 悬停或滑动查看完整精度' : '当前没有可确认的已发布成员';
+  $('frontierMembers').innerHTML=current.map(point=>'<button data-frontier-current="'+esc(pointKey(point))+'">◎ '+esc(pointLabel(point))+'</button>').join('');
+  $('frontierMembers').querySelectorAll('button').forEach(button=>button.onclick=()=>{chartView='frontier';frontierPinned=button.dataset.frontierCurrent;frontierHover=null;drawChart();});
+  $('frontierViews').querySelectorAll('button').forEach(button=>{const active=button.dataset.chartView===chartView;button.classList.toggle('on',active);button.setAttribute('aria-pressed',String(active));});
+  const allNotes=[];
+  if(!frontier.available)allNotes.push(frontier.reason || '当前 Frontier 不可用。');
+  if((frontier.points || []).some(point=>point.reached==null))allNotes.push('部分历史轮次缺少发布时的 Frontier 快照，其历史成员身份不作推断。');
+  if(chartView==='all' && (frontier.legacy_points || []).length)allNotes.push('早期账本以灰色空心点显示，不参与已评审 Frontier 曲线。');
+  const coverage=data.coverage || {};
+  allNotes.push(...(coverage.limitations || []));
+  $('frontierNote').textContent=allNotes.join(' ');
+  $('historyCoverage').textContent=(data.sources || []).length ? (data.sources || []).map(source=>source.label+' '+source.count+' 条').join(' · ')+(coverage.unique_reviewed_result_count!=null?'；已评审的不同评价结果 '+coverage.unique_reviewed_result_count+' 个，复用事件 '+(coverage.duplicate_reviewed_result_count || 0)+' 次。':'') : '只显示已接入的研究记录。';
+  $('sourceBadges').innerHTML=(data.sources || []).map(source=>'<button data-source="'+esc(source.id)+'" title="'+esc(source.root)+'">'+esc(source.label)+' · '+source.count+'</button>').join('');
+  $('sourceBadges').querySelectorAll('button').forEach(button=>button.onclick=()=>highlightSource(button.dataset.source));
+  const W=Math.max(260,$('frontierChart').clientWidth || 1100),H=Math.max(240,$('frontierChart').clientHeight || 300),L=76,R=25,T=32,B=40;
+  const svg=$('frontierChart'),focused=svg.contains(document.activeElement)?document.activeElement?.closest('[data-frontier-id]')?.dataset.frontierId:null;
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  if(!model.points.length && !model.curve.length){svg.innerHTML='<text x="25" y="80" fill="#a0afc5" font-size="15">'+esc(frontier.available?'这个范围内没有可读测量。':'正在等待可确认的 Frontier 记录。')+'</text>';frontierPinned=null;showFrontierPoint(null);return;}
+  model.x=sequence=>L+(sequence-model.first)/Math.max(1,model.last-model.first)*(W-L-R);
+  model.y=value=>T+(model.hi-value)/(model.hi-model.lo)*(H-T-B);
+  let html='<text x="'+L+'" y="16" fill="#a0afc5" font-size="11">'+esc(model.axisOffset==null?'RMSD / Å ↓':'相对 '+exactScore(model.axisOffset)+' Å 的差值 ↓')+'</text>';
+  for(let tick=0;tick<5;tick++){const value=model.lo+(model.hi-model.lo)*tick/4,Y=model.y(value);html+=`<line x1="${L}" x2="${W-R}" y1="${Y}" y2="${Y}" stroke="#2a3b4d"/><text x="${L-10}" y="${Y+4}" fill="#a0afc5" text-anchor="end" font-size="11">${esc(axisValue(value,model))}</text>`;}
+  const step=Math.max(1,Math.ceil((model.last-model.first)/Math.max(3,Math.floor((W-L-R)/70))));
+  for(let sequence=model.first;sequence<=model.last;sequence+=step)html+=`<text x="${model.x(sequence)}" y="${H-12}" fill="#a0afc5" text-anchor="middle" font-size="11">${sequence}</text>`;
+  if((model.last-model.first)%step)html+=`<text x="${model.x(model.last)}" y="${H-12}" fill="#a0afc5" text-anchor="middle" font-size="11">${model.last}</text>`;
+  const boundaries=[];
+  for(const node of [...data.nodes].sort((a,b)=>nodeOrder(a)-nodeOrder(b))){if(nodeOrder(node)<model.first || nodeOrder(node)>model.last)continue;if(boundaries.at(-1)?.source!==node.source_id)boundaries.push({sequence:nodeOrder(node),source:node.source_id,label:node.source_label});}
+  for(const boundary of boundaries.slice(1))html+=`<line x1="${model.x(boundary.sequence-.5)}" x2="${model.x(boundary.sequence-.5)}" y1="${T}" y2="${H-B}" stroke="#506074" stroke-dasharray="3 5"/><text x="${model.x(boundary.sequence-.5)+6}" y="${T+12}" fill="#a0afc5" font-size="10">${esc(boundary.label)}</text>`;
+  let path='';for(const point of model.curve)path+=path?' H'+model.x(point.sequence)+' V'+model.y(point.value):'M'+model.x(point.sequence)+','+model.y(point.value);
+  if(path)html+='<path d="'+path+' H'+model.x(model.last)+'" fill="none" stroke="#72dfb3" stroke-width="2.4"/>';
+  html+='<line id="frontierCursor" x1="0" x2="0" y1="'+T+'" y2="'+(H-B)+'" stroke="#d6e5f4" stroke-dasharray="3 4" opacity="0"/>';
+  const labelEvery=Math.max(1,Math.ceil(model.points.length/Math.max(3,Math.floor((W-L-R)/85))));
+  model.points.forEach((point,index)=>{
+    const x=model.x(point.sequence),y=model.y(point.value),ledger=point.reviewed===false,color=point.current||point.reached===true?'#72dfb3':ledger?'#9baac2':'#8ab8ff',r=point.current?7:point.reached===true?6:4;
+    const status=point.current?'当前 Frontier':point.reached===true?'发布时进入 Frontier':ledger?'早期未评审账本':'其他已核查测量';
+    html+=`<g class="plot-point" data-frontier-id="${esc(pointKey(point))}" role="button" tabindex="0" aria-label="${esc(pointLabel(point)+'，RMSD '+exactScore(point.value)+' Å，'+status)}"><title>${esc(pointLabel(point)+' · '+exactScore(point.value)+' Å · '+status)}</title><circle class="point-halo" cx="${x}" cy="${y}" r="14" fill="${color}" fill-opacity=".18"/>`;
+    if(point.reached===true&&!point.current)html+=`<path d="M${x},${y-r} L${x+r},${y} L${x},${y+r} L${x-r},${y} Z" fill="${color}" stroke="#10202b" stroke-width="1.2"/>`;
+    else html+=`<circle cx="${x}" cy="${y}" r="${r}" fill="${ledger?'#151f30':color}" stroke="${ledger?color:'#10202b'}" stroke-width="1.8"/>`;
+    if(point.current)html+=`<circle cx="${x}" cy="${y}" r="11" fill="none" stroke="${color}" stroke-width="1.4"/>`;
+    if((point.reached===true && index%labelEvery===0)||point.current)html+=`<text x="${x}" y="${Math.max(T+15,y-16)}" fill="${color}" text-anchor="${x>W-100?'end':x<L+100?'start':'middle'}" font-size="11">${esc(pointShortLabel(point))}</text>`;
+    html+='</g>';
+  });
+  svg.innerHTML=html;
+  if(!model.points.some(point=>pointKey(point)===frontierPinned))frontierPinned=pointKey(model.points.find(point=>point.current)||model.points.at(-1));
+  $('chartRange').textContent='横轴：完整研究时间线序号 '+model.first+'–'+model.last+' · 当前显示 '+model.points.length+' 个观测；纵轴自动缩放'+(model.axisOffset!=null?'，以相对差值显示微小变化':'，不强制从零开始')+'。';
+  showFrontierPoint(model.points.find(point=>pointKey(point)===(frontierHover || frontierPinned))||model.points.find(point=>pointKey(point)===frontierPinned));
+  const nearest=event=>{if(!model.points.length)return null;const target=event.target.closest('[data-frontier-id]'),exact=target&&model.points.find(point=>pointKey(point)===target.dataset.frontierId);if(exact)return exact;const rect=svg.getBoundingClientRect(),x=(event.clientX-rect.left)/rect.width*W;return model.points.reduce((a,b)=>Math.abs(model.x(a.sequence)-x)<=Math.abs(model.x(b.sequence)-x)?a:b);};
+  svg.onpointermove=event=>{const point=nearest(event);if(point){frontierHover=pointKey(point);if(event.buttons===1)frontierPinned=frontierHover;showFrontierPoint(point);}};
+  svg.onpointerleave=()=>{frontierHover=null;showFrontierPoint(model.points.find(point=>pointKey(point)===frontierPinned));};
+  svg.onclick=event=>{const point=nearest(event);if(point){frontierPinned=pointKey(point);frontierHover=null;showFrontierPoint(point);}};
+  svg.querySelectorAll('.plot-point').forEach((element,index)=>{element.onfocus=()=>{frontierPinned=pointKey(model.points[index]);showFrontierPoint(model.points[index]);};element.onkeydown=event=>{if(['Enter',' ','ArrowLeft','ArrowRight'].includes(event.key)){event.preventDefault();const target=event.key==='ArrowLeft'?Math.max(0,index-1):event.key==='ArrowRight'?Math.min(model.points.length-1,index+1):index;pinFrontierIndex(target);svg.querySelectorAll('.plot-point')[target]?.focus({preventScroll:true});}};});
+  if(focused)[...svg.querySelectorAll('.plot-point')].find(element=>element.dataset.frontierId===focused)?.focus({preventScroll:true});
+}
+function pointKey(point){return point?.candidate_id || point?.id || null;}
+function pointLabel(point){const node=data?.nodes.find(item=>item.id===point?.id);return node?nodeLabel(node):point?.id || '—';}
+function pointShortLabel(point){const node=data?.nodes.find(item=>item.id===point.id);return node?.source_id==='ledger'?'账本':(node?.source_id==='active'?'当前 ':node?.source_label?node.source_label+' ':'')+'#'+(node?.local_id || point.id);}
+function frontierPlot(frontier,nodes,mode){
+  const order=point=>point.sequence ?? nodeOrder(nodes.find(node=>node.id===point.id) || {id:point.id});
+  const reviewed=frontier.available?(frontier.points || []).filter(point=>typeof point.value==='number'&&Number.isFinite(point.value)&&point.frontier_eligible!==false).map(point=>({...point,sequence:order(point)})).sort((a,b)=>a.sequence-b.sequence):[];
+  const ledger=(frontier.legacy_points || []).filter(point=>typeof point.value==='number'&&Number.isFinite(point.value)).map(point=>({...point,sequence:order(point),reviewed:false}));
+  const orders=nodes.map(nodeOrder).filter(Number.isFinite),last=Math.max(1,...orders,...reviewed.map(point=>point.sequence)),start=Math.min(last,...orders);
+  const first=mode==='recent'?Math.max(start,last-9):mode==='frontier'&&reviewed.length?Math.min(...reviewed.map(point=>point.sequence)):start;
+  const points=(mode==='frontier'?reviewed.filter(point=>point.reached===true||point.current):[...reviewed,...ledger]).filter(point=>point.sequence>=first&&point.sequence<=last).sort((a,b)=>a.sequence-b.sequence);
+  let best=Infinity;const curve=[];
+  for(const point of reviewed){if(point.sequence<first){best=Math.min(best,point.value);continue;}if(!curve.length&&best!==Infinity)curve.push({sequence:first,value:best});best=Math.min(best,point.value);curve.push({sequence:point.sequence,value:best});}
+  if(!curve.length&&best!==Infinity)curve.push({sequence:first,value:best});
+  const values=[...points.map(point=>point.value),...curve.map(point=>point.value),...reviewed.filter(point=>point.current).map(point=>point.value)];
+  const low=values.length?Math.min(...values):0,high=values.length?Math.max(...values):1,span=high-low,pad=span?span*.13:Math.max(Math.abs(low)*1e-6,1e-6);
+  return {points,curve,first,last,lo:low-pad,hi:high+pad,axisOffset:span>0&&span<.001?low:null,precision:Math.min(12,Math.max(2,Math.ceil(-Math.log10(span || pad))+1))};
+}
+function axisValue(value,model){const number=value-(model.axisOffset || 0);if(model.axisOffset!=null)return (number>0?'+':'')+(Math.abs(number)<1e-7&&number!==0?number.toExponential(2):number.toFixed(model.precision));return number.toFixed(model.precision);}
+function showFrontierPoint(point){
+  const pool=chartModel?.points || [],index=pool.findIndex(item=>pointKey(item)===pointKey(point));
+  $('frontierSlider').disabled=!pool.length;$('frontierSlider').max=Math.max(0,pool.length-1);$('frontierSlider').value=Math.max(0,index);$('frontierPrev').disabled=index<=0;$('frontierNext').disabled=index<0||index>=pool.length-1;
+  $('frontierDetails').disabled=!point;
+  if(!point){$('inspectTitle').textContent='尚无可浏览测量';$('inspectStatus').textContent='等待已发布记录';$('inspectValue').textContent='—';$('inspectDelta').textContent='';$('inspectProvenance').hidden=true;$('frontierPosition').textContent='尚无可浏览的测量';return;}
+  $('inspectTitle').textContent=pointLabel(point);
+  $('inspectStatus').textContent=point.current?'◎ 当前 Frontier':point.reached===true?'◇ 发布时进入 Frontier':point.reviewed===false?'○ 早期账本，未经本 Loop 评审':point.reached==null?'已核查测量 · 历史成员身份未确认':'● 已核查测量 · 未进入当时 Frontier';
+  $('inspectValue').textContent=exactScore(point.value)+' Å';
+  $('inspectDelta').textContent=point.reviewed===false?'历史记录值，不参与已评审 Frontier 曲线':point.duplicate_of?'同一评价结果再次导入，本次不计为新测量或新的全程改善':point.improved===true?'较该实例此前 Frontier 降低约 '+Number(point.delta).toPrecision(8)+' Å':point.previous_best==null?'首个已发布基线，或此前 Frontier 记录未完整保留':point.reached===true?'与该实例此前 Frontier 持平':'本轮没有推进该实例当时的 Frontier';
+  const provenance=[];
+  if(point.duplicate_of)provenance.push('复用同一评价结果：'+nodeLabel(data.nodes.find(node=>node.id===point.duplicate_of))+'；不增加新评价结果。');
+  if(point.same_ledger_result)provenance.push('与早期账本记录的 fingerprint 相同；账本未由本 Loop 独立评审。');
+  if(point.imported&&!point.duplicate_of)provenance.push('历史结果导入，不是一次新训练。');
+  $('inspectProvenance').textContent=provenance.join(' ');$('inspectProvenance').hidden=!provenance.length;
+  $('frontierPosition').textContent='滑动浏览图中实验 '+(index+1)+' / '+pool.length+' · 精确 RMSD 保留记录精度';
+  $('frontierSlider').setAttribute('aria-valuetext',pointLabel(point)+'，RMSD '+exactScore(point.value)+' Å');
+  const cursor=$('frontierCursor');if(cursor&&chartModel?.x){cursor.setAttribute('x1',chartModel.x(point.sequence));cursor.setAttribute('x2',chartModel.x(point.sequence));cursor.setAttribute('opacity','0.6');}
+  $('frontierChart').querySelectorAll('.plot-point').forEach(element=>element.classList.toggle('inspected',element.dataset.frontierId===pointKey(point)));
+}
+function pinFrontierIndex(index){const point=chartModel?.points[index];if(point){frontierPinned=pointKey(point);frontierHover=null;showFrontierPoint(point);}}
+function highlightSource(source){view='git';$('sourceFilter').value=source;$('routeFilter').value='';drawGraph();drawRoutes();updateView();const node=[...data.nodes].sort((a,b)=>nodeOrder(b)-nodeOrder(a)).find(item=>item.source_id===source);const row=node?[...$('graph').querySelectorAll('[data-node]')].find(item=>item.dataset.node===node.id):null;if(row)$('graphWrap').scrollTop=Math.max(0,row.offsetTop-30);}
+function updateView() {
+  const git = view === 'git', filter = $('routeFilter').value;
+  $('graphWrap').hidden = !git; $('routeWrap').hidden = git;
+  $('graphBtn').classList.toggle('on',git); $('routesBtn').classList.toggle('on',!git);
+  $('graphBtn').setAttribute('aria-pressed',String(git)); $('routesBtn').setAttribute('aria-pressed',String(!git));
+  $('refs').disabled = !git; $('graphLegend').hidden = !git;
+  $('graphTitle').textContent = git ? '代码演化' : '研究路线';
+  $('graphSubtitle').textContent = git ? '像读 Git 历史一样，回溯每次调查的代码起点。' : '追踪同一研究问题下的尝试、结论与后续条件。';
+  $('graphExplanation').textContent = git ? '上新下旧，每行是一轮调查或一条早期账本；分支轨道只用于排线，阶段和路线由标签标明。'+(filter || $('sourceFilter').value?' 当前突出选中范围，其他节点保留为继承上下文。':'') : '按研究问题分组，组内按时间由早到晚排列；› 只表示先后，不表示代码继承。现有记录未定义路线之间的父子关系。';
+}
+function renderSnapshot() {
+  const current = activeNode();
+  if (following) selected = current?.id || data.nodes.at(-1)?.id || null;
+  renderProgress();
+  const filter = $('routeFilter').value;
+  $('routeFilter').innerHTML = '<option value="">所有路线</option>'+Object.entries(data.routes || {}).map(([id,route]) => '<option value="'+esc(id)+'">'+esc(id+' · '+route.title)+'</option>').join('');
+  $('routeFilter').value = filter;
+  const source=$('sourceFilter').value;
+  $('sourceFilter').innerHTML='<option value="">所有阶段</option>'+(data.sources || []).map(item=>'<option value="'+esc(item.id)+'">'+esc(item.label+' · '+item.count+' 条')+'</option>').join('');
+  $('sourceFilter').value=source;
+  $('follow').setAttribute('aria-pressed',String(following)); $('follow').textContent = following ? '● 跟随当前' : '跟随当前';
+  drawGraph(); drawRoutes(); drawChart(); updateView(); renderScout(); renderDetailHeader();
+}
+function renderDetailHeader() {
+  const node = data.nodes.find(item => item.id === selected);
+  $('tabs').hidden=node?.source_id==='ledger'&&!globalView;
+  $('detailTitle').textContent = globalView ? '全局研究理解' : node ? nodeLabel(node)+' · '+node.route : '尚无调查记录';
+  $('detailMeta').textContent = globalView ? '当前实例已发布的全局知识；历史实例的文档可从对应节点查看。' : node ? (node.source_id==='ledger'?'早期评价账本，未经本 Loop 评审':node.published?'Review 已发布':'尚未发布 Review')+' · '+(node.imported?'历史回执导入 · ':'')+(node.value==null?'无已核查的质量测量':'RMSD '+exactScore(node.value)+' Å') : '等待第一个调查节点';
+  if (!node || globalView) { $('context').innerHTML = ''; return; }
+  if(node.source_id==='ledger'){$('context').innerHTML='<div class="context-box ledger-record">早期评价账本 · '+esc(clock(node.created_at))+'<br>只展示原始评价元数据；未由本 Loop 独立评审，未记录可确认的比较范围，不进入已评审 Frontier 曲线。</div>';return;}
+  const references = (node.references || []).filter(id => id !== node.base);
+  const jobs=(node.attempts || []).map(attempt=>'作业 '+(attempt.owned_job_id || '待绑定')+' · '+(attempt.terminal_state || attempt.status || '状态未记录')+(attempt.gpu_seconds!=null?' · '+attempt.gpu_seconds+' GPU 秒':'')).join('；');
+  $('context').innerHTML = '<div class="context-box"><div class="toolbar"><span class="muted">代码起点</span> '+(node.base?experimentLink(node.base):'<span>独立基线，无 Study 父版本</span>')+'<span class="muted" style="margin-left:10px">研究路线</span> '+badge((node.route_id || '')+' · '+node.route,'route')+(node.inquiry_kind?badge(translated(node.inquiry_kind)):'')+'</div><p><span class="muted">额外证据引用</span> '+(references.length?references.map(id=>experimentLink(id)).join('、'):'无')+'</p>'+(node.action_summary || node.action?'<p><span class="muted">'+esc(node.action_summary_label || '行动摘录')+'</span> '+esc(excerpt(node.action_summary || node.action,230))+'</p>':'')+(jobs?'<p><span class="muted">评估回执</span> '+esc(jobs)+'</p>':'')+'</div>';
+  if (node.source_commit) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p><span class="muted">冻结源码版本</span> <code title="'+esc(node.source_commit)+'">'+esc(node.source_commit.slice(0,12))+'</code></p>');
+  if (node.imported_from) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p><span class="muted">同版本结果导入</span> '+experimentLink(node.imported_from)+'；不增加新评价结果。</p>');
+  if (node.same_ledger_result) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p><span class="muted">同一账本结果</span> '+experimentLink(node.same_ledger_result)+'</p>');
+  if (node.frontier_exclusion_reason) $('context').querySelector('.context-box').insertAdjacentHTML('beforeend','<p class="amber">该候选当前资格已排除：'+esc(node.frontier_exclusion_reason)+'，不参与 Frontier 指标曲线。</p>');
+  bindExperiments($('context'));
+}
+function agentCard(agent, index) {
+  const output = agent.output || {}, phase = agent.phase, key = 'agent-'+(agent.key || index)+'-'+(agent.attempt || index);
+  const status = agent.published ? (phase==='plan'?'合同已发布':'Review 已发布') : agent.accepted ? '控制器已接纳' : STATUS[agent.status] || agent.status || '状态未确认';
+  const tone = agent.published || agent.accepted ? 'green' : ['failed','interrupted','timed_out'].includes(agent.status) ? 'red' : 'amber';
+  const meta = [agent.round != null ? '选择轮次 '+agent.round : null, agent.attempt ? String(agent.attempt).replace(/^attempt-/, 'attempt ') : null, agent.duration_seconds != null ? duration(agent.duration_seconds) : null, agent.started_at ? clock(agent.started_at) : null].filter(Boolean).join(' · ');
+  let body = '';
+  if (Object.keys(output).length) {
+    if (phase === 'plan') {
+      body += facts(output,['decision','base_experiment','references','inquiry_kind']);
+      if (output.contract) body += Object.entries(output.contract).map(([name,value])=>readingField(key+'-'+name,LABELS[name] || name,value)).join('');
+      else if (output.action) body += '<div class="agent-action">'+esc(output.action)+'</div>';
+      if (output.markdown) body += disclosure(key+'-full','Planner 的完整说明',markdown(output.markdown),!output.contract);
+      if (output.input_artifacts?.length) body += disclosure(key+'-inputs','冻结的输入版本',structured(output.input_artifacts));
+      if (output.stop_reason) body += '<div class="notice">停止原因：'+esc(output.stop_reason)+'</div>';
+    } else if (phase === 'review') {
+      body += facts(output,['decision','goal_status','route_status']);
+      if (output.insight) body += '<div class="fact-block"><h4>研究洞见</h4>'+structured(output.insight)+'</div>';
+      if (output.knowledge_changes?.length) body += '<div class="fact-block"><h4>新增认识</h4>'+structured(output.knowledge_changes)+'</div>';
+      if (output.markdown) body += readingField(key+'-review','评审说明',output.markdown);
+      if (output.route_reason) body += '<div class="fact-block"><h4>路线判断</h4>'+markdown(output.route_reason)+'</div>';
+      if (output.resume_condition) body += '<div class="notice">恢复条件：'+esc(output.resume_condition)+'</div>';
+      for (const field of ['candidate_reviews','candidate_corrections']) if (output[field]?.length) body += disclosure(key+'-'+field,LABELS[field],structured(output[field]),true);
+    } else {
+      body += facts(output,['decision','choice','goal_status','route_title','route_id','base_experiment','references']);
+      if (output.action) body += '<div class="agent-action">'+inline(['propose','evaluate','resume','import'].includes(output.action)?excerpt(output.markdown,260):output.action)+'</div>';
+      if (output.research_design) body += disclosure(key+'-design','研究设计：问题、对照与最小验证',structured(output.research_design),true);
+      if (output.markdown) body += disclosure(key+'-full',phase==='judge'?'Judge 的取舍依据':phase==='proposal'?'提案的完整依据':'完整讨论输出',markdown(output.markdown),phase==='judge');
+      if (output.stop_reason) body += '<div class="notice">停止原因：'+esc(output.stop_reason)+'</div>';
+    }
+    const known = new Set(['markdown','route_research','global_research','decision','choice','goal_status','route_title','route_id','base_experiment','references','action','contract','input_artifacts','stop_reason','knowledge_changes','route_reason','resume_condition','candidate_reviews','candidate_corrections','route_status','inquiry_kind','research_design','insight']);
+    const extra = Object.fromEntries(Object.entries(output).filter(([name,value])=>!known.has(name) && value!=null));
+    if (Object.keys(extra).length) body += disclosure(key+'-more','其他结构化输出',structured(extra));
+  } else body = '<div class="muted">'+(agent.status==='running'?'此调用尚未返回完整输出。': '本次 attempt 没有已完成的输出。')+'</div>';
+  if (!agent.accepted && !agent.published && Object.keys(output).length) body = '<div class="notice">调用已返回完整输出；控制器是否接纳尚未确认。</div>'+body;
+  if (agent.error) body += '<p class="agent-error">'+esc(agent.error)+'</p>';
+  const full = '<div class="agent-output">'+body+'</div>'+(agent.source?disclosure(key+'-source','记录来源','<div class="source">'+esc(agent.source)+'</div>'):'');
+  const role=agent.role || {plan:'Planner',review:'Reviewer',judge:'Judge',proposal:'Advocate'}[phase] || phase;
+  const suffix={proposal:'提案',critique:'质疑',response:'回应'}[phase];
+  const header = '<div class="agent-header"><h3>'+esc(role+(suffix?' · '+suffix:''))+'</h3>'+badge(status,tone)+'</div><div class="agent-provenance">'+esc(meta || '调用时间未记录')+'</div>';
+  return '<article class="agent-card">'+header+(['critique','response'].includes(phase)?disclosure(key+'-discussion',phase==='critique'?'查看质疑':'查看回应',full):full)+'</article>';
+}
+function renderDetail() {
+  const body = $('detailBody'), disclosures = new Map([...body.querySelectorAll('details')].map(item=>[item.dataset.disclosure,item.open])), scroll = body.scrollTop;
+  $('tabs').querySelectorAll('[data-tab]').forEach(button => { const active = !globalView && button.dataset.tab===tab; button.classList.toggle('on',active); button.setAttribute('aria-selected',String(active)); });
+  if (globalView) body.innerHTML = markdown(research);
+  else if (!selected) body.innerHTML = '<div class="empty">尚无调查记录。</div>';
+  else if (!detail || detail.id !== selected) body.innerHTML = '<div class="loading">正在读取 #'+esc(selected)+' 的记录…</div>';
+  else if (detail.ledger) body.innerHTML='<div class="notice">'+esc(detail.summary)+'</div>'+structured(detail.ledger)+disclosure('ledger-sources','元数据来源',structured(detail.sources));
+  else if (tab === 'route') {
+    body.innerHTML = '<div class="notice">这是本轮发布时的路线知识快照。顶部“全局研究”展示当前跨路线的研究理解。</div>'+markdown(detail.route);
+  } else {
+    let agents = (detail.agents || []).filter(agent => tab==='selection' ? ['proposal','critique','response','judge'].includes(agent.phase) : agent.phase===tab);
+    let prefix = '';
+    if (tab === 'selection') {
+      prefix = '<div class="subtoolbar"><button id="keyOutputs" class="'+(!discussion?'on':'')+'">关键提案与 Judge</button><button id="allOutputs" class="'+(discussion?'on':'')+'">包含质疑与回应</button></div><div class="caption">按调用顺序阅读。提案和讨论是研究决策，不是新增实验证据。</div>';
+      if (!discussion) agents = agents.filter(agent=>!['critique','response'].includes(agent.phase));
+    }
+    if (agents.length) body.innerHTML = prefix+agents.map(agentCard).join('');
+    else if (tab==='selection' && detail.selection && Object.keys(detail.selection).length) body.innerHTML = prefix+structured(detail.selection);
+    else if (detail[tab] && typeof detail[tab]==='string' && detail[tab]!=='暂无记录') body.innerHTML = '<div class="notice">已保存的研究文档；此记录未提供可确认的 Agent 调用元数据。</div>'+markdown(detail[tab]);
+    else body.innerHTML = prefix+'<div class="empty">'+(tab==='review'?'尚无完成的 Review。执行结果返回并经过独立评审后，这里会显示判断、发现与路线决定。':tab==='plan'?'尚无完成的 Plan。可以先查看“提案与决策”了解正在考虑的行动。':'尚无完成的提案输出。')+'</div>';
+    if (tab==='selection') {
+      $('keyOutputs').onclick=()=>{discussion=false;renderDetail();}; $('allOutputs').onclick=()=>{discussion=true;renderDetail();};
+    }
+  }
+  for (const item of body.querySelectorAll('details')) if (disclosures.has(item.dataset.disclosure)) item.open=disclosures.get(item.dataset.disclosure);
+  body.scrollTop=scroll; bindExperiments(body);
+}
+async function loadDetail(force = false) {
+  const token = ++detailToken, id = selected;
+  try {
+    if (globalView) { const result=await api('/api/research'); if(token!==detailToken || !globalView)return; if(force || detailError || research!==result.text){research=result.text;renderDetail();} detailError=false;return; }
+    if (!id) { renderDetail(); return; }
+    const node=data.nodes.find(item=>item.id===id);
+    const result = await api(node?.detail_url || '/api/node/'+encodeURIComponent(id));
+    if (token!==detailToken || id!==selected || globalView) return;
+    const signature=JSON.stringify(result);
+    if(force || detailError || signature!==detailSignature || detail?.id!==id){detail={...result,id};detailSignature=signature;renderDetail();} detailError=false;
+  } catch(error) { if(token===detailToken){detailError=true;$('detailBody').innerHTML='<div class="empty red">读取调查记录失败：'+esc(error.message)+'。下一次刷新会重试。</div>';} }
+}
+async function choose(id) {
+  if(!data.nodes.some(node=>node.id===id)) { $('detailBody').innerHTML='<div class="empty">引用的 #'+esc(id)+' 不在当前 Study 中。</div>'; return; }
+  following=false; globalView=false; selected=id; detailSignature=''; detail=null;
+  renderSnapshot(); renderDetail(); await loadDetail(true);
+}
+function renderScout() {
+  const scout=data.scout; $('scoutPanel').hidden=!scout; if(!scout)return;
+  $('scoutStatus').textContent=STATUS[scout.status] || scout.status || '状态未确认';
+  const known=new Set(['status','summary','error','source','observed_at','configured']);
+  $('scoutBody').innerHTML=(scout.summary?markdown(scout.summary):'')+(scout.error?'<div class="reason"><strong>Scout 当前错误</strong><p>'+esc(scout.error)+'</p></div>':'')+disclosure('scout-findings','查看发现与建议',structured(Object.fromEntries(Object.entries(scout).filter(([key])=>!known.has(key)))))+(scout.source?'<div class="source">'+esc(scout.source)+'</div>':'');
+  bindExperiments($('scoutBody'));
+}
+$('routeFilter').onchange=()=>{drawGraph();drawRoutes();updateView();};
+$('sourceFilter').onchange=()=>highlightSource($('sourceFilter').value);
+$('frontierViews').querySelectorAll('[data-chart-view]').forEach(button=>button.onclick=()=>{chartView=button.dataset.chartView;frontierHover=null;drawChart();});
+$('frontierSlider').oninput=()=>pinFrontierIndex(Number($('frontierSlider').value));
+$('frontierPrev').onclick=()=>pinFrontierIndex(Math.max(0,Number($('frontierSlider').value)-1));
+$('frontierNext').onclick=()=>pinFrontierIndex(Math.min((chartModel?.points.length || 1)-1,Number($('frontierSlider').value)+1));
+$('frontierDetails').onclick=async()=>{const point=chartModel?.points.find(item=>pointKey(item)===frontierPinned);if(point){tab='review';await choose(point.id);$('detailTitle').scrollIntoView({behavior:'smooth',block:'start'});}};
+$('refs').onchange=drawGraph;
+$('graphBtn').onclick=()=>{view='git';updateView();}; $('routesBtn').onclick=()=>{view='routes';updateView();};
+$('tabs').querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{tab=button.dataset.tab;globalView=false;$('detailBody').scrollTop=0;renderDetailHeader();renderDetail();});
+$('follow').onclick=async()=>{following=true;globalView=false;detailSignature='';renderSnapshot();renderDetail();await loadDetail(true);const row=$('graph').querySelector('.selected');if(row)$('graphWrap').scrollTop=Math.max(0,row.offsetTop-102);};
+$('researchBtn').onclick=async()=>{following=false;globalView=true;research='';renderSnapshot();renderDetail();await loadDetail(true);};
+async function refresh() {
+  try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className='green';renderSnapshot();await loadDetail(); }
+  catch(error){$('connection').textContent='读取失败 · '+error.message;$('connection').className='red';}
+  finally{setTimeout(refresh,5000);}
+}
+refresh();
+</script>
+</body>
+</html>
