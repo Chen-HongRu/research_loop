@@ -14,6 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from integrations.protok.run import job_path  # noqa: E402
+
 
 class ScoutScheduler:
     """Poll independently while run_one is blocked on an actual GPU evaluation."""
@@ -44,12 +46,7 @@ class ScoutScheduler:
         while not self.stopped.is_set():
             try:
                 state = read(self.root / "study/state.json")
-                job = (
-                    self.root
-                    / "control/jobs"
-                    / f"{state['iteration']:04d}"
-                    / "job.json"
-                )
+                job = job_path(self.root, f"{state['iteration']:04d}") / "job.json"
                 if job.exists() and read(job).get("status") == "submitted":
                     self.manager.launch_if_due()
             except (OSError, ValueError, KeyError, TypeError) as error:
@@ -87,12 +84,18 @@ def write(path, value):
 
 def recover_owned(root, runner, backend):
     """Reconcile existing attempts only; protected recovery forbids submission."""
+    runner.reconcile_debug_allocations(root, backend)
     outstanding = backend.inspect()["outstanding"]
     for row in outstanding:
         jobs = [
-            folder
+            job_path(root, folder.name)
             for folder in (root / "control/jobs").glob("*")
-            if read(folder / "job.json").get("fingerprint") == row["fingerprint"]
+            if read(job_path(root, folder.name) / "job.json").get("fingerprint")
+            == row["fingerprint"]
+            and read(job_path(root, folder.name) / "job.json").get(
+                "record_name", row["fingerprint"]
+            )
+            == row.get("record", row["fingerprint"])
         ]
         if len(jobs) != 1:
             raise RuntimeError("Cannot bind outstanding receipt to one owned job")
@@ -103,6 +106,11 @@ def recover_owned(root, runner, backend):
                 job / "runtime-config.json",
                 timeout_seconds=240,
                 recover=True,
+                **(
+                    {"fresh_attempt": read(job / "job.json")["fresh_attempt"]}
+                    if read(job / "job.json").get("fresh_attempt")
+                    else {}
+                ),
             )
         except runner.ProTokError:
             if backend.inspect()["outstanding"]:
@@ -125,7 +133,7 @@ def drive(root, runner, backend, *, clock=time.time):
         if (control / "HANDOFF").exists() and state and state["phase"] == "done":
             return "handoff"
         status = backend.inspect()
-        if status["outstanding"]:
+        if status["outstanding"] and not (state and state.get("debugging")):
             raise RuntimeError("Outstanding job requires explicit reconciliation")
         remaining = lease["deadline"] - clock()
         spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]

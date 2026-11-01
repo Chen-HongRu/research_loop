@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.backend import ProTokBackend  # noqa: E402
+from integrations.protok.run import debug_policy, job_path  # noqa: E402
 
 
 def read(path):
@@ -48,15 +49,57 @@ def check_boundary(root, backend):
     runner = read(control / "runner.json")
     if runner["status"] != "completed" or runner.get("iteration") != state["iteration"]:
         raise RuntimeError("Runner has not finished control publication")
-    job = control / "jobs" / f"{state['iteration']:04d}" / "job.json"
+    iteration = f"{state['iteration']:04d}"
+    job = job_path(root, iteration) / "job.json"
     if job.exists() and read(job)["status"] != "completed":
-        raise RuntimeError("Latest job is not completed")
-    if backend.inspect()["outstanding"]:
+        decision = control / "debug" / iteration / "decision.json"
+        rejected = read(decision) if decision.exists() else {}
+        if not (
+            read(job)["status"] == "failed"
+            and rejected.get("status") == "failed"
+            and rejected.get("response", {}).get("outcome") == "incomplete"
+            and rejected["response"].get("measurements") == []
+        ):
+            raise RuntimeError(
+                "Latest job is not completed or a reviewed debug rejection"
+            )
+    status = backend.inspect()
+    if status["outstanding"] or status.get("debug_outstanding"):
         raise RuntimeError("Outstanding evaluation effects prevent a handoff")
     return state
 
 
-def deploy(root, runtime):
+def check_debug_boundary(root, backend):
+    state = read(root / "study/state.json")
+    if (
+        state.get("status") != "ready"
+        or state.get("phase") != "execute"
+        or not state.get("debugging")
+    ):
+        raise RuntimeError("An explicitly prepared debug continuation is required")
+    iteration = f"{state['iteration']:04d}"
+    debug_policy(root)
+    preparation = read(
+        root / "control/reconciliations" / f"begin-debug-{iteration}.json"
+    )
+    failure = read(root / "study" / state["debugging"])
+    if (
+        preparation.get("failure") != failure
+        or failure["details"].get("kind") != "candidate_rejected"
+    ):
+        raise RuntimeError("Debug preparation no longer matches the certified failure")
+    stop = root / "control/STOP"
+    if (stop.read_text() if stop.exists() else None) != preparation.get("stop_before"):
+        raise RuntimeError("STOP changed after the explicit debug preparation")
+    status = backend.inspect()
+    if status["outstanding"] or status.get("debug_outstanding"):
+        raise RuntimeError(
+            "Outstanding effects prevent starting a prepared debug session"
+        )
+    return state
+
+
+def deploy(root, runtime, *, resume_debug=False):
     root, runtime = root.resolve(), runtime.resolve()
     commit = (runtime / "SOURCE_COMMIT").read_text().strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -82,7 +125,13 @@ def deploy(root, runtime):
     ):
         fcntl.flock(supervisor_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(runner_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        state = check_boundary(root, backend)
+        state = (
+            check_debug_boundary(root, backend)
+            if resume_debug
+            else check_boundary(root, backend)
+        )
+        stop = control / "STOP"
+        stop_before = stop.read_text() if stop.exists() else None
         protected = {
             name: (control / name).read_bytes()
             for name in ("ownership.json", "continuation.json")
@@ -91,6 +140,8 @@ def deploy(root, runtime):
         backup.mkdir(parents=True, exist_ok=False)
         (backup / "service.before").write_text(command("systemctl", "cat", service))
         write(backup / "boundary.json", state)
+        if stop_before is not None:
+            (backup / "STOP.before").write_text(stop_before)
         dropin = Path("/etc/systemd/system") / f"{service}.d/60-runtime.conf"
         if dropin.exists():
             (backup / "runtime.before.conf").write_bytes(dropin.read_bytes())
@@ -107,9 +158,16 @@ def deploy(root, runtime):
             (control / name).read_bytes() != value for name, value in protected.items()
         ):
             raise RuntimeError("Ownership or budget changed during handoff")
-        if marker.read_text() != marker_text or (control / "STOP").exists():
+        if (
+            marker.read_text() != marker_text
+            or read(root / "study/state.json") != state
+            or (stop.read_text() if stop.exists() else None) != stop_before
+            or (stop.exists() and not resume_debug)
+        ):
             raise RuntimeError("Operator state changed during handoff")
         marker.unlink()
+        if resume_debug and stop.exists():
+            stop.unlink()
         write(
             backup / "deployment.json",
             {
@@ -117,6 +175,7 @@ def deploy(root, runtime):
                 "commit": commit,
                 "runtime": str(runtime),
                 "after_iteration": state["iteration"],
+                "resume_debug": resume_debug,
                 "at": time.time(),
             },
         )
@@ -129,6 +188,7 @@ def deploy(root, runtime):
             "commit": commit,
             "runtime": str(runtime),
             "after_iteration": state["iteration"],
+            "resume_debug": resume_debug,
             "at": time.time(),
         },
     )
@@ -139,8 +199,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--runtime", type=Path, required=True)
+    parser.add_argument("--resume-debug", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(deploy(args.root, args.runtime)))
+    print(json.dumps(deploy(args.root, args.runtime, resume_debug=args.resume_debug)))
 
 
 if __name__ == "__main__":

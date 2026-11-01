@@ -70,6 +70,59 @@ class RuntimeDeployTests(unittest.TestCase):
             DEPLOY.check_boundary(self.root, self.backend)
         self.assertEqual(stop.read_text(), "Operator intervention")
 
+    def test_debug_upgrade_requires_certified_preparation_and_unchanged_stop(self):
+        failure = {
+            "version": 1,
+            "details": {"kind": "candidate_rejected", "iteration": "0009"},
+        }
+        relative = "iterations/0009/execute/attempt-001/failure.json"
+        self.write("study/" + relative, failure)
+        self.write(
+            "study/state.json",
+            {
+                "iteration": 9,
+                "phase": "execute",
+                "status": "ready",
+                "debugging": relative,
+            },
+        )
+        self.write(
+            "control/debug-policy.json",
+            {
+                "schema": 1,
+                "gpu_seconds_per_investigation": 1800,
+                "independent_of_formal_budget": True,
+                "authorization": "user",
+            },
+        )
+        self.write(
+            "control/reconciliations/begin-debug-0009.json",
+            {"failure": failure, "stop_before": "Paused after candidate failure\n"},
+        )
+        stop = self.root / "control/STOP"
+        stop.write_text("Paused after candidate failure\n")
+        self.assertEqual(
+            DEPLOY.check_debug_boundary(self.root, self.backend)["iteration"], 9
+        )
+        self.assertTrue(stop.exists())
+        stop.write_text("A newer user stop\n")
+        with self.assertRaisesRegex(RuntimeError, "STOP changed"):
+            DEPLOY.check_debug_boundary(self.root, self.backend)
+
+    def test_reviewed_debug_rejection_can_handoff_without_a_score(self):
+        self.write("control/jobs/0006/job.json", {"status": "failed"})
+        self.write(
+            "control/debug/0006/decision.json",
+            {
+                "status": "failed",
+                "response": {"outcome": "incomplete", "measurements": []},
+            },
+        )
+        self.assertEqual(DEPLOY.check_boundary(self.root, self.backend)["iteration"], 6)
+        self.backend.inspect.return_value["debug_outstanding"] = ["unknown"]
+        with self.assertRaisesRegex(RuntimeError, "Outstanding"):
+            DEPLOY.check_boundary(self.root, self.backend)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -25,6 +26,44 @@ METRIC = "subset_ca_rmsd_2000_seed42"
 
 class ProTokError(RuntimeError):
     """A gate or evidence check failed; no substitute score is available."""
+
+
+class ProTokBudgetError(ProTokError):
+    """A known resource allowance cannot fit a new full formal allocation."""
+
+
+def allocation_record(fingerprint, fresh_attempt=None):
+    if fresh_attempt is None:
+        return fingerprint
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", fresh_attempt):
+        raise ProTokError("Invalid fresh formal allocation identity")
+    return fingerprint + "--" + fresh_attempt
+
+
+def _require_fresh_allocation(state, fingerprint, name):
+    if name == fingerprint:
+        return
+    fresh = name.removeprefix(fingerprint + "--")
+    attempts = state.get("attempts", [])
+    if (
+        state.get("fresh_attempt") != fresh
+        or state.get("baseline") is not False
+        or state.get("imported_baseline")
+        or state.get("mode") != "scored"
+        or len(attempts) != 1
+    ):
+        raise ProTokError("Fresh formal result has no distinct full allocation")
+    attempt = attempts[0]
+    if (
+        attempt.get("seed") != 42
+        or attempt.get("mode") != "evaluate"
+        or attempt.get("budget_seconds") != 1800
+        or attempt.get("include_smoke") is not True
+        or attempt.get("terminal_state") != "COMPLETED"
+        or attempt.get("exit_code") != "0:0"
+        or not re.fullmatch(r"[1-9][0-9]*", str(attempt.get("owned_job_id", "")))
+    ):
+        raise ProTokError("Fresh formal result cannot reuse a smoke or imported score")
 
 
 def _read(path):
@@ -186,6 +225,16 @@ class ProTokBackend:
         ):
             if (self.project / name).exists():
                 continuation[name] = _read(self.project / name)
+        debug_used = 0
+        debug_outstanding = []
+        for path in sorted((self.control / "debug").glob("*/debug-budget.json")):
+            budget = _read(path)
+            seconds = budget.get("used_gpu_seconds")
+            if type(seconds) is not int or seconds < 0:
+                raise ProTokError("Invalid debug accounting; preserve the ledger")
+            debug_used += seconds
+            if budget.get("active_attempt") is not None:
+                debug_outstanding.append(str(path))
         return dict(
             project=str(self.project),
             protocol=PROTOCOL,
@@ -195,12 +244,15 @@ class ProTokBackend:
             records=receipts,
             scored_records=sum(s.get("mode") == "scored" for _, s in states),
             used_gpu_seconds=used,
+            debug_gpu_seconds=debug_used,
+            total_gpu_seconds=used + debug_used,
+            debug_outstanding=debug_outstanding,
             outstanding=outstanding,
             off=(self.project / ".autoresearch-off").exists(),
             continuation=continuation,
         )
 
-    def _command(self, config_path, operation, *, recover=False):
+    def _command(self, config_path, operation, *, recover=False, fresh_attempt=None):
         command = [
             "uv",
             "run",
@@ -231,7 +283,10 @@ class ProTokBackend:
                 str(config_path),
                 "--evaluate",
                 *(["--recover"] if recover else []),
+                *(["--fresh-attempt", fresh_attempt] if fresh_attempt else []),
             ]
+        if fresh_attempt is not None:
+            raise ProTokError("Fresh formal allocations require continuation control")
         return command + [
             str(self.project / EVALUATOR),
             "--config",
@@ -298,7 +353,15 @@ class ProTokBackend:
         identity = json.loads(result.stdout)
         return dict(config_path=str(output), workspace=str(workspace), **identity)
 
-    def _gate(self, identity, *, recover=False, preparing=False, config_path=None):
+    def _gate(
+        self,
+        identity,
+        *,
+        recover=False,
+        preparing=False,
+        config_path=None,
+        fresh_attempt=None,
+    ):
         config, now = self._config(), time.time()
         continuation = (self.control / "continuation.json").exists()
         lease = (
@@ -321,6 +384,8 @@ class ProTokBackend:
         ):
             raise ProTokError("Acknowledged, unexpired owner lease required")
         status = self.inspect()
+        if status.get("debug_outstanding"):
+            raise ProTokError("Outstanding debug allocation must be reconciled first")
         if (not recover or not continuation) and (self.control / "STOP").exists():
             raise ProTokError("Continuation is paused")
         if not config.get("launch_enabled") or (not continuation and status["off"]):
@@ -336,6 +401,7 @@ class ProTokBackend:
                     self.owner_token,
                     config_path or self.project / "autoresearch-run.json",
                     recover=recover,
+                    **({"fresh_attempt": fresh_attempt} if fresh_attempt else {}),
                 )
             except (ValueError, RuntimeError, OSError) as error:
                 raise ProTokError(f"Continuation admission failed: {error}") from error
@@ -370,14 +436,17 @@ class ProTokBackend:
         bound = 1800 * len(config["seeds"])
         if control and control.get("schema") == 2:
             if control["effective_deadline"] - now < bound:
-                raise ProTokError("Continuation wall deadline exhausted")
+                raise ProTokBudgetError("Continuation wall deadline exhausted")
             spent = status["used_gpu_seconds"] - control["initial_gpu_seconds"]
+            if spent < 0:
+                raise ProTokError(
+                    "Historical GPU accounting decreased below its anchor"
+                )
             if (
-                spent < 0
-                or spent + bound + config["reserve_gpu_seconds"]
+                spent + bound + config["reserve_gpu_seconds"]
                 > control["additional_gpu_seconds"]
             ):
-                raise ProTokError("Additional GPU budget exhausted")
+                raise ProTokBudgetError("Additional GPU budget exhausted")
             return
         session = status["session"]
         if (
@@ -390,16 +459,228 @@ class ProTokBackend:
             - now
             < bound
         ):
-            raise ProTokError("Original session wall deadline exhausted")
+            raise ProTokBudgetError("Original session wall deadline exhausted")
         if not continuation and status["scored_records"] >= config["max_evaluations"]:
-            raise ProTokError("Original scored experiment budget exhausted")
+            raise ProTokBudgetError("Original scored experiment budget exhausted")
         if (
             status["used_gpu_seconds"] + bound + config["reserve_gpu_seconds"]
             > config["gpu_budget_seconds"]
         ):
-            raise ProTokError("Original GPU budget exhausted")
+            raise ProTokBudgetError("Original GPU budget exhausted")
 
-    def completed_receipt(self, workspace: Path, config_path: Path, fingerprint: str):
+    def formal_capacity(self, config_path, deadline):
+        config = self._config()
+        if not _finite(deadline):
+            raise ProTokError("Formal capacity requires a finite deadline")
+        if deadline - time.time() < 1800 * len(config["seeds"]):
+            return {
+                "admitted": False,
+                "reason": "Full formal allocation does not fit the wall deadline",
+            }
+        try:
+            self._gate(None, config_path=config_path)
+        except ProTokBudgetError as error:
+            return {"admitted": False, "reason": str(error)}
+        return {"admitted": True, "reason": "Full formal allowance remains available"}
+
+    def debug_smoke(
+        self, workspace, config_path, debug_root, attempt_id, deadline, *, recover=False
+    ):
+        """Run a separately accounted smoke; it can never return a quality score."""
+        config_path, workspace, debug_root = (
+            Path(config_path),
+            Path(workspace).resolve(),
+            Path(debug_root).resolve(),
+        )
+        if _read(config_path).get("workspace") != str(workspace):
+            raise ProTokError("Debug configuration must bind the frozen source")
+        prepared = subprocess.run(
+            self._command(config_path, "prepare"),
+            capture_output=True,
+            text=True,
+            cwd=self.control,
+            timeout=120,
+        )
+        if prepared.returncode:
+            raise ProTokError("Debug source/configuration validation failed")
+        identity = json.loads(prepared.stdout)["fingerprint"]
+        logs = debug_root / "processes" / attempt_id / uuid.uuid4().hex
+        logs.mkdir(parents=True, exist_ok=False)
+        argv = [
+            "uv",
+            "run",
+            "--no-project",
+            "--python",
+            "3.12",
+            "python",
+            "-B",
+            "-I",
+            str(Path(__file__).with_name("debug_backend.py")),
+            "--project",
+            str(self.project),
+            "--control",
+            str(self.control),
+            "--owner-token",
+            self.owner_token or "",
+            "--config",
+            str(config_path),
+            "--debug-root",
+            str(debug_root),
+            "--attempt-id",
+            attempt_id,
+            "--deadline",
+            str(deadline),
+            *(["--recover"] if recover else []),
+        ]
+        with (
+            (logs / "stdout.log").open("w") as stdout,
+            (logs / "stderr.log").open("w") as stderr,
+        ):
+            process = subprocess.Popen(
+                argv, cwd=self.control, stdout=stdout, stderr=stderr
+            )
+            try:
+                while process.poll() is None:
+                    if not recover and (
+                        (self.control / "STOP").exists() or time.time() >= deadline
+                    ):
+                        process.terminate()
+                        try:
+                            process.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        break
+                    try:
+                        process.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        pass
+            except BaseException:
+                process.terminate()
+                try:
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise
+        try:
+            result = json.loads((logs / "stdout.log").read_text().splitlines()[-1])
+        except (OSError, ValueError, IndexError) as error:
+            raise ProTokError(
+                f"Debug process has no completion receipt; inspect {logs}"
+            ) from error
+        if (
+            result.get("purpose") != "debug"
+            or result.get("quality_score_eligible") is not False
+            or (result.get("fingerprint") not in (None, identity))
+            or "value" in result
+            or "metric" in result
+        ):
+            raise ProTokError(
+                "Debug receipt cannot be accepted as a formal measurement"
+            )
+        return result
+
+    def settled_failure(self, workspace, config_path, fingerprint, *, record_name=None):
+        """Certify a candidate-code rejection only after its allocation is settled."""
+        config = self._config()
+        lease = _read(self.control / "ownership.json")
+        if not (
+            self.owner_token
+            and lease.get("owner_token") == self.owner_token
+            and lease.get("project") == str(self.project)
+            and lease.get("handoff_acknowledged") is True
+        ):
+            raise ProTokError(
+                "Matching acknowledged owner required for failure recovery"
+            )
+        workspace, config_path = Path(workspace).resolve(), Path(config_path).resolve()
+        frozen = _read(config_path)
+        if frozen.get("workspace") != str(
+            workspace
+        ) or not self._receipt_config_matches(
+            frozen, config | {"workspace": str(workspace)}
+        ):
+            raise ProTokError("Failed source configuration no longer matches")
+        name = record_name or fingerprint
+        if name != fingerprint and not re.fullmatch(
+            re.escape(fingerprint) + r"--[A-Za-z0-9_-]{1,64}", name
+        ):
+            raise ProTokError("Invalid failed allocation identity")
+        prepared = subprocess.run(
+            self._command(config_path, "prepare"),
+            capture_output=True,
+            text=True,
+            cwd=self.control,
+            timeout=120,
+        )
+        if (
+            prepared.returncode
+            or json.loads(prepared.stdout).get("fingerprint") != fingerprint
+        ):
+            raise ProTokError("Failed source does not match its frozen identity")
+        record = Path(config["records_root"]) / name
+        state = _read(record / "state.json")
+        if (
+            state.get("status") != "failed"
+            or state.get("fingerprint") != fingerprint
+            or state.get("mode") != "scored"
+            or _outstanding(state)
+            or not self._receipt_config_matches(
+                _read(record / "run-config.json"), frozen
+            )
+            or self.inspect()["outstanding"]
+            or not state.get("attempts")
+        ):
+            raise ProTokError("Failure has unknown or unsettled external effects")
+        if (self.control / "continuation.json").exists() and state.get(
+            "controller_lease", {}
+        ).get("owner_token") != self.owner_token:
+            raise ProTokError("Failed allocation belongs to another owner")
+        if name != fingerprint and (
+            state.get("fresh_attempt") != name.removeprefix(fingerprint + "--")
+            or state.get("baseline") is not False
+        ):
+            raise ProTokError("Failed formal attempt identity differs")
+        attempt = state["attempts"][-1]
+        if not re.fullmatch(r"[1-9][0-9]*", str(attempt.get("owned_job_id", ""))):
+            raise ProTokError("Failed allocation has no owned job identity")
+        if attempt.get("terminal_state") not in {"FAILED", "OUT_OF_MEMORY"}:
+            raise ProTokError("Failure is not a settled candidate execution rejection")
+        directory = attempt.get("directory", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", directory):
+            raise ProTokError("Invalid failed attempt log location")
+        log = record / directory / "run.log.tail"
+        from .debug_backend import failure_detail
+
+        detail = failure_detail(log, attempt, state.get("error"))
+        if detail["failure_kind"] != "candidate":
+            raise ProTokError(
+                "Failure cause is not certified as a candidate-code error"
+            )
+        cause = detail["cause"]
+        return {
+            "kind": "candidate_rejected",
+            "cause": cause,
+            "fingerprint": fingerprint,
+            "record_name": name,
+            "job_id": attempt["owned_job_id"],
+            "terminal_state": attempt["terminal_state"],
+            "exit_code": attempt["exit_code"],
+            "gpu_seconds": sum(
+                a["gpu_seconds"]
+                for a in state["attempts"]
+                if a.get("status") != "prepared"
+            ),
+            "quality_score_eligible": False,
+            "purpose": "formal",
+            "evidence": [str(record / n) for n in ("state.json", "run-config.json")]
+            + [str(log)],
+        }
+
+    def completed_receipt(
+        self, workspace: Path, config_path: Path, fingerprint: str, *, record_name=None
+    ):
         """Materialize completed evidence without evaluating or allocating anything.
 
         STOP and exhausted allocation budgets do not prevent reading a receipt.
@@ -457,9 +738,18 @@ class ProTokBackend:
             raise ProTokError(
                 "Completed receipt does not match frozen job source identity"
             )
-        root = Path(config["records_root"]) / fingerprint
+        if record_name is not None and not (
+            record_name == fingerprint
+            or re.fullmatch(
+                re.escape(fingerprint) + r"--[A-Za-z0-9_-]{1,64}", record_name
+            )
+        ):
+            raise ProTokError("Invalid retained allocation record identity")
+        name = record_name or fingerprint
+        root = Path(config["records_root"]) / name
         state = _read(root / "state.json")
         summary = _read(root / "summary.json")
+        _require_fresh_allocation(state, fingerprint, name)
         if (
             state.get("status") != "complete"
             or _outstanding(state)
@@ -477,11 +767,15 @@ class ProTokBackend:
         # These are small local process receipts, never dataset/cache contents.
         for path in self.control.glob("evaluation-*/receipt.json"):
             previous = _read(path)
-            if previous.get("fingerprint") == fingerprint and (
-                previous.get("error")
-                or previous.get("timed_out")
-                or previous.get("cancelled")
-                or ("exit_code" in previous and previous["exit_code"] != 0)
+            if (
+                previous.get("fingerprint") == fingerprint
+                and previous.get("record_name", fingerprint) == name
+                and (
+                    previous.get("error")
+                    or previous.get("timed_out")
+                    or previous.get("cancelled")
+                    or ("exit_code" in previous and previous["exit_code"] != 0)
+                )
             ):
                 raise ProTokError(
                     f"Known failed evaluator wrapper receipt blocks reconciliation: {path}"
@@ -490,6 +784,7 @@ class ProTokBackend:
             "workspace": str(workspace),
             "config_path": str(config_path),
             "fingerprint": fingerprint,
+            "record_name": name,
             "metric": METRIC,
             "value": summary["value"],
             "verified": True,
@@ -508,10 +803,13 @@ class ProTokBackend:
         *,
         recover: bool = False,
         cancel_event=None,
+        fresh_attempt=None,
     ) -> dict:
         """Run once, preserving actual process status and fingerprint-bound evidence."""
         if not _finite(timeout_seconds) or timeout_seconds <= 0:
             raise ProTokError("A finite positive timeout is required")
+        if fresh_attempt is not None:
+            allocation_record("candidate", fresh_attempt)
 
         def cancelled():
             return cancel_event is not None and cancel_event.is_set()
@@ -527,18 +825,36 @@ class ProTokBackend:
                 prepared = self.prepare_config(workspace, output)
                 record = (
                     Path(self._config()["records_root"])
-                    / prepared["fingerprint"]
+                    / allocation_record(prepared["fingerprint"], fresh_attempt)
                     / "state.json"
                 )
                 if record.exists() and _read(record).get("status") == "complete":
                     return self.completed_receipt(
-                        workspace, output, prepared["fingerprint"]
+                        workspace,
+                        output,
+                        prepared["fingerprint"],
+                        **(
+                            {
+                                "record_name": allocation_record(
+                                    prepared["fingerprint"], fresh_attempt
+                                )
+                            }
+                            if fresh_attempt
+                            else {}
+                        ),
                     )
             # Gate before preparing or invoking the protected evaluator.
-            self._gate(None, recover=recover, preparing=True)
+            self._gate(
+                None, recover=recover, preparing=True, fresh_attempt=fresh_attempt
+            )
             prepared = self.prepare_config(workspace, output)
             identity = prepared["fingerprint"]
-            self._gate(identity, recover=recover, config_path=output)
+            self._gate(
+                identity,
+                recover=recover,
+                config_path=output,
+                fresh_attempt=fresh_attempt,
+            )
             if cancelled():
                 raise ProTokError("Evaluation cancelled before launch")
             run = self.control / ("evaluation-" + uuid.uuid4().hex)
@@ -551,13 +867,20 @@ class ProTokBackend:
                 receipt=str(run / "receipt.json"),
                 started_at=time.time(),
                 verified=False,
+                record_name=allocation_record(identity, fresh_attempt),
+                fresh_attempt=fresh_attempt,
             )
             with (
                 (run / "stdout.log").open("w") as stdout,
                 (run / "stderr.log").open("w") as stderr,
             ):
                 process = subprocess.Popen(
-                    self._command(output, "evaluate", recover=recover),
+                    self._command(
+                        output,
+                        "evaluate",
+                        recover=recover,
+                        **({"fresh_attempt": fresh_attempt} if fresh_attempt else {}),
+                    ),
                     cwd=self.control,
                     stdout=stdout,
                     stderr=stderr,
@@ -601,10 +924,15 @@ class ProTokBackend:
                 if len(lines) != 1 or not lines[0].startswith(f"METRIC {METRIC}="):
                     raise ProTokError("Exactly one primary stdout METRIC is required")
                 value = float(lines[0].split("=", 1)[1])
-                root = Path(self._config()["records_root"]) / identity
+                root = Path(self._config()["records_root"]) / allocation_record(
+                    identity, fresh_attempt
+                )
                 state, summary = (
                     _read(root / "state.json"),
                     _read(root / "summary.json"),
+                )
+                _require_fresh_allocation(
+                    state, identity, allocation_record(identity, fresh_attempt)
                 )
                 frozen = _read(root / "run-config.json")
                 expected = _read(output)

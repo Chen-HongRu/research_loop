@@ -27,8 +27,10 @@ from .harness import (
     AgentHarness,
     HarnessConfig,
     HarnessError,
+    RecoverableExecutionError,
     completed_response,
     make_harness,
+    publish_completed_response,
 )
 from .protocol import SCHEMAS, prompt, validate_response
 from .strategy import debate_rounds, review_guidance, validate_strategy
@@ -179,6 +181,7 @@ def initialize(
             "sample_counter": 0,
             "selection_round": 0,
             "active_attempt": None,
+            "debugging": None,
             "stop_reason": None,
             "goal_status": "undetermined",
             "review_ref": None,
@@ -358,6 +361,10 @@ class Study:
             )
 
     def _can_resume(self, state: dict) -> bool:
+        if state.get("debugging"):
+            return (state.get("error") or "").startswith(
+                ("KeyboardInterrupt:", "OSError:")
+            )
         if (
             state["phase"] == "review"
             and (self._folder(state) / "publication.json").exists()
@@ -542,6 +549,7 @@ class Study:
             execution_ref=None,
             review_ref=None,
             error=None,
+            debugging=None,
         )
         self._save(state)
 
@@ -593,12 +601,25 @@ class Study:
         directory: Path,
         *,
         workspace: Path | None = None,
+        harness: AgentHarness | None = None,
     ) -> dict:
+        harness = harness or self.harness
         state["last_call_key"] = key
         if key in state["calls"]:
             attempt = self.root / state["calls"][key]
+            failure = attempt / "failure.json"
+            if phase == "execute" and failure.exists():
+                self._check_attempt_stopped(attempt)
+                record = _read(failure)
+                if record.get("version") != 1 or not isinstance(
+                    record.get("details"), dict
+                ):
+                    raise StudyError("Invalid recoverable failure receipt")
+                raise RecoverableExecutionError(
+                    record["error"], details=record["details"]
+                )
             result = completed_response(attempt)
-            validate_completed = getattr(self.harness, "validate_completed", None)
+            validate_completed = getattr(harness, "validate_completed", None)
             if (
                 result is not None
                 and phase == "execute"
@@ -646,26 +667,121 @@ class Study:
             timeout = min(int(remaining), self.config["harness"]["timeout_seconds"])
             if phase == "execute":
                 timeout = min(timeout, context["plan"]["contract"]["timeout_seconds"])
-            result = self.harness.run(
-                prompt=prompt(phase, context)
-                + guidance(phase, context)
-                + (
-                    "\n\n" + review_guidance(self.strategy)
-                    if phase == "review" and review_guidance(self.strategy)
-                    else ""
-                ),
-                schema=stage_schema(phase, context, SCHEMAS),
-                workspace=workspace or self.workspace,
-                run_dir=attempt,
-                writable=phase == "execute" and self.config["allow_write"],
-                timeout_seconds=max(1, timeout),
-            )
+            try:
+                result = harness.run(
+                    prompt=prompt(phase, context)
+                    + guidance(phase, context)
+                    + (
+                        "\n\n" + review_guidance(self.strategy)
+                        if phase == "review" and review_guidance(self.strategy)
+                        else ""
+                    ),
+                    schema=stage_schema(phase, context, SCHEMAS),
+                    workspace=workspace or self.workspace,
+                    run_dir=attempt,
+                    writable=phase == "execute" and self.config["allow_write"],
+                    timeout_seconds=max(1, timeout),
+                )
+            except RecoverableExecutionError as exc:
+                if phase == "execute":
+                    _write(
+                        attempt / "failure.json",
+                        {"version": 1, "error": str(exc), "details": exc.details},
+                    )
+                raise
+        self._validate_result(phase, result, context)
+        state.setdefault("accepted_calls", {})[key] = True
+        state.update(status="ready", active_attempt=None)
+        self._save(state)
+        return result
+
+    def _validate_result(self, phase: str, result: dict, context: dict) -> None:
         validate_response(phase, result, schema=stage_schema(phase, context, SCHEMAS))
         validate_design(phase, result, context)
         if not result["markdown"].strip():
             raise StudyError("Stage report must be nonempty")
-        state.setdefault("accepted_calls", {})[key] = True
-        state.update(status="ready", active_attempt=None)
+
+    def _recover_execution(self, state: dict, folder: Path, context: dict) -> dict:
+        failure_ref = state["debugging"]
+        record = _read(self.root / failure_ref)
+        if record.get("version") != 1 or not isinstance(record.get("details"), dict):
+            raise StudyError("Invalid recoverable failure receipt")
+        recover = getattr(self.harness, "recover_execution", None)
+        if recover is None:
+            raise StudyError("Harness has no execution recovery handler")
+        workspace = Path(context["workspace"])
+        self._save(state)
+        context = {
+            **context,
+            "budget": {
+                "calls_left": self.config["max_calls"] - state["call_count"]
+                if self.config["max_calls"] is not None
+                else None,
+                "seconds_left": self.config["max_seconds"] - state["elapsed_seconds"],
+            },
+        }
+        run_dir = folder / "execute/recovery"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        result = completed_response(run_dir)
+        if result is None:
+            returned = run_dir / "returned.json"
+            if returned.exists():
+                receipt = _read(returned)
+                if receipt.get("failure_ref") != failure_ref:
+                    raise StudyError("Recovery response belongs to another failure")
+                result = receipt["response"]
+            else:
+
+                def invoke(key, context, directory, harness):
+                    result = self._call(
+                        state,
+                        "execute",
+                        f"debug:{key}",
+                        {**context, **execution_context},
+                        directory,
+                        workspace=workspace,
+                        harness=harness,
+                    )
+                    if (
+                        result["outcome"] != "incomplete"
+                        or result["artifacts"]
+                        or result["measurements"]
+                    ):
+                        raise StudyError(
+                            "Repair calls must return incomplete with no artifacts or measurements"
+                        )
+                    return result
+
+                execution_context = context
+                result = recover(
+                    record["details"],
+                    workspace=workspace,
+                    run_dir=run_dir,
+                    context=context,
+                    invoke=invoke,
+                )
+                _write(
+                    returned,
+                    {
+                        "version": 1,
+                        "failure_ref": failure_ref,
+                        "response": result,
+                    },
+                )
+            validate_completed = getattr(self.harness, "validate_completed", None)
+            if validate_completed is not None:
+                result = validate_completed(
+                    result, workspace=workspace, run_dir=run_dir
+                )
+            self._validate_result("execute", result, context)
+            _write(run_dir / "response.json", result)
+            publish_completed_response(run_dir, result)
+        self._validate_result("execute", result, context)
+        state["calls"]["execute"] = str(run_dir.relative_to(self.root))
+        state.setdefault("accepted_calls", {})["execute"] = True
+        state.update(
+            debugging=None, status="ready", active_attempt=None, last_call_key="execute"
+        )
         self._save(state)
         return result
 
@@ -856,14 +972,24 @@ class Study:
                 "execution_writes_enabled": self.config["allow_write"],
             }
             # Execution receives relevant global context but no debate transcript.
-            result = self._call(
-                state,
-                "execute",
-                "execute",
-                context,
-                folder / "execute",
-                workspace=Path(metadata["workspace"]),
-            )
+            if not state.get("debugging"):
+                try:
+                    result = self._call(
+                        state,
+                        "execute",
+                        "execute",
+                        context,
+                        folder / "execute",
+                        workspace=Path(metadata["workspace"]),
+                    )
+                except RecoverableExecutionError:
+                    state["debugging"] = str(
+                        Path(state["calls"]["execute"]) / "failure.json"
+                    )
+                    state.update(status="ready", active_attempt=None)
+                    self._save(state)
+            if state.get("debugging"):
+                result = self._recover_execution(state, folder, context)
             definition = self.config["global_evaluation"]
             if (
                 definition

@@ -9,6 +9,7 @@ import hashlib
 import json
 import sys
 import math
+import re
 import subprocess
 import shutil
 import threading
@@ -23,6 +24,7 @@ from research_loop.harness import (
     CodexHarness,
     HarnessConfig,
     HarnessError,
+    RecoverableExecutionError,
     publish_completed_response,
 )
 from research_loop.protocol import validate_response
@@ -262,10 +264,99 @@ def immutable_record(path, record):
         write(path, record)
 
 
+def debug_policy(root):
+    policy = read(Path(root) / "control/debug-policy.json")
+    if (
+        policy.get("schema") != 1
+        or policy.get("gpu_seconds_per_investigation") != 1800
+        or policy.get("independent_of_formal_budget") is not True
+        or not policy.get("authorization")
+    ):
+        raise ProTokError(
+            "Explicit independent per-investigation debug authorization required"
+        )
+    return policy
+
+
+def job_path(root, iteration):
+    root = Path(root).resolve()
+    original = root / "control/jobs" / iteration
+    pointer = original / "recovery.json"
+    if not pointer.exists():
+        return original
+    target = Path(read(pointer)["job_directory"]).resolve()
+    expected = root / "control/debug" / iteration
+    if target.parent != expected or not re.fullmatch(r"formal-[0-9]{3}", target.name):
+        raise ProTokError("Invalid recovered formal job pointer")
+    return target
+
+
+def certify_candidate_failure(root, backend, workspace, iteration):
+    """Persist the distinction between a settled code rejection and unknown effects."""
+    root, workspace = Path(root), Path(workspace)
+    debug_policy(root)
+    job = job_path(root, iteration)
+    record = read(job / "job.json")
+    baseline = read(root / "study/study.json")["baseline"]
+    for source in (workspace, job / "source"):
+        check_scope(source, baseline)
+        if signatures(candidate_bytes(source)) != record["source_signatures"]:
+            raise ProTokError("Failed candidate changed after its source was frozen")
+    if git(job / "source", "rev-parse", "HEAD") != record["source_commit"]:
+        raise ProTokError("Failed candidate source commit changed")
+    details = backend.settled_failure(
+        job / "source",
+        job / "runtime-config.json",
+        record["fingerprint"],
+        **({"record_name": record["record_name"]} if record.get("record_name") else {}),
+    )
+    details.update(
+        iteration=iteration,
+        job_directory=str(job.resolve()),
+        source_signatures=record["source_signatures"],
+        source_commit=record["source_commit"],
+    )
+    debug_root = root / "control/debug" / iteration
+    request = workspace / "evaluation-request.json"
+    result = workspace / "evaluation-result.json"
+    if request.exists() or request.is_symlink() or result.is_symlink():
+        raise ProTokError("Pending or symlinked evaluation interface prevents debug")
+    if result.exists():
+        value = read(result)
+        if value.get("status") not in {"error", "candidate_failed"} or any(
+            name in value for name in ("value", "metric", "measurements")
+        ):
+            raise ProTokError(
+                "Unexpected evaluation result cannot be cleared for debug"
+            )
+        archived = (
+            debug_root / "original-interface" / (job.name + "-evaluation-result.json")
+        )
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        if archived.exists() and archived.read_bytes() != result.read_bytes():
+            raise ProTokError("An earlier failed interface record differs")
+        if not archived.exists():
+            archived.write_bytes(result.read_bytes())
+        result.unlink()
+    failure = job / "failure.json"
+    if failure.exists():
+        if read(failure).get("details") != details:
+            raise ProTokError("Retained candidate failure evidence changed")
+    else:
+        immutable_record(
+            failure,
+            {"version": 1, "details": details, "previous_status": record["status"]},
+        )
+    if record.get("status") != "failed":
+        record.update(status="failed", failure_ref=str(failure), failed_at=time.time())
+        write(job / "job.json", record)
+    return details
+
+
 def completed_job(root, backend, workspace, iteration):
     """Repair only publication of a frozen, fully settled backend measurement."""
     root, workspace = Path(root), Path(workspace)
-    job = root / "control/jobs" / iteration
+    job = job_path(root, iteration)
     record = read(job / "job.json")
     expected_action = "import" if iteration == "0001" else "evaluate"
     if (
@@ -285,7 +376,10 @@ def completed_job(root, backend, workspace, iteration):
     if git(source, "rev-parse", "HEAD") != record["source_commit"]:
         raise ProTokError("Frozen job source commit changed")
     receipt = backend.completed_receipt(
-        source, job / "runtime-config.json", record["fingerprint"]
+        source,
+        job / "runtime-config.json",
+        record["fingerprint"],
+        **({"record_name": record["record_name"]} if record.get("record_name") else {}),
     )
     if expected_action == "import":
         imported = import_best(backend, receipt)
@@ -341,6 +435,7 @@ class ProTokHarness:
         )
         self.errors = []
         self.trusted_result = None
+        self.recoverable_failure = None
 
     def evaluate_request(self, workspace, iteration, request, stop, deadline):
         if request not in ({"action": "import"}, {"action": "evaluate"}):
@@ -448,6 +543,19 @@ class ProTokHarness:
                     "retry": False,
                 }
                 self.errors.append(result["error"])
+                if (self.root / "control/debug-policy.json").exists():
+                    try:
+                        self.recoverable_failure = certify_candidate_failure(
+                            self.root, self.backend, workspace, iteration
+                        )
+                    except (ProTokError, OSError, ValueError, KeyError):
+                        pass
+                    else:
+                        result.update(
+                            status="candidate_failed",
+                            error=self.recoverable_failure["cause"],
+                            debug_available=True,
+                        )
             write(workspace / "evaluation-result.json", result)
             return
 
@@ -468,6 +576,7 @@ class ProTokHarness:
             return self.delegate.run(**kwargs)
         self.trusted_result = None
         self.errors = []
+        self.recoverable_failure = None
         workspace = Path(kwargs["workspace"])
         outer = Path(kwargs["run_dir"]) if "run_dir" in kwargs else None
         if outer is not None:
@@ -497,6 +606,13 @@ class ProTokHarness:
             # evaluate has the same finite deadline; settle effects before returning.
             thread.join()
         if self.errors:
+            if self.recoverable_failure is not None:
+                self.recoverable_failure = certify_candidate_failure(
+                    self.root, self.backend, workspace, iteration
+                )
+                raise RecoverableExecutionError(
+                    self.recoverable_failure["cause"], details=self.recoverable_failure
+                )
             raise HarnessError(self.errors[-1])
         if result.get("outcome") == "incomplete" and self.trusted_result is None:
             diagnostic = local_incomplete(
@@ -520,12 +636,50 @@ class ProTokHarness:
             publish_completed_response(outer, result)
         return result
 
+    def recover_execution(self, failure, *, workspace, run_dir, context, invoke):
+        from integrations.protok.debug_flow import recover_execution
+
+        return recover_execution(
+            self,
+            failure,
+            workspace=workspace,
+            run_dir=run_dir,
+            context=context,
+            invoke=invoke,
+        )
+
     def validate_completed(self, result, *, workspace, run_dir):
         """Validate retained process output before accepting an Execute receipt."""
         validate_response("execute", result)
         workspace = Path(workspace)
         iteration = workspace.parent.name
         if result["outcome"] == "incomplete":
+            decision = self.root / "control/debug" / iteration / "decision.json"
+            if decision.exists():
+                from research_loop.debug_budget import DebugBudget
+
+                debug_policy(self.root)
+                saved = read(decision)
+                budget = DebugBudget(
+                    decision.parent, scope_id=iteration, limit_gpu_seconds=1800
+                ).status()
+                if (
+                    saved.get("status") != "failed"
+                    or saved.get("response") != result
+                    or saved.get("source_signatures")
+                    != signatures(candidate_bytes(workspace))
+                    or result["artifacts"]
+                    or result["measurements"]
+                    or budget["active_attempt"] is not None
+                    or budget["breached"]
+                    or self.backend.inspect()["outstanding"]
+                    or self.backend.inspect().get("debug_outstanding")
+                ):
+                    raise HarnessError(
+                        "Debug failure has unresolved effects or altered evidence"
+                    )
+                check_scope(workspace, read(self.root / "study/study.json")["baseline"])
+                return result
             diagnostic = local_incomplete(
                 self.root, self.backend, workspace, iteration, result
             )
@@ -800,8 +954,8 @@ def repair_completed_control(root, backend):
 def _run_one(root, backend):
     study = Study(Path(root) / "study")
     _repair_completed_control(root, backend, study)
-    deadline = admission(root, backend)
     state = study.status()
+    deadline = admission(root, backend, require_idle=not state.get("debugging"))
     config = HarnessConfig(**study.config["harness"])
     study.harness = ProTokHarness(backend, root, CodexHarness(config), deadline)
     try:
@@ -843,6 +997,7 @@ def run_one(root, backend):
                 status="completed" if state["status"] == "ready" else "stopped",
                 iteration=state["iteration"],
             )
+            write(control / "status.json", {**record, "phase": state["phase"]})
             return state
         except Exception as error:
             record.update(status="paused", error=f"{type(error).__name__}: {error}")
@@ -854,6 +1009,99 @@ def run_one(root, backend):
         finally:
             record["ended_at"] = time.time()
             write(control / "runner.json", record)
+
+
+def begin_debug(root, backend):
+    """Opt a retained, certified rejection into authorized bounded recovery."""
+    root = Path(root)
+    debug_policy(root)
+    study = Study(root / "study")
+    with (root / "control/runner.lock").open("a") as lock, study._lock():
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        state = study.status()
+        if state["phase"] != "execute" or state["status"] not in {
+            "needs_attention",
+            "running",
+            "ready",
+        }:
+            raise ProTokError("Only an interrupted failed Execute may enter debug")
+        relative = state["calls"].get("execute")
+        if not relative:
+            raise ProTokError("Failed Execute has no retained attempt")
+        attempt = study.root / relative
+        study._check_attempt_stopped(attempt)
+        iteration = f"{state['iteration']:04d}"
+        if state.get("debugging"):
+            failure = read(study.root / state["debugging"])
+            if (
+                failure.get("version") != 1
+                or failure["details"]["iteration"] != iteration
+            ):
+                raise ProTokError("Retained debug identity differs")
+            return state
+        previous = dict(state)
+        workspace = Path(read(study._folder(state) / "iteration.json")["workspace"])
+        details = certify_candidate_failure(root, backend, workspace, iteration)
+        record = {"version": 1, "error": details["cause"], "details": details}
+        immutable_record(attempt / "failure.json", record)
+        control_record = (
+            root / "control/reconciliations" / f"begin-debug-{iteration}.json"
+        )
+        stop = root / "control/STOP"
+        immutable_record(
+            control_record,
+            {
+                "action": "begin-authorized-debug",
+                "state_before": previous,
+                "failure": record,
+                "stop_before": stop.read_text() if stop.exists() else None,
+            },
+        )
+        archive = control_record.with_suffix("")
+        archive.mkdir(parents=True, exist_ok=True)
+        current_status = root / "control/status.json"
+        if current_status.exists() and not (archive / "status.before.json").exists():
+            shutil.copyfile(current_status, archive / "status.before.json")
+        write(
+            current_status,
+            {
+                "status": "debug_prepared",
+                "iteration": iteration,
+                "cause": details["cause"],
+                "failure_ref": str(attempt / "failure.json"),
+                "debug_gpu_seconds_limit": 1800,
+            },
+        )
+        state.update(
+            debugging=str((attempt / "failure.json").relative_to(study.root)),
+            status="ready",
+            active_attempt=None,
+            error=None,
+        )
+        study._save(state)
+        return state
+
+
+def reconcile_debug_allocations(root, backend):
+    """Cancel/account existing debug work under STOP or expired deadlines."""
+    root = Path(root)
+    for path in sorted((root / "control/debug").glob("*/debug-budget.json")):
+        active = read(path).get("active_attempt")
+        if active is None:
+            continue
+        debug = path.parent
+        saved = read(debug / "attempts" / active / "debug.json")
+        source = Path(saved["base_config"]["workspace"])
+        config_path = debug / "attempts" / active / "recovery-config.json"
+        if config_path.exists() and read(config_path) != saved["base_config"]:
+            raise ProTokError("Retained debug recovery configuration differs")
+        if not config_path.exists():
+            write(config_path, saved["base_config"])
+        result = backend.debug_smoke(
+            source, config_path, debug, active, saved["deadline"], recover=True
+        )
+        if result.get("status") == "blocked":
+            raise ProTokError("Debug allocation is still unaccounted")
 
 
 def reconcile_completed_execute(root, backend):
@@ -1003,6 +1251,7 @@ def main(argv=None):
         "reconcile-local-incomplete",
         "reconcile-completed-execute",
         "repair-completed-control",
+        "begin-debug",
     ):
         modes.add_argument("--" + mode, action="store_true")
     args = parser.parse_args(argv)
@@ -1028,6 +1277,8 @@ def main(argv=None):
             "repaired": repair_completed_control(root, backend),
             "study": Study(root / "study").status(),
         }
+    elif args.begin_debug:
+        result = begin_debug(root, backend)
     else:
         result = run_one(root, backend)
     print(json.dumps(result, indent=2, ensure_ascii=False))

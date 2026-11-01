@@ -21,6 +21,18 @@ results. Execute is never automatically repeated on this basis. A task adapter
 may validate existing external receipts and create a separately labeled operator
 reconciliation attempt; it must preserve the original Agent attempt.
 
+An adapter can explicitly certify a settled candidate-code rejection with
+`RecoverableExecutionError(details=...)`. The controller retains that failure and
+enters the adapter's `recover_execution` handler. Repair Agent calls go through
+the ordinary call/time budgets and have separate Study-contained receipts. The
+handler's final response is independently validated before normal Review.
+Resource limits and task-specific debug checks belong to the adapter; the generic
+controller never infers recoverability from an error string or job failure alone.
+
+`DebugBudget` persists one investigation's allocation reservations and actual GPU
+charges. Restarts reopen the same scope. Unknown submissions or missing terminal
+accounting block new allocation; consumed seconds cannot be refunded or reset.
+
 `research-loop retry STUDY` authorizes a fresh attempt after effects have been
 checked. It preserves completed Execute receipts and refuses an active local
 process. Replaying an unaccepted Execute through a custom harness invokes its

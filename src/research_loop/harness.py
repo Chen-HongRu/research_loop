@@ -17,6 +17,14 @@ class HarnessError(RuntimeError):
     pass
 
 
+class RecoverableExecutionError(HarnessError):
+    """An adapter-certified terminal failure eligible for bounded recovery."""
+
+    def __init__(self, message: str, *, details: dict):
+        super().__init__(message)
+        self.details = details
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     backend: str = "codex"

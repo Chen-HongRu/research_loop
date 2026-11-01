@@ -15,6 +15,42 @@ SPEC.loader.exec_module(SERVER)
 
 
 class ServerTests(unittest.TestCase):
+    def test_recovery_matches_fresh_record_identity_not_only_source_fingerprint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            fresh = root / "control/debug/0009/formal-001"
+            name = "fingerprint--debug-0009-formal-001"
+            SERVER.write(
+                root / "control/jobs/0001/job.json", {"fingerprint": "fingerprint"}
+            )
+            SERVER.write(
+                root / "control/jobs/0009/recovery.json", {"job_directory": str(fresh)}
+            )
+            SERVER.write(
+                fresh / "job.json",
+                {
+                    "fingerprint": "fingerprint",
+                    "record_name": name,
+                    "fresh_attempt": "debug-0009-formal-001",
+                },
+            )
+            backend = Mock()
+            backend.inspect.side_effect = [
+                {"outstanding": [{"fingerprint": "fingerprint", "record": name}]},
+                {"outstanding": []},
+            ]
+            runner = SimpleNamespace(
+                reconcile_debug_allocations=Mock(), ProTokError=RuntimeError
+            )
+            SERVER.recover_owned(root, runner, backend)
+            backend.evaluate.assert_called_once_with(
+                fresh / "source",
+                fresh / "runtime-config.json",
+                timeout_seconds=240,
+                recover=True,
+                fresh_attempt="debug-0009-formal-001",
+            )
+
     def test_budget_reserves_a_whole_job_before_any_agent_call(self):
         for used, seconds, expected_calls in (
             (100084, 3600, 1),

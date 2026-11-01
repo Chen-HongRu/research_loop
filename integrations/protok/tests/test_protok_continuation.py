@@ -840,5 +840,252 @@ class IncrementalContinuationTest(unittest.TestCase):
             self.validate()
 
 
+class FreshContinuationTest(unittest.TestCase):
+    write = ContinuationTest.write
+    sync_control = ContinuationTest.sync_control
+    receipt = IncrementalContinuationTest.receipt
+
+    def setUp(self):
+        IncrementalContinuationTest.setUp(self)
+        baseline = self.records / "baseline"
+        baseline.mkdir()
+        self.write(baseline / "state.json", self.receipt(0, owner="opaque"))
+
+    def validate(self, *, fresh_attempt="postdebug", now=100000, recover=False):
+        return validate_continuation(
+            self.project,
+            self.control,
+            "opaque",
+            self.runtime,
+            now=now,
+            recover=recover,
+            fresh_attempt=fresh_attempt,
+        )
+
+    def hooked(self, *, fresh_attempt="postdebug", recover=False):
+        backend, config, control = self.validate(
+            fresh_attempt=fresh_attempt, recover=recover
+        )
+        install_hooks(
+            backend,
+            config,
+            control,
+            lambda: None,
+            recover=recover,
+            fresh_attempt=fresh_attempt,
+        )
+        return backend, config
+
+    def test_fresh_allocation_preserves_original_complete_and_failed_records(self):
+        for status in ("complete", "failed"):
+            with self.subTest(original_status=status):
+                original = self.records / "owned"
+                original.mkdir(exist_ok=True)
+                state = self.receipt(80, owner="opaque")
+                state.update(status=status, fingerprint="owned")
+                state["attempts"][0]["status"] = status
+                self.write(original / "state.json", state)
+                before = {
+                    path: path.read_bytes()
+                    for path in self.records.glob("*/state.json")
+                }
+                backend, config = self.hooked(fresh_attempt=status)
+                backend.exercise_owned = True
+                self.assertEqual(backend.main(["--config", str(self.runtime)]), 0)
+                self.assertEqual(backend.main(["--config", str(self.runtime)]), 0)
+                fresh = self.records / f"owned--{status}"
+                saved = json.loads((fresh / "state.json").read_text())
+                self.assertEqual(saved["fingerprint"], "owned")
+                self.assertEqual(saved["fresh_attempt"], status)
+                self.assertIs(saved["baseline"], False)
+                self.assertEqual(saved["mode"], "scored")
+                self.assertEqual(saved["controller_lease"]["owner_token"], "opaque")
+                self.assertEqual(len(saved["attempts"]), 1)
+                self.assertEqual(backend.submissions, 1)
+                for path, content in before.items():
+                    self.assertEqual(path.read_bytes(), content)
+                saved["status"] = "complete"
+                saved["attempts"][0]["status"] = "complete"
+                self.write(fresh / "state.json", saved)
+
+    def test_fresh_identity_equal_to_baseline_still_is_scored_nonbaseline(self):
+        backend, config = self.hooked()
+        record, state = backend.reserve_record(config, "baseline", "baseline")
+        self.assertEqual(record.name, "baseline--postdebug")
+        self.assertEqual(state["fingerprint"], "baseline")
+        self.assertIs(state["baseline"], False)
+        self.assertEqual(state["mode"], "scored")
+
+    def test_failed_fresh_id_stays_failed_without_another_attempt(self):
+        backend, config = self.hooked()
+        record, state = backend.reserve_record(config, "owned", "baseline")
+        state.update(
+            status="failed",
+            attempts=[
+                {"status": "failed", "gpu_seconds": 7, "terminal_state": "FAILED"}
+            ],
+        )
+        backend.save_state(record, state)
+        before = (record / "state.json").read_bytes()
+        restarted, config = self.hooked()
+        same, preserved = restarted.reserve_record(config, "owned", "baseline")
+        self.assertEqual(same, record)
+        self.assertEqual(preserved["status"], "failed")
+        self.assertEqual(len(preserved["attempts"]), 1)
+        self.assertEqual((record / "state.json").read_bytes(), before)
+        self.assertFalse(hasattr(restarted, "submissions"))
+
+    def test_fresh_admission_needs_full_wall_and_global_formal_budget(self):
+        for seconds, charged, error in (
+            (1799, 0, "whole allocation"),
+            (1800, 81001, "incremental GPU"),
+        ):
+            with self.subTest(seconds=seconds, charged=charged):
+                self.owner["expires_at"] = 100000 + seconds
+                self.sync_control()
+                extra = self.records / "extra"
+                extra.mkdir(exist_ok=True)
+                self.write(extra / "state.json", self.receipt(charged, owner="opaque"))
+                backend, config = self.hooked()
+                with self.assertRaisesRegex(RuntimeError, error):
+                    backend.reserve_record(config, "owned", "baseline")
+                self.assertFalse((self.records / "owned--postdebug").exists())
+        self.owner["expires_at"] = 101800
+        self.sync_control()
+        self.write(extra / "state.json", self.receipt(81000, owner="opaque"))
+        backend, config = self.hooked()
+        record, state = backend.reserve_record(config, "owned", "baseline")
+        self.assertEqual(record.parent, self.records)
+        self.assertEqual(state["mode"], "scored")
+        with self.assertRaisesRegex(ValueError, "expired"):
+            self.validate(now=101800)
+
+    def test_fresh_charge_counts_toward_subsequent_formal_allocations(self):
+        backend, config = self.hooked()
+        record, state = backend.reserve_record(config, "owned", "baseline")
+        state.update(
+            status="complete",
+            attempts=[
+                {
+                    "status": "complete",
+                    "terminal_state": "COMPLETED",
+                    "gpu_seconds": 1800,
+                }
+            ],
+        )
+        backend.save_state(record, state)
+        self.assertEqual(backend.used_gpu_seconds(self.records), 19084 + 1800)
+        extra = self.records / "extra"
+        extra.mkdir()
+        self.write(extra / "state.json", self.receipt(79201, owner="opaque"))
+        restarted, config = self.hooked(fresh_attempt="another")
+        with self.assertRaisesRegex(RuntimeError, "incremental GPU"):
+            restarted.reserve_record(config, "owned", "baseline")
+        self.assertFalse((self.records / "owned--another").exists())
+
+    def test_fresh_requires_baseline_and_excludes_other_outstanding_records(self):
+        baseline = self.records / "baseline/state.json"
+        self.write(baseline, self.receipt(0, owner="opaque") | {"status": "failed"})
+        backend, config = self.hooked()
+        with self.assertRaisesRegex(RuntimeError, "baseline must complete"):
+            backend.reserve_record(config, "owned", "baseline")
+        self.write(baseline, self.receipt(0, owner="opaque"))
+        original = self.records / "owned"
+        original.mkdir()
+        self.write(
+            original / "state.json",
+            self.receipt(0, owner="opaque") | {"status": "incomplete"},
+        )
+        with self.assertRaisesRegex(RuntimeError, "outstanding"):
+            backend.reserve_record(config, "owned", "baseline")
+        self.assertFalse((self.records / "owned--postdebug").exists())
+
+    def test_recovery_uses_only_matching_custom_path_and_never_submits_again(self):
+        backend, config = self.hooked()
+        record, state = backend.reserve_record(config, "owned", "baseline")
+        state.update(status="incomplete", attempts=[{"status": "submitting"}])
+        backend.save_state(record, state)
+        (self.control / "STOP").touch()
+        backend, config, control = self.validate(recover=True, now=186401)
+        backend.exercise_owned = True
+        install_hooks(
+            backend,
+            config,
+            control,
+            lambda: None,
+            recover=True,
+            fresh_attempt="postdebug",
+        )
+        self.assertEqual(backend.main(["--config", str(self.runtime)]), 0)
+        self.assertFalse(hasattr(backend, "submissions"))
+        self.assertEqual(
+            len(json.loads((record / "state.json").read_text())["attempts"]), 1
+        )
+        for wrong in (None, "other"):
+            with (
+                self.subTest(wrong=wrong),
+                self.assertRaisesRegex(ValueError, "Recovery requires"),
+            ):
+                self.validate(recover=True, fresh_attempt=wrong, now=186401)
+        with self.assertRaisesRegex(ValueError, "cannot submit"):
+            backend.submit(config, record, state, state["attempts"][0])
+
+    def test_custom_identity_and_owner_tampering_rejected(self):
+        backend, config = self.hooked()
+        record, state = backend.reserve_record(config, "owned", "baseline")
+        for changes in (
+            {"fingerprint": "different"},
+            {"fresh_attempt": "different"},
+            {"baseline": True},
+            {"mode": "import"},
+            {"controller_lease": {"owner_token": "other"}},
+        ):
+            with self.subTest(changes=changes):
+                backend.save_state(record, state | changes)
+                with self.assertRaises(ValueError):
+                    self.validate()
+        backend.save_state(record, state)
+        with self.assertRaisesRegex(ValueError, "Recovery requires"):
+            self.validate(recover=True)
+
+    def test_safe_ids_and_launcher_forward_fresh_namespace_at_every_check(self):
+        for bad in ("", "../record", "a/b", ".", "x" * 65, 3):
+            with (
+                self.subTest(bad=bad),
+                self.assertRaisesRegex(ValueError, "safe explicit"),
+            ):
+                self.validate(fresh_attempt=bad)
+        backend, config, control = self.validate()
+
+        def exercise_checks(backend, config, control, validate, **options):
+            self.assertEqual(options["fresh_attempt"], "postdebug")
+            validate()
+            options["validate_poll"]()
+
+        with (
+            patch(
+                "integrations.protok.continuation.validate_continuation",
+                return_value=(backend, config, control),
+            ) as validate,
+            patch(
+                "integrations.protok.continuation.install_hooks",
+                side_effect=exercise_checks,
+            ),
+        ):
+            self.assertEqual(
+                launch(
+                    self.project,
+                    self.control,
+                    "opaque",
+                    self.runtime,
+                    fresh_attempt="postdebug",
+                ),
+                0,
+            )
+        self.assertEqual(validate.call_count, 3)
+        for call in validate.call_args_list:
+            self.assertEqual(call.kwargs["fresh_attempt"], "postdebug")
+
+
 if __name__ == "__main__":
     unittest.main()

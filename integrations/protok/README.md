@@ -45,6 +45,44 @@ wrapper receipts, changed source/configuration, unsettled accounting and unknown
 effects block repair. The second finishes retained Review/control publication.
 Neither command clears STOP, resets costs or extends the lease.
 
+## Bounded candidate debugging
+
+The host may explicitly authorize `control/debug-policy.json`:
+
+```json
+{"schema": 1, "gpu_seconds_per_investigation": 1800,
+ "independent_of_formal_budget": true, "authorization": "user authorization"}
+```
+
+Each failed investigation and all its continuous repair attempts share one
+`control/debug/ITERATION/debug-budget.json`. Charges are actual single-GPU Slurm
+allocation seconds, including setup, compilation, failed checks and cancellation.
+Debug charges are separate from the original formal allowance; physical totals
+include both. Historical formal failures retain their original charges.
+
+A known, fully accounted candidate-code failure enters repair under the same
+scientific Plan. Repair calls can edit only the existing three candidate files.
+The controller freezes each revision, runs the pinned unscored three-update smoke
+and gates, and uses failure evidence for the next bounded repair. Every allocation
+fits the remaining debug allowance and the original wall deadline. Slurm rounds
+limits to minutes, so requests round down; a residual below 60 seconds ends debug.
+
+Passing debug triggers a fresh full 30-minute formal allocation, including when
+the source fingerprint already has a historical record. Its explicit attempt ID
+uses a separate record under the original formal ledger. It retains the fixed
+initialization, training, scorer and gates; it cannot import a cached score or
+continue a debug checkpoint. The original failed records remain intact.
+
+Exhausted or unsuccessful certified recovery produces incomplete Execute with
+no measurements and proceeds to independent Review. Unknown effects,
+infrastructure failures, missing accounting and overspend remain blocking.
+The original ownership and absolute wall deadline continue to apply.
+
+For a failure retained by an older runtime, `--begin-debug` certifies and archives
+the original failure/interface, prepares the recovery state, and retains STOP.
+An explicit `deploy_runtime.py --resume-debug` switch verifies that preparation
+and the unchanged STOP before starting the new runtime.
+
 ## Runtime upgrade
 
 Export a tested Git commit into a new runtime directory and save its full revision

@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.backend import METRIC, PROTOCOL, ProTokBackend
+from integrations.protok.run import job_path
 from research_loop.harness import completed_response
 
 
@@ -271,6 +272,19 @@ def progress(root, state, backend, runner, agents):
             "等待下一步",
             f"当前阶段：{phase_label}；尚未观察到正在运行的调用。",
         )
+    if state.get("debugging") and not (root / "control/STOP").exists():
+        title = "候选调试中"
+        message = "正在处理已核账的候选实现失败；调试使用独立预算，通过后重新申请正式评价资源。"
+        flow = read(
+            root / "control/debug" / f"{state['iteration']:04d}" / "flow.json", {}
+        )
+        if flow.get("phase") in {"formal_prepare", "formal"}:
+            title = "正式评价中（调试已通过）"
+            message = "正在为修复后的候选运行新的完整正式评价作业；调试消耗单独记账。"
+        failure = read(root / "study" / state["debugging"], {})
+        cause = failure.get("details", {}).get("cause")
+        if cause:
+            reason("本次调试原因", cause, "study/" + state["debugging"])
     stages = []
     order = ["selection", "plan", "execute", "review"]
     for key in order:
@@ -476,9 +490,7 @@ def frontier_snapshot(root):
         ):
             prior_known = False
         imported = (
-            read(root / "control/jobs" / folder.name / "result.json", {}).get(
-                "provenance"
-            )
+            read(job_path(root, folder.name) / "result.json", {}).get("provenance")
             == "historical-import-no-allocation"
         )
         for candidate in candidates:
@@ -584,8 +596,8 @@ def snapshot(root, *, snapshot_only=False):
         if not meta:
             continue
         identity = meta["id"]
-        job = read(root / "control/jobs" / identity / "job.json", {})
-        receipt = read(root / "control/jobs" / identity / "result.json", {})
+        job = read(job_path(root, identity) / "job.json", {})
+        receipt = read(job_path(root, identity) / "result.json", {})
         record = records.get(job.get("fingerprint"), {})
         agents = agent_outputs(root, folder)
         _, published, saved, current = iteration_context(root, folder)
@@ -690,11 +702,9 @@ def snapshot(root, *, snapshot_only=False):
     frontier = frontier_snapshot(root)
     for node in nodes:
         points = [point for point in frontier["points"] if point["id"] == node["id"]]
-        node["fingerprint"] = read(
-            root / "control/jobs" / node["id"] / "job.json", {}
-        ).get("fingerprint") or read(
-            root / "control/jobs" / node["id"] / "result.json", {}
-        ).get("fingerprint")
+        node["fingerprint"] = read(job_path(root, node["id"]) / "job.json", {}).get(
+            "fingerprint"
+        ) or read(job_path(root, node["id"]) / "result.json", {}).get("fingerprint")
         if points:
             candidate = next(
                 (
@@ -758,6 +768,15 @@ def snapshot(root, *, snapshot_only=False):
         )
         if value is not None
     ]
+    debug_root = root / "control/debug" / f"{state.get('iteration', 0):04d}"
+    debug_budget = read(debug_root / "debug-budget.json", {})
+    debug_flow = read(debug_root / "flow.json", {})
+    active_debug = debug_budget.get("attempts", {}).get(
+        debug_budget.get("active_attempt"), {}
+    )
+    used_debug = debug_budget.get("used_gpu_seconds", 0)
+    reserved_debug = active_debug.get("allocated_gpu_seconds", 0)
+    debug_limit = debug_budget.get("limit_gpu_seconds", 1800)
     return {
         "observed_at": time.time(),
         "study_name": root.name,
@@ -775,6 +794,7 @@ def snapshot(root, *, snapshot_only=False):
                 "active_attempt",
                 "stop_reason",
                 "goal_status",
+                "debugging",
             )
         },
         "deadline": continuation.get("deadline"),
@@ -784,7 +804,18 @@ def snapshot(root, *, snapshot_only=False):
         "progress": progress(root, state, backend, runner, current_agents),
         "scout": scout_snapshot(root),
         "best": {"id": best.get("experiment_id"), "metrics": best.get("metrics", {})},
-        "gpu_seconds": backend["used_gpu_seconds"],
+        "gpu_seconds": backend.get("total_gpu_seconds", backend["used_gpu_seconds"]),
+        "formal_gpu_seconds": backend["used_gpu_seconds"],
+        "debug_gpu_seconds": backend.get("debug_gpu_seconds", 0),
+        "debug": {
+            "phase": debug_flow.get("phase"),
+            "used_gpu_seconds": used_debug,
+            "reserved_gpu_seconds": reserved_debug,
+            "limit_gpu_seconds": debug_limit,
+            "remaining_gpu_seconds": max(0, debug_limit - used_debug - reserved_debug),
+        }
+        if debug_budget or state.get("debugging")
+        else None,
         "scored_records": backend["scored_records"],
         "outstanding": backend["outstanding"],
         "nodes": nodes,

@@ -200,6 +200,8 @@ function renderProgress() {
   if (progress.active_role) bits.push((state.status==='running'?'当前角色 ':'最近调用角色 ')+progress.active_role);
   if (progress.elapsed_seconds != null) bits.push((state.status==='running'?'本次调用已用 ':'最近调用耗时 ')+duration(progress.elapsed_seconds));
   if (data.runner?.status) bits.push('Runner '+(STATUS[data.runner.status] || data.runner.status));
+  if (data.formal_gpu_seconds != null) bits.push('正式计算 '+data.formal_gpu_seconds+' GPU 秒 · 调试 '+(data.debug_gpu_seconds || 0)+' GPU 秒（独立记账）');
+  if (data.debug) bits.push('本调查调试 '+data.debug.used_gpu_seconds+'/'+data.debug.limit_gpu_seconds+' GPU 秒 · 已预留 '+data.debug.reserved_gpu_seconds+' GPU 秒');
   $('statusline').innerHTML = bits.map(bit => '<span>'+esc(bit)+'</span>').join('');
   $('updated').textContent = '记录读取于 '+clock(data.observed_at);
   $('sourceName').textContent = (data.study_name || '当前目录')+' · 每 5 秒刷新';

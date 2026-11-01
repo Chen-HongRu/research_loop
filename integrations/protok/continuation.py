@@ -24,6 +24,36 @@ def _finite_number(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
+def _fresh_id(fresh_attempt):
+    if fresh_attempt is not None and (
+        not isinstance(fresh_attempt, str)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", fresh_attempt)
+    ):
+        raise ValueError("Fresh attempt requires a safe explicit allocation ID")
+    return fresh_attempt
+
+
+def _record_path(records, identity, fresh_attempt):
+    return records / (
+        identity if fresh_attempt is None else f"{identity}--{fresh_attempt}"
+    )
+
+
+def _fresh_state(record, identity, fresh_attempt, owner_token):
+    if record.is_symlink() or (record / "state.json").is_symlink():
+        raise ValueError("Fresh allocation record cannot alias another record")
+    state = _read(record / "state.json")
+    if (
+        state.get("fingerprint") != identity
+        or state.get("fresh_attempt") != fresh_attempt
+        or state.get("mode") != "scored"
+        or state.get("baseline") is not False
+        or state.get("controller_lease", {}).get("owner_token") != owner_token
+    ):
+        raise ValueError("Fresh allocation identity or owning lease does not match")
+    return state
+
+
 def _validate_incremental_anchor(control, states):
     """Check small receipt metadata with the pinned backend's accounting rules."""
     anchor = control.get("initial_record_gpu_seconds")
@@ -127,9 +157,17 @@ def _load_backend(project, control):
 
 
 def validate_continuation(
-    project, control_dir, owner_token, config_path, *, now=None, recover=False
+    project,
+    control_dir,
+    owner_token,
+    config_path,
+    *,
+    now=None,
+    recover=False,
+    fresh_attempt=None,
 ):
     """Validate the lease and unchanged original scientific/budget contract."""
+    fresh_attempt = _fresh_id(fresh_attempt)
     project, control_dir = Path(project).resolve(), Path(control_dir).resolve()
     control = _read(control_dir / "continuation.json")
     owner = _read(control_dir / "ownership.json")
@@ -237,10 +275,18 @@ def validate_continuation(
         or control.get("initial_gpu_seconds") != 11660
     ):
         raise ValueError("Continuation historical accounting anchor mismatch")
-    if recover:
+    if recover or fresh_attempt is not None:
         identity = backend.fingerprint(config, backend.source_boundary(config))
-        path = records / identity / "state.json"
-        state = _read(path) if path.exists() else {}
+        record = _record_path(records, identity, fresh_attempt)
+        path = record / "state.json"
+        state = (
+            _fresh_state(record, identity, fresh_attempt, owner_token)
+            if fresh_attempt is not None and record.exists()
+            else _read(path)
+            if path.exists()
+            else {}
+        )
+    if recover:
         if state.get("controller_lease", {}).get(
             "owner_token"
         ) != owner_token or not any(
@@ -254,9 +300,17 @@ def validate_continuation(
 
 
 def install_hooks(
-    backend, config, control, validate_lease, *, validate_poll=None, recover=False
+    backend,
+    config,
+    control,
+    validate_lease,
+    *,
+    validate_poll=None,
+    recover=False,
+    fresh_attempt=None,
 ):
     """Install narrow hooks; backend.evaluate acquires its original global lock."""
+    fresh_attempt = _fresh_id(fresh_attempt)
     reserve, budget, wait, submit = (
         backend.reserve_record,
         backend.budget_check,
@@ -315,7 +369,7 @@ def install_hooks(
             raise ValueError(
                 "Continuation authorizes scored candidates, not separate smokes"
             )
-        record = records / identity
+        record = _record_path(records, identity, fresh_attempt)
         if recover and not record.exists():
             raise ValueError("Receipt recovery cannot reserve a new candidate")
         states = backend.records_state(records)
@@ -333,16 +387,46 @@ def install_hooks(
         if record.exists():
             # Completed caches and same-fingerprint receipt recovery need no new
             # admission and remain available after the continuation deadline.
+            if fresh_attempt is not None:
+                state = _fresh_state(
+                    record, identity, fresh_attempt, control["owner_token"]
+                )
+                if recover and not any(
+                    attempt.get("status") in {"submitting", "running", "finished"}
+                    for attempt in state.get("attempts", [])
+                ):
+                    raise ValueError(
+                        "Fresh recovery requires this allocation's outstanding attempt"
+                    )
+                return record, state
             return reserve(current, identity, baseline_identity, smoke=False)
         session = backend.session_state(current)
         budget_check(current, session, records, 1)
         count = sum(state.get("mode") == "scored" for _, state in states)
-        record, state = reserve(
-            current | {"max_evaluations": count + 1},
-            identity,
-            baseline_identity,
-            smoke=False,
-        )
+        if fresh_attempt is not None:
+            if identity != baseline_identity:
+                baseline = records / baseline_identity / "state.json"
+                if not baseline.exists() or _read(baseline).get("status") != "complete":
+                    raise RuntimeError(
+                        "Fresh protected baseline must complete before candidates"
+                    )
+            record.mkdir()
+            state = {
+                "status": "reserved",
+                "fingerprint": identity,
+                "fresh_attempt": fresh_attempt,
+                "mode": "scored",
+                "baseline": False,
+                "attempts": [],
+                "created_at": time.time(),
+            }
+        else:
+            record, state = reserve(
+                current | {"max_evaluations": count + 1},
+                identity,
+                baseline_identity,
+                smoke=False,
+            )
         state["controller_lease"] = {
             "owner_token": control["owner_token"],
             "started_at": control["started_at"],
@@ -437,15 +521,27 @@ def install_hooks(
         backend.session_state = session_state
 
 
-def launch(project, control_dir, owner_token, config_path, *, recover=False):
+def launch(
+    project, control_dir, owner_token, config_path, *, recover=False, fresh_attempt=None
+):
     backend, config, control = validate_continuation(
-        project, control_dir, owner_token, config_path, recover=recover
+        project,
+        control_dir,
+        owner_token,
+        config_path,
+        recover=recover,
+        fresh_attempt=fresh_attempt,
     )
 
     def validate_lease(*, receipt_recovery=recover):
         # Lease changes are observed again while holding the backend's global lock.
         fresh_backend, fresh_config, fresh_control = validate_continuation(
-            project, control_dir, owner_token, config_path, recover=receipt_recovery
+            project,
+            control_dir,
+            owner_token,
+            config_path,
+            recover=receipt_recovery,
+            fresh_attempt=fresh_attempt,
         )
         del fresh_backend
         if fresh_config != config or fresh_control != control:
@@ -458,6 +554,7 @@ def launch(project, control_dir, owner_token, config_path, *, recover=False):
         validate_lease,
         validate_poll=lambda: validate_lease(receipt_recovery=False),
         recover=recover,
+        fresh_attempt=fresh_attempt,
     )
     return backend.main(["--config", str(config_path), "--evaluate"])
 
@@ -468,6 +565,7 @@ def main(argv=None):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--evaluate", action="store_true", required=True)
     parser.add_argument("--recover", action="store_true")
+    parser.add_argument("--fresh-attempt")
     args = parser.parse_args(argv)
     try:
         return launch(
@@ -476,6 +574,7 @@ def main(argv=None):
             args.owner_token,
             args.config,
             recover=args.recover,
+            fresh_attempt=args.fresh_attempt,
         )
     except (Exception, KeyboardInterrupt) as error:
         # Do not print exception payloads: trusted receipts may contain owner tokens.
