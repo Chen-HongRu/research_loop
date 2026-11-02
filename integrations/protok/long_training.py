@@ -17,6 +17,7 @@ import time
 from integrations.protok.backend import CANDIDATE_FILES, ProTokError
 from integrations.protok.continuation import _load_backend
 from integrations.protok.research_backend import _source_identity, _launcher
+from research_loop.long_training import admitted_round
 from research_loop.protocol import EVALUATION, _validate, validate_response
 
 RECIPE = {
@@ -73,6 +74,39 @@ def _policy(control):
     return value
 
 
+def round_authorization(backend, root, request, token=None, *, reconcile=False):
+    """Freeze independent grant and controller identity at actual child entry."""
+    root = Path(root)
+    control = root / "control"
+    if not reconcile and (control / "STOP").exists():
+        raise ProTokError("Parent Study is stopped")
+    policy = _policy(control)
+    owner = _read(control / "ownership.json")
+    continuation_path = control / "continuation.json"
+    continuation = _read(continuation_path) if continuation_path.exists() else None
+    if (
+        owner.get("owner_token") != backend.owner_token
+        or owner.get("handoff_acknowledged") is not True
+    ):
+        raise ProTokError("Parent ownership identity required")
+    identity = {"policy": policy, "owner": owner, "continuation": continuation}
+    if token:
+        if token.get("authorization") != identity:
+            raise ProTokError("Long round authorization identity changed")
+        return identity
+    if (control / "HANDOFF").exists() or time.time() >= policy["deadline"]:
+        raise ProTokError("Long round admission closed")
+    spent = usage(control)
+    if spent["outstanding"]:
+        raise ProTokError("Long allocation accounting is unresolved")
+    if (
+        spent["gpu_seconds"] + policy["gpu_seconds_per_run"]
+        > policy["total_gpu_seconds"]
+    ):
+        raise ProTokError("Long-training GPU budget exhausted")
+    return identity
+
+
 def _directory(root, run_id):
     return Path(root) / "study" / "long-runs" / _run_id(run_id)
 
@@ -91,7 +125,7 @@ def usage(control):
         seconds = receipt.get("gpu_seconds")
         if (
             type(seconds) is not int
-            or not 0 <= seconds <= job["allocated_seconds"]
+            or seconds < 0
             or receipt.get("source_identity") != job["source_identity"]
             or receipt.get("run_id") != job["run_id"]
             or receipt.get("status") not in {"completed", "failed"}
@@ -379,7 +413,7 @@ def _retained_result(job, result):
         or result.get("evaluation") != request["evaluation"]
         or result.get("remote") != job["remote"]
         or type(result.get("gpu_seconds")) is not int
-        or not 0 <= result["gpu_seconds"] <= job["allocated_seconds"]
+        or result["gpu_seconds"] < 0
         or result.get("status") not in {"completed", "failed"}
     ):
         raise ProTokError("Retained long result differs from its allocation")
@@ -470,7 +504,15 @@ def execute(
             or not _finite(deadline)
         ):
             raise ProTokError("Active parent ownership required")
-        effective = min(deadline, policy["deadline"], owner["expires_at"])
+        token = admitted_round(root / "study/long-runs" / request["id"])
+        # Recovery of legacy jobs remains receipt-only and cannot create allocations.
+        if token:
+            round_authorization(backend, root, request, token, reconcile=recover)
+        elif not recover:
+            raise ProTokError(
+                "Long allocation requires a committed child round admission"
+            )
+        effective = deadline
         off = backend.project / ".autoresearch-off"
         off_value = _read(off) if off.exists() else None
         stat = off.stat() if off.exists() else None
@@ -495,7 +537,11 @@ def execute(
                 existing["request"] != request
                 or existing["policy"] != policy
                 or existing["owner"] != owner
-                or existing["deadline"] != effective
+                or existing["deadline"] != deadline
+                or (token and existing.get("round_admission", token) != token)
+                or existing["continuation"] != continuation
+                or existing["off"] != off_value
+                or existing["off_stat"] != off_stat
                 or existing["config"] != config
             ):
                 raise ProTokError(
@@ -522,7 +568,6 @@ def execute(
             if (
                 spent["outstanding"]
                 or spent["gpu_seconds"] + allocated > policy["total_gpu_seconds"]
-                or effective - time.time() < allocated
                 or (control / "STOP").exists()
             ):
                 raise ProTokError(
@@ -565,6 +610,8 @@ def execute(
                 "policy": policy,
                 "owner": owner,
                 "deadline": effective,
+                "round_admission": token,
+                "wait_policy": "slurm-allocation",
                 "config": config,
                 "off": off_value,
                 "off_stat": off_stat,
@@ -586,7 +633,7 @@ def execute(
             _write(record / "state.json", state)
         attempt = state["attempts"][0]
         original_ssh = fixed.ssh
-        watching = not recover
+        watching = True
 
         def live():
             current_stat = off.stat() if off.exists() else None
@@ -600,7 +647,6 @@ def execute(
             )
             if (
                 (control / "STOP").exists()
-                or time.time() >= effective
                 or _read(control / "ownership.json") != owner
                 or _policy(control) != policy
                 or current != existing["off_stat"]
@@ -646,12 +692,26 @@ def execute(
                     timeout=600,
                 )
                 live()
-                if effective - time.time() < existing["allocated_seconds"]:
-                    raise ProTokError("Staging exhausted long allocation window")
                 fixed.submit(config, record, state, attempt)
+            unlimited_queue = (
+                token and existing.get("wait_policy") == "slurm-allocation"
+            )
+            wait_config = (
+                {**config, "queue_timeout_seconds": float("inf")}
+                if unlimited_queue
+                else config
+            )
             fixed.wait_for_job(
-                config,
-                {"deadline": min(effective, time.time()) if recover else effective},
+                wait_config,
+                {
+                    "deadline": time.time()
+                    if (control / "STOP").exists()
+                    else float("inf")
+                    if unlimited_queue
+                    else min(effective, time.time())
+                    if recover
+                    else effective
+                },
                 record,
                 state,
                 attempt,
@@ -686,12 +746,11 @@ def execute(
         )
         unsubmitted = attempt["status"] == "prepared"
         seconds = attempt.get("gpu_seconds", 0 if unsubmitted else None)
-        if settled and (
-            type(seconds) is not int
-            or not 0 <= seconds <= existing["allocated_seconds"]
-        ):
+        if settled and (type(seconds) is not int or seconds < 0):
             settled = False
             error = (error or "") + "; invalid authoritative accounting"
+        if settled and seconds > existing["allocated_seconds"]:
+            error = (error or "") + "; Slurm accounting exceeded the allocation limit"
         result = {
             "status": "completed"
             if settled and error is None

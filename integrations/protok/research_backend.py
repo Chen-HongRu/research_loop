@@ -521,6 +521,12 @@ def run_script(
     if type(deadline) not in (int, float) or not math.isfinite(deadline):
         raise ProTokError("Finite original research deadline required")
     control = root / "control"
+    from .round_admission import (
+        active_round,
+        execution_deadline,
+        freeze_execution_deadline,
+    )
+
     policy = _read(control / "research-policy.json")
     if (
         policy.get("version") != 1
@@ -584,7 +590,37 @@ def run_script(
                 backend.owner_token,
                 backend.project / "autoresearch-run.json",
             )
-            if deadline > admitted["effective_deadline"]:
+            current_round = active_round(root, owner_token=backend.owner_token)
+            if current_round:
+                from .research_execution import frozen_contract
+
+                if (
+                    current_round["iteration"] != iteration
+                    or frozen_contract(root, iteration)["execution"] != execution
+                ):
+                    raise ProTokError(
+                        "Research execution differs from its admitted frozen Plan"
+                    )
+                plan = _read(
+                    root / "study" / _read(root / "study/state.json")["plan_ref"]
+                )
+                if deadline > time.time() + min(
+                    3600, plan["contract"]["timeout_seconds"]
+                ):
+                    raise ProTokError(
+                        "Research deadline exceeds its frozen Plan timeout"
+                    )
+                window = freeze_execution_deadline(
+                    root,
+                    deadline,
+                    owner_token=backend.owner_token,
+                    attempt=f"research/{iteration}",
+                )
+                if window != deadline:
+                    raise ProTokError(
+                        "Research deadline differs from its frozen attempt window"
+                    )
+            elif deadline > admitted["effective_deadline"]:
                 raise ProTokError("Research cannot extend the original lease")
             status = backend.inspect()
             spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
@@ -668,13 +704,20 @@ def run_script(
             _write(record / "state.json", state)
             if environment is not None:
                 _write(record / "environment.json", environment)
+        wall_deadline = execution_deadline(
+            root,
+            deadline,
+            3600,
+            owner_token=backend.owner_token,
+            attempt=f"research/{iteration}",
+        )
         original_ssh = fixed.ssh
         watching = True
 
         def live():
             if (
                 (control / "STOP").exists()
-                or time.time() >= deadline
+                or time.time() >= wall_deadline
                 or (cancel_event is not None and cancel_event.is_set())
                 or _read(control / "ownership.json") != owner
                 or _read(control / "continuation.json") != lease
@@ -749,10 +792,17 @@ def run_script(
                     )
                 fixed.submit(config, record, state, attempt)
             if attempt["status"] in {"submitting", "running"}:
-                watching = not recover
+                watching = not recover or bool(
+                    active_round(root, owner_token=backend.owner_token)
+                )
                 fixed.wait_for_job(
                     config,
-                    {"deadline": min(deadline, time.time()) if recover else deadline},
+                    {
+                        "deadline": min(wall_deadline, time.time())
+                        if recover
+                        and not active_round(root, owner_token=backend.owner_token)
+                        else wall_deadline
+                    },
                     record,
                     state,
                     attempt,

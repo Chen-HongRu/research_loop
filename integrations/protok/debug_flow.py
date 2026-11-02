@@ -159,6 +159,16 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         }
         write(flow_path, state)
 
+    from .round_admission import execution_deadline
+
+    wall_deadline = execution_deadline(
+        root,
+        state["deadline"],
+        3600,
+        owner_token=harness.backend.owner_token,
+        attempt=f"debug-flow/{iteration}",
+    )
+
     def save():
         write(flow_path, state)
 
@@ -248,7 +258,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         if state["phase"] == "repair":
             if budget.status()["active_attempt"] is not None:
                 raise HarnessError("Unresolved debug accounting blocks a new repair")
-            if min(budget.remaining(), state["deadline"] - time.time()) < 60:
+            if min(budget.remaining(), wall_deadline - time.time()) < 60:
                 return finish(
                     "debug budget exhausted or original wall deadline reached"
                 )
@@ -275,7 +285,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                         }
                     },
                     directory,
-                    _RepairDelegate(harness.delegate, root, state["deadline"]),
+                    _RepairDelegate(harness.delegate, root, wall_deadline),
                 )
             except HarnessError as error:
                 check_scope(workspace, baseline, allow_research=allow_research)
@@ -307,7 +317,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
             revision = debug / "revisions" / f"{state['revision']:03d}"
             if (
                 not state["smoke_submitted"]
-                and min(budget.remaining(), state["deadline"] - time.time()) < 60
+                and min(budget.remaining(), wall_deadline - time.time()) < 60
             ):
                 return finish(
                     "no complete scheduler minute remains in debug/wall budget"
@@ -422,7 +432,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
             }
             if not recover:
                 capacity = harness.backend.formal_capacity(
-                    job / "runtime-config.json", state["deadline"]
+                    job / "runtime-config.json", wall_deadline
                 )
                 if not capacity["admitted"]:
                     return finish(
@@ -440,7 +450,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                 receipt = harness.backend.evaluate(
                     job / "source",
                     job / "runtime-config.json",
-                    timeout_seconds=max(0.01, state["deadline"] - time.time()),
+                    timeout_seconds=max(0.01, wall_deadline - time.time()),
                     recover=recover,
                     fresh_attempt=record["fresh_attempt"],
                     cancel_event=threading.Event(),

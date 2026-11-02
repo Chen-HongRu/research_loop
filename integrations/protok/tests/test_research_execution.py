@@ -297,6 +297,7 @@ class ResearchExecutionTests(unittest.TestCase):
         }
         control = {
             "schema": 2,
+            "owner_token": "owner",
             "effective_deadline": self.deadline,
             "initial_gpu_seconds": 1000,
             "additional_gpu_seconds": 100,

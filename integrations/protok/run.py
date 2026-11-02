@@ -290,6 +290,9 @@ def admission(root, backend, *, require_idle=True):
         read(control / "continuation.json"),
     )
     now = time.time()
+    from integrations.protok.round_admission import active_round
+
+    admitted = active_round(root, owner_token=backend.owner_token)
     duration = continuation.get("seconds")
     supported_lease = (continuation.get("schema", 1) == 1 and duration == 21600) or (
         continuation.get("schema") == 2
@@ -306,9 +309,12 @@ def admission(root, backend, *, require_idle=True):
         or continuation.get("max_new_candidates", "missing") is not None
         or not supported_lease
         or not continuation.get("authorization")
-        or not continuation["started_at"]
-        <= now
-        < min(continuation["deadline"], owner["expires_at"])
+        or (
+            not continuation["started_at"]
+            <= now
+            < min(continuation["deadline"], owner["expires_at"])
+            and admitted is None
+        )
     ):
         raise ProTokError(
             "An acknowledged active bounded continuation lease is required"
@@ -694,6 +700,24 @@ class ProTokHarness:
         self.trusted_result = None
         self.recoverable_failure = None
 
+    def admit_iteration(self, iteration):
+        from integrations.protok.round_admission import admit
+
+        admission(self.root, self.backend, require_idle=False)
+        return admit(self.root, iteration, owner_token=self.backend.owner_token)
+
+    def commit_iteration(self, iteration, token):
+        from integrations.protok.round_admission import commit
+
+        return commit(self.root, iteration, token, owner_token=self.backend.owner_token)
+
+    def call_allowance(self, remaining):
+        from integrations.protok.round_admission import active_round
+
+        if active_round(self.root, owner_token=self.backend.owner_token):
+            return 3600
+        return remaining
+
     def evaluate_request(self, workspace, iteration, request, stop, deadline):
         if request == {"action": "research"}:
             from integrations.protok.research_execution import execute_script
@@ -855,7 +879,16 @@ class ProTokHarness:
             return
 
     def run(self, **kwargs):
-        remaining = int(self.deadline - time.time())
+        from integrations.protok.round_admission import execution_deadline
+
+        deadline = execution_deadline(
+            self.root,
+            self.deadline,
+            min(kwargs["timeout_seconds"], 3600),
+            owner_token=self.backend.owner_token,
+            attempt=kwargs.get("run_dir", "untracked-agent"),
+        )
+        remaining = int(deadline - time.time())
         if remaining <= 0 or (self.root / "control/STOP").exists():
             raise HarnessError("Continuation deadline reached or control/STOP set")
         kwargs["timeout_seconds"] = min(kwargs["timeout_seconds"], remaining, 3600)
@@ -870,7 +903,9 @@ Review. It does not establish model quality or mechanism, but is evidence of
 execution cost and feasibility under the fixed time budget.
 Review should retain the measured best, record the missing evidence, and continue
 unless an independent global reason requires stopping. Unresolved effects,
-identity/accounting failures, user STOP and the original deadline remain blocking.
+identity/accounting failures and user STOP remain blocking. The short entry cutoff
+blocks the next investigation; this admitted investigation may finish through Review.
+Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
 """
         from integrations.protok.research_execution import instructions
 
@@ -904,7 +939,7 @@ identity/accounting failures, user STOP and the original deadline remain blockin
         if submission_status(workspace)["status"] != "not_submitted":
             raise HarnessError("Existing evaluation submission requires reconciliation")
         stop = threading.Event()
-        deadline = min(self.deadline, time.time() + kwargs["timeout_seconds"] - 5)
+        deadline = min(deadline, time.time() + kwargs["timeout_seconds"] - 5)
         thread = threading.Thread(
             target=self._watch, args=(workspace, iteration, stop, deadline)
         )

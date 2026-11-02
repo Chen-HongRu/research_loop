@@ -10,9 +10,16 @@ import time
 
 from research_loop import Study
 from research_loop.harness import CodexHarness, HarnessConfig
-from research_loop.long_training import LongTrainingManager, validate_policy
+from research_loop.long_training import LongTrainingManager, validate_policy, snapshot
 from integrations.protok.backend import ProTokError
-from integrations.protok.long_training import METRICS, RECIPE, _policy, _run_id, execute
+from integrations.protok.long_training import (
+    METRICS,
+    RECIPE,
+    _policy,
+    _run_id,
+    execute,
+    round_authorization,
+)
 
 PROTOCOL = "se3-long-v1-10k-full4491-seed42"
 
@@ -35,9 +42,6 @@ def study_policy(root):
     if not path.exists():
         return None
     grant = _policy(path.parent)
-    seconds = int(grant["deadline"] - time.time())
-    if seconds < grant["gpu_seconds_per_run"]:
-        raise ProTokError("Long-training grant has no full allocation window")
     return validate_policy(
         {
             "version": 1,
@@ -58,8 +62,8 @@ def study_policy(root):
                 ],
                 "constraints": [],
             },
-            "max_runs": grant["total_gpu_seconds"] // grant["gpu_seconds_per_run"],
-            "max_seconds_per_run": seconds,
+            "max_runs": None,
+            "max_seconds_per_run": grant["gpu_seconds_per_run"],
         }
     )
 
@@ -113,7 +117,14 @@ def manager(root, backend):
     def executor(request, workspace, *, deadline):
         return execute(backend, root, request, workspace, deadline=deadline)
 
-    return LongTrainingManager(root / "study", delegate, executor)
+    return LongTrainingManager(
+        root / "study",
+        delegate,
+        executor,
+        admission=lambda request, token: round_authorization(
+            backend, root, request, token
+        ),
+    )
 
 
 def run_one(root, backend):
@@ -173,32 +184,85 @@ class LongTrainingScheduler:
         self.manager = lane_manager
         self.interval = interval
         self.stopped = threading.Event()
+        self.nominations_finished = threading.Event()
+        self._status = {"status": "idle", "reason": None}
         self.thread = threading.Thread(
             target=self._run, daemon=True, name="long-training"
         )
 
+    def status(self):
+        return dict(self._status)
+
+    def finish_nominations(self):
+        """No more parent nominations will arrive; drain the existing legal queue."""
+        self.nominations_finished.set()
+
     def _run(self):
-        while not self.stopped.is_set():
-            try:
+        try:
+            while not self.stopped.is_set():
                 study = self.root / "study/study.json"
-                if (
-                    study.exists()
-                    and _read(study).get("long_training")
-                    and not (self.root / "control/STOP").exists()
-                    and not (self.root / "control/HANDOFF").exists()
-                ):
+                if (self.root / "control/STOP").exists():
+                    self._status = {"status": "finished", "reason": "user_stop"}
+                    return
+                enabled = study.exists() and _read(study).get("long_training")
+                handoff = (self.root / "control/HANDOFF").exists()
+                if enabled:
                     if self.manager is None:
                         self.manager = manager(self.root, self.backend)
-                    self.manager.run_one(
-                        deadline=_policy(self.root / "control")["deadline"]
+                    self._status = {"status": "running", "reason": None}
+                    result = self.manager.run_one(
+                        deadline=_policy(self.root / "control")["deadline"],
+                        allow_new=not handoff,
                     )
-            except (Exception, KeyboardInterrupt) as error:
-                _write(
-                    self.root / "control/long-training-error.json",
-                    {"error": f"{type(error).__name__}: {error}", "at": time.time()},
-                )
-                return
-            self.stopped.wait(self.interval)
+                    if result is not None and result.get("status") in {
+                        "needs_attention",
+                        "stopped",
+                    }:
+                        raise ProTokError("Long child requires reconciliation")
+                    cutoff = time.time() >= _policy(self.root / "control")["deadline"]
+                    rows = snapshot(self.root / "study")
+                    pending = any(
+                        row["status"] not in {"reviewed", "withdrawn"} for row in rows
+                    )
+                    if (
+                        result is None
+                        and pending
+                        and not any(row["status"] == "queued" for row in rows)
+                        and not (cutoff or handoff)
+                    ):
+                        raise ProTokError(
+                            "Retained long child cannot make progress; inspect its state"
+                        )
+                    if result is None and (
+                        (self.nominations_finished.is_set() and not pending)
+                        or cutoff
+                        or handoff
+                    ):
+                        self._status = {
+                            "status": "finished",
+                            "reason": "handoff"
+                            if handoff
+                            else "admission_cutoff"
+                            if cutoff
+                            else "no_pending",
+                        }
+                        return
+                elif self.nominations_finished.is_set() or handoff:
+                    self._status = {"status": "finished", "reason": "disabled"}
+                    return
+                self._status = {"status": "idle", "reason": None}
+                self.stopped.wait(self.interval)
+        except (Exception, KeyboardInterrupt) as error:
+            message = f"{type(error).__name__}: {error}"
+            budget = "GPU budget exhausted" in str(error)
+            self._status = {
+                "status": "finished" if budget else "blocked",
+                "reason": "budget_exhausted" if budget else message,
+            }
+            _write(
+                self.root / "control/long-training-error.json",
+                {"error": message, "at": time.time()},
+            )
 
     def start(self):
         self.thread.start()

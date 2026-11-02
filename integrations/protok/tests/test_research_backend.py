@@ -313,6 +313,83 @@ class ResearchBackendTests(unittest.TestCase):
                     self.run_job()
                 self.assertFalse((self.control / "research-jobs/0002").exists())
 
+    def admit_script_round(self):
+        from integrations.protok.round_admission import admit, commit
+
+        now = time.time()
+        self.lease.update(started_at=now - 10, deadline=now + 1, owner_token="owner")
+        research._write(self.control / "continuation.json", self.lease)
+        research._write(
+            self.control / "ownership.json",
+            {
+                "owner_token": "owner",
+                "expires_at": now + 1,
+                "handoff_acknowledged": True,
+            },
+        )
+        token = admit(self.root, "0002", owner_token="owner")
+        committed_at = commit(self.root, "0002", token, owner_token="owner")
+        folder = self.root / "study/iterations/0002"
+        folder.mkdir(parents=True)
+        research._write(folder / "iteration.json", {"round_admission": token})
+        research._write(
+            folder / "plan.json",
+            {
+                "decision": "investigate",
+                "contract": {"timeout_seconds": 1800},
+                "research_contract": {"execution": self.execution},
+            },
+        )
+        research._write(
+            self.root / "study/state.json",
+            {
+                "iteration": 2,
+                "phase": "execute",
+                "status": "ready",
+                "round_admission": token,
+                "round_admitted_at": committed_at,
+                "plan_ref": "iterations/0002/plan.json",
+            },
+        )
+        self.deadline = now + 1800
+        research.validate_continuation.return_value = (
+            self.fixed,
+            self.config,
+            {"effective_deadline": now + 1},
+        )
+        return now
+
+    def test_admitted_script_uses_own_window_without_formal_override(self):
+        from integrations.protok.round_admission import frozen_execution_deadline
+
+        now = self.admit_script_round()
+        with patch(
+            "integrations.protok.research_backend.time.time", return_value=now + 2
+        ):
+            receipt = self.run_job()
+        self.assertEqual(receipt["status"], "completed")
+        self.assertNotIn(
+            "execution_deadline", research.validate_continuation.call_args.kwargs
+        )
+        self.assertEqual(
+            frozen_execution_deadline(
+                self.root, owner_token="owner", attempt="research/0002"
+            ),
+            self.deadline,
+        )
+
+    def test_admitted_script_window_cannot_extend_plan_or_ignore_stop(self):
+        self.admit_script_round()
+        self.deadline += 1
+        with self.assertRaisesRegex(ProTokError, "Plan timeout"):
+            self.run_job()
+        self.assertFalse((self.control / "research-jobs/0002").exists())
+        self.deadline -= 1
+        (self.control / "STOP").touch()
+        with self.assertRaisesRegex(ProTokError, "original lease"):
+            self.run_job()
+        self.assertFalse((self.control / "research-jobs/0002").exists())
+
     def test_script_receipt_is_bounded_nonformal_and_repeatable(self):
         receipt = self.run_job()
         self.assertEqual(receipt["status"], "completed")

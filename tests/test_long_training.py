@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from research_loop import Study, initialize
 from research_loop.protocol import SCHEMAS
@@ -250,6 +251,225 @@ class LongTrainingTests(unittest.TestCase):
         self.assertFalse(
             (self.root / "long-runs" / request["id"] / "study/study.json").exists()
         )
+
+    def test_started_child_drains_after_cutoff_and_does_not_admit_queue(self):
+        request = self.nominate()
+        calls = []
+        delegate = RecordedHarness()
+        clock = [100.0]
+
+        def cross_cutoff(call):
+            if call["phase"] == "plan":
+                clock[0] = 201.0
+
+        delegate.before = cross_cutoff
+        manager = LongTrainingManager(self.root, delegate, self.executor(calls))
+        with patch(
+            "research_loop.long_training.time.time", side_effect=lambda: clock[0]
+        ):
+            result = manager.run_one(deadline=200.0)
+            self.assertIsNone(manager.run_one(deadline=200.0))
+        self.assertEqual(result["id"], request["id"])
+        self.assertEqual(calls, [request["id"]])
+        self.assertEqual([c["phase"] for c in delegate.calls], ["plan", "review"])
+
+    def prepare_child(self):
+        request = self.nominate()
+        manager = LongTrainingManager(self.root, RecordedHarness(), self.executor([]))
+        manager.sync_requests()
+        child = self.root / "long-runs" / request["id"] / "study"
+        initialize(
+            child,
+            goal="Prepared frozen child",
+            global_evaluation=request["evaluation"],
+            max_iterations=1,
+            max_calls=12,
+            max_seconds=policy()["max_seconds_per_run"],
+            strategy={"selection": "direct", "review": "full"},
+        )
+        return request, child
+
+    def test_initialized_child_can_enter_before_cutoff_without_reinitializing(self):
+        request, child = self.prepare_child()
+        original_config = (child / "study.json").read_bytes()
+        calls = []
+        delegate = RecordedHarness()
+        manager = LongTrainingManager(self.root, delegate, self.executor(calls))
+        result = manager.run_one(deadline=time.time() + 1000)
+        self.assertEqual(result["id"], request["id"])
+        self.assertEqual(calls, [request["id"]])
+        self.assertEqual([call["phase"] for call in delegate.calls], ["plan", "review"])
+        self.assertEqual((child / "study.json").read_bytes(), original_config)
+
+    def test_initialized_child_is_not_active_after_cutoff_or_without_admission(self):
+        _, child = self.prepare_child()
+        initial_state = read(child / "state.json")
+        calls = []
+        delegate = RecordedHarness()
+        manager = LongTrainingManager(self.root, delegate, self.executor(calls))
+        self.assertIsNone(manager.run_one(deadline=0))
+        self.assertIsNone(manager.run_one(deadline=time.time() + 1000, allow_new=False))
+        self.assertEqual(read(child / "state.json"), initial_state)
+        self.assertEqual(calls, [])
+        self.assertEqual(delegate.calls, [])
+
+    def test_initialized_child_rechecks_admission_authorization(self):
+        _, child = self.prepare_child()
+        calls = []
+        delegate = RecordedHarness()
+
+        def blocked(request, token):
+            raise RuntimeError("Long-training GPU budget exhausted or HANDOFF")
+
+        manager = LongTrainingManager(
+            self.root, delegate, self.executor(calls), admission=blocked
+        )
+        with self.assertRaisesRegex(RuntimeError, "budget exhausted"):
+            manager.run_one(deadline=time.time() + 1000)
+        self.assertEqual(read(child / "state.json")["iteration"], 0)
+        self.assertEqual(calls, [])
+        self.assertEqual(delegate.calls, [])
+
+    def test_initialized_child_rechecks_source_eligibility(self):
+        request, child = self.prepare_child()
+        frontiers = read(self.root / "frontiers.json")
+        view = frontiers["global"][request["candidate"]["evaluation_id"]]
+        view["candidate_ids"] = []
+        view["excluded"] = [{"id": request["candidate"]["id"], "reason": "invalid"}]
+        (self.root / "frontiers.json").write_text(json.dumps(frontiers))
+        calls = []
+        delegate = RecordedHarness()
+        manager = LongTrainingManager(self.root, delegate, self.executor(calls))
+        self.assertIsNone(manager.run_one(deadline=time.time() + 1000))
+        self.assertEqual(snapshot(self.root)[0]["status"], "withdrawn")
+        self.assertEqual(read(child / "state.json")["iteration"], 0)
+        self.assertEqual(calls, [])
+        self.assertEqual(delegate.calls, [])
+
+    def test_fixed_controller_freezes_gpu_timeout_and_keeps_agent_timeout(self):
+        self.nominate()
+        delegate = RecordedHarness()
+        calls = []
+        manager = LongTrainingManager(
+            self.root,
+            delegate,
+            self.executor(calls),
+            admission=lambda request, token: {"policy": {"gpu_seconds_per_run": 60}},
+        )
+        result = manager.run_one(deadline=time.time() + 1000)
+        self.assertEqual(result["execute"]["outcome"], "completed")
+        plan_call = next(call for call in delegate.calls if call["phase"] == "plan")
+        self.assertIn("Slurm GPU allocation time, exactly 60", plan_call["prompt"])
+        self.assertEqual(len(calls), 1)
+
+    def test_authorization_stays_out_of_child_artifacts_and_review_prompt(self):
+        request = self.nominate()
+        identity = {
+            "owner": {"owner_token": "secret-owner-value"},
+            "authorization": "secret-grant-text",
+        }
+        delegate = RecordedHarness()
+        manager = LongTrainingManager(
+            self.root,
+            delegate,
+            self.executor([]),
+            admission=lambda request, token: identity,
+        )
+        manager.run_one(deadline=time.time() + 1000)
+        child = self.root / "long-runs" / request["id"] / "study"
+        artifacts = [
+            child / "state.json",
+            child / "iterations/0001/iteration.json",
+            child / "iterations/0001/publication.json",
+        ]
+        texts = [path.read_text() for path in artifacts]
+        texts.extend(path.read_text() for path in child.rglob("prompt.md"))
+        texts.extend(
+            call["prompt"] for call in delegate.calls if call["phase"] == "review"
+        )
+        for text in texts:
+            self.assertNotIn("owner_token", text)
+            self.assertNotIn("secret-owner-value", text)
+            self.assertNotIn("secret-grant-text", text)
+            self.assertNotIn('"authorization"', text)
+        from research_loop.long_training import admission_path
+
+        record = read(admission_path(child.parent))
+        self.assertEqual(record["authorization"], identity)
+        token = read(child / "state.json")["round_admission"]
+        self.assertEqual(set(token), {"version", "id", "nonce"})
+
+    def test_opaque_token_keeps_identity_changes_blocked(self):
+        self.nominate()
+        identity = {"owner": {"owner_token": "first"}}
+        delegate = RecordedHarness()
+        calls = []
+
+        def change_owner(call):
+            if call["phase"] == "plan":
+                identity["owner"]["owner_token"] = "replacement"
+
+        delegate.before = change_owner
+        manager = LongTrainingManager(
+            self.root,
+            delegate,
+            self.executor(calls),
+            admission=lambda request, token: copy.deepcopy(identity),
+        )
+        with self.assertRaisesRegex(ValueError, "identity changed"):
+            manager.run_one(deadline=time.time() + 1000)
+        self.assertEqual(calls, [])
+
+    def test_inconsistent_fixed_controller_plan_cannot_allocate(self):
+        self.nominate()
+        calls = []
+        manager = LongTrainingManager(
+            self.root,
+            RecordedHarness(),
+            self.executor(calls),
+            admission=lambda request, token: {"policy": {"gpu_seconds_per_run": 10800}},
+        )
+        with self.assertRaisesRegex(ValueError, "GPU allocation timeout"):
+            manager.run_one(deadline=time.time() + 1000)
+        self.assertEqual(calls, [])
+
+    def test_prepared_token_cannot_commit_when_context_build_crosses_cutoff(self):
+        from research_loop import core
+        from research_loop.long_training import admitted_round
+
+        request = self.nominate()
+        manager = LongTrainingManager(self.root, RecordedHarness(), self.executor([]))
+        clock = [100.0]
+        atomic_text = core._atomic_text
+
+        def crossing(path, content):
+            result = atomic_text(path, content)
+            if "long-runs" in path.parts and path.parent.name == "context":
+                clock[0] = 201.0
+            return result
+
+        with (
+            patch(
+                "research_loop.long_training.time.time", side_effect=lambda: clock[0]
+            ),
+            patch.object(core, "_atomic_text", side_effect=crossing),
+        ):
+            with self.assertRaisesRegex(ValueError, "cutoff"):
+                manager.run_one(deadline=200.0)
+        folder = self.root / "long-runs" / request["id"]
+        self.assertIsNone(admitted_round(folder))
+        self.assertEqual(read(folder / "study/state.json")["iteration"], 0)
+
+    def test_orphan_prepared_admission_cannot_start_after_cutoff(self):
+        request = self.nominate()
+        manager = LongTrainingManager(self.root, RecordedHarness(), self.executor([]))
+        manager.sync_requests()
+        folder = self.root / "long-runs" / request["id"]
+        (folder / "round-admission.json").write_text(
+            json.dumps({"entered_at": 1, "cutoff": 2})
+        )
+        self.assertIsNone(manager.run_one(deadline=0))
+        self.assertFalse((folder / "study/study.json").exists())
 
     def test_final_only_and_resumed_recipes_rejected(self):
         invalid = copy.deepcopy(policy())

@@ -132,6 +132,37 @@ def setup(tmp_path):
     backend = SimpleNamespace(
         project=project, owner_token="test", _config=lambda: config
     )
+    run = root / "study/long-runs" / req["id"]
+    token = {
+        "version": 1,
+        "request": req,
+        "child": str((run / "study").resolve()),
+        "entered_at": 90.0,
+        "cutoff": 100000.0,
+        "authorization": {
+            "policy": lane._policy(control),
+            "owner": owner,
+            "continuation": None,
+        },
+    }
+    opaque = {"version": 1, "id": req["id"], "nonce": "test-only"}
+    lane._write(run / "request.json", req)
+    lane._write(
+        control / "long-training-rounds" / (req["id"] + ".json"),
+        token | {"token": opaque, "committed_at": 90.0},
+    )
+    lane._write(
+        run / "study/state.json",
+        {
+            "iteration": 1,
+            "phase": "execute",
+            "round_admission": opaque,
+            "round_admitted_at": 90.0,
+        },
+    )
+    lane._write(
+        run / "study/iterations/0001/iteration.json", {"round_admission": opaque}
+    )
     return root, control, req, config, backend
 
 
@@ -330,6 +361,63 @@ class LongTrainingTests(unittest.TestCase):
             )
             assert recovered["outcome"] == "completed"
             assert transport.submissions == 1
+
+    def test_admitted_execute_after_cutoff_and_owner_expiry_keeps_real_usage(self):
+        root, control, req, config, backend = setup(self.tmp_path)
+        transport = Transport()
+        original_wait = transport.wait_for_job
+
+        def overrun(*args):
+            original_wait(*args)
+            args[-1]["gpu_seconds"] = 3610
+
+        transport.wait_for_job = overrun
+        with (
+            patch.object(lane, "_load_backend", return_value=(transport, config)),
+            patch.object(lane, "_snapshot", side_effect=fake_snapshot),
+            patch.object(lane.time, "time", return_value=200000.0),
+        ):
+            result = lane.execute(
+                backend, root, req, root / "workspace", deadline=210000.0
+            )
+        self.assertEqual(result["outcome"], "incomplete")
+        self.assertEqual(lane.usage(control), {"gpu_seconds": 3610, "outstanding": []})
+        self.assertEqual(transport.submissions, 1)
+
+    def test_new_waiter_has_no_queue_cutoff_and_keeps_frozen_config(self):
+        root, control, req, config, backend = setup(self.tmp_path)
+        config["queue_timeout_seconds"] = 30
+        transport = Transport()
+        wait = transport.wait_for_job
+
+        def pending_wait(current, session, record, state, attempt):
+            # Match the evaluator's separate PENDING and allocation wall checks.
+            self.assertLess(1000000, current["queue_timeout_seconds"])
+            self.assertLess(1000000, session["deadline"])
+            wait(current, session, record, state, attempt)
+
+        transport.wait_for_job = pending_wait
+        remote = config["remote_root"] + "/long-training/" + req["id"]
+        with (
+            patch.object(lane, "_load_backend", return_value=(transport, config)),
+            patch.object(lane, "_snapshot", side_effect=fake_snapshot),
+            patch.object(
+                lane, "_collect", return_value=completion(req, "b" * 64, remote)
+            ),
+            patch.object(lane.time, "time", return_value=200000.0),
+        ):
+            lane.execute(backend, root, req, root / "workspace", deadline=200001.0)
+        job = lane._read(control / "long-training-jobs" / req["id"] / "job.json")
+        self.assertEqual(job["config"]["queue_timeout_seconds"], 30)
+        self.assertEqual(config["queue_timeout_seconds"], 30)
+        self.assertEqual(job["deadline"], 200001.0)
+
+    def test_prepared_admission_without_real_child_cannot_submit(self):
+        root, _, req, _, backend = setup(self.tmp_path)
+        (root / "study/long-runs" / req["id"] / "study/state.json").unlink()
+        with patch.object(lane, "_load_backend", return_value=(Transport(), {})):
+            with self.assertRaisesRegex(lane.ProTokError, "committed child"):
+                lane.execute(backend, root, req, root / "workspace", deadline=200000.0)
 
     def test_checkpoint_requires_review(self):
         tmp_path = self.tmp_path

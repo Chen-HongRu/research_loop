@@ -33,6 +33,8 @@ class ProcessLost(BaseException):
 
 
 class CpuBackend:
+    owner_token = "test-owner"
+
     def __init__(self, project):
         self.project = project
         self.smokes = ["failed", "completed"]
@@ -720,7 +722,11 @@ class DebugFlowTests(unittest.TestCase):
         agent = Agent()
         harness = run.ProTokHarness(backend, live, agent, self.harness.deadline)
         study = Study(live / "study", harness)
-        with patch.object(run, "admission", return_value=self.harness.deadline):
+        with (
+            patch.object(run, "admission", return_value=self.harness.deadline),
+            patch.object(harness, "admit_iteration", return_value=None),
+            patch.object(harness, "commit_iteration", return_value=None),
+        ):
             result = study.run()
         self.assertEqual((result["status"], result["phase"]), ("stopped", "done"))
         self.assertEqual(result["call_count"], 7)
