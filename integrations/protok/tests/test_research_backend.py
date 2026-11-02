@@ -531,9 +531,10 @@ class ResearchBackendTests(unittest.TestCase):
         self.assertIn("/dev/nvidia", launcher)
         compile(launcher, "launcher", "exec")
 
-    def test_launcher_uses_reported_device_minor_and_logs_only_resource_fields(self):
+    def test_launcher_mounts_ldconfig_read_only_and_preserves_isolation(self):
+        inputs = research._inputs(self.root, self.config, self.execution, "0002")
         launcher = research._launcher(
-            self.config, "/remote/attempt", self.execution, []
+            self.config, "/remote/attempt", self.execution, inputs
         )
         output = io.StringIO()
         with (
@@ -577,6 +578,24 @@ class ResearchBackendTests(unittest.TestCase):
             query.call_args_list[1].args[0], ["nvidia-smi", "-q", "-x", "-i", "0"]
         )
         args = execute.call_args.args[1]
+        read_only_mounts = [
+            tuple(args[index + 1 : index + 3])
+            for index, arg in enumerate(args)
+            if arg == "--ro-bind"
+        ]
+        self.assertIn(("/sbin", "/sbin"), read_only_mounts)
+        self.assertIn(("/remote/attempt/code", "/workspace"), read_only_mounts)
+        for item in inputs:
+            self.assertIn((item["path"], item["mount"]), read_only_mounts)
+        writable_mounts = [
+            tuple(args[index + 1 : index + 3])
+            for index, arg in enumerate(args)
+            if arg == "--bind"
+        ]
+        self.assertEqual(writable_mounts, [("/remote/attempt/output", "/output")])
+        self.assertIn("--unshare-net", args)
+        self.assertIn("--unshare-pid", args)
+        self.assertEqual(args[args.index("--cap-drop") + 1], "ALL")
         self.assertIn("/dev/nvidia4", args)
         self.assertNotIn("/dev/nvidia0", args)
         text = output.getvalue()
