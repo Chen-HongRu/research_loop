@@ -211,6 +211,13 @@ ownership and budget files and records the previous service configuration.
 
 ## Supervisor state
 
+Research script processes have a 512 MiB regular-file cap for compiler caches,
+logs and other file writes, bounded by any tighter inherited hard limit. This is
+a per-file limit, not a total disk quota. Declared research outputs still have a
+16 MiB aggregate collection cap. The shared launcher leaves long-training file
+limits unchanged; this research-only cap does not change allocation time, GPU,
+CPU or memory requests.
+
 For a retained SSH failure in the read-only input metadata probe, before native
 job creation or reservation, `preparation_failure.certify` can explicitly record
 the failed preparation after its original execution window expires. It preserves

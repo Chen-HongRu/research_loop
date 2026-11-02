@@ -2,7 +2,9 @@ import copy
 import getpass
 import hashlib
 import io
+import json
 from pathlib import Path
+import resource
 import shlex
 import shutil
 import subprocess
@@ -535,7 +537,11 @@ class ResearchBackendTests(unittest.TestCase):
     def test_launcher_mounts_ldconfig_read_only_and_preserves_isolation(self):
         inputs = research._inputs(self.root, self.config, self.execution, "0002")
         launcher = research._launcher(
-            self.config, "/remote/attempt", self.execution, inputs
+            self.config,
+            "/remote/attempt",
+            self.execution,
+            inputs,
+            file_limit_bytes=research.MAX_REGULAR_FILE_BYTES,
         )
         output = io.StringIO()
         with (
@@ -563,9 +569,18 @@ class ResearchBackendTests(unittest.TestCase):
             patch("os.path.exists", return_value=True),
             patch("os.path.isfile", return_value=True),
             patch("os.execve") as execute,
+            patch(
+                "resource.getrlimit",
+                return_value=(resource.RLIM_INFINITY, resource.RLIM_INFINITY),
+            ),
+            patch("resource.setrlimit") as set_limit,
             patch("sys.stdout", output),
         ):
             exec(compile(launcher, "research-launcher", "exec"), {})
+        set_limit.assert_called_once_with(
+            resource.RLIMIT_FSIZE,
+            (research.MAX_REGULAR_FILE_BYTES, research.MAX_REGULAR_FILE_BYTES),
+        )
         self.assertEqual(
             query.call_args_list[0].args[0],
             [
@@ -639,6 +654,11 @@ class ResearchBackendTests(unittest.TestCase):
             ),
             patch("ctypes.CDLL", side_effect=OSError("driver location unavailable")),
             patch("os.execve") as execute,
+            patch(
+                "resource.getrlimit",
+                return_value=(resource.RLIM_INFINITY, resource.RLIM_INFINITY),
+            ),
+            patch("resource.setrlimit"),
             patch("sys.stdout", output),
         ):
             with self.assertRaisesRegex(RuntimeError, "metadata query failed"):
@@ -650,6 +670,87 @@ class ResearchBackendTests(unittest.TestCase):
         self.assertIn("unsupported field", text)
         self.assertNotIn("x" * 4097, text)
         execute.assert_not_called()
+
+    def test_launcher_child_allows_compiler_scratch_and_preserves_tighter_hard_limit(
+        self,
+    ):
+        hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+        if hard != resource.RLIM_INFINITY and hard < research.MAX_REGULAR_FILE_BYTES:
+            self.skipTest("Host hard limit cannot demonstrate the 512 MiB child cap")
+        launcher = research._launcher(
+            self.config,
+            "/remote/attempt",
+            self.execution,
+            [],
+            file_limit_bytes=research.MAX_REGULAR_FILE_BYTES,
+        )
+        for name, inherited, expected, success in (
+            ("scratch", None, research.MAX_REGULAR_FILE_BYTES, True),
+            ("old-artifact-limit", 16 * 1024 * 1024, 16 * 1024 * 1024, False),
+            ("stricter-upstream", 8 * 1024 * 1024, 8 * 1024 * 1024, False),
+        ):
+            with self.subTest(name=name):
+                path = self.directory / (name + ".gch")
+                # Real process-local resource limits and a sparse last-byte
+                # write exercise the failure without material compiler/cache IO.
+                code = f"""import errno,json,os,resource,signal,subprocess
+from unittest.mock import patch
+signal.signal(signal.SIGXFSZ,signal.SIG_IGN)
+inherited={inherited!r}
+if inherited is not None:
+ resource.setrlimit(resource.RLIMIT_FSIZE,(inherited,inherited))
+def execute(*args):
+ result={{"limits":resource.getrlimit(resource.RLIMIT_FSIZE)}}
+ try:
+  with open({str(path)!r},"wb") as handle:
+   handle.seek(32*1024*1024-1)
+   handle.write(b"x")
+  result["success"]=True
+ except OSError as error:
+  result.update(success=False,errno=error.errno)
+ print("SCRATCH_RESULT "+json.dumps(result),flush=True)
+queries=[subprocess.CompletedProcess([],0,"0, GPU-test\\n",""),subprocess.CompletedProcess([],0,"<nvidia_smi_log><gpu><uuid>GPU-test</uuid><minor_number>0</minor_number></gpu></nvidia_smi_log>","")]
+with patch.dict(os.environ,{{"CUDA_VISIBLE_DEVICES":"0"}}),patch("subprocess.run",side_effect=queries),patch("os.execve",side_effect=execute):
+ exec(compile({launcher!r},"research-launcher","exec"),{{}})
+"""
+                child = subprocess.run(
+                    [sys.executable, "-c", code],
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+                result = json.loads(
+                    next(
+                        line.removeprefix("SCRATCH_RESULT ")
+                        for line in child.stdout.splitlines()
+                        if line.startswith("SCRATCH_RESULT ")
+                    )
+                )
+                self.assertEqual(result["limits"], [expected, expected])
+                self.assertEqual(result["success"], success)
+                if success:
+                    self.assertEqual(path.stat().st_size, 32 * 1024 * 1024)
+                else:
+                    import errno
+
+                    self.assertEqual(result["errno"], errno.EFBIG)
+        self.assertEqual(research.MAX_OUTPUT_BYTES, 16 * 1024 * 1024)
+
+    def test_shared_launcher_default_keeps_long_training_file_limits(self):
+        launcher = research._launcher(
+            self.config, "/remote/attempt", self.execution, []
+        )
+        self.assertNotIn("resource.setrlimit", launcher)
+        batch = research._batch(self.config, "/remote/attempt", self.execution, [], 600)
+        self.assertNotIn("ulimit -f", batch)
+        self.assertIn(
+            "file_limit=536870912 if hard_limit==resource.RLIM_INFINITY else min(hard_limit,536870912)",
+            batch,
+        )
+        self.assertIn(
+            "resource.setrlimit(resource.RLIMIT_FSIZE,(file_limit,file_limit))", batch
+        )
 
     def test_collector_refuses_symlinks_and_caps_total_output(self):
         remote = self.directory / "collect"
@@ -704,7 +805,11 @@ class ResearchBackendTests(unittest.TestCase):
         manifest = research._read(stage / "inputs.json")
         self.assertIn("mount field", manifest["instructions"])
         batch = (stage / "code/autoresearch-se3.sbatch").read_text()
-        self.assertIn("ulimit -f 16384", batch)
+        self.assertNotIn("ulimit -f", batch)
+        self.assertIn(
+            "resource.setrlimit(resource.RLIMIT_FSIZE,(file_limit,file_limit))", batch
+        )
+        self.assertIn(str(research.MAX_REGULAR_FILE_BYTES), batch)
 
     def test_full_cache_with_extra_holdout_split_is_not_exposed(self):
         path = Path(self.config["cache_root"]) / "manifest.json"

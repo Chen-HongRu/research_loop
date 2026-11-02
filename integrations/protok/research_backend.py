@@ -17,6 +17,7 @@ from integrations.protok.backend import CANDIDATE_FILES, PROTOCOL, ProTokError
 from integrations.protok.continuation import _load_backend, validate_continuation
 
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+MAX_REGULAR_FILE_BYTES = 512 * 1024 * 1024
 LOG_BYTES = 65536
 RESEARCH_ENVIRONMENTS = "/data/user/hongruchen/experiments/ProTok/research-environments"
 BASE_PYTHON = "/data/user/hongruchen/projects/ProTok/.venv/bin/python"
@@ -342,7 +343,9 @@ print(json.dumps(items))
     return result
 
 
-def _launcher(config, remote, execution, inputs, environment=None):
+def _launcher(
+    config, remote, execution, inputs, environment=None, *, file_limit_bytes=None
+):
     """Trusted launcher with an empty root and explicit read-only mounts."""
     # The shell writes this generated Python launcher; no agent shell is evaluated.
     prefix = "/data/user/hongruchen/projects/ProTok/.venv"
@@ -380,10 +383,16 @@ def _launcher(config, remote, execution, inputs, environment=None):
             (remote + "/environment.json", "/environment.json"),
         ]
         pythonpath += ":/research-libs"
+    file_limit_setup = "file_limit=resource.getrlimit(resource.RLIMIT_FSIZE)[0]\n"
+    if file_limit_bytes is not None:
+        file_limit_setup = f"""hard_limit=resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+file_limit={file_limit_bytes} if hard_limit==resource.RLIM_INFINITY else min(hard_limit,{file_limit_bytes})
+resource.setrlimit(resource.RLIMIT_FSIZE,(file_limit,file_limit))
+"""
     # Compiler caches query getpass.getuser(); the empty root has no passwd entry.
-    script = f"""import ctypes,json,os,re,subprocess,sys,xml.etree.ElementTree as ET
-visible=os.environ.get("CUDA_VISIBLE_DEVICES", "")
-resources={{"CUDA_VISIBLE_DEVICES":visible,"SLURM_JOB_GPUS":os.environ.get("SLURM_JOB_GPUS"),"host_libcuda_paths":[]}}
+    script = f"""import ctypes,json,os,re,resource,subprocess,sys,xml.etree.ElementTree as ET
+{file_limit_setup}visible=os.environ.get("CUDA_VISIBLE_DEVICES", "")
+resources={{"CUDA_VISIBLE_DEVICES":visible,"SLURM_JOB_GPUS":os.environ.get("SLURM_JOB_GPUS"),"host_libcuda_paths":[],"file_size_limit_bytes":file_limit}}
 try:
  driver=ctypes.CDLL("libcuda.so.1")
  with open("/proc/self/maps") as maps:
@@ -428,7 +437,14 @@ os.execve(args[0],args,{{"PATH":"/usr/bin:/bin"}})
 
 
 def _batch(config, remote, execution, inputs, allocated, environment=None):
-    launcher = _launcher(config, remote, execution, inputs, environment)
+    launcher = _launcher(
+        config,
+        remote,
+        execution,
+        inputs,
+        environment,
+        file_limit_bytes=MAX_REGULAR_FILE_BYTES,
+    )
     directives = {
         "partition": "debug",
         "nodes": 1,
@@ -450,7 +466,6 @@ def _batch(config, remote, execution, inputs, allocated, environment=None):
             "#!/bin/bash",
             *[f"#SBATCH --{k}={v}" for k, v in directives.items()],
             "set -euo pipefail",
-            "ulimit -f 16384",
             "exec >" + shlex.quote(remote + "/run.log") + " 2>&1",
             shlex.quote(config["remote_python"]) + " - <<'RESEARCH_LAUNCHER'",
             launcher,
