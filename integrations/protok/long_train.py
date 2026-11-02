@@ -31,6 +31,7 @@ def run(config):
     source = Path(config["source"])
     sys.path[:0] = [str(source), str(source / "scripts")]
     import torch
+    from research_loop_events import emit
     import train_autoresearch_se3 as frozen
     from train_ca_h_flow import FrozenHiddenDataset, check_cache_identity, optimizer_for
     from protok.model.autoresearch_se3 import build_model
@@ -69,6 +70,12 @@ def run(config):
             args.output / "long-curve.json",
             progress_record(config, step, phase, curve, checkpoints, last_training),
         )
+
+    def observe(name, value, step, scope, tags=("dashboard", "unreviewed")):
+        try:
+            emit(name, value, tags=tags, step=step, context={"scope": scope})
+        except (OSError, ValueError, TypeError):
+            pass
 
     publish(0, "initializing")
     torch.set_float32_matmul_precision("highest")
@@ -134,6 +141,18 @@ def run(config):
             }
             log_training_row(args.output, last_training)
             publish(completed, "training")
+            observe("training/progress", completed, completed, "training")
+            for name, value in last_training.items():
+                if name != "optimizer_step":
+                    observe(
+                        name,
+                        value,
+                        completed,
+                        "training",
+                        ("dashboard", "unreviewed")
+                        if "loss" in name
+                        else ("internal",),
+                    )
         if completed in STEPS:
             publish(completed, "validation")
             checkpoint = frozen.save_checkpoint(
@@ -159,6 +178,10 @@ def run(config):
                 }
             )
             publish(completed, "training")
+            # Only the already complete, coverage-checked full point is emitted.
+            for name, value in point.items():
+                if name not in {"optimizer_step", "step", "scope"}:
+                    observe("validation/" + name, value, completed, "full")
     publish(10000, "final-gate")
     adam = sorted({int(state["step"]) for state in optimizer.state.values()})
     if adam != [10000] or scheduler.last_epoch != 10000:

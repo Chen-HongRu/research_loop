@@ -57,6 +57,7 @@
       <div id="detailBody" class="detail-body" aria-live="polite"><div class="loading">正在载入 Agent 输出…</div></div>
     </section>
   </div>
+  <section class="panel scout" id="telemetryPanel" hidden><h3>实时训练观测</h3><p class="caption">仅展示 dashboard 标签 · 尚未 Review · 同步自本地日志；不更新 Frontier 或已接受长训曲线。</p><div id="telemetryBody"></div></section>
   <section class="panel scout" id="longTrainingPanel" hidden aria-labelledby="longTrainingTitle"><h3 id="longTrainingTitle">独立长训 · 全量验证</h3><p class="caption">独立 Plan → Execute → Review；长训结果不进入短训 Frontier。曲线与最优使用核查通过的全量验证观测，旧完整记录明确标注整轮核查；同一行三个指标来自同一 checkpoint；全部保留观测和缺失的 10k 端点单独列出。</p><div id="longTrainingBody"></div></section>
   <section class="panel scout" id="scoutPanel" hidden><div class="toolbar between"><h3>Scout · 外部研究输入</h3><span id="scoutStatus" class="badge"></span></div><div id="scoutBody"></div></section>
   <div class="footer">固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板读取本地研究记录与回执，不发起训练、模型调用或远程轮询。Execute 展示已完成的执行与修复输出、作业回执及调试历史；调试不计正式质量，正式测量经过独立 Review 后才进入质量曲线。</div>
@@ -369,7 +370,7 @@ function renderSnapshot() {
   $('sourceFilter').innerHTML='<option value="">所有阶段</option>'+(data.sources || []).map(item=>'<option value="'+esc(item.id)+'">'+esc(item.label+' · '+item.count+' 条')+'</option>').join('');
   $('sourceFilter').value=source;
   $('follow').setAttribute('aria-pressed',String(following)); $('follow').textContent = following ? '● 跟随当前' : '跟随当前';
-  drawGraph(); drawRoutes(); drawChart(); updateView(); renderScout(); renderLongTraining(); renderDetailHeader();
+  drawGraph(); drawRoutes(); drawChart(); updateView(); renderScout(); renderTelemetry(); renderLongTraining(); renderDetailHeader();
 }
 function renderDetailHeader() {
   const node = data.nodes.find(item => item.id === selected);
@@ -538,6 +539,30 @@ function longTrainingRuns(runs) {
     const logs=published&&(result.log_evidence || result.training_log_tail || result.stdout_tail)?'<h4>保留的训练与日志证据</h4>'+(result.log_evidence?structured({log_evidence:result.log_evidence}):'')+['training_log_tail','stdout_tail'].filter(key=>result[key]).map(key=>disclosure('long-'+key+'-'+run.id,key==='training_log_tail'?'训练日志尾部':'标准输出尾部','<pre>'+esc(typeof result[key]==='string'?result[key]:JSON.stringify(result[key],null,2))+'</pre>')).join(''):'';
     return '<article class="agent-card"><div class="agent-header"><h3>'+esc(run.id || request.id || '长训')+' · '+esc(published?.candidate_id || request.candidate?.id || request.candidate_id || '')+'</h3>'+badge(incomplete?'未完整完成 · 已评审':run.status || 'pending',incomplete?'amber':published?'green':'amber')+'</div><p class="caption">来源调查 #'+esc(request.source_iteration || run.source_iteration || '—')+(run.source_label?' · '+esc(run.source_label):'')+' · '+esc(run.phase || '等待 Plan')+'</p>'+facts(request.recipe || {},['total_steps','validation_interval','validation_split','initialization','seed'])+facts(request.evaluation || {},['id','comparison_scope','data_role'])+'<h4>提名与证据</h4>'+facts(nomination,['basis','comparison_candidate_id','reason','evidence'])+(run.error?'<p class="agent-error">'+esc(typeof run.error==='string'?run.error:JSON.stringify(run.error))+'</p>':'')+progress+metrics+logs+(published?disclosure('long-review-'+run.id,'独立 Review 与知识',markdown(review.markdown)+structured({knowledge_changes:review.knowledge_changes,global_research:review.global_research,candidate_reviews:review.candidate_reviews,observation_reviews:review.observation_reviews}))+disclosure('long-artifacts-'+run.id,'Checkpoint 与证据引用',structured({checkpoints:result.checkpoints,curve_evidence:curve.map(point=>({step:point.step,checkpoint:point.checkpoint,checkpoint_path:point.checkpoint_path,evidence:point.evidence})),artifacts:published.execute?.artifacts,publication_ref:published.publication_ref || run.publication_ref})): '')+'</article>';
   }).join('');
+}
+function telemetryGroups(stream) {
+  const groups=new Map();
+  const transportKeys=new Set(['remote_start_offset','remote_end_offset','raw_fragment_bytes','raw_fragment_complete','csv_discard_until_newline']);
+  for(const event of stream.events || []) {
+    if(!Array.isArray(event.tags)||!event.tags.includes('dashboard'))continue;
+    const stable=value=>Array.isArray(value)?value.map(stable):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])])):value;
+    const conditions=stream.source?.kind==='fixed-short'?Object.fromEntries(Object.entries(event.context || {}).filter(([key])=>!transportKeys.has(key))):event.context || {};
+    const key=JSON.stringify([event.name,event.unit,stable(conditions)]);
+    if(!groups.has(key))groups.set(key,[]);groups.get(key).push(event);
+  }
+  return [...groups.values()];
+}
+function telemetryPanel(streams) {
+  return streams.map(stream=>'<article class="agent-card"><div class="agent-header"><h4>'+esc([stream.source_id,stream.run_id,stream.stream_id].filter(Boolean).join(' / '))+'</h4>'+badge('观测 · 未评审','amber')+'</div><p class="caption">同步状态：'+esc(stream.status || 'pending')+(stream.sync_error?' · 同步错误':'')+' · 读取错误 '+esc(stream.error_count || 0)+' · 实验 '+esc(stream.source?.experiment_id || '—')+'</p>'+telemetryGroups(stream).map(events=>{
+    const latest=events.at(-1), printable=value=>typeof value==='string'?value:JSON.stringify(value);
+    const numeric=events.filter(event=>typeof event.step==='number'&&Number.isFinite(event.step)&&typeof event.value==='number'&&Number.isFinite(event.value));
+    let chart='';
+    if(numeric.length){const values=numeric.map(event=>event.value),steps=numeric.map(event=>event.step),lo=Math.min(...values),hi=Math.max(...values),first=Math.min(...steps),last=Math.max(...steps);chart='<svg viewBox="0 0 480 95" role="img" aria-label="'+esc(latest.name)+' 实时未评审曲线" style="width:100%;max-width:480px"><polyline fill="none" stroke="#e5bd72" stroke-width="2" points="'+numeric.map(event=>(12+(event.step-first)/(last-first||1)*450)+','+(80-(event.value-lo)/(hi-lo||1)*65)).join(' ')+'"/></svg>';}
+    return '<div class="fact-block"><b>'+esc(latest.name)+'</b> '+esc(printable(latest.value))+' '+esc(latest.unit || '')+'<p class="caption">最新 Step：'+esc(latest.step ?? '—')+' · '+esc(latest.time || '')+'</p><div class="source">'+esc(printable(latest.context || {}))+'</div>'+chart+'</div>';
+  }).join('')+(!(stream.events || []).length?'<p class="empty">尚无 dashboard 标签观测。</p>':'')+'</article>').join('');
+}
+function renderTelemetry() {
+  const streams=data.telemetry?.streams || [];$('telemetryPanel').hidden=!streams.length;$('telemetryBody').innerHTML=telemetryPanel(streams);
 }
 function renderLongTraining() {
   const runs=data.long_training || [];$('longTrainingPanel').hidden=!runs.length;

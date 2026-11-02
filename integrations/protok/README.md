@@ -17,6 +17,15 @@ Historical deployment evidence is retained in [deployment.md](deployment.md),
 `research-inputs/`, and `archive/exploration-v1/verification/`. The archived
 manifest describes the original snapshot and is not a current deployment check.
 
+## Tagged live observations
+
+Research scripts use `research_loop_events.emit` with optional `dashboard` tags.
+The controller incrementally receives all tags during owned allocations; the live
+panel filters presentation while Review retains an unfiltered frozen prefix.
+Long training emits structured progress and the protected short trainer is observed
+through its existing CSV/JSON outputs. See [Tagged live observations](../../docs/telemetry.md)
+for the API, synchronization states and evidence boundaries.
+
 ## Parallel long training
 
 Reviewed short candidates may be nominated into an independently authorized lane:

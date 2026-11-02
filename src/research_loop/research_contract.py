@@ -196,6 +196,10 @@ Mechanism work needs at least two competing explanations with different predicti
 and interpretation referencing their observable IDs. Other purposes may use empty
 explanations/interpretation. Each observable declares definition, method, inputs,
 timing, aggregation and cost. Freeze these declarations before Execute.
+When live telemetry is available, state the observable names, steps/units, conditions,
+publication boundaries and intended tags. Use dashboard only for user-facing progress;
+retain diagnostic/custom tags for Review. Log tags do not change the frozen scientific
+scope, data roles, required evidence or interpretation of incomplete measurements.
 execution selects fixed_evaluation or script. A script uses research/*.py, named
 inputs with source and role, relative output evidence files, GPU requirement and a
 whole-minute time limit no greater than 1800 seconds. Source resolution belongs to
