@@ -159,6 +159,59 @@ class PartialResultTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(lane.ProTokError):
                 lane._curve(invalid, request, "b" * 64, "/remote", complete=False)
 
+    def test_real_collector_isolates_nonfinite_records_and_keeps_other_evidence(self):
+        request = fixture.request()
+        remote = self.tmp / "remote"
+        train = remote / "train"
+        train.mkdir(parents=True)
+        records = {
+            "completion": fixture.completion(request, "b" * 64, str(remote)),
+            "progress": bundle(request, str(remote))["progress"],
+        }
+        names = {
+            "completion": "long-completion.json",
+            "progress": "long-curve.json",
+        }
+        training_tail = "t" * 65536
+        stdout_tail = "s" * 65536
+        (train / "train.csv").write_text("discarded prefix" + training_tail)
+        (remote / "run.log").write_text("discarded prefix" + stdout_tail)
+        for bad_key in records:
+            good_key = "progress" if bad_key == "completion" else "completion"
+            # Include exponent overflow, which parse_constant alone cannot reject.
+            for nonfinite in ["NaN", "Infinity", "-Infinity", "1e999"]:
+                with self.subTest(record=bad_key, nonfinite=nonfinite):
+                    for key, record in records.items():
+                        content = json.dumps(record)
+                        if key == bad_key:
+                            content = (
+                                content[:-1]
+                                + ', "last_training": {"loss": '
+                                + nonfinite
+                                + "}}"
+                            )
+                        (train / names[key]).write_text(content)
+                    result = lane._collect(
+                        LocalTransport(), {"remote_python": sys.executable}, str(remote)
+                    )
+                    self.assertIsNone(result[bad_key])
+                    self.assertEqual(result[good_key], records[good_key])
+                    self.assertEqual(len(result["errors"]), 1)
+                    self.assertIn(names[bad_key], result["errors"][0])
+                    self.assertEqual(result["training_log_tail"], training_tail)
+                    self.assertEqual(result["stdout_tail"], stdout_tail)
+                    points = lane._curve(
+                        result[good_key],
+                        request,
+                        "b" * 64,
+                        str(remote),
+                        complete=good_key == "completion",
+                    )
+                    self.assertEqual(
+                        [point["step"] for point in points],
+                        lane.STEPS if good_key == "completion" else lane.STEPS[:3],
+                    )
+
     def test_partial_checkpoint_requires_acceptance_of_that_exact_step(self):
         root, request, execute, result = self.execute_timeout()
         run = root / "study/long-runs" / request["id"]

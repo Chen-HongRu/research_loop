@@ -421,7 +421,9 @@ for key,name in [("completion","train/long-completion.json"),("progress","train/
   path=root/name
   if path.exists():
    if path.is_symlink() or path.stat().st_size>{MAX_EVIDENCE_BYTES}: raise ValueError("unsafe or oversized evidence")
-   result[key]=json.loads(path.read_text())
+   record=json.loads(path.read_text())
+   json.dumps(record,allow_nan=False)
+   result[key]=record
  except Exception as error: result["errors"].append(name+": "+str(error))
 for key,name in [("training_log_tail","train/train.csv"),("stdout_tail","run.log")]:
  try:
