@@ -159,13 +159,15 @@ def readonly_resume(root, state):
 
 
 def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
+    from integrations.protok.round_admission import active_round
+
     control = root / "control"
     lease = read(control / "continuation.json")
     if lease.get("schema") != 2 or lease.get("seconds") != 86400:
         raise ValueError("Server requires an activated schema2 lease")
     if (control / "STOP").exists():
         return "user_stop"
-    # Waiting cannot extend this invocation's authorization.
+    # The original lease is an entry cutoff; an admitted round can finish.
     deadline = lease["deadline"]
     supervisor_path = control / "supervisor-status.json"
     previous = read(supervisor_path) if supervisor_path.exists() else {}
@@ -174,20 +176,20 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
     delay = 5
     repaired = False
     while not (control / "STOP").exists():
-        if clock() >= deadline:
-            return "deadline"
         stage = "inspection"
         state = None
         try:
             ownership = control / "ownership.json"
             if ownership.exists():
                 deadline = min(deadline, read(ownership)["expires_at"])
-            if clock() >= deadline:
-                return "deadline"
             state_path = root / "study/state.json"
             state = read(state_path) if state_path.exists() else None
             if (control / "HANDOFF").exists() and state and state["phase"] == "done":
                 return "handoff"
+            if clock() >= deadline and not active_round(
+                root, owner_token=getattr(backend, "owner_token", None)
+            ):
+                return "deadline"
             if state and not repaired:
                 runner.repair_completed_control(root, backend)
                 repaired = True
@@ -197,17 +199,13 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
                 status["outstanding"] and not (state and state.get("debugging"))
             ):
                 raise RuntimeError("Outstanding job requires explicit reconciliation")
-            remaining = deadline - clock()
             spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
             if spent < 0:
                 raise RuntimeError("Historical GPU accounting decreased")
             reserve = backend._config()["reserve_gpu_seconds"]
             fresh = state is None or state["phase"] == "done"
             minimum = 60 if (control / "research-policy.json").exists() else 1800
-            if fresh and (
-                remaining < minimum
-                or spent + minimum + reserve > lease["additional_gpu_seconds"]
-            ):
+            if fresh and spent + minimum + reserve > lease["additional_gpu_seconds"]:
                 return "budget"
             if state and state.get("status") == "stopped":
                 return "attention"
@@ -258,9 +256,28 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
             )
             # Polling only reads receipts. Execute remains blocked until explicit
             # reconciliation changes its retained state; core budgets bound retries.
-            wait(min(delay, max(0, deadline - clock())))
+            wait(delay if clock() >= deadline else min(delay, deadline - clock()))
             delay = min(delay * 2, 60)
     return "user_stop"
+
+
+def finish_long_training(root, scheduler, reason, *, wait=time.sleep):
+    """Finish eligible long work after the short lane has naturally stopped."""
+    if reason not in {"budget", "deadline", "review_stop"}:
+        return reason, None
+    control = root / "control"
+    scheduler.finish_nominations()
+    while True:
+        if (control / "STOP").exists():
+            return "user_stop", None
+        if (control / "HANDOFF").exists():
+            return "handoff", None
+        status = scheduler.status()
+        if status["status"] == "blocked":
+            return "attention", status.get("reason")
+        if status["status"] == "finished":
+            return reason, None
+        wait(3)
 
 
 def final_summary(root, runner, backend, reason, *, first_error=None):
@@ -386,17 +403,43 @@ def main():
                     control / "scout-shutdown-error.json",
                     {"error": f"{type(error).__name__}: {error}", "at": time.time()},
                 )
-            try:
-                if long_training is not None:
-                    # Drain independently authorized work before stopping the
-                    # parent after a normal budget completion or handoff.
+            if long_training is not None:
+                try:
+                    reason, long_error = finish_long_training(
+                        root, long_training, reason
+                    )
+                    if long_error:
+                        first_error = (
+                            first_error or f"Long-training scheduler: {long_error}"
+                        )
+                except KeyboardInterrupt:
+                    reason = "user_stop"
+                except Exception as error:
+                    reason = "attention"
+                    first_error = first_error or f"{type(error).__name__}: {error}"
+                    write(
+                        control / "long-training-shutdown-error.json",
+                        {
+                            "error": f"{type(error).__name__}: {error}",
+                            "at": time.time(),
+                        },
+                    )
+                try:
+                    # HANDOFF drains only the current child; STOP is observed by
+                    # the child and cancels its owned allocation.
                     long_training.shutdown()
-            except Exception as error:
-                first_error = first_error or f"{type(error).__name__}: {error}"
-                write(
-                    control / "long-training-shutdown-error.json",
-                    {"error": f"{type(error).__name__}: {error}", "at": time.time()},
-                )
+                except KeyboardInterrupt:
+                    reason = "user_stop"
+                    long_training.shutdown()
+                except Exception as error:
+                    first_error = first_error or f"{type(error).__name__}: {error}"
+                    write(
+                        control / "long-training-shutdown-error.json",
+                        {
+                            "error": f"{type(error).__name__}: {error}",
+                            "at": time.time(),
+                        },
+                    )
             if reason != "handoff":
                 (control / "STOP").write_text(f"Supervisor stopped: {reason}\n")
                 try:

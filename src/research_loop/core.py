@@ -450,6 +450,17 @@ class Study:
                         self._stop(state, "iteration_budget")
                         break
                     self._begin(state)
+                admission = getattr(self.harness, "admit_iteration", None)
+                if admission is not None and state["phase"] != "done":
+                    token = admission(f"{state['iteration']:04d}")
+                    metadata = self._folder(state) / "iteration.json"
+                    _write(metadata, _read(metadata) | {"round_admission": token})
+                    commit = getattr(self.harness, "commit_iteration", None)
+                    committed_at = (
+                        commit(f"{state['iteration']:04d}", token) if commit else None
+                    )
+                    state.update(round_admission=token, round_admitted_at=committed_at)
+                    self._save(state)
                 while state["phase"] != "done" and state["status"] != "stopped":
                     self._step(state)
             return state
@@ -481,6 +492,12 @@ class Study:
         self._save(state)
 
     def _begin(self, state: dict) -> None:
+        admission = getattr(self.harness, "admit_iteration", None)
+        token = (
+            admission(f"{state['iteration'] + 1:04d}")
+            if admission is not None
+            else None
+        )
         # Human research edits become explicit immutable revisions before sampling.
         routes = _read(self.root / "routes/index.json")
         changed = False
@@ -579,7 +596,13 @@ class Study:
                     "status": "selecting",
                 },
             )
+        if token is not None:
+            _write(metadata, _read(metadata) | {"round_admission": token})
+        commit = getattr(self.harness, "commit_iteration", None)
+        committed_at = commit(f"{number:04d}", token) if commit else None
         state.update(
+            round_admitted_at=committed_at,
+            round_admission=token,
             iteration=number,
             phase="selection",
             status="ready",
@@ -911,6 +934,9 @@ class Study:
                 raise BudgetExhausted("call_budget")
             self._save(state)
             remaining = self.config["max_seconds"] - state["elapsed_seconds"]
+            call_allowance = getattr(self.harness, "call_allowance", None)
+            if call_allowance is not None:
+                remaining = call_allowance(remaining)
             if remaining < 1:
                 raise BudgetExhausted("time_budget")
             attempt = (

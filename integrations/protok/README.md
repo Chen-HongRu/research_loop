@@ -175,8 +175,10 @@ Settled timeouts and failed research scripts enter independent Review as incompl
 experiments with real resource charges and no invented measurement. The supervisor
 keeps admission/effect failures observable in `control/supervisor-status.json`,
 with bounded polling and no automatic Execute replay. Only core-authorized read-only
-calls retry within persisted call/time budgets. User STOP, handoff, exhausted
-allowance and the original lease/ownership expiry still stop execution.
+calls retry within persisted call/time budgets. The short lease deadline is an
+entry cutoff: a durably admitted investigation may finish after it, while no new
+investigation may start. User STOP cancels owned work; handoff drains the active
+investigation. Short and long GPU allowances remain independent.
 
 Inspection and cleanup failures are recorded separately. Final summaries use
 `null` for unavailable accounting; the read-only dashboard retains study records

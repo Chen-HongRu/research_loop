@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
 import fcntl
 import hashlib
 import json
 from pathlib import Path
 import time
+import uuid
 
 from .evaluation import build_frontier, validate_evaluation
 from .harness import HarnessConfig, HarnessError, publish_completed_response
@@ -37,6 +37,8 @@ def validate_policy(value):
             "Long training requires version/recipe/evaluation/max_runs/max_seconds_per_run"
         )
     for name in ("max_runs", "max_seconds_per_run"):
+        if name == "max_runs" and value[name] is None:
+            continue
         if type(value[name]) is not int or value[name] < 1:
             raise ValueError(f"Long training {name} must be a positive integer")
     recipe = value["recipe"]
@@ -297,10 +299,53 @@ def completed_results(study_root):
     ]
 
 
+def admission_path(folder):
+    """Keep controller authorization outside Agent-visible Study artifacts."""
+    folder = Path(folder).resolve()
+    return folder.parents[2] / "control/long-training-rounds" / (folder.name + ".json")
+
+
+def admitted_round(folder):
+    """Return only an authorization committed into a real child iteration."""
+    folder = Path(folder)
+    path = admission_path(folder)
+    if not path.exists():
+        return None
+    record = _read(path)
+    token = record["token"]
+    state_path = folder / "study/state.json"
+    metadata_path = folder / "study/iterations/0001/iteration.json"
+    if not state_path.exists() or not metadata_path.exists():
+        return None
+    state, metadata = _read(state_path), _read(metadata_path)
+    if (
+        state.get("round_admitted_at") != record.get("committed_at")
+        or record.get("committed_at", float("inf")) >= record.get("cutoff", 0)
+        or record.get("committed_at", 0) < record.get("entered_at", float("inf"))
+        or state.get("iteration") != 1
+        or state.get("round_admission") != token
+        or metadata.get("round_admission") != token
+        or record.get("child") != str((folder / "study").resolve())
+        or record.get("entered_at", float("inf")) >= record.get("cutoff", 0)
+        or record.get("request") != _read(folder / "request.json")
+    ):
+        return None
+    return record
+
+
 class _LongHarness:
     """Reuse ordinary Study publication/recovery, with a fixed selected candidate."""
 
-    def __init__(self, request, delegate, executor, deadline):
+    def __init__(
+        self,
+        request,
+        delegate,
+        executor,
+        deadline,
+        folder,
+        admission=None,
+        call_timeout=3600,
+    ):
         self.request, self.delegate, self.executor, self.deadline = (
             request,
             delegate,
@@ -308,7 +353,85 @@ class _LongHarness:
             deadline,
         )
 
+        self.folder, self.admission = Path(folder), admission
+        self.call_timeout = call_timeout
+
+    def admit_iteration(self, iteration):
+        if iteration != "0001":
+            raise ValueError("Only one frozen long-training round is authorized")
+        existing = admitted_round(self.folder)
+        state_path = self.folder / "study/state.json"
+        if (
+            not existing
+            and state_path.exists()
+            and _read(state_path).get("round_admission") is not None
+        ):
+            raise ValueError(
+                "Committed long round admission is invalid; cannot replace its identity"
+            )
+        identity = self.admission(self.request, existing) if self.admission else None
+        if existing:
+            if existing["authorization"] != identity:
+                raise ValueError("Long round authorization identity changed")
+            return existing["token"]
+        if time.time() >= self.deadline:
+            raise ValueError("Long-training round admission cutoff reached")
+        record = {
+            "token": {
+                "version": 1,
+                "id": self.request["id"],
+                "nonce": uuid.uuid4().hex,
+            },
+            "child": str((self.folder / "study").resolve()),
+            "request": self.request,
+            "cutoff": self.deadline,
+            "entered_at": time.time(),
+            "authorization": identity,
+        }
+        if record["entered_at"] >= self.deadline:
+            raise ValueError("Long-training round admission cutoff reached")
+        _write(admission_path(self.folder), record)
+        return record["token"]
+
+    def commit_iteration(self, iteration, token):
+        existing = admitted_round(self.folder)
+        if existing:
+            self.admit_iteration(iteration)
+            return existing["committed_at"]
+        record = _read(admission_path(self.folder))
+        if record["token"] != token:
+            raise ValueError("Long round token changed before commit")
+        if self.admission:
+            identity = self.admission(self.request, None)
+            if identity != record["authorization"]:
+                raise ValueError("Long round authorization identity changed")
+        now = time.time()
+        if now >= record["cutoff"]:
+            raise ValueError("Long-training round admission cutoff reached")
+        _write(admission_path(self.folder), record | {"committed_at": now})
+        return now
+
+    def call_allowance(self, remaining):
+        # Cumulative child wall time is accounting, not the GPU allocation limit.
+        return max(remaining, self.call_timeout)
+
     def run(self, **kwargs):
+        if self.admission:
+            token = admitted_round(self.folder)
+            if not token:
+                raise ValueError("Long child round admission is not committed")
+            if self.admission(self.request, token) != token["authorization"]:
+                raise ValueError("Long round authorization identity changed")
+        token = admitted_round(self.folder)
+        grant = (token or {}).get("authorization") or {}
+        gpu_limit = grant.get("policy", {}).get("gpu_seconds_per_run")
+        controller_contract = (
+            "\nThis fixed long-training controller defines contract.timeout_seconds as the Slurm GPU allocation time, exactly "
+            + str(gpu_limit)
+            + " seconds. Queue waiting has no additional wall-clock cap and consumes no GPU allocation time. State this explicitly in the contract command and acceptance criteria. Plan and Review agents retain their own configured call timeouts. STOP or identity changes can cancel the job.\n"
+            if gpu_limit
+            else ""
+        )
         context = _read(kwargs["run_dir"] / "context.json")
         # Study context has no source DAG references: the parent is explicitly external.
         phase = kwargs["run_dir"].parent.name
@@ -331,13 +454,18 @@ class _LongHarness:
                 "stop_reason": None,
             }
         elif phase == "execute":
+            if (
+                gpu_limit
+                and context["plan"]["contract"]["timeout_seconds"] != gpu_limit
+            ):
+                raise ValueError(
+                    "Frozen long Plan timeout differs from Slurm allocation contract"
+                )
             try:
                 result = self.executor(
                     self.request,
                     Path(kwargs["workspace"]),
-                    deadline=min(
-                        self.deadline, time.time() + kwargs["timeout_seconds"]
-                    ),
+                    deadline=time.time() + kwargs["timeout_seconds"],
                 )
             except Exception as error:
                 raise HarnessError(str(error)) from error
@@ -348,10 +476,15 @@ class _LongHarness:
                     "prompt": kwargs["prompt"]
                     + "\nFrozen long-training request (external parent evidence, not an editable recipe):\n"
                     + json.dumps(self.request, ensure_ascii=False)
+                    + controller_contract
                     + "\nNo candidate changes, alternative recipe, checkpoint selection or new measurements are authorized. Review the full curve and all metrics at matching checkpoint steps; distinguish endpoint from best-over-curve, and preserve negative/incomplete results. The short-study goal is not proved by this independent protocol.\n",
                 }
             )
             if phase == "plan" and result["decision"] == "investigate":
+                if gpu_limit and result["contract"]["timeout_seconds"] != gpu_limit:
+                    raise ValueError(
+                        "Long Plan must freeze the Slurm GPU allocation timeout"
+                    )
                 if (
                     result["local_evaluation"] is not None
                     or result["base_experiment"] is not None
@@ -367,9 +500,10 @@ class _LongHarness:
 class LongTrainingManager:
     """One process per lane; child studies never write parent research documents."""
 
-    def __init__(self, study_root, delegate, executor):
+    def __init__(self, study_root, delegate, executor, *, admission=None):
         self.root = Path(study_root)
         self.delegate, self.executor = delegate, executor
+        self.admission = admission
 
     def sync_requests(self):
         for folder in sorted((self.root / "iterations").glob("*")):
@@ -382,7 +516,7 @@ class LongTrainingManager:
                     if not destination.exists():
                         _write(destination, request)
 
-    def run_one(self, *, deadline):
+    def run_one(self, *, deadline, allow_new=True):
         from .core import Study, initialize
 
         policy = validate_policy(_read(self.root / "study.json").get("long_training"))
@@ -397,6 +531,20 @@ class LongTrainingManager:
             started = [
                 r for r in rows if (lane / r["id"] / "study/study.json").exists()
             ]
+            prepared = []
+            for row in started:
+                state = _read(lane / row["id"] / "study/state.json")
+                if (
+                    row["status"] != "withdrawn"
+                    and state.get("iteration") == 0
+                    and state.get("phase") == "done"
+                    and state.get("status") == "ready"
+                    and state.get("call_count") == 0
+                    and state.get("calls") == {}
+                    and state.get("active_attempt") is None
+                    and state.get("round_admission") is None
+                ):
+                    prepared.append(row)
             active = [
                 r
                 for r in started
@@ -410,27 +558,27 @@ class LongTrainingManager:
                 )
             ]
             eligible = active or (
-                [r for r in rows if r not in started and r["status"] != "withdrawn"][:1]
-                if len(started) < policy["max_runs"]
+                [
+                    r
+                    for r in rows
+                    if (r not in started or r in prepared)
+                    and r["status"] != "withdrawn"
+                ][:1]
+                if allow_new
+                and (
+                    policy["max_runs"] is None
+                    or len(started) - len(prepared) < policy["max_runs"]
+                )
                 else []
             )
-            if not eligible or time.time() >= deadline:
+            if not eligible:
+                return None
+            if time.time() >= deadline and not admitted_round(lane / eligible[0]["id"]):
                 return None
             row = eligible[0]
             request, folder = row["request"], lane / row["id"]
             child = folder / "study"
-            deadline_file = folder / "deadline.json"
-            if not deadline_file.exists():
-                _write(
-                    deadline_file,
-                    {
-                        "deadline": min(
-                            deadline, time.time() + policy["max_seconds_per_run"]
-                        )
-                    },
-                )
-            run_deadline = min(deadline, _read(deadline_file)["deadline"])
-            if not (child / "study.json").exists():
+            if row in prepared or not (child / "study.json").exists():
                 views = _read(self.root / "frontiers.json")["global"]
                 view = views.get(request["candidate"]["evaluation_id"], {})
                 exclusions = {
@@ -449,11 +597,9 @@ class LongTrainingManager:
                         },
                     )
                     return None
+            if not (child / "study.json").exists():
                 parent = _read(self.root / "study.json")
-                harness_config = replace(
-                    HarnessConfig(**parent["harness"]),
-                    timeout_seconds=policy["max_seconds_per_run"],
-                )
+                harness_config = HarnessConfig(**parent["harness"])
                 initialize(
                     child,
                     goal="Independently assess the fixed long-training candidate and full-validation trajectory. Preserve source, recipe, all metric/checkpoint pairs, limitations and reusable checkpoint references.\n"
@@ -465,7 +611,15 @@ class LongTrainingManager:
                     max_seconds=policy["max_seconds_per_run"],
                     strategy={"selection": "direct", "review": "full"},
                 )
-            harness = _LongHarness(request, self.delegate, self.executor, run_deadline)
+            harness = _LongHarness(
+                request,
+                self.delegate,
+                self.executor,
+                deadline,
+                folder,
+                self.admission,
+                HarnessConfig(**_read(child / "study.json")["harness"]).timeout_seconds,
+            )
             study = Study(child, harness)
             # A failed/unknown Execute requires explicit reconciliation, as in short studies.
             state = study.run()

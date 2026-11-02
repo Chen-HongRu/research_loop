@@ -574,6 +574,141 @@ def main(argv):
         for path, before in historical.items():
             self.assertEqual(path.read_bytes(), before)
 
+    def test_committed_round_crosses_cutoff_with_same_gpu_budget_and_wait(self):
+        from integrations.protok.round_admission import (
+            admit,
+            commit,
+            freeze_execution_deadline,
+        )
+
+        root = self.control.parent
+        token = admit(root, "0001", owner_token="opaque")
+        committed_at = commit(root, "0001", token, owner_token="opaque")
+        metadata = root / "study/iterations/0001/iteration.json"
+        metadata.parent.mkdir(parents=True)
+        self.write(metadata, {"round_admission": token})
+        self.write(
+            root / "study/state.json",
+            {
+                "iteration": 1,
+                "phase": "execute",
+                "status": "ready",
+                "round_admission": token,
+                "round_admitted_at": committed_at,
+            },
+        )
+        original_session = (self.records / "session.json").read_text()
+        original_control = (self.control / "continuation.json").read_text()
+        now = self.cont["deadline"] + 1
+        with patch("integrations.protok.continuation.time.time", return_value=now):
+            freeze_execution_deadline(
+                root, now + 1800, owner_token="opaque", attempt="formal/owned"
+            )
+            backend, config, control = validate_continuation(
+                self.project,
+                self.control,
+                "opaque",
+                self.runtime,
+                execution_deadline=now + 1800,
+            )
+            install_hooks(
+                backend, config, control, lambda: None, control_dir=self.control
+            )
+            used = backend.budget_check(
+                config, backend.session_state(config), self.records, 1
+            )
+            self.assertEqual(used, self.cont["initial_gpu_seconds"])
+            self.assertEqual(
+                backend.wait_for_job(
+                    config, backend.session_state(config), None, {}, {}
+                ),
+                now + 1800,
+            )
+            self.charge(81001)
+            with self.assertRaisesRegex(RuntimeError, "incremental GPU"):
+                backend.budget_check(
+                    config, backend.session_state(config), self.records, 1
+                )
+        self.assertEqual((self.records / "session.json").read_text(), original_session)
+        self.assertEqual(
+            (self.control / "continuation.json").read_text(), original_control
+        )
+
+    def test_formal_cli_deadline_is_bound_to_exact_attempt_and_token(self):
+        from integrations.protok.round_admission import (
+            admit,
+            commit,
+            freeze_execution_deadline,
+        )
+
+        root = self.control.parent
+        token = admit(root, "0001", owner_token="opaque")
+        committed_at = commit(root, "0001", token, owner_token="opaque")
+        metadata = root / "study/iterations/0001/iteration.json"
+        metadata.parent.mkdir(parents=True)
+        self.write(metadata, {"round_admission": token})
+        self.write(
+            root / "study/state.json",
+            {
+                "iteration": 1,
+                "phase": "execute",
+                "status": "ready",
+                "round_admission": token,
+                "round_admitted_at": committed_at,
+            },
+        )
+        window = freeze_execution_deadline(
+            root, 101800, owner_token="opaque", attempt="formal/owned"
+        )
+
+        def validate(**kwargs):
+            return validate_continuation(
+                self.project,
+                self.control,
+                "opaque",
+                self.runtime,
+                execution_deadline=window,
+                **kwargs,
+            )
+
+        self.assertEqual(validate()[2]["effective_deadline"], window)
+        with self.assertRaisesRegex(ValueError, "differs from its frozen"):
+            validate_continuation(
+                self.project,
+                self.control,
+                "opaque",
+                self.runtime,
+                execution_deadline=window + 1,
+            )
+        with self.assertRaisesRegex(ValueError, "frozen attempt window"):
+            validate(fresh_attempt="another")
+        window_path = next((root / "control/round-admissions/0001").glob("*.json"))
+        saved = json.loads(window_path.read_text())
+        self.write(window_path, saved | {"attempt": "formal/wrong"})
+        with self.assertRaisesRegex(ValueError, "frozen attempt window"):
+            validate()
+        self.write(window_path, saved | {"token": "another-round"})
+        with self.assertRaisesRegex(ValueError, "frozen attempt window"):
+            validate()
+        self.write(window_path, saved)
+        owned = self.records / "owned"
+        owned.mkdir()
+        self.write(
+            owned / "state.json",
+            {
+                "status": "incomplete",
+                "mode": "scored",
+                "controller_lease": {"owner_token": "opaque"},
+                "attempts": [{"status": "running", "owned_job_id": "42"}],
+            },
+        )
+        with patch("integrations.protok.continuation.time.time", return_value=102000):
+            self.assertEqual(validate(recover=True)[2]["effective_deadline"], window)
+        # The legacy CLI without an override retains its original lease deadline.
+        self.assertEqual(
+            self.validate()[2]["effective_deadline"], self.cont["deadline"]
+        )
+
     def test_incremental_budget_crosses_original_cap_but_retains_reserve(self):
         backend, config = self.hooked()
         self.charge(81000)

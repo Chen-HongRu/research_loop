@@ -378,6 +378,9 @@ class ProTokBackend:
         fresh_attempt=None,
     ):
         config, now = self._config(), time.time()
+        from .round_admission import active_round
+
+        admitted_round = active_round(self.control.parent, owner_token=self.owner_token)
         continuation = (self.control / "continuation.json").exists()
         lease = (
             _read(self.control / "ownership.json")
@@ -393,7 +396,11 @@ class ProTokBackend:
             and _finite(lease.get("acknowledged_at"))
             and _finite(lease.get("expires_at"))
             and lease["acknowledged_at"] <= now
-            and ((recover and continuation) or now < lease["expires_at"])
+            and (
+                (recover and continuation)
+                or admitted_round
+                or now < lease["expires_at"]
+            )
             and lease.get("previous_owner")
             and lease.get("evidence")
         ):
@@ -454,7 +461,7 @@ class ProTokBackend:
             return
         bound = 1800 * len(config["seeds"])
         if control and control.get("schema") == 2:
-            if control["effective_deadline"] - now < bound:
+            if not admitted_round and control["effective_deadline"] - now < bound:
                 raise ProTokBudgetError("Continuation wall deadline exhausted")
             spent = status["used_gpu_seconds"] - control["initial_gpu_seconds"]
             if spent < 0:
@@ -471,12 +478,15 @@ class ProTokBackend:
         if (
             not session
             or not _finite(session.get("deadline"))
-            or min(
-                session["deadline"],
-                control["effective_deadline"] if control else session["deadline"],
+            or (
+                not admitted_round
+                and min(
+                    session["deadline"],
+                    control["effective_deadline"] if control else session["deadline"],
+                )
+                - now
+                < bound
             )
-            - now
-            < bound
         ):
             raise ProTokBudgetError("Original session wall deadline exhausted")
         if not continuation and status["scored_records"] >= config["max_evaluations"]:
@@ -551,6 +561,15 @@ class ProTokBackend:
             str(deadline),
             *(["--recover"] if recover else []),
         ]
+        from .round_admission import execution_deadline
+
+        wall_deadline = execution_deadline(
+            self.control.parent,
+            deadline,
+            3600,
+            owner_token=self.owner_token,
+            attempt=f"debug/{debug_root.name}/{attempt_id}",
+        )
         with (
             (logs / "stdout.log").open("w") as stdout,
             (logs / "stderr.log").open("w") as stderr,
@@ -561,7 +580,7 @@ class ProTokBackend:
             try:
                 while process.poll() is None:
                     if not recover and (
-                        (self.control / "STOP").exists() or time.time() >= deadline
+                        (self.control / "STOP").exists() or time.time() >= wall_deadline
                     ):
                         process.terminate()
                         try:
@@ -958,13 +977,32 @@ class ProTokBackend:
                 (run / "stdout.log").open("w") as stdout,
                 (run / "stderr.log").open("w") as stderr,
             ):
+                command = self._command(
+                    output,
+                    "evaluate",
+                    recover=recover,
+                    **({"fresh_attempt": fresh_attempt} if fresh_attempt else {}),
+                )
+                from .round_admission import active_round, execution_deadline
+
+                admitted = active_round(
+                    self.control.parent, owner_token=self.owner_token
+                )
+                if admitted:
+                    window = execution_deadline(
+                        self.control.parent,
+                        admitted["cutoff"],
+                        timeout_seconds,
+                        owner_token=self.owner_token,
+                        attempt=f"formal/{allocation_record(identity, fresh_attempt)}",
+                    )
+                    command += ["--execution-deadline", str(window)]
+                    if not recover:
+                        timeout_seconds = min(
+                            timeout_seconds, max(0.01, window - time.time())
+                        )
                 process = subprocess.Popen(
-                    self._command(
-                        output,
-                        "evaluate",
-                        recover=recover,
-                        **({"fresh_attempt": fresh_attempt} if fresh_attempt else {}),
-                    ),
+                    command,
                     cwd=self.control,
                     stdout=stdout,
                     stderr=stderr,

@@ -55,7 +55,7 @@ class ServerTests(unittest.TestCase):
         for used, seconds, expected_calls in (
             (100084, 3600, 1),
             (100085, 3600, 0),
-            (19084, 1799, 0),
+            (19084, 1799, 1),
         ):
             with (
                 self.subTest(used=used, seconds=seconds),
@@ -276,6 +276,7 @@ class ProTokServerTests(unittest.TestCase):
 
     def test_readonly_publication_retry_rechecks_fresh_allocation_budget(self):
         self.write("study/state.json", {"phase": "review", "status": "needs_attention"})
+        self.backend.inspect.return_value["used_gpu_seconds"] = 86500
 
         def publish(**kwargs):
             self.write("study/state.json", {"phase": "done", "status": "ready"})
@@ -307,6 +308,67 @@ class ProTokServerTests(unittest.TestCase):
                 (self.root / "control/STOP").unlink()
         status = SERVER.read(self.root / "control/supervisor-status.json")
         self.assertIn("unknown external effects", status["first_error"])
+
+    def test_admitted_round_can_finish_after_cutoff_but_no_next_round_starts(self):
+        lease = SERVER.read(self.root / "control/continuation.json")
+        lease.update(owner_token="owner", started_at=0)
+        self.write("control/continuation.json", lease)
+        owner = {
+            "owner_token": "owner",
+            "expires_at": 10000,
+            "handoff_acknowledged": True,
+        }
+        self.write("control/ownership.json", owner)
+        self.backend.owner_token = "owner"
+        (self.root / "control/round-admissions").mkdir()
+        (self.root / "study/iterations/0007").mkdir(parents=True)
+        self.write(
+            "control/round-admissions/0007.json",
+            {
+                "schema": 1,
+                "iteration": "0007",
+                "token": "admitted",
+                "admitted_at": 100,
+                "committed_at": 100,
+                "cutoff": 10000,
+                "owner": owner,
+                "continuation": lease,
+            },
+        )
+        self.write(
+            "study/iterations/0007/iteration.json", {"round_admission": "admitted"}
+        )
+        self.write(
+            "study/state.json",
+            {
+                "iteration": 7,
+                "status": "ready",
+                "phase": "review",
+                "round_admission": "admitted",
+                "round_admitted_at": 100,
+            },
+        )
+
+        def finish(root, backend):
+            self.write(
+                "study/state.json", {"iteration": 7, "status": "ready", "phase": "done"}
+            )
+            return {"iteration": 7, "status": "ready", "phase": "done"}
+
+        self.runner.run_one.side_effect = finish
+        self.assertEqual(
+            SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 10001),
+            "deadline",
+        )
+        self.runner.run_one.assert_called_once()
+
+    def test_handoff_takes_precedence_after_finished_round_passes_cutoff(self):
+        (self.root / "control/HANDOFF").write_text("switch at boundary")
+        self.assertEqual(
+            SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 10001),
+            "handoff",
+        )
+        self.runner.run_one.assert_not_called()
 
     def test_blocked_inspection_obeys_original_deadline_with_capped_backoff(self):
         self.backend.inspect.side_effect = RuntimeError("accounting conflict")
@@ -438,6 +500,10 @@ class ProTokServerTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 (self.root / "control/STOP").unlink(missing_ok=True)
                 scheduler = Mock()
+                scheduler.status.return_value = {
+                    "status": "finished",
+                    "reason": "no_pending",
+                }
 
                 def drain():
                     self.assertFalse((self.root / "control/STOP").exists())
@@ -470,6 +536,9 @@ class ProTokServerTests(unittest.TestCase):
                     SERVER.main()
                 scheduler.start.assert_called_once()
                 scheduler.shutdown.assert_called_once()
+                self.assertEqual(
+                    scheduler.finish_nominations.call_count, int(reason == "budget")
+                )
                 self.assertEqual(recovery.call_count, int(reason != "handoff"))
                 self.assertEqual(
                     (self.root / "control/STOP").exists(), reason == "budget"
@@ -478,6 +547,48 @@ class ProTokServerTests(unittest.TestCase):
                 self.assertEqual(summary["long_training_gpu_seconds"], 80)
                 self.assertEqual(summary["long_training_outstanding"], [])
                 self.assertEqual(summary["total_gpu_seconds"], 180)
+
+    def test_long_training_continues_after_short_budget_and_honors_handoff(self):
+        scheduler = Mock()
+        scheduler.status.side_effect = [
+            {"status": "running", "reason": None},
+            {"status": "finished", "reason": "no_pending"},
+        ]
+        waits = []
+
+        def wait(seconds):
+            self.assertFalse((self.root / "control/STOP").exists())
+            waits.append(seconds)
+
+        self.assertEqual(
+            SERVER.finish_long_training(self.root, scheduler, "budget", wait=wait),
+            ("budget", None),
+        )
+        scheduler.finish_nominations.assert_called_once()
+        self.assertEqual(waits, [3])
+
+        scheduler.reset_mock()
+        scheduler.status.side_effect = None
+        scheduler.status.return_value = {"status": "running", "reason": None}
+
+        def request_handoff(seconds):
+            (self.root / "control/HANDOFF").touch()
+
+        self.assertEqual(
+            SERVER.finish_long_training(
+                self.root, scheduler, "budget", wait=request_handoff
+            ),
+            ("handoff", None),
+        )
+        self.assertFalse((self.root / "control/STOP").exists())
+
+    def test_blocked_long_training_is_reported_after_short_lane_stops(self):
+        scheduler = Mock()
+        scheduler.status.return_value = {"status": "blocked", "reason": "unknown job"}
+        self.assertEqual(
+            SERVER.finish_long_training(self.root, scheduler, "budget"),
+            ("attention", "unknown job"),
+        )
 
     def test_blocked_outstanding_deadline_recovers_and_summarizes_failure(self):
         self.write(
@@ -532,6 +643,7 @@ class ProTokServerTests(unittest.TestCase):
         )
 
     def test_remaining_budget_is_still_enforced(self):
+        self.backend.inspect.return_value["used_gpu_seconds"] = 86500
         self.assertEqual(
             SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 9000),
             "budget",
@@ -539,6 +651,7 @@ class ProTokServerTests(unittest.TestCase):
         self.runner.run_one.assert_not_called()
 
     def test_completed_control_repair_precedes_budget_gate(self):
+        self.backend.inspect.return_value["used_gpu_seconds"] = 86500
         self.assertEqual(
             SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 9000),
             "budget",
@@ -548,6 +661,7 @@ class ProTokServerTests(unittest.TestCase):
         )
 
     def test_existing_review_can_finish_without_budget_for_new_allocation(self):
+        self.backend.inspect.return_value["used_gpu_seconds"] = 86500
         self.write("study/state.json", {"status": "running", "phase": "review"})
 
         def finish(*args):

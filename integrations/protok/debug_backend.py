@@ -56,7 +56,14 @@ def _live(control, owner_token, deadline):
     try:
         owner = read(control / "ownership.json")
         lease = read(control / "continuation.json")
-        ends = (deadline, owner["expires_at"], lease["deadline"])
+        from integrations.protok.round_admission import active_round
+
+        admitted = active_round(control.parent, owner_token=owner_token)
+        ends = (
+            (deadline,)
+            if admitted
+            else (deadline, owner["expires_at"], lease["deadline"])
+        )
         valid = (
             owner.get("owner_token") == owner_token
             and lease.get("owner_token") == owner_token
@@ -328,6 +335,15 @@ def run_debug(
     scope = _name(debug_root.name)
     if type(deadline) not in (int, float) or not math.isfinite(deadline):
         raise ValueError("Finite original debug wall deadline required")
+    from integrations.protok.round_admission import execution_deadline
+
+    wall_deadline = execution_deadline(
+        control.parent,
+        deadline,
+        3600,
+        owner_token=owner_token,
+        attempt=f"debug/{scope}/{attempt_id}",
+    )
     policy = _policy(control)
     record = debug_root / "attempts" / attempt_id
     existing = read(record / "debug.json") if (record / "debug.json").exists() else None
@@ -359,7 +375,7 @@ def run_debug(
         )
         if deadline > lease["effective_deadline"]:
             raise ValueError("Debug cannot extend the original owner/wall deadline")
-        _live(control, owner_token, deadline)
+        _live(control, owner_token, wall_deadline)
     formal = Path(config["records_root"]).resolve()
     workspace = Path(config["workspace"]).resolve()
     for protected in (formal, project):
@@ -403,7 +419,9 @@ def run_debug(
                     "Outstanding debug submission/accounting must be resolved first"
                 )
             # Whole-minute allocation avoids Slurm rounding beyond a residual cap.
-            seconds = int(min(budget.remaining(), deadline - time.time()) // 60) * 60
+            seconds = (
+                int(min(budget.remaining(), wall_deadline - time.time()) // 60) * 60
+            )
             if seconds < 60:
                 raise ValueError("No whole Slurm minute remains in debug/wall budget")
             bound = budget.reserve(attempt_id, requested_seconds=seconds)
@@ -470,7 +488,7 @@ def run_debug(
 
         def ssh(current, command, **kwargs):
             if watching and re.fullmatch(r"squeue -h -j [1-9][0-9]* -o %T", command):
-                _live(control, owner_token, deadline)
+                _live(control, owner_token, wall_deadline)
             return original_ssh(current, command, **kwargs)
 
         backend.save_state, backend.ssh = save, ssh
@@ -478,8 +496,8 @@ def run_debug(
         try:
             if not recover:
                 backend.prepare(operational, candidates, record, attempt)
-                _live(control, owner_token, deadline)
-                if deadline - time.time() < bound:
+                _live(control, owner_token, wall_deadline)
+                if wall_deadline - time.time() < bound:
                     raise RuntimeError(
                         "Original wall window no longer fits debug allocation"
                     )
@@ -493,7 +511,11 @@ def run_debug(
                     watching = False
                 backend.wait_for_job(
                     operational,
-                    {"deadline": min(deadline, time.time()) if recover else deadline},
+                    {
+                        "deadline": min(wall_deadline, time.time())
+                        if recover and wall_deadline == deadline
+                        else wall_deadline
+                    },
                     record,
                     state,
                     attempt,

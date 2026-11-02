@@ -82,13 +82,15 @@ enabling the lane. Its fields are:
 | `authorization` | Actual user/operator authorization for this separate grant |
 | `gpu_seconds_per_run` | Full single-GPU allocation allowance, a positive multiple of60 |
 | `total_gpu_seconds` | Total independent long-training allowance |
-| `deadline` | Absolute Unix timestamp; ownership expiry also applies |
+| `deadline` | Absolute Unix timestamp after which no new long child may enter |
 
-The maximum number of child studies is the total allowance divided by the
-per-run allowance. Each child uses the remaining grant wall window for queueing,
-training and Review. Actual `sacct` allocation seconds, including failed and
-cancelled work, are charged in `control/long-training-jobs/`; unknown effects do
-not release budget. `used_gpu_seconds` retains short/research grant accounting;
+Each new allocation must fit the remaining independent GPU allowance. Actual
+`sacct` allocation seconds, including failed and cancelled work and any overrun,
+are charged in `control/long-training-jobs/`; unknown effects do not release
+budget. A child's fixed Plan specifies its Slurm GPU allocation in
+`contract.timeout_seconds`. Queueing does not consume that GPU allowance and has
+no separate wall cutoff. An admitted child can finish and publish Review after
+the entry deadline. `used_gpu_seconds` retains short/research grant accounting;
 `long_training_gpu_seconds` reports the separate charge and `total_gpu_seconds`
 includes short, research, debug and long training.
 
@@ -101,11 +103,11 @@ uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --ena
 ```
 
 The supervisor schedules the lane independently. `--run-long-one` provides the
-same bounded manual operation. When short work ends or HANDOFF is requested, an
-already active long child drains through its Review; no next long child starts.
-User STOP/signals cancel owned GPU work immediately through the existing polling
-path. Long-grant and ownership deadlines remain absolute. Runtime handoff refuses
-unsettled long effects.
+same bounded manual operation. If short work ends first, the long lane can finish
+eligible published nominations within its own entry deadline and allowance.
+HANDOFF prevents new children and drains the current one. User STOP/signals
+cancel owned GPU work through the existing polling path. Runtime handoff refuses
+unsettled long effects. A Slurm allocation is released when its batch exits.
 
 After inspecting retained effects, `--recover-long-run --long-run-id ID`
 reconciles only the same owned allocation, retains the original Execute attempt

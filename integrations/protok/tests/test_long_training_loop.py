@@ -30,7 +30,7 @@ class LongTrainingLoopTests(unittest.TestCase):
 
     def test_policy_keeps_all_three_endpoint_metrics(self):
         policy = lane.study_policy(self.root)
-        self.assertEqual(policy["max_runs"], 2)
+        self.assertIsNone(policy["max_runs"])
         self.assertEqual(policy["recipe"]["total_steps"], 10000)
         self.assertEqual(
             {metric["name"] for metric in policy["evaluation"]["objectives"]},
@@ -158,6 +158,42 @@ class LongTrainingLoopTests(unittest.TestCase):
         )
         self.assertEqual(
             Study(self.root / "study").knowledge()["long_training"][0]["id"], identity
+        )
+
+    def test_finish_nominations_continues_after_first_withdrawal(self):
+        initialize(
+            self.root / "study",
+            goal="Drain queue",
+            global_evaluation=evaluation("short"),
+            long_training=lane.study_policy(self.root),
+        )
+        calls = []
+        rows = [{"status": "queued"}, {"status": "queued"}]
+
+        def run_one(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                rows[0]["status"] = "withdrawn"
+                return None
+            if len(calls) == 2:
+                rows[1]["status"] = "reviewed"
+                return {"id": "second"}
+            return None
+
+        scheduler = lane.LongTrainingScheduler(
+            self.root,
+            Mock(),
+            lane_manager=SimpleNamespace(run_one=run_one),
+            interval=0.001,
+        )
+        scheduler.finish_nominations()
+        with patch.object(lane, "snapshot", side_effect=lambda root: rows):
+            scheduler.start()
+            scheduler.thread.join(2)
+        self.assertFalse(scheduler.thread.is_alive())
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(
+            scheduler.status(), {"status": "finished", "reason": "no_pending"}
         )
 
     def test_research_contract_accepts_reviewed_long_checkpoint_model_input(self):

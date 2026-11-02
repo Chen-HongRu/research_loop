@@ -170,6 +170,7 @@ def validate_continuation(
     now=None,
     recover=False,
     fresh_attempt=None,
+    execution_deadline=None,
 ):
     """Validate the lease and unchanged original scientific/budget contract."""
     fresh_attempt = _fresh_id(fresh_attempt)
@@ -265,8 +266,37 @@ def validate_continuation(
     deadline = min(end, owner["expires_at"])
     if not incremental:
         deadline = min(deadline, session["deadline"])
-    if incremental and not recover and now >= deadline:
+    from integrations.protok.round_admission import active_round
+
+    admitted = active_round(control_dir.parent, owner_token=owner_token)
+    if incremental and not recover and now >= deadline and not admitted:
         raise ValueError("Incremental continuation lease has expired")
+    identity = None
+    if execution_deadline is not None:
+        if (
+            not admitted
+            or not _finite_number(execution_deadline)
+            or execution_deadline > now + 3600
+        ):
+            raise ValueError("Execution deadline requires a committed short round")
+        from integrations.protok.backend import allocation_record
+        from integrations.protok.round_admission import frozen_execution_deadline
+
+        identity = backend.fingerprint(config, backend.source_boundary(config))
+        attempt = "formal/" + allocation_record(identity, fresh_attempt)
+        try:
+            frozen_deadline = frozen_execution_deadline(
+                control_dir.parent, owner_token=owner_token, attempt=attempt
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise ValueError(
+                "Formal execution requires its frozen attempt window"
+            ) from error
+        if execution_deadline != frozen_deadline:
+            raise ValueError(
+                "Formal execution deadline differs from its frozen attempt window"
+            )
+        deadline = frozen_deadline
     control = control | {"effective_deadline": deadline}
     records = Path(config["records_root"])
     states = backend.records_state(records)
@@ -281,7 +311,8 @@ def validate_continuation(
     ):
         raise ValueError("Continuation historical accounting anchor mismatch")
     if recover or fresh_attempt is not None:
-        identity = backend.fingerprint(config, backend.source_boundary(config))
+        if identity is None:
+            identity = backend.fingerprint(config, backend.source_boundary(config))
         record = _record_path(records, identity, fresh_attempt)
         path = record / "state.json"
         state = (
@@ -329,6 +360,13 @@ def install_hooks(
     incremental = control["schema"] == 2
     accounted = control["initial_gpu_seconds"]
     waiting = False
+    from integrations.protok.round_admission import active_round
+
+    admitted = (
+        active_round(Path(control_dir).parent, owner_token=control["owner_token"])
+        if control_dir
+        else None
+    )
     validate_poll = validate_poll or validate_lease
 
     def check_owned_wait():
@@ -344,7 +382,7 @@ def install_hooks(
     def ssh(current, command, *, timeout=120):
         if (
             waiting
-            and not recover
+            and (not recover or admitted)
             and re.fullmatch(r"squeue -h -j [1-9][0-9]* -o %T", command)
         ):
             check_owned_wait()
@@ -436,7 +474,11 @@ def install_hooks(
         state["controller_lease"] = {
             "owner_token": control["owner_token"],
             "started_at": control["started_at"],
-            "deadline": deadline,
+            "deadline": min(
+                control["deadline"], control["original_session"]["deadline"]
+            )
+            if control["schema"] == 1
+            else control["deadline"],
             "cumulative_scored_records": count + 1,
         }
         backend.save_state(record, state)
@@ -482,7 +524,10 @@ def install_hooks(
             return used
         used = budget(
             current,
-            session | {"deadline": min(session["deadline"], deadline)},
+            session
+            | {
+                "deadline": deadline if admitted else min(session["deadline"], deadline)
+            },
             record_root,
             allocations,
             now=now,
@@ -500,8 +545,10 @@ def install_hooks(
             check_lease()
         else:
             check_owned_wait()
-        wait_deadline = deadline if incremental else min(session["deadline"], deadline)
-        if recover:
+        wait_deadline = (
+            deadline if admitted or incremental else min(session["deadline"], deadline)
+        )
+        if recover and not admitted:
             # Receipt-only recovery must reach accounting even after STOP/expiry.
             # The original wait polls first: terminal jobs are charged directly;
             # still-active owned jobs are cancelled immediately, then reconciled.
@@ -537,7 +584,14 @@ def install_hooks(
 
 
 def launch(
-    project, control_dir, owner_token, config_path, *, recover=False, fresh_attempt=None
+    project,
+    control_dir,
+    owner_token,
+    config_path,
+    *,
+    recover=False,
+    fresh_attempt=None,
+    execution_deadline=None,
 ):
     backend, config, control = validate_continuation(
         project,
@@ -546,6 +600,7 @@ def launch(
         config_path,
         recover=recover,
         fresh_attempt=fresh_attempt,
+        execution_deadline=execution_deadline,
     )
 
     def validate_lease(*, receipt_recovery=recover):
@@ -557,6 +612,7 @@ def launch(
             config_path,
             recover=receipt_recovery,
             fresh_attempt=fresh_attempt,
+            execution_deadline=execution_deadline,
         )
         del fresh_backend
         if fresh_config != config or fresh_control != control:
@@ -582,6 +638,7 @@ def main(argv=None):
     parser.add_argument("--evaluate", action="store_true", required=True)
     parser.add_argument("--recover", action="store_true")
     parser.add_argument("--fresh-attempt")
+    parser.add_argument("--execution-deadline", type=float)
     args = parser.parse_args(argv)
     try:
         return launch(
@@ -591,6 +648,7 @@ def main(argv=None):
             args.config,
             recover=args.recover,
             fresh_attempt=args.fresh_attempt,
+            execution_deadline=args.execution_deadline,
         )
     except (Exception, KeyboardInterrupt) as error:
         # Do not print exception payloads: trusted receipts may contain owner tokens.
