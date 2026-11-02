@@ -149,6 +149,9 @@ the complete source file set is frozen. Put narrative in the final Agent respons
 Check Python syntax with in-memory `compile(source_text, filename, "exec")`;
 `py_compile`/`compileall` create disallowed bytecode caches. Do not import an
 authored script merely to check syntax.
+Permitted research source/support suffixes are `.py`, `.json`, `.md`, `.txt`,
+`.toml`, `.yaml`, `.yml` and `.csv`, subject to the existing size/count limits.
+Save patch/diff reports as `.txt` or `.md`; `.patch` and `.diff` are not admitted.
 If an extra report already blocks receipt validation, an operator may preserve it
 outside the source tree, restore exact frozen source identity, then use
 `--reconcile-completed-execute`. Do not change original code, loosen source checks

@@ -28,6 +28,9 @@ narrative in this final markdown response, not in a new workspace report file.
 For Python syntax checks use compile(source_text, filename, "exec") in memory.
 Do not run py_compile/compileall or import authored scripts merely to check syntax:
 they can create __pycache__/*.pyc, which is outside the permitted source file set.
+Research source/support files may use only .py, .json, .md, .txt, .toml, .yaml,
+.yml or .csv, within the controller's size/count bounds. Save patch/diff reports
+as .txt or .md, not .patch/.diff; review filenames before the one submission.
 """
 
 
