@@ -135,7 +135,7 @@ function renderTaskMetrics() {
       const point=item.points[Number(circle.dataset.metricPoint)];
       circle.onmouseenter=circle.onfocus=()=>readout(point,false);
       circle.onmouseleave=circle.onblur=()=>readout(view.pinned.get(item.key) || item.points.at(-1),view.pinned.has(item.key));
-      circle.onclick=()=>{view.pinned.set(item.key,point);readout(point,true);};
+      circle.onclick=()=>{view.pinned.set(item.key,point);metricCardSignature='';readout(point,true);};
       circle.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();circle.onclick();}};
     }
     card.querySelector('.metric-latest').onclick=()=>{view.pinned.delete(item.key);renderTaskMetrics();};
