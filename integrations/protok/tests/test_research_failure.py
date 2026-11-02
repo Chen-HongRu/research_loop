@@ -85,6 +85,10 @@ class ResearchFailureTests(unittest.TestCase):
         )
 
     def script(self, backend, *, root, iteration, **kwargs):
+        if getattr(self, "preflight", False):
+            from integrations.protok.research_backend import _execution
+
+            return _execution(kwargs["execution"], {"max_time_limit_seconds": 1800})
         self.allocations += 1
         directory = root / "control/research-jobs" / iteration
         identity = {
@@ -128,6 +132,96 @@ class ResearchFailureTests(unittest.TestCase):
         state = self.run_one()
         self.assertEqual((state["iteration"], state["phase"]), (3, "done"))
         self.assertEqual(self.allocations, 2)
+
+    def test_legacy_invalid_plan_reconciles_without_job_then_enters_review(self):
+        from integrations.protok.research_backend import _execution
+
+        self.initialize()
+        self.preflight = True
+        delegate_run = self.delegate.run
+
+        def legacy_run(**kwargs):
+            response = delegate_run(**kwargs)
+            if "research_contract" in response:
+                response["research_contract"]["execution"]["inputs"] = [
+                    {
+                        "name": "hidden",
+                        "source": "hidden_cache",
+                        "role": "development; prose",
+                    }
+                ]
+            return response
+
+        # Simulate the older adapter which admitted this malformed Plan.
+        calls = 0
+
+        def legacy_validation(execution, policy):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return 1200
+            return _execution(execution, policy)
+
+        with (
+            patch.object(self.delegate, "run", side_effect=legacy_run),
+            patch(
+                "integrations.protok.research_backend._execution",
+                side_effect=legacy_validation,
+            ),
+        ):
+            with self.assertRaises(HarnessError):
+                self.run_one()
+        before = self.study.status()
+        plan = (self.study.root / before["plan_ref"]).read_bytes()
+        state = RUNNER.reconcile_research_execute(
+            self.root, self.backend, authorization="test operator recovery"
+        )
+        self.assertEqual(state["call_count"], before["call_count"])
+        self.assertEqual((self.study.root / before["plan_ref"]).read_bytes(), plan)
+        self.assertEqual(self.allocations, 0)
+
+        self.assertFalse((self.control / "research-jobs/0002").exists())
+        self.assertEqual(
+            deploy_runtime.check_timeout_boundary(
+                self.root, self.backend, research=True
+            ),
+            state,
+        )
+        RUNNER.write(self.control / "STOP", "User stop\n")
+        with self.assertRaises(RuntimeError):
+            deploy_runtime.check_timeout_boundary(
+                self.root, self.backend, research=True
+            )
+        (self.control / "STOP").unlink()
+        state = self.run_one()
+        self.assertEqual((state["phase"], state["status"]), ("done", "ready"))
+        self.assertEqual(self.delegate.count("execute"), 1)
+        self.assertEqual(self.allocations, 0)
+
+    def test_invalid_plan_is_not_published_as_accepted(self):
+        self.initialize()
+        delegate_run = self.delegate.run
+
+        def invalid_plan(**kwargs):
+            response = delegate_run(**kwargs)
+            if "research_contract" in response:
+                response["research_contract"]["execution"]["inputs"] = [
+                    {
+                        "name": "hidden",
+                        "source": "hidden_cache",
+                        "role": "development; prose",
+                    }
+                ]
+            return response
+
+        with patch.object(self.delegate, "run", side_effect=invalid_plan):
+            with self.assertRaisesRegex(HarnessError, "input role"):
+                self.run_one()
+        state = self.study.status()
+        self.assertEqual((state["phase"], state["status"]), ("plan", "needs_attention"))
+        self.assertIsNone(completed_response(self.study.root / state["active_attempt"]))
+        self.assertEqual(self.delegate.count("execute"), 0)
+        self.assertEqual(self.allocations, 0)
 
     def test_agent_reporting_failure_does_not_lose_settled_experiment(self):
         self.initialize()

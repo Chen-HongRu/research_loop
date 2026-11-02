@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import fcntl
 import os
 import hashlib
@@ -1071,7 +1072,47 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
                 + environment.read_text(encoding="utf-8")
             )
         if not kwargs["writable"]:
-            return self.delegate.run(**kwargs)
+            schema = kwargs.get("schema", {})
+            plan_attempt = None
+            if "research_contract" in schema.get("properties", {}):
+                kwargs["schema"] = copy.deepcopy(schema)
+                contract_schema = kwargs["schema"]["properties"]["research_contract"][
+                    "anyOf"
+                ][0]
+                input_schema = contract_schema["properties"]["execution"]["properties"][
+                    "inputs"
+                ]["items"]
+                input_schema["properties"]["role"]["enum"] = [
+                    "development",
+                    "exploratory",
+                    "model",
+                    "reference",
+                ]
+                if kwargs.get("run_dir") is not None:
+                    plan_attempt = Path(kwargs["run_dir"])
+                    agent = plan_attempt / "agent"
+                    agent.mkdir()
+                    if (plan_attempt / "context.json").exists():
+                        shutil.copyfile(
+                            plan_attempt / "context.json", agent / "context.json"
+                        )
+                    kwargs["run_dir"] = agent
+            result = self.delegate.run(**kwargs)
+            contract = result.get("research_contract")
+            if (
+                result.get("decision") == "investigate"
+                and contract
+                and contract["execution"]["mode"] == "script"
+            ):
+                from integrations.protok.research_backend import _execution
+
+                try:
+                    _execution(contract["execution"], research_policy(self.root))
+                except ProTokError as error:
+                    raise HarnessError(str(error)) from error
+            if plan_attempt is not None:
+                publish_completed_response(plan_attempt, result)
+            return result
         kwargs["schema"] = REPORT_SCHEMA
         kwargs["prompt"] += REPORT_INSTRUCTIONS
         self.trusted_result = None
@@ -1878,14 +1919,41 @@ def _reconcile_settled_execute(root, backend, *, authorization, research=False):
             metadata = read(study.root / "iterations" / iteration / "iteration.json")
             workspace = Path(metadata["workspace"])
             if research:
-                from integrations.protok.research_execution import completed_script
+                from integrations.protok.research_execution import (
+                    completed_script,
+                    reject_preflight,
+                )
+
+                effects = backend.inspect()
+                if any(
+                    effects.get(key)
+                    for key in (
+                        "outstanding",
+                        "research_outstanding",
+                        "debug_outstanding",
+                        "long_training_outstanding",
+                        "manual_training_outstanding",
+                    )
+                ):
+                    raise ProTokError(
+                        "Unresolved effects prevent research reconciliation"
+                    )
+                source_root = root / "control/research-sources" / iteration
+                if not (source_root / "result.json").exists():
+                    reject_preflight(
+                        root, workspace, iteration, authorization=authorization
+                    )
 
                 trusted = completed_script(root, workspace, iteration)
                 if trusted["status"] != "failed":
                     raise ProTokError(
                         "Only a settled research failure may be reconciled"
                     )
-                record_root = root / "control/research-jobs" / iteration
+                record_root = (
+                    source_root
+                    if trusted.get("failure_kind") == "preflight_rejected"
+                    else root / "control/research-jobs" / iteration
+                )
                 backend_result = (
                     root / "control/research-sources" / iteration / "result.json"
                 )

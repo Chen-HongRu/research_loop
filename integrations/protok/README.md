@@ -38,6 +38,22 @@ interfaces are specified in [Parallel long training](../../docs/long-training.md
 
 ## Recovery
 
+Research script input `role` values are exact enums: `development` or
+`exploratory`; teacher/checkpoint sources may also use `model` or `reference`.
+Put descriptions in the observables, not in `role`. ProTok validates the script
+envelope before publishing an accepted Plan completion.
+
+A retained invalid research envelope rejected before any backend job may be
+explicitly reconciled with `run.py --reconcile-research-execute --authorization
+'User authorized failure Review and continuation'` and deployed with
+`deploy_runtime.py --resume-research`. Use the existing root/project/runtime
+arguments. The controller verifies unchanged contract/source and absence of job
+or unresolved effects, records a distinct zero-allocation preflight rejection,
+and enters incomplete Review without a measurement or resubmission. It preserves
+the original Plan and Agent attempt. This recovery permits an unchanged absent
+STOP; a new/user STOP still blocks it. Allocated failures retain their existing
+STOP and accounting requirements.
+
 Evaluation submission uses the reusable `research_loop.submission` API:
 
 ```sh

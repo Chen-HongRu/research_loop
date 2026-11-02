@@ -101,6 +101,25 @@ def check_timeout_boundary(root, backend, *, research=False):
         raise RuntimeError("An explicitly reconciled formal timeout is required")
     attempt = root / "study" / relative
     record = read(attempt / "reconciliation.json")
+    preflight = False
+    if research:
+        from integrations.protok.research_execution import completed_script
+
+        trusted = completed_script(root, Path(record["workspace"]), iteration)
+        preflight = trusted.get("failure_kind") == "preflight_rejected"
+        if preflight:
+            effects = backend.inspect()
+            if any(
+                effects.get(key)
+                for key in (
+                    "outstanding",
+                    "research_outstanding",
+                    "debug_outstanding",
+                    "long_training_outstanding",
+                    "manual_training_outstanding",
+                )
+            ):
+                raise RuntimeError("Outstanding effects prevent preflight recovery")
     stop = root / "control/STOP"
     stop_text = stop.read_text() if stop.exists() else None
     if (
@@ -112,7 +131,12 @@ def check_timeout_boundary(root, backend, *, research=False):
         )
         or not isinstance(record.get("authorization"), str)
         or not record["authorization"].strip()
-        or record.get("stop_before") != "Supervisor stopped: attention\n"
+        or record.get("stop_before")
+        not in (
+            {None, "Supervisor stopped: attention\n"}
+            if preflight
+            else {"Supervisor stopped: attention\n"}
+        )
         or stop_text != record["stop_before"]
     ):
         raise RuntimeError("STOP changed or is not the reconciled system attention")
