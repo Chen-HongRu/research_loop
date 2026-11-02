@@ -12,10 +12,11 @@ imports, paths, metrics or scientific prompts.
 - `server.py` drives the bounded lease and admits Scout only during submitted work.
 - `deploy_runtime.py` switches a separate committed runtime at a published HANDOFF.
 
-The active cloud run is `/root/research-loop/runs/protok-resume-20261101`.
-Historical deployment evidence is retained in [deployment.md](deployment.md),
-`research-inputs/`, and `archive/exploration-v1/verification/`. The archived
-manifest describes the original snapshot and is not a current deployment check.
+This is a task-specific adapter reference, not a self-contained benchmark.
+It requires a separately provisioned ProTok repository, protected evaluator,
+canonical data and an authorized resource lease. Private research inputs,
+experiment reports and deployment snapshots are not distributed here.
+See [Deployment configuration](deployment.md) for the required settings.
 
 ## Tagged live observations
 

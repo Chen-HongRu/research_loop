@@ -5,3 +5,17 @@ __pycache__/
 studies/
 aideml/
 dist/
+
+# Local credentials, private evidence and experiment outputs
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
+evidence/
+runs/
+deployments/
+data/
+checkpoints/
+.release-private/

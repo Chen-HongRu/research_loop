@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -24,7 +25,16 @@ SPEC = importlib.util.spec_from_file_location(
     "protok_runner", Path(__file__).resolve().parents[3] / "integrations/protok/run.py"
 )
 RUNNER = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(RUNNER)
+# Synthetic receipt identity; never depend on the operator's real experiment.
+with patch.dict(
+    os.environ,
+    {
+        "PROTOK_BASE_COMMIT": "b" * 40,
+        "PROTOK_BASE_FINGERPRINT": "a" * 64,
+        "PROTOK_BASE_VALUE": "3.0",
+    },
+):
+    SPEC.loader.exec_module(RUNNER)
 
 
 class FakeBackend:
@@ -109,6 +119,35 @@ class FakeBackend:
 
 
 class ProTokRunnerTests(unittest.TestCase):
+    def test_missing_baseline_stops_before_admission_or_receipt_access(self):
+        with (
+            patch.object(RUNNER, "BEST_FINGERPRINT", ""),
+            patch.object(RUNNER, "admission") as admission,
+        ):
+            backend = Mock()
+            with self.assertRaisesRegex(ProTokError, "PROTOK_BASE_FINGERPRINT"):
+                RUNNER.init_study(self.root, backend)
+            with self.assertRaisesRegex(ProTokError, "PROTOK_BASE_FINGERPRINT"):
+                RUNNER.import_best(backend, {})
+            admission.assert_not_called()
+            backend.inspect.assert_not_called()
+
+    def test_baseline_requires_exact_identities_and_a_finite_metric(self):
+        for field, value in (
+            ("BEST_COMMIT", ""),
+            ("BEST_COMMIT", "not-a-commit"),
+            ("BEST_FINGERPRINT", "not-a-fingerprint"),
+            ("BEST_VALUE", float("nan")),
+            ("BEST_VALUE", float("inf")),
+        ):
+            with (
+                self.subTest(field=field, value=value),
+                patch.object(RUNNER, field, value),
+            ):
+                with self.assertRaises(ProTokError):
+                    RUNNER.require_baseline()
+        RUNNER.require_baseline()
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

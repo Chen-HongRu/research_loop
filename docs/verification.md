@@ -1,5 +1,7 @@
 # 本次实现验证
 
+> 历史验证摘要：以下数值来自开发时保留的记录，本次公开整理未重跑训练。原始运行产物未随源码分发，读者无法仅凭此摘要独立复核这些数值。
+
 日期：2026-10-31。以下区分代码行为测试、真实 Harness 接线与尚未验证的研究效果。
 
 ## 已观察到的结果
@@ -10,7 +12,7 @@
 - 本机 Codex CLI `0.166.0-alpha.5.1`，`login status` 返回 `Logged in using ChatGPT`。未读取或复制凭据。
 - 通过该 CLI 完成一轮真实的只读数学推导，三个阶段的进程均退出 0，返回对象通过本地协议校验，最终研究文档成功发布。
 
-本环境把 uv 缓存和工具目录定向到 `/private/tmp/research-loop-uv-cache`、`/private/tmp/research-loop-uv-tools`，避免写全局工具目录。项目无第三方运行时依赖；构建使用 Hatchling。
+验证使用独立的临时缓存和工具目录。核心包无第三方运行时依赖；构建使用 Hatchling。可选看板依赖由 extra 单独安装。
 
 ## 真实接线案例
 
@@ -28,11 +30,11 @@
 
 本机原始结果保存在 `studies/codex-proof-smoke/`（该运行目录被 `.gitignore` 排除，不随源码分发）：
 
-- [研究文档](../studies/codex-proof-smoke/research.md)
-- [控制状态](../studies/codex-proof-smoke/state.json)
-- [执行证明](../studies/codex-proof-smoke/iterations/0001/execute.md)
-- [评审报告](../studies/codex-proof-smoke/iterations/0001/review.md)
-- [执行请求与收据](../studies/codex-proof-smoke/iterations/0001/execute/attempt-001/process.json)
+- 研究文档（私有运行产物，未随源码分发）
+- 控制状态（私有运行产物，未随源码分发）
+- 执行证明（私有运行产物，未随源码分发）
+- 评审报告（私有运行产物，未随源码分发）
+- 执行请求与收据（私有运行产物，未随源码分发）
 
 ## 自动测试实际保护什么
 

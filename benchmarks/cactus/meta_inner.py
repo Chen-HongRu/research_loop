@@ -165,7 +165,9 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mode", choices=["cactus", "canary"], required=True)
     parser.add_argument("--codex", required=True)
-    parser.add_argument("--host", default="autodl")
+    parser.add_argument(
+        "--host", required=True, help="Operator-configured SSH host alias"
+    )
     parser.add_argument("--remote-base", required=True)
     parser.add_argument("--gpu", default="1")
     parser.add_argument("--job-prefix", required=True)
