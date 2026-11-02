@@ -1979,8 +1979,6 @@ def _reconcile_settled_execute(root, backend, *, authorization, research=False):
                         "outstanding",
                         "research_outstanding",
                         "debug_outstanding",
-                        "long_training_outstanding",
-                        "manual_training_outstanding",
                     )
                 ):
                     raise ProTokError(

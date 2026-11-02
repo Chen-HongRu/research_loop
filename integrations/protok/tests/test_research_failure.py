@@ -249,6 +249,20 @@ class ResearchFailureTests(unittest.TestCase):
             ),
             state,
         )
+        effects = self.backend.inspect()
+        for channel in ("manual_training_outstanding", "long_training_outstanding"):
+            with (
+                self.subTest(channel=channel),
+                patch.object(
+                    self.backend,
+                    "inspect",
+                    return_value={**effects, channel: ["known-independent-job"]},
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Outstanding effects"):
+                    deploy_runtime.check_timeout_boundary(
+                        self.root, self.backend, research=True
+                    )
         RUNNER.write(self.control / "STOP", "User stop\n")
         with self.assertRaises(RuntimeError):
             deploy_runtime.check_timeout_boundary(
@@ -322,11 +336,25 @@ class ResearchFailureTests(unittest.TestCase):
         original = (previous / "agent/response.json").read_bytes()
         plan = (self.study.root / before["plan_ref"]).read_bytes()
         (self.control / "STOP").write_text("Supervisor stopped: attention\n")
-        state = RUNNER.reconcile_research_execute(
-            self.root,
+        effects = self.backend.inspect()
+        with patch.object(
             self.backend,
-            authorization="User authorized restoring the settled failure",
-        )
+            "inspect",
+            return_value={
+                **effects,
+                "manual_training_outstanding": ["known-independent-job"],
+                "long_training_outstanding": ["known-independent-child"],
+            },
+        ):
+            state = RUNNER.reconcile_research_execute(
+                self.root,
+                self.backend,
+                authorization="User authorized restoring the settled failure",
+            )
+            with self.assertRaisesRegex(RuntimeError, "Outstanding effects"):
+                deploy_runtime.check_timeout_boundary(
+                    self.root, self.backend, research=True
+                )
         self.assertEqual(state["call_count"], before["call_count"])
         self.assertEqual(state["elapsed_seconds"], before["elapsed_seconds"])
         self.assertEqual((previous / "agent/response.json").read_bytes(), original)
