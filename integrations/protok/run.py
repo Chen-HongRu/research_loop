@@ -2074,8 +2074,6 @@ def _reconcile_settled_execute(
                         "outstanding",
                         "research_outstanding",
                         "debug_outstanding",
-                        "long_training_outstanding",
-                        "manual_training_outstanding",
                     )
                 ):
                     raise ProTokError(

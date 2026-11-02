@@ -193,6 +193,66 @@ class FormalTimeoutTests(unittest.TestCase):
             completed_response(self.study.root / state["calls"]["execute"])
         )
 
+    def test_settled_timeout_review_can_coexist_with_independent_training(self):
+        self.initialize()
+        with patch.object(
+            RUNNER, "timed_out_job", side_effect=ProTokError("old wrapper")
+        ):
+            with self.assertRaises(HarnessError):
+                self.run_one()
+        before = self.study.status()
+        effects = self.backend.inspect()
+        for channel in ("outstanding", "research_outstanding", "debug_outstanding"):
+            with (
+                self.subTest(channel=channel),
+                patch.object(
+                    self.backend,
+                    "inspect",
+                    return_value={**effects, channel: ["unknown"]},
+                ),
+            ):
+                with self.assertRaisesRegex(ProTokError, "Unresolved effects"):
+                    RUNNER.reconcile_timed_out_execute(
+                        self.root, self.backend, authorization="Restore settled timeout"
+                    )
+                self.assertEqual(self.study.status(), before)
+        stop = self.control / "STOP"
+        stop.write_text("Supervisor stopped: attention\n")
+        independent = {
+            **effects,
+            "manual_training_outstanding": ["known-independent-job"],
+            "long_training_outstanding": ["known-independent-child"],
+        }
+        with patch.object(self.backend, "inspect", return_value=independent):
+            prepared = RUNNER.reconcile_timed_out_execute(
+                self.root, self.backend, authorization="Restore settled timeout"
+            )
+            self.assertEqual(prepared["call_count"], before["call_count"])
+            self.assertEqual(prepared["elapsed_seconds"], before["elapsed_seconds"])
+            for channel in ("manual_training_outstanding", "long_training_outstanding"):
+                with (
+                    self.subTest(deployment_channel=channel),
+                    patch.object(
+                        self.backend,
+                        "inspect",
+                        return_value={**effects, channel: independent[channel]},
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "Outstanding effects"):
+                        deploy_runtime.check_timeout_boundary(self.root, self.backend)
+            stop.unlink()
+            state = self.run_one()
+            self.assertEqual((state["phase"], state["status"]), ("done", "ready"))
+            with self.assertRaisesRegex(RuntimeError, "Outstanding"):
+                deploy_runtime.check_boundary(self.root, self.backend)
+        self.assertEqual(self.backend.evaluations, 1)
+        response = completed_response(self.study.root / state["calls"]["execute"])
+        self.assertEqual(response["outcome"], "incomplete")
+        self.assertEqual(response["measurements"], [])
+        self.assertEqual(
+            RUNNER.read(self.control / "jobs/0002/result.json")["gpu_seconds"], 1828
+        )
+
     def test_reconcile_old_failure_preserves_agent_plan_stop_and_usage(self):
         self.initialize()
         with patch.object(
