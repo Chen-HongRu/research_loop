@@ -775,6 +775,20 @@ def settled_failure_response(trusted, *, agent_error=None):
     """An accounted failed allocation is evidence, without a quality measurement."""
     if trusted.get("status") != "failed":
         raise ProTokError("A settled failed execution receipt is required")
+    if trusted.get("failure_kind") == "preflight_rejected":
+        return {
+            "outcome": "incomplete",
+            "markdown": (
+                "Controller-certified research envelope rejected before backend "
+                "admission: " + trusted["error"] + ". No allocation occurred; GPU "
+                "charge is zero and the scientific hypothesis remains untested. "
+                "The original Plan, source and failed Agent attempt are retained. "
+                "Independent Review must assess this prerequisite failure without "
+                "a quality measurement or resubmission."
+            ),
+            "artifacts": [trusted["artifact"]],
+            "measurements": [],
+        }
     if trusted.get("failure_kind") == "operator_certified_no_allocation":
         return {
             "outcome": "incomplete",
