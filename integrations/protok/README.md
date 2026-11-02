@@ -43,6 +43,28 @@ uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --res
 uv run python integrations/protok/deploy_runtime.py --root RUN_ROOT --runtime RUNTIME --resume-submission
 ```
 
+A formal allocation with a confirmed Slurm `TIMEOUT`, frozen candidate identity
+and fully settled accounting completes Execute as `incomplete`, with retained
+failure evidence and no measurements. Independent Review records actual cost and
+fixed-budget feasibility, then decides the next investigation. This path neither
+repairs the candidate nor resubmits the timed-out job. Unknown effects, incomplete
+accounting, other uncertified failures, user STOP and exhausted authorization
+remain blocking.
+
+For an older runtime stopped on this settled timeout, retain the existing failed
+Agent attempt and prepare a separate controller reconciliation:
+
+```sh
+uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --reconcile-timed-out-execute --authorization 'User authorized failure Review and continuation'
+uv run python integrations/protok/deploy_runtime.py --root RUN_ROOT --runtime RUNTIME --resume-timeout
+```
+
+Preparation preserves STOP, the accepted Plan, candidate and original invocation
+and charges. Deployment requires the matching committed-runtime HANDOFF and
+unchanged prepared state, Plan, ownership, Study configuration and lease. Only the
+retained system attention STOP may be cleared; a newer or user STOP blocks resume.
+The original absolute deadline and all counters continue to apply.
+
 Preparation retains STOP and immutable per-attempt evidence. Deployment checks
 the matching preparation and HANDOFF. An unpublished Execute continues in the
 same iteration with only its unaccepted call pointer retired. An already published

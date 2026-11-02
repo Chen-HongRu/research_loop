@@ -27,6 +27,7 @@ from research_loop.harness import (
     HarnessConfig,
     HarnessError,
     RecoverableExecutionError,
+    completed_response,
     publish_completed_response,
 )
 from research_loop.protocol import validate_response
@@ -592,6 +593,66 @@ def completed_job(root, backend, workspace, iteration):
     return result
 
 
+def timed_out_job(root, backend, workspace, iteration):
+    """Retain a settled formal time limit as an unmeasured investigation result."""
+    root, workspace = Path(root), Path(workspace)
+    job = job_path(root, iteration)
+    record = read(job / "job.json")
+    if (
+        record.get("iteration") != iteration
+        or record.get("request") != {"action": "evaluate"}
+        or record.get("status") not in {"prepared", "submitted", "failed"}
+        or not record.get("fingerprint")
+        or not record.get("source_commit")
+    ):
+        raise ProTokError("Job has no retained formal timeout identity")
+    baseline = read(root / "study/study.json")["baseline"]
+    for source in (workspace, job / "source"):
+        check_scope(source, baseline, allow_research=research_policy(root) is not None)
+        if signatures(candidate_bytes(source)) != record["source_signatures"]:
+            raise ProTokError("Timed-out candidate changed after source freeze")
+    if git(job / "source", "rev-parse", "HEAD") != record["source_commit"]:
+        raise ProTokError("Timed-out source commit changed")
+    submission = workspace / RECEIPT
+    request = workspace / "evaluation-request.json"
+    if (
+        submission.is_symlink()
+        or not submission.exists()
+        or read(submission) != record["request"]
+        or request.exists()
+        or request.is_symlink()
+        or (workspace / "evaluation-result.json").is_symlink()
+    ):
+        raise ProTokError("Timed-out submission has changed or pending effects")
+    receipt = backend.timed_out_receipt(
+        job / "source",
+        job / "runtime-config.json",
+        record["fingerprint"],
+        **({"record_name": record["record_name"]} if record.get("record_name") else {}),
+    )
+    marker = job / "timeout.json"
+    if marker.exists():
+        if read(marker).get("receipt") != receipt:
+            raise ProTokError("Retained timeout evidence changed")
+    else:
+        immutable_record(
+            marker,
+            {"version": 1, "previous_job": record, "receipt": receipt},
+        )
+    result = {
+        **receipt,
+        "source_commit": record["source_commit"],
+        "config_snapshot": str(job / "runtime-config.json"),
+        "frozen_source": str(job / "source"),
+        "artifact": {"path": str(marker), "version": receipt["record_name"]},
+    }
+    immutable_record(job / "result.json", result)
+    if record["status"] != "failed":
+        record.update(status="failed", failure_ref=str(marker), failed_at=time.time())
+        write(job / "job.json", record)
+    return result
+
+
 class ProTokHarness:
     def __init__(self, backend, root, delegate, deadline):
         self.backend, self.root, self.delegate, self.deadline = (
@@ -642,10 +703,15 @@ class ProTokHarness:
             saved = read(job / "job.json")
             if saved["request"] != request or saved["source_signatures"] != before:
                 raise ProTokError("Existing job cannot be replaced or rewound")
+            if (job / "timeout.json").exists():
+                return timed_out_job(self.root, self.backend, workspace, iteration)
             if saved["status"] != "completed" and not (job / "result.json").exists():
-                raise ProTokError(
-                    "Existing unfinished job has unknown effects; explicit recovery required"
-                )
+                try:
+                    return timed_out_job(self.root, self.backend, workspace, iteration)
+                except (ProTokError, OSError, ValueError, KeyError) as error:
+                    raise ProTokError(
+                        "Existing unfinished job has unknown effects; explicit recovery required"
+                    ) from error
             return completed_job(self.root, self.backend, workspace, iteration)
         job.mkdir(parents=True)
         record = {
@@ -732,7 +798,6 @@ class ProTokHarness:
                     "error": f"{type(error).__name__}: {error}",
                     "retry": False,
                 }
-                self.errors.append(result["error"])
                 if (self.root / "control/debug-policy.json").exists():
                     try:
                         self.recoverable_failure = certify_candidate_failure(
@@ -746,6 +811,17 @@ class ProTokHarness:
                             error=self.recoverable_failure["cause"],
                             debug_available=True,
                         )
+                if self.recoverable_failure is None:
+                    try:
+                        trusted = timed_out_job(
+                            self.root, self.backend, workspace, iteration
+                        )
+                    except (ProTokError, OSError, ValueError, KeyError, AttributeError):
+                        self.errors.append(result["error"])
+                    else:
+                        result = self.trusted_result = trusted
+                else:
+                    self.errors.append(result["error"])
             write(workspace / "evaluation-result.json", result)
             return
 
@@ -755,6 +831,18 @@ class ProTokHarness:
             raise HarnessError("Continuation deadline reached or control/STOP set")
         kwargs["timeout_seconds"] = min(kwargs["timeout_seconds"], remaining, 3600)
         kwargs["prompt"] += "\n\n" + submission_instructions()
+        kwargs["prompt"] += """
+For a controller-certified formal result with status=failed and
+failure_kind=allocation_timeout, return outcome=incomplete, measurements=[],
+and artifacts=[the exact returned artifact]. Preserve the time limit and actual
+GPU charge; do not invent a score, shorten the evaluation, or submit again.
+A settled time limit ends this investigation's execution and enters independent
+Review. It does not establish model quality or mechanism, but is evidence of
+execution cost and feasibility under the fixed time budget.
+Review should retain the measured best, record the missing evidence, and continue
+unless an independent global reason requires stopping. Unresolved effects,
+identity/accounting failures, user STOP and the original deadline remain blocking.
+"""
         from integrations.protok.research_execution import instructions
 
         kwargs["prompt"] += instructions(self.root)
@@ -820,7 +908,7 @@ class ProTokHarness:
             read(result_path).get("status") != "completed"
             and not (
                 self.trusted_result
-                and self.trusted_result.get("purpose") == "research"
+                and self.trusted_result.get("purpose") in {"research", "formal"}
                 and self.trusted_result.get("status") == "failed"
             )
         ):
@@ -900,6 +988,18 @@ class ProTokHarness:
                     allow_research=research_policy(self.root) is not None,
                 )
                 return result
+            if (job_path(self.root, iteration) / "timeout.json").exists():
+                trusted = timed_out_job(self.root, self.backend, workspace, iteration)
+                if (
+                    result["artifacts"] != [trusted["artifact"]]
+                    or result["measurements"]
+                    or not (workspace / "evaluation-result.json").exists()
+                    or read(workspace / "evaluation-result.json") != trusted
+                ):
+                    raise HarnessError(
+                        "Execute response does not match the settled formal timeout"
+                    )
+                return result
             retain_local_incomplete(
                 self.root, self.backend, workspace, iteration, result, run_dir=run_dir
             )
@@ -971,7 +1071,10 @@ An unconfirmed local precheck failure, transport error, or unknown evaluation ef
 requires pausing the original Execute and preserving its Plan for reconciliation.
 Independent Review must inspect actual source and receipt, verify measurement, preserve
 limitations, update both route/global research, and continue. A worse candidate is useful
-evidence, not a reason to stop. Continue until deadline or real execution failure.
+evidence, not a reason to stop. A controller-certified, fully accounted formal
+TIMEOUT is an incomplete investigation, with no score; Review records the limitation
+and may continue. Stop dependent work on unresolved effects, identity/accounting
+failures, user STOP or exhausted authorization, not solely on a settled time limit.
 '''
 
 
@@ -1412,6 +1515,136 @@ def reconcile_completed_execute(root, backend):
             return state
 
 
+def reconcile_timed_out_execute(root, backend, *, authorization):
+    """Record a settled failed allocation without repeating its Execute or Plan."""
+    if not isinstance(authorization, str) or not authorization.strip():
+        raise ProTokError("Explicit timeout reconciliation authorization required")
+    root = Path(root)
+    study = Study(root / "study")
+    with (root / "control/runner.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with study._lock():
+            state = study.status()
+            relative = state["calls"].get("execute")
+            if not relative or state.get("accepted_calls", {}).get("execute"):
+                raise ProTokError("Timeout has no unaccepted Execute to reconcile")
+            previous = study.root / relative
+            replay = previous / "reconciliation.json"
+            if state["status"] == "ready" and replay.exists():
+                saved = read(replay)
+                if saved.get("operator_action") != "reconcile-settled-formal-timeout":
+                    raise ProTokError("Execute belongs to another reconciliation")
+                if saved.get("prepared_state") != state or any(
+                    (root / name).read_text() != value
+                    for name, value in saved["protected"].items()
+                ):
+                    raise ProTokError(
+                        "Timeout preparation or protected contract changed"
+                    )
+                response = completed_response(previous)
+                ProTokHarness(backend, root, None, 0).validate_completed(
+                    response, workspace=Path(saved["workspace"]), run_dir=previous
+                )
+                return state
+            if (
+                state["phase"] != "execute"
+                or state["status"] != "needs_attention"
+                or state.get("active_attempt") != relative
+            ):
+                raise ProTokError("Only an interrupted Execute may reconcile a timeout")
+            for directory in (previous, previous / "agent"):
+                study._check_attempt_stopped(directory)
+            iteration = f"{state['iteration']:04d}"
+            metadata = read(study.root / "iterations" / iteration / "iteration.json")
+            workspace = Path(metadata["workspace"])
+            trusted = timed_out_job(root, backend, workspace, iteration)
+            result_path = workspace / "evaluation-result.json"
+            if result_path.exists() and read(result_path) != trusted:
+                old = read(result_path)
+                if old.get("status") != "error" or any(
+                    name in old for name in ("value", "metric", "measurements")
+                ):
+                    raise ProTokError(
+                        "Existing evaluation interface is not the retained failure"
+                    )
+                immutable_record(
+                    job_path(root, iteration) / "timeout.previous-interface.json", old
+                )
+            write(result_path, trusted)
+            raw = completed_response(previous / "agent")
+            response = {
+                "outcome": "incomplete",
+                "markdown": (
+                    "Controller reconciliation of a settled formal TIMEOUT; no new "
+                    "evaluation or Execute call. The original Plan, candidate and Agent "
+                    "records are retained. Job "
+                    + str(trusted["job_id"])
+                    + " ended TIMEOUT; actual charge "
+                    + str(trusted["gpu_seconds"])
+                    + " GPU seconds. No official measurement was produced. Independent "
+                    "Review must assess cost and fixed-budget feasibility; model quality "
+                    "and mechanism remain unmeasured.\n\n"
+                    + (
+                        "Retained completed Agent report:\n" + raw["markdown"]
+                        if raw
+                        else "The partial Agent attempt remains evidence, not a completed response."
+                    )
+                ),
+                "artifacts": [trusted["artifact"]],
+                "measurements": [],
+            }
+            ProTokHarness(backend, root, None, 0).validate_completed(
+                response, workspace=workspace, run_dir=previous
+            )
+            directory = previous.parent
+            attempt = (
+                directory / f"attempt-{len(list(directory.glob('attempt-*'))) + 1:03d}"
+            )
+            attempt.mkdir()
+            if (previous / "context.json").exists():
+                shutil.copyfile(previous / "context.json", attempt / "context.json")
+            stop = root / "control/STOP"
+            prepared = {
+                **state,
+                "calls": {
+                    **state["calls"],
+                    "execute": str(attempt.relative_to(study.root)),
+                },
+                "status": "ready",
+                "active_attempt": None,
+                "error": None,
+            }
+            plan = Path("study") / state["plan_ref"]
+            if plan.is_absolute() or ".." in plan.parts:
+                raise ProTokError("Frozen Plan reference leaves the Study")
+            record = {
+                "operator_action": "reconcile-settled-formal-timeout",
+                "authorization": authorization,
+                "previous_attempt": relative,
+                "workspace": str(workspace),
+                "backend_result": str(job_path(root, iteration) / "result.json"),
+                "source_signatures": signatures(candidate_bytes(workspace)),
+                "stop_before": stop.read_text() if stop.exists() else None,
+                "call_count": state["call_count"],
+                "elapsed_seconds": state["elapsed_seconds"],
+                "previous_error": state.get("error"),
+                "prepared_state": prepared,
+                "protected": {
+                    name: (root / name).read_text()
+                    for name in (
+                        "control/ownership.json",
+                        "control/continuation.json",
+                        "study/study.json",
+                        str(plan),
+                    )
+                },
+            }
+            immutable_record(attempt / "reconciliation.json", record)
+            publish_completed_response(attempt, response)
+            study._save(prepared)
+            return prepared
+
+
 def reconcile_local_incomplete(root, backend):
     """Operator-only acceptance of the retained successful local rejection receipt."""
     root = Path(root)
@@ -1483,6 +1716,7 @@ def main(argv=None):
         "status",
         "reconcile-local-incomplete",
         "reconcile-completed-execute",
+        "reconcile-timed-out-execute",
         "repair-completed-control",
         "begin-debug",
         "resume-unsubmitted",
@@ -1506,6 +1740,10 @@ def main(argv=None):
         result = reconcile_local_incomplete(root, backend)
     elif args.reconcile_completed_execute:
         result = reconcile_completed_execute(root, backend)
+    elif args.reconcile_timed_out_execute:
+        result = reconcile_timed_out_execute(
+            root, backend, authorization=args.authorization or ""
+        )
     elif args.repair_completed_control:
         result = {
             "repaired": repair_completed_control(root, backend),

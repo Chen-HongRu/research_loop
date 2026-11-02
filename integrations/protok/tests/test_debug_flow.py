@@ -381,6 +381,48 @@ class DebugFlowTests(unittest.TestCase):
         self.assertEqual(len(self.invocations), 1)
         self.assertFalse((self.root / "control/debug/0009/decision.json").exists())
 
+    def test_settled_fresh_formal_timeout_finishes_without_repair_or_resubmission(self):
+        self.backend.smokes = ["completed"]
+        self.backend.formals = ["timeout"]
+        self.failure["submission"] = {"action": "evaluate"}
+        run.write(
+            self.workspace / "evaluation-submission.json", self.failure["submission"]
+        )
+
+        def rejected(*args, **kwargs):
+            raise ProTokError("TIMEOUT is not a candidate-code rejection")
+
+        def timeout(workspace, config, fingerprint, *, record_name):
+            return {
+                "purpose": "formal",
+                "status": "failed",
+                "failure_kind": "allocation_timeout",
+                "fingerprint": fingerprint,
+                "record_name": record_name,
+                "job_id": "790195",
+                "terminal_state": "TIMEOUT",
+                "exit_code": "0:0",
+                "gpu_seconds": 1828,
+                "quality_score_eligible": False,
+                "cause": "Slurm time limit reached.",
+                "evidence": [str(config)],
+            }
+
+        self.backend.settled_failure = rejected
+        self.backend.timed_out_receipt = timeout
+        result = self.recover()
+        self.assertEqual(result["outcome"], "incomplete")
+        self.assertEqual(result["artifacts"], [])
+        self.assertEqual(result["measurements"], [])
+        self.assertEqual(len(self.invocations), 1)
+        self.assertEqual(self.backend.formal_calls, [("debug-0009-formal-001", False)])
+        decision = run.read(self.root / "control/debug/0009/decision.json")
+        self.assertEqual(decision["status"], "failed")
+        self.assertEqual(decision["failures"][-1]["gpu_seconds"], 1828)
+        self.assertEqual(self.recover(), result)
+        self.assertEqual(len(self.backend.formal_calls), 1)
+        self.assertEqual(len(self.invocations), 1)
+
     def test_blocked_smoke_preserves_unaccounted_allocation_and_stops(self):
         self.backend.smokes = ["blocked"]
         with self.assertRaisesRegex(HarnessError, "unknown/unaccounted"):
