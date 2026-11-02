@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, telemetryPanel, longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -494,11 +494,14 @@ test('Live telemetry stays unreviewed, escaped and split by metric unit and cond
   const event={name:'loss',value:.2,step:1,unit:'nats',tags:['dashboard'],context:{seed:42,scope:'dev'}};
   const stream={stream_id:'same',source_id:'active',status:'running',events:[event,{...event,step:2,value:.1},{...event,context:{seed:43,scope:'dev'}},{...event,unit:'bits'},{...event,tags:['private'],value:'SECRET'}]};
   assert.equal(ui.telemetryGroups(stream).length,3);
-  const shown=ui.telemetryPanel([stream,{...stream,source_id:'history-1',events:[{...event,value:{nonfinite:'NaN<script>'}}]}]);
-  for(const text of ['active / same','history-1 / same','观测 · 未评审','running','NaN&lt;script&gt;'])assert.ok(shown.includes(text),text);
+  const groups=ui.metricSeries([stream,{...stream,source_id:'history-1',events:[{...event,value:{nonfinite:'NaN<script>'}}]}]);
+  assert.equal(groups.length,4);
+  const shown=groups.map(group=>ui.metricCard(group,{pinned:new Map()})).join('');
+  for(const text of ['loss','nats','NaN&lt;script&gt;'])assert.ok(shown.includes(text),text);
+  assert.match(html,/dashboard 标签 · 尚未评审/);
   assert.doesNotMatch(shown,/<script>|SECRET/);
   assert.equal((shown.match(/<svg /g)||[]).length,3);
-  assert.match(ui.telemetryPanel([{stream_id:'empty',events:[]}]),/尚无 dashboard 标签观测/);
+  assert.equal(ui.metricSeries([{stream_id:'empty',events:[]}]).length,0);
 });
 
 function concurrentTasks() {
@@ -569,6 +572,67 @@ test('Native telemetry groups scientific conditions independently of transport c
   assert.equal(ui.telemetryGroups(stream)[0].length,2);
   stream.events.push({...point,context:{...point.context,scope:'full'}});
   assert.equal(ui.telemetryGroups(stream).length,2);
+});
+
+test('Task metric scope separates source, parent investigation and independent long run', () => {
+  const short=ui.metricTask({id:'active:0001',source_id:'active',local_id:'0001'});
+  const stream={source_id:'active',run_id:null,source:{experiment_id:'0001'}};
+  assert.equal(ui.metricMatches(stream,short),true);
+  assert.equal(ui.metricMatches({...stream,source_id:'history-1'},short),false);
+  assert.equal(ui.metricMatches({...stream,run_id:'L0123456789abcdef'},short),false);
+  assert.equal(ui.metricMatches({...stream,source:{experiment_id:'0002',parent_iteration:'0001'}},short),false);
+  const long=ui.metricTask({id:'active:long:L0123456789abcdef',source_id:'active',local_id:'L0123456789abcdef',task_kind:'long_training'});
+  assert.equal(ui.metricMatches({...stream,run_id:'L0123456789abcdef'},long),true);
+  assert.equal(ui.metricMatches(stream,long),false);
+  assert.equal(ui.metricTask({id:'ledger:hash',source_id:'ledger'}),null);
+});
+
+test('Native numeric fields become precise scalar series without interpreting arrays as histograms', () => {
+  const leaves=ui.metricLeaves({'loss':.123456789012345,'a/b':{'x~y':2},array:[1,2],flag:true,broken:{nonfinite:'NaN'}});
+  assert.deepEqual(plain(leaves.map(leaf=>leaf.path)),[['loss'],['a~1b','x~0y'],['broken']]);
+  assert.equal(leaves[0].value,.123456789012345);
+  const base={name:'native/training',value:{loss:.2},step:10,time:100,tags:['dashboard'],context:{scope:'training',remote_start_offset:10,remote_end_offset:20}};
+  const series=ui.metricSeries([{source_id:'active',stream_id:'native',source:{kind:'fixed-short'},events:[base,{...base,step:20,value:{loss:.1},context:{...base.context,remote_start_offset:20,remote_end_offset:30}},{...base,unit:'different'}, {...base,context:{...base.context,scope:'validation'}},{...base,tags:['internal'],value:{secret:999}}]}]);
+  assert.equal(series.length,3);
+  assert.equal(series[0].name,'native/training/loss');
+  assert.equal(series[0].points.length,2);
+  assert.doesNotMatch(series.map(item=>ui.metricCard(item,{pinned:new Map()})).join(''),/secret/);
+  const alias=ui.metricSeries([{stream_id:'aliases',events:[{...base,name:'loss/part',value:1},{...base,name:'loss',value:{part:2}}]}]);
+  assert.equal(alias.length,2,'a scalar observation name and an object field cannot merge');
+});
+
+test('Missing values and step resets break plotted segments while missing steps use a time axis', () => {
+  const event={name:'loss',step:1,time:100,value:1,tags:['dashboard'],context:{}};
+  const series=ui.metricSeries([{stream_id:'gaps',events:[event,{...event,step:2,value:{nonfinite:'NaN'}},{...event,step:3,value:3},{...event,step:2,value:2},{...event,step:3,value:2.5},{...event,step:null,time:105,value:.5}]}]);
+  assert.equal(series.length,2);
+  assert.equal(series[0].axis,'time');
+  const stepped=series.find(item=>item.axis==='step'),chart=ui.metricPlot(stepped);
+  assert.equal((chart.match(/<polyline /g)||[]).length,3);
+  assert.doesNotMatch(chart,/NaN|Infinity/);
+  const view={pinned:new Map([[stepped.key,stepped.points[0]]])};
+  const pinned=ui.metricCard(stepped,view);
+  assert.match(pinned,/data-metric-value>1<\/div>/);
+  assert.match(pinned,/已固定 · Step 1/);
+  for(const values of [[1,null,3],[{loss:1},{loss:null},{loss:3}]]) {
+    const missing=ui.metricSeries([{stream_id:'explicit-null',events:values.map((value,index)=>({...event,value,step:index+1}))}])[0];
+    assert.equal(missing.points.length,3);
+    assert.equal((ui.metricPlot(missing).match(/<polyline /g)||[]).length,2,'explicit null must split a scalar curve');
+  }
+});
+
+test('Recent task metric cache deduplicates refresh and never carries values across task selection', () => {
+  const first={id:'active:0001',source_id:'active',local_id:'0001'},second={id:'active:0002',source_id:'active',local_id:'0002'};
+  const event={id:'a',offset:0,end_offset:10,name:'loss',value:.2,step:1,time:100,tags:['dashboard'],context:{}};
+  const stream={source_id:'active',run_id:null,stream_id:'same',source:{experiment_id:'0001',source_identity:'s',execution_identity:'e'},status:'live',updated_at:1,events:[event]};
+  ui.mergeTaskMetrics(first,[stream]);
+  let merged=ui.mergeTaskMetrics(first,[stream,{...stream,updated_at:3,status:'sync_incomplete',events:[{...event,id:'b',offset:10,end_offset:20,value:.1,step:2}]}]);
+  assert.equal(merged[0].events.length,2);
+  merged=ui.mergeTaskMetrics(first,[stream]);
+  assert.equal(merged[0].status,'sync_incomplete');
+  const selected=ui.mergeTaskMetrics(second,[{...stream,source:{...stream.source,experiment_id:'0002'},events:[{...event,value:999}]}]);
+  assert.equal(selected.length,1);
+  assert.deepEqual(plain(selected[0].events.map(point=>point.value)),[999]);
+  assert.equal(ui.mergeTaskMetrics(second,[stream]).length,1,'another experiment cannot add a stream');
 });
 
 test('A settled partial long task exposes progress and logs before review without accepted curves', () => {
