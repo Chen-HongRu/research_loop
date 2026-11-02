@@ -295,7 +295,12 @@ class LongTrainingTests(unittest.TestCase):
             patch.object(lane, "_load_backend", return_value=(transport, config)),
             patch.object(lane, "_snapshot", side_effect=fake_snapshot),
             patch.object(
-                lane, "_collect", return_value=completion(req, "b" * 64, remote)
+                lane,
+                "_collect",
+                return_value={
+                    "completion": completion(req, "b" * 64, remote),
+                    "progress": None,
+                },
             ),
             patch.object(lane.time, "time", return_value=100.0),
         ):
@@ -342,7 +347,12 @@ class LongTrainingTests(unittest.TestCase):
             patch.object(lane, "_load_backend", return_value=(transport, config)),
             patch.object(lane, "_snapshot", side_effect=fake_snapshot),
             patch.object(
-                lane, "_collect", return_value=completion(req, "b" * 64, remote)
+                lane,
+                "_collect",
+                return_value={
+                    "completion": completion(req, "b" * 64, remote),
+                    "progress": None,
+                },
             ),
             patch.object(lane.time, "time", return_value=100.0),
         ):
@@ -402,7 +412,12 @@ class LongTrainingTests(unittest.TestCase):
             patch.object(lane, "_load_backend", return_value=(transport, config)),
             patch.object(lane, "_snapshot", side_effect=fake_snapshot),
             patch.object(
-                lane, "_collect", return_value=completion(req, "b" * 64, remote)
+                lane,
+                "_collect",
+                return_value={
+                    "completion": completion(req, "b" * 64, remote),
+                    "progress": None,
+                },
             ),
             patch.object(lane.time, "time", return_value=200000.0),
         ):
@@ -428,11 +443,22 @@ class LongTrainingTests(unittest.TestCase):
             patch.object(lane, "_load_backend", return_value=(transport, config)),
             patch.object(lane, "_snapshot", side_effect=fake_snapshot),
             patch.object(
-                lane, "_collect", return_value=completion(req, "b" * 64, remote)
+                lane,
+                "_collect",
+                return_value={
+                    "completion": completion(req, "b" * 64, remote),
+                    "progress": None,
+                },
             ),
             patch.object(lane.time, "time", return_value=100.0),
         ):
-            lane.execute(backend, root, req, root / "workspace", deadline=100000.0)
+            lane.execute(
+                backend,
+                root,
+                req,
+                root / "study/long-runs" / req["id"] / "study/workspace",
+                deadline=100000.0,
+            )
         run = root / "study/long-runs" / req["id"]
         child = run / "study"
         publication = child / "iterations/0001/publication.json"
@@ -448,8 +474,14 @@ class LongTrainingTests(unittest.TestCase):
                 "execution_ref": "execute-response.json",
             },
         )
-        result = lane._read(root / "workspace/result.json")
-        execute = lane._envelope(req, root / "workspace/result.json", result)
+        result = lane._read(
+            root / "study/long-runs" / req["id"] / "study/workspace/result.json"
+        )
+        execute = lane._envelope(
+            req,
+            root / "study/long-runs" / req["id"] / "study/workspace/result.json",
+            result,
+        )
         review = {"candidate_reviews": []}
         lane._write(child / "review-response.json", review)
         lane._write(child / "execute-response.json", execute)
@@ -486,7 +518,9 @@ class LongTrainingTests(unittest.TestCase):
         with (
             patch.object(lane, "_load_backend", return_value=(transport, config)),
             patch.object(lane, "_snapshot", side_effect=fake_snapshot),
-            patch.object(lane, "_collect", return_value=invalid),
+            patch.object(
+                lane, "_collect", return_value={"completion": invalid, "progress": None}
+            ),
             patch.object(lane.time, "time", return_value=100.0),
         ):
             envelope = lane.execute(

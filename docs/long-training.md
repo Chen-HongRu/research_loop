@@ -41,8 +41,12 @@ adapter supplies the authorized executor and resource accounting.
 
 Published child output is recorded in `long-runs/<ID>/result.json`, including the
 independent Review, exact source, recipe, Execute, trajectory and evidence
-references. Negative and incomplete settled results remain knowledge. Unknown
-external effects remain unresolved and block this lane until reconciliation.
+references. Negative and incomplete settled results remain knowledge. A new child
+Review returns one `observation_reviews` entry (`step`, `valid`, `verified`,
+`reason`) for every complete retained validation point, including rejected points.
+The review context freezes the exact observations used for acceptance and later
+knowledge publication. Unknown external effects remain unresolved and block this
+lane until reconciliation.
 
 The parent freezes reviewed results into
 `iterations/NNNN/context/long_training_results.json` at the next iteration
@@ -69,9 +73,31 @@ The fixed long protocol is `se3-long-v1-10k-full4491-seed42`:
 
 The protected 2k/subset trainer is unchanged. `long_train.py` reuses its frozen
 training/evaluation helpers in an explicit 10k loop. All five validation
-checkpoints remain at the unique remote run path. Only small completion and
-metric receipts are collected; datasets and checkpoints are not scanned, hashed
-or copied for validation.
+checkpoints remain at the unique remote run path. `long-curve.json` is atomically
+published at initialization, every ten completed optimizer updates and validation
+boundaries. It records actual progress and the last training observation; a full
+validation point is appended only after checkpoint publication and complete
+4491-protein evaluation. An interruption during8k validation therefore retains
+complete2k/4k/6k points, while8k and10k remain missing.
+
+After any settled termination, including TIMEOUT or cancellation, the controller
+collects the two bounded completion/progress JSON records and at most64KiB each
+from training CSV and stdout tails. It does not read datasets, per-protein tables
+or checkpoint contents for validation. Missing/corrupt or source-mismatched
+progress cannot supply accepted validation observations; collected logs and exact
+errors remain evidence. Actual Slurm allocation charges are retained even when
+they exceed the requested allocation.
+
+An incomplete execution has `endpoint_complete: false`, lists missing validation
+steps and returns no10k endpoint measurement. Its complete intermediate metrics
+and training/log evidence still reach independent Review, parent knowledge and
+the dashboard. Even when no full validation completes, available training progress
+and logs remain visible. Final10k endpoint eligibility still requires full successful
+execution; a timeout alone is not evidence that the scientific method is ineffective.
+Performance research scripts must likewise publish a declared small JSON artifact
+initially and atomically update completed subtests at useful boundaries. Only
+persisted observations can be collected after process termination; unwritten memory
+and interrupted measurements cannot be recovered or treated as complete.
 
 Create an explicitly authorized `control/long-training-policy.json` before
 enabling the lane. Its fields are:
@@ -120,10 +146,12 @@ The dashboard has a separate long-training panel for nominations, status,
 reviewed curves, aligned metrics, knowledge and source/checkpoint references.
 Explanations use the parent's frozen evidence snapshot. A subsequent research
 script may declare a model input such as
-`long-checkpoint:L0123456789abcdef:6000`; resolution requires a completed,
-accounted allocation and an independently published accepting Review. The symbol
-resolves to the original remote checkpoint; no checkpoint-content validation runs
-at startup.
+`long-checkpoint:L0123456789abcdef:6000`; a partial run requires a settled,
+accounted allocation and independently published acceptance of that exact complete
+checkpoint observation. The allocation need not reach10k. Reuse compares the
+receipt/artifact to the observations frozen in the accepting Review; changing live
+metrics after Review cannot reuse the old acceptance. The symbol resolves to the
+original remote checkpoint; no checkpoint-content validation runs at startup.
 
 ## Verification boundary
 

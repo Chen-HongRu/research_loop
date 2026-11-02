@@ -415,7 +415,7 @@ test('Settled research overruns show actual accounting without marking it unknow
 
 test('Long training separates reviewed 10k endpoints and best checkpoints with aligned metrics', () => {
   const request={source_iteration:'0003',candidate:{id:'candidate3'},nomination:{basis:'quality',reason:'test reason',evidence:['short/result.json']},recipe:{total_steps:10000,validation_split:'full',initialization:'fresh'}};
-  const run={id:'L0123456789abcdef',request,status:'reviewed',phase:'done',result:{candidate_id:'candidate3',review:{markdown:'Independent knowledge',knowledge_changes:['long-run evidence']},execute:{artifacts:['metrics.json']},result:{curve:[{step:2000,ca_rmsd:1,tm_score:.5,lddt:.6,checkpoint:'checkpoint2k',proteins:100},{step:10000,ca_rmsd:2,tm_score:.7,lddt:.8,checkpoint:'checkpoint10k',proteins:100}],checkpoints:['checkpoint2k','checkpoint10k']}}};
+  const run={id:'L0123456789abcdef',request,status:'reviewed',phase:'done',result:{candidate_id:'candidate3',review:{markdown:'Independent knowledge',knowledge_changes:['long-run evidence'],observation_reviews:[{step:2000,valid:true,verified:true,reason:'complete'},{step:10000,valid:true,verified:true,reason:'complete'}]},execute:{artifacts:['metrics.json']},result:{curve:[{step:2000,ca_rmsd:1,tm_score:.5,lddt:.6,checkpoint:'checkpoint2k',proteins:100},{step:10000,ca_rmsd:2,tm_score:.7,lddt:.8,checkpoint:'checkpoint10k',proteins:100}],checkpoints:['checkpoint2k','checkpoint10k']}}};
   const rendered=ui.longTrainingRuns([run]);
   for(const label of ['最终 10k','曲线最优 CA RMSD','CA RMSD ↓','TM-score ↑','lDDT ↑','checkpoint2k','checkpoint10k','Independent knowledge','short/result.json','metrics.json'])assert.ok(rendered.includes(label),label);
   assert.match(rendered, /最终 10k<\/th><td>10000<\/td><td>2<\/td><td>0.7<\/td><td>0.8/);
@@ -435,4 +435,56 @@ test('Long training allocations appear in accounting when no short job is outsta
   assert.match(elements.get('statusline').innerHTML,/长训练 80 GPU 秒/);
   assert.doesNotMatch(elements.get('statusline').innerHTML,/无待核账 GPU 作业/);
   vm.runInContext('data=null;',context);
+});
+
+
+test('Timed-out long training retains every complete observation and reports its missing 10k endpoint', () => {
+  const curve=[2000,4000,6000].map(step=>({step,proteins:4491,ca_rmsd:4-step/10000,tm_score:step/10000,lddt:.6,checkpoint:'checkpoint'+step,checkpoint_path:'/train/checkpoint-'+step+'.pt',evidence:['/validation/'+step+'/eval.csv']}));
+  const run={id:'L0123456789abcdef',source_label:'历史1',request:{source_iteration:'0003'},status:'reviewed',result:{review:{observation_reviews:curve.map(point=>({step:point.step,valid:true,verified:true,reason:'full validation'}))},result:{status:'failed',terminal_state:'TIMEOUT',endpoint_complete:false,missing_validation_steps:[8000,10000],progress:{optimizer_step:6750,phase:'training'},curve}}};
+  const rendered=ui.longTrainingRuns([run]);
+  for(const value of ['训练未完整完成','TIMEOUT','历史1','8000, 10000','6750','缺少完整 10k 全量验证端点','全部保留的完整全量验证观测'])assert.ok(rendered.includes(value),value);
+  assert.match(rendered,/曲线最优 CA RMSD<\/th><td>6000<\/td>/);
+  for(const step of [2000,4000,6000]){
+    assert.ok(rendered.includes('/train/checkpoint-'+step+'.pt'));
+    assert.ok(rendered.includes('/validation/'+step+'/eval.csv'));
+    assert.match(rendered,new RegExp('<tr><td>'+step+'</td>'));
+  }
+  assert.doesNotMatch(rendered, /最终 10k<\/th><td>10000/);
+});
+
+test('Rejected and unverified full observations remain visible but never become accepted best or curve', () => {
+  const point=(step,value)=>({step,proteins:4491,ca_rmsd:value,tm_score:.7,lddt:.8,checkpoint:'checkpoint'+step});
+  const curve=[point(2000,3),point(4000,1),point(6000,2)];
+  const result={curve,endpoint_complete:false};
+  const review={observation_reviews:[{step:2000,valid:true,verified:true,reason:'accepted'},{step:4000,valid:false,verified:true,reason:'wrong source <script>'},{step:6000,valid:true,verified:false,reason:'missing evidence'}]};
+  const rendered=ui.longTrainingRuns([{id:'L0123456789abcdef',result:{review,result}}]);
+  assert.match(rendered,/曲线最优 CA RMSD<\/th><td>2000<\/td><td>3/);
+  for(const label of ['观测被拒绝','证据未核实','wrong source &lt;script&gt;','missing evidence','checkpoint4000','checkpoint6000'])assert.ok(rendered.includes(label),label);
+  assert.doesNotMatch(rendered,/<script>/);
+  const charts=[...rendered.matchAll(/<svg[\s\S]*?<\/svg>/g)].map(match=>match[0]).join('');
+  assert.match(charts,/2000 steps/);
+  assert.doesNotMatch(charts,/4000 steps|6000 steps/);
+  const unreviewed=ui.longTrainingRuns([{id:'L0123456789abcdef',result:{result}}]);
+  assert.match(unreviewed,/尚无逐点核查通过的观测/);
+  assert.doesNotMatch(unreviewed,/<svg /);
+});
+
+test('No full-validation points still exposes collected training and log evidence without invented metrics', () => {
+  const rendered=ui.longTrainingRuns([{id:'L0123456789abcdef',result:{review:{observation_reviews:[]},result:{status:'failed',terminal_state:'TIMEOUT',endpoint_complete:false,missing_validation_steps:[2000,4000,6000,8000,10000],progress:{optimizer_step:1250,phase:'validation'},curve:[],log_evidence:['/train/progress.json','/train/train.csv'],training_log_tail:'step=1250 loss=.2 <script>',stdout_tail:'TIME LIMIT & interrupted'}}}]);
+  for(const value of ['尚无完整全量验证观测','1250','/train/progress.json','/train/train.csv','训练日志尾部','标准输出尾部','step=1250 loss=.2 &lt;script&gt;','TIME LIMIT &amp; interrupted'])assert.ok(rendered.includes(value),value);
+  assert.doesNotMatch(rendered,/<svg |<script>|最终 10k<\/th><td>10000/);
+});
+
+
+test('Legacy completed curves retain explicit whole-run review labels while partial runs require point reviews', () => {
+  const result={curve:[{step:2000,ca_rmsd:2,tm_score:.6,lddt:.7},{step:10000,ca_rmsd:3,tm_score:.5,lddt:.6}]};
+  const published={candidate_id:'legacy',review:{candidate_reviews:[{candidate_id:'legacy',valid:true,verified:true}]},result};
+  const full=ui.longTrainingRuns([{id:'L0123456789abcdef',result:published}]);
+  assert.match(full,/整轮核查通过（旧完整记录）/);
+  assert.match(full,/当时未单列逐点核查/);
+  assert.match(full,/曲线最优 CA RMSD<\/th><td>2000<\/td>/);
+  assert.match(full,/最终 10k<\/th><td>10000<\/td>/);
+  const partial=ui.longTrainingRuns([{id:'L0123456789abcdef',result:{...published,result:{...result,status:'failed',endpoint_complete:false}}}]);
+  assert.doesNotMatch(partial,/整轮核查通过|<svg /);
+  assert.match(partial,/尚无逐点核查通过的观测/);
 });

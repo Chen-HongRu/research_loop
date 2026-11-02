@@ -10,6 +10,23 @@ import sys
 STEPS = [2000, 4000, 6000, 8000, 10000]
 
 
+def progress_record(config, step, phase, points, checkpoints, training=None):
+    """Small journal; only fully evaluated checkpoints enter points."""
+    return {
+        "status": "incomplete",
+        "run_id": config["run_id"],
+        "protocol": config["protocol"],
+        "source_identity": config["source_identity"],
+        "recipe": config["recipe"],
+        "scheduler_horizon": 50000,
+        "optimizer_step": step,
+        "phase": phase,
+        "points": list(points),
+        "checkpoints": list(checkpoints),
+        "last_training": training,
+    }
+
+
 def run(config):
     source = Path(config["source"])
     sys.path[:0] = [str(source), str(source / "scripts")]
@@ -44,6 +61,16 @@ def run(config):
     if args.output.exists() and any(args.output.iterdir()):
         raise FileExistsError("Preserving existing long-training output")
     args.output.mkdir(parents=True, exist_ok=True)
+    curve, checkpoints = [], []
+    last_training = None
+
+    def publish(step, phase):
+        atomic_json(
+            args.output / "long-curve.json",
+            progress_record(config, step, phase, curve, checkpoints, last_training),
+        )
+
+    publish(0, "initializing")
     torch.set_float32_matmul_precision("highest")
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -82,10 +109,10 @@ def run(config):
     frozen.save_checkpoint(
         args.output, model, optimizer, scheduler, 0, fixed, candidate, args
     )
+    publish(0, "compiling")
     forward = torch.compile(model, dynamic=True) if args.compile else model
     adapter = frozen.FixedSamplingAdapter(model, forward)
     model.train()
-    curve, checkpoints = [], []
     for step in range(10000):
         values, _ = frozen.update(
             model,
@@ -101,14 +128,14 @@ def run(config):
         )
         completed = step + 1
         if completed % 10 == 0:
-            log_training_row(
-                args.output,
-                {
-                    "optimizer_step": completed,
-                    **{f"train/{key}": float(value) for key, value in values.items()},
-                },
-            )
+            last_training = {
+                "optimizer_step": completed,
+                **{f"train/{key}": float(value) for key, value in values.items()},
+            }
+            log_training_row(args.output, last_training)
+            publish(completed, "training")
         if completed in STEPS:
+            publish(completed, "validation")
             checkpoint = frozen.save_checkpoint(
                 args.output,
                 model,
@@ -131,10 +158,8 @@ def run(config):
                     "path": config["output_reference"] + "/" + checkpoint.name,
                 }
             )
-            atomic_json(
-                args.output / "long-curve.json",
-                {"points": curve, "checkpoints": checkpoints},
-            )
+            publish(completed, "training")
+    publish(10000, "final-gate")
     adam = sorted({int(state["step"]) for state in optimizer.state.values()})
     if adam != [10000] or scheduler.last_epoch != 10000:
         raise RuntimeError("Optimizer/scheduler completion clocks differ")

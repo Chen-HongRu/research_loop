@@ -264,6 +264,15 @@ or validation scan. Load only samples/checkpoints needed for actual computation.
 The remote manifest /inputs.json describes resolved read-only paths under /inputs/;
 code is at /workspace, working/output directory is /output. Write only declared
 relative output files there (small JSON/CSV/Markdown/figures; 16 MiB total).
+Publish completed subtests incrementally: after each completed configuration or
+measurement, atomically replace a declared small JSON file with completed
+observations and pending/missing items. Retain conditions, warmup, measured steps,
+timing boundaries and units; synchronize asynchronous GPU work for GPU timing.
+Write an initial empty/pending record before expensive setup, and update at useful
+boundaries. Do not wait until the entire experiment succeeds to write results.
+A time limit does not invalidate earlier complete observations; explain exactly
+which comparisons remain incomplete. Never invent observations still in memory
+or treat an interrupted measurement or missing configuration as zero.
 Import protected project modules from /workspace. See the actual trusted result
 for locally collected output/evidence paths. No checkpoint is promised to exist:
 missing input is a failed prerequisite, never permission to substitute another.
