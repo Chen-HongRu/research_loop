@@ -2120,8 +2120,11 @@ def _reconcile_settled_execute(
                     "outstanding",
                     "research_outstanding",
                     "debug_outstanding",
-                    "long_training_outstanding",
-                    "manual_training_outstanding",
+                    *(
+                        ("long_training_outstanding", "manual_training_outstanding")
+                        if no_allocation
+                        else ()
+                    ),
                 )
             ):
                 raise ProTokError(
