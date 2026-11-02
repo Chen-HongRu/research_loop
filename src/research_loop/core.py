@@ -46,6 +46,7 @@ from .harness import (
 )
 from .protocol import SCHEMAS, context_schema, prompt, validate_response
 from .research_contract import validate_research_execution
+from .scout import REPORT_MAX_BYTES as SCOUT_REPORT_MAX_BYTES
 from .strategy import debate_rounds, review_guidance, validate_strategy
 from .tasks import TaskQueue, completed_results as task_results
 
@@ -598,11 +599,12 @@ class Study:
                 target = context / destination
                 if not target.exists():
                     try:
-                        value = (
-                            _read(source)
-                            if source.exists() and source.stat().st_size <= 131072
-                            else None
-                        )
+                        if not source.exists():
+                            value = None
+                        elif source.stat().st_size > SCOUT_REPORT_MAX_BYTES:
+                            value = {"unavailable": "Input exceeds 128 KiB"}
+                        else:
+                            value = _read(source)
                     except (OSError, ValueError) as error:
                         value = {"unavailable": type(error).__name__}
                     _write(target, value)

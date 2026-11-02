@@ -711,10 +711,10 @@ class ProTokServerTests(unittest.TestCase):
 
     def test_scout_runs_off_the_driver_thread_and_closes_without_wait(self):
         entered, release = threading.Event(), threading.Event()
-        self.write("study/state.json", {"iteration": 7})
-        job = self.root / "control/jobs/0007/job.json"
-        job.parent.mkdir(parents=True)
-        job.write_text(json.dumps({"status": "submitted"}))
+        self.write(
+            "study/state.json",
+            {"iteration": 7, "status": "running", "phase": "selection"},
+        )
 
         def launch():
             entered.set()
@@ -732,19 +732,51 @@ class ProTokServerTests(unittest.TestCase):
             release.set()
             scheduler.thread.join(2)
 
-    def test_scout_does_not_launch_search_while_supervisor_is_blocked(self):
-        self.write("study/state.json", {"iteration": 7})
-        self.write("control/supervisor-status.json", {"status": "blocked"})
-        job = self.root / "control/jobs/0007/job.json"
-        job.parent.mkdir(parents=True)
-        job.write_text(json.dumps({"status": "submitted"}))
-        manager = SimpleNamespace(launch_if_due=Mock(), close=Mock())
-        scheduler = SERVER.ScoutScheduler(self.root, manager=manager)
-        with patch.object(
-            scheduler.stopped, "wait", side_effect=lambda _: scheduler.stopped.set()
+    def test_scout_polls_without_a_formal_job_during_active_research(self):
+        for phase in ("selection", "plan", "execute", "review"):
+            for supervisor in (None, "running"):
+                with self.subTest(phase=phase, supervisor=supervisor):
+                    self.write(
+                        "study/state.json",
+                        {"iteration": 7, "status": "running", "phase": phase},
+                    )
+                    status = self.root / "control/supervisor-status.json"
+                    status.unlink(missing_ok=True)
+                    if supervisor:
+                        self.write(status, {"status": supervisor})
+                    manager = SimpleNamespace(launch_if_due=Mock(), close=Mock())
+                    scheduler = SERVER.ScoutScheduler(self.root, manager=manager)
+                    with patch.object(
+                        scheduler.stopped,
+                        "wait",
+                        side_effect=lambda _: scheduler.stopped.set(),
+                    ):
+                        scheduler._run()
+                    manager.launch_if_due.assert_called_once_with()
+
+    def test_scout_suppresses_new_search_when_blocked_failed_or_handing_off(self):
+        for supervisor, handoff in (
+            ("blocked", False),
+            ("failed", False),
+            ("running", True),
         ):
-            scheduler._run()
-        manager.launch_if_due.assert_not_called()
+            with self.subTest(supervisor=supervisor, handoff=handoff):
+                self.write("control/supervisor-status.json", {"status": supervisor})
+                if handoff:
+                    (self.root / "control/HANDOFF").touch()
+                manager = SimpleNamespace(
+                    launch_if_due=Mock(), close=Mock(), shutdown=Mock()
+                )
+                scheduler = SERVER.ScoutScheduler(self.root, manager=manager)
+                with patch.object(
+                    scheduler.stopped,
+                    "wait",
+                    side_effect=lambda _: scheduler.stopped.set(),
+                ):
+                    scheduler._run()
+                manager.launch_if_due.assert_not_called()
+                manager.close.assert_not_called()
+                manager.shutdown.assert_not_called()
 
     def test_shutdown_settles_scheduler_and_owned_search(self):
         self.write("study/state.json", {"iteration": 7})

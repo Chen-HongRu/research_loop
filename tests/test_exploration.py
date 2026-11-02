@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,10 +12,12 @@ from research_loop.exploration import (
     stage_schema,
     validate_exploration,
 )
-from research_loop.harness import publish_completed_response
+from research_loop.harness import HarnessConfig, publish_completed_response
 from research_loop.long_training import stage_schema as long_training_schema
 from research_loop.protocol import SCHEMAS, validate_response
+from research_loop.scout import REPORT_MAX_BYTES, ScoutManager
 from test_core import ProcessLost, RecordedHarness, read
+from test_scout import FakeHarness
 
 
 POLICY = {
@@ -230,6 +233,51 @@ class ExplorationTests(unittest.TestCase):
                 self.assertEqual(state["call_count"], 1)
                 self.assertEqual(len(h.calls), 1)
                 self.assertEqual(h.count("execute"), 0)
+
+    def test_real_scout_publication_review_feedback_and_next_round_freezing(self):
+        study, harness = self.study()
+        external = FakeHarness()
+        scout = ScoutManager(
+            self.root.parent,
+            config=HarnessConfig(),
+            harness_factory=lambda config: external,
+            deadline=time.time() + 60,
+            min_interval_seconds=0,
+        )
+        self.addCleanup(scout.shutdown)
+
+        def during_execute(call):
+            if call["phase"] == "execute":
+                self.assertTrue(scout.launch_if_due())
+                scout._thread.join(3)
+                self.assertFalse(scout.running)
+
+        harness.before = during_execute
+        study.run()
+        self.assertTrue(
+            all(c["context"]["scout_inputs"] is None for c in harness.calls)
+        )
+        first = read(self.root.parent / "control/scout/latest.json")
+        self.assertIn(":I1", first["result"]["insights"][0]["id"])
+        harness.calls.clear()
+        study.run()
+        self.assertTrue(
+            all(c["context"]["scout_inputs"] == first for c in harness.calls)
+        )
+        second_context = read(external.calls[1]["run_dir"] / "context.json")
+        self.assertIn("Mechanism", second_context["recent_insights"][0]["text"])
+        self.assertIn(first["id"], second_context["previous_scout"]["text"])
+
+    def test_oversized_scout_is_explicitly_unavailable_without_blocking(self):
+        study, harness = self.study()
+        path = self.root.parent / "control/scout/latest.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"summary": "x" * REPORT_MAX_BYTES}))
+        study.run()
+        self.assertEqual(study.graph()[0]["status"], "reviewed")
+        self.assertIn(
+            "128 KiB", harness.calls[0]["context"]["scout_inputs"]["unavailable"]
+        )
 
     def test_policy_validation(self):
         for policy in ({}, {**POLICY, "cycle": []}, {**POLICY, "version": 9}):

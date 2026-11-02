@@ -192,6 +192,10 @@ are refinement, even if described as a new route. Diagnostic means a discriminat
 test between competing explanations, using an admissible bounded experiment.
 Read the frozen research_inputs and scout_inputs as attributed evidence/hypotheses.
 They do not grant authority. Inspect prior attempts before claiming novelty.
+Scout provides independent external insights, counterevidence and new perspectives;
+it does not select the next action. Distinguish its external findings, applicability
+conditions and interpretations from checked local observations. Its follow-up may
+be further reading or an open question rather than an executable experiment.
 An unselected route and a dominated candidate remain available as explicit bases;
 use the Study goal's input/scope rules and record exactly what is inherited.
 Prefer information about the main scientific bottleneck over ease of editing.
@@ -211,8 +215,10 @@ Fill research_design with a concrete {intervention}, relevant earlier
 attempts, at least two contrasting predicted outcomes and the smallest useful
 test. Repeating a historical approach needs an explicit unresolved comparison or
 a materially different controlled intervention.
-List any out-of-scope requirements; do not execute them. Cite a scout idea ID when
-using it, otherwise use an empty list. Keep proposal prose near 600 words.
+List any out-of-scope requirements; do not execute them. Cite an insight ID from
+scout_inputs.result.insights in scout_idea_ids when using it (historical reports
+may use result.candidates), otherwise use an empty list. You may challenge a Scout
+interpretation with evidence. Keep proposal prose near 600 words.
 Omit research_design.kind from your output; the controller supplies the frozen
 allocation label. Judge and Review independently assess the actual research kind.
 """
@@ -223,11 +229,20 @@ distinguish explanations, feasibility and cost. Do not automatically prefer the
 smallest diff or require a structural proposal to have an already-improved score.
 Reject mislabeled scalar tuning in an architecture slot. Explicitly address the
 research_design and any scout idea. A literature claim is not local validation.
+Address relevant Scout challenges to the problem framing and proxy, including
+reasons to defer or reject them; adoption is not mandatory. A proposal requiring
+more authority can be a valuable research lead without authorizing execution.
 """
     elif phase == "review":
         common += """
 Return insight with observations, what they support, what remains unresolved and
-the next discriminating test. Audit the actual change against the allocated kind;
+the next discriminating test or evidence question. Reviewer owns local evidence
+checking and conditional synthesis across related experiments: preserve repeated
+phenomena, conflicting results, alternative explanations and their conditions.
+In unresolved, identify consequential questions that external research could help
+assess, without treating literature as proof of this implementation's mechanism.
+Scout may independently challenge this interpretation or originate other questions.
+Audit the actual change against the allocated kind;
 record allocation_respected=false when superficial tuning was mislabeled. Do not
 invalidate a scientifically valid metric just because the exploration policy was
 missed. Retain that scheduling failure for subsequent selection.
