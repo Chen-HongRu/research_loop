@@ -1155,12 +1155,10 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
                 input_schema = contract_schema["properties"]["execution"]["properties"][
                     "inputs"
                 ]["items"]
-                input_schema["properties"]["role"]["enum"] = [
-                    "development",
-                    "exploratory",
-                    "model",
-                    "reference",
-                ]
+                input_schema["properties"]["role"] = {
+                    "type": "string",
+                    "enum": ["development", "exploratory", "model", "reference"],
+                }
                 if kwargs.get("run_dir") is not None:
                     plan_attempt = Path(kwargs["run_dir"])
                     agent = plan_attempt / "agent"
