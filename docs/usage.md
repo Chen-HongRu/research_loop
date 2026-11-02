@@ -10,7 +10,7 @@ Meta Loop 复用同一 Study、Route、实验图与 Plan → Execute → Review�
 
 ## 探索策略与研究 Scout
 
-Study 可选用探索策略，为每轮分配研究类型，并在迭代边界冻结研究输入、Scout 建议和已发布洞见。宿主按任务条件启动只读 Scout，结果供后续研究参考。策略与边界见[探索策略](exploration.md)和 [Scout 说明](scout.md)。
+Study 可选用探索策略，为每轮分配研究类型，并在迭代边界冻结研究输入、Scout 建议和已发布洞见。Reviewer 综合本地证据与未解问题；宿主接入的只读 Scout 深入阅读论文与实现，提供独立外部视角。默认每推进一轮且至少间隔五分钟可调用，结果在下一轮边界供选择阶段审议，不改写当前 Plan。策略与边界见[探索策略](exploration.md)和 [Scout 说明](scout.md)。
 
 通用库位于 `src/research_loop/`；任务后端、固定指标、资源租约和部署操作位于 `integrations/`。ProTok 的适配器保存在 `integrations/protok/`；实际研究输入和部署记录由项目方私下维护。
 

@@ -71,6 +71,31 @@ test('Scout refresh retains user expansion and collapse while updating findings'
   }
 });
 
+test('Scout renders structured research insights, open questions and legacy findings', () => {
+  const prior=elements.get('scoutBody');
+  elements.set('scoutBody',{innerHTML:'',querySelector:()=>null,querySelectorAll:()=>[]});
+  try {
+    vm.runInContext(`data={scout:{status:'completed',findings:[{
+      id:'run:I1',title:'A research explanation',kind:'explanation',
+      local_observations:['A local observation'],external_findings:['An external finding'],
+      applicability:'Matching conditions',relation_to_goal:'Goal relation',
+      implications:'A research implication',follow_up:'',execution_conditions:[],scope_requirements:[]
+    }],open_questions:['An unresolved question']}};`,context);
+    ui.renderScout();
+    const markup=elements.get('scoutBody').innerHTML;
+    for(const text of ['A research explanation','解释','本地观察','外部研究发现','适用条件','与研究目标的关系','研究启示','开放问题','An unresolved question']) {
+      assert.ok(markup.includes(text),text);
+    }
+    vm.runInContext("data.scout.findings=[{title:'Legacy proposal',ready_to_test:true}];",context);
+    ui.renderScout();
+    assert.ok(elements.get('scoutBody').innerHTML.includes('Legacy proposal'));
+    assert.ok(elements.get('scoutBody').innerHTML.includes('已具备实验条件'));
+  } finally {
+    if(prior) elements.set('scoutBody',prior); else elements.delete('scoutBody');
+    vm.runInContext('data=null;',context);
+  }
+});
+
 test('Git rows follow time; tracks follow code parents, independently of routes and references', () => {
   const nodes = [
     {id:'0001', base:null, route_id:'A'},

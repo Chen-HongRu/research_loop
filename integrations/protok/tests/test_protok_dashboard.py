@@ -912,9 +912,47 @@ class AgentOutputTests(unittest.TestCase):
         scout = DASH.snapshot(self.root, snapshot_only=True)["scout"]
         self.assertEqual(scout["status"], "failed")
         self.assertEqual(scout["summary"], "Earlier published advice")
+        self.assertEqual(scout["findings"], [{"id": "idea-1"}])
+        self.assertEqual(scout["open_questions"], [])
         self.assertEqual(scout["findings_finished_at"], 30)
         self.assertEqual(scout["finished_at"], 70)
         self.assertNotIn("PRIVATE", json.dumps(scout))
+
+    def test_scout_exports_v2_insights_and_open_questions(self):
+        self.put("study/study.json", {"exploration": {"version": 1}})
+        insight = {
+            "id": "run:I1",
+            "title": "Explain local behavior",
+            "kind": "explanation",
+            "question": "What explains the observation?",
+            "local_observations": ["A local result"],
+            "external_findings": ["A related source finding"],
+            "interpretation": "A possible mechanism",
+            "applicability": "Under matching conditions",
+            "relation_to_goal": "Explains the research obstacle",
+            "implications": "Revise the working explanation",
+            "source_ids": ["S1"],
+            "follow_up": "",
+            "execution_conditions": [],
+            "scope_requirements": [],
+        }
+        self.put(
+            "control/scout/latest.json",
+            {
+                "version": 2,
+                "result": {
+                    "summary": "Research context",
+                    "insights": [insight],
+                    "open_questions": ["What remains uncertain?"],
+                    "candidates": [{"id": "legacy-shadow"}],
+                    "sources": [{"id": "S1", "url": "https://example.org/paper"}],
+                },
+            },
+        )
+        scout = DASH.snapshot(self.root, snapshot_only=True)["scout"]
+        self.assertEqual(scout["findings"], [insight])
+        self.assertEqual(scout["open_questions"], ["What remains uncertain?"])
+        self.assertEqual(scout["sources"][0]["id"], "S1")
 
 
 class FrontierTests(unittest.TestCase):

@@ -19,7 +19,7 @@ from research_loop.diagnostics import CommandDiagnostics, diagnostic_view  # noq
 
 
 class ScoutScheduler:
-    """Poll independently while run_one is blocked on an actual GPU evaluation."""
+    """Poll independently throughout an active research iteration."""
 
     def __init__(self, root, *, manager=None, interval=3):
         self.root = Path(root)
@@ -47,16 +47,10 @@ class ScoutScheduler:
         while not self.stopped.is_set():
             try:
                 supervisor = self.root / "control/supervisor-status.json"
-                state = read(self.root / "study/state.json")
-                job = job_path(self.root, f"{state['iteration']:04d}") / "job.json"
                 if (
-                    (
-                        not supervisor.exists()
-                        or read(supervisor).get("status") == "running"
-                    )
-                    and job.exists()
-                    and read(job).get("status") == "submitted"
-                ):
+                    not supervisor.exists()
+                    or read(supervisor).get("status") == "running"
+                ) and not (self.root / "control/HANDOFF").exists():
                     self.manager.launch_if_due()
             except (OSError, ValueError, KeyError, TypeError) as error:
                 write(
