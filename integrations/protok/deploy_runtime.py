@@ -13,7 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.backend import ProTokBackend  # noqa: E402
-from integrations.protok.run import debug_policy, job_path  # noqa: E402
+from integrations.protok.run import (  # noqa: E402
+    ProTokHarness,
+    debug_policy,
+    job_path,
+    timed_out_job,
+)
+from research_loop.harness import completed_response  # noqa: E402
 
 
 def read(path):
@@ -52,9 +58,13 @@ def check_boundary(root, backend):
     iteration = f"{state['iteration']:04d}"
     job = job_path(root, iteration) / "job.json"
     if job.exists() and read(job)["status"] != "completed":
+        timeout = job.parent / "timeout.json"
         decision = control / "debug" / iteration / "decision.json"
         rejected = read(decision) if decision.exists() else {}
-        if not (
+        if timeout.exists() and read(job)["status"] == "failed":
+            workspace = read(folder / "iteration.json")["workspace"]
+            timed_out_job(root, backend, workspace, iteration)
+        elif not (
             read(job)["status"] == "failed"
             and rejected.get("status") == "failed"
             and rejected.get("response", {}).get("outcome") == "incomplete"
@@ -70,6 +80,55 @@ def check_boundary(root, backend):
         or status.get("research_outstanding")
     ):
         raise RuntimeError("Outstanding evaluation effects prevent a handoff")
+    return state
+
+
+def check_timeout_boundary(root, backend, *, research=False):
+    """Resume only the explicitly reconciled, settled failed allocation."""
+    state = read(root / "study/state.json")
+    iteration = f"{state['iteration']:04d}"
+    relative = state.get("calls", {}).get("execute", "")
+    if (
+        state.get("phase") != "execute"
+        or state.get("status") != "ready"
+        or state.get("debugging")
+        or state.get("active_attempt")
+        or state.get("accepted_calls", {}).get("execute")
+        or not re.fullmatch(rf"iterations/{iteration}/execute/attempt-[0-9]+", relative)
+    ):
+        raise RuntimeError("An explicitly reconciled formal timeout is required")
+    attempt = root / "study" / relative
+    record = read(attempt / "reconciliation.json")
+    stop = root / "control/STOP"
+    stop_text = stop.read_text() if stop.exists() else None
+    if (
+        record.get("operator_action")
+        != (
+            "reconcile-settled-research-result"
+            if research
+            else "reconcile-settled-formal-timeout"
+        )
+        or not isinstance(record.get("authorization"), str)
+        or not record["authorization"].strip()
+        or record.get("stop_before") != "Supervisor stopped: attention\n"
+        or stop_text != record["stop_before"]
+    ):
+        raise RuntimeError("STOP changed or is not the reconciled system attention")
+    owner = read(root / "control/ownership.json")
+    lease = read(root / "control/continuation.json")
+    if not time.time() < min(owner["expires_at"], lease["deadline"]):
+        raise RuntimeError("Timeout continuation cannot extend the original deadline")
+    if record.get("prepared_state") != state or any(
+        (root / name).read_text() != value
+        for name, value in record["protected"].items()
+    ):
+        raise RuntimeError("Timeout preparation or protected contract changed")
+    result = completed_response(attempt)
+    if result is None:
+        raise RuntimeError("Timeout reconciliation has no completed controller receipt")
+    ProTokHarness(backend, root, None, 0).validate_completed(
+        result, workspace=Path(record["workspace"]), run_dir=attempt
+    )
     return state
 
 
@@ -107,8 +166,16 @@ def check_debug_boundary(root, backend):
     return state
 
 
-def deploy(root, runtime, *, resume_debug=False, resume_submission=False):
-    if resume_debug and resume_submission:
+def deploy(
+    root,
+    runtime,
+    *,
+    resume_debug=False,
+    resume_submission=False,
+    resume_timeout=False,
+    resume_research=False,
+):
+    if sum((resume_debug, resume_submission, resume_timeout, resume_research)) > 1:
         raise ValueError("Choose one explicit recovery mode")
     root, runtime = root.resolve(), runtime.resolve()
     commit = (runtime / "SOURCE_COMMIT").read_text().strip()
@@ -139,6 +206,8 @@ def deploy(root, runtime, *, resume_debug=False, resume_submission=False):
             from integrations.protok.resume_submission import validate_prepared
 
             state = validate_prepared(root, backend)
+        elif resume_timeout or resume_research:
+            state = check_timeout_boundary(root, backend, research=resume_research)
         else:
             state = (
                 check_debug_boundary(root, backend)
@@ -177,11 +246,21 @@ def deploy(root, runtime, *, resume_debug=False, resume_submission=False):
             marker.read_text() != marker_text
             or read(root / "study/state.json") != state
             or (stop.read_text() if stop.exists() else None) != stop_before
-            or (stop.exists() and not (resume_debug or resume_submission))
+            or (
+                stop.exists()
+                and not (
+                    resume_debug
+                    or resume_submission
+                    or resume_timeout
+                    or resume_research
+                )
+            )
         ):
             raise RuntimeError("Operator state changed during handoff")
         marker.unlink()
-        if (resume_debug or resume_submission) and stop.exists():
+        if (
+            resume_debug or resume_submission or resume_timeout or resume_research
+        ) and stop.exists():
             stop.unlink()
         write(
             backup / "deployment.json",
@@ -192,6 +271,8 @@ def deploy(root, runtime, *, resume_debug=False, resume_submission=False):
                 "after_iteration": state["iteration"],
                 "resume_debug": resume_debug,
                 "resume_submission": resume_submission,
+                "resume_timeout": resume_timeout,
+                "resume_research": resume_research,
                 "at": time.time(),
             },
         )
@@ -206,6 +287,8 @@ def deploy(root, runtime, *, resume_debug=False, resume_submission=False):
             "after_iteration": state["iteration"],
             "resume_debug": resume_debug,
             "resume_submission": resume_submission,
+            "resume_timeout": resume_timeout,
+            "resume_research": resume_research,
             "at": time.time(),
         },
     )
@@ -219,6 +302,8 @@ def main():
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument("--resume-debug", action="store_true")
     recovery.add_argument("--resume-submission", action="store_true")
+    recovery.add_argument("--resume-timeout", action="store_true")
+    recovery.add_argument("--resume-research", action="store_true")
     args = parser.parse_args()
     print(
         json.dumps(
@@ -227,6 +312,8 @@ def main():
                 args.runtime,
                 resume_debug=args.resume_debug,
                 resume_submission=args.resume_submission,
+                resume_timeout=args.resume_timeout,
+                resume_research=args.resume_research,
             )
         )
     )

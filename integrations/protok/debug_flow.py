@@ -97,6 +97,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         read,
         research_policy,
         signatures,
+        timed_out_job,
         write,
     )
 
@@ -453,9 +454,20 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                         record_name=record["record_name"],
                     )
                 except Exception as unknown:
-                    raise HarnessError(
-                        "Fresh formal allocation has unknown/unsettled effects"
-                    ) from unknown
+                    try:
+                        timeout = timed_out_job(
+                            root, harness.backend, workspace, iteration
+                        )
+                    except Exception:
+                        raise HarnessError(
+                            "Fresh formal allocation has unknown/unsettled effects"
+                        ) from unknown
+                    state["failures"].append(timeout)
+                    return finish(
+                        "settled formal TIMEOUT; no measurement; actual GPU charge "
+                        + str(timeout["gpu_seconds"])
+                        + " seconds"
+                    )
                 if (
                     rejected.get("kind") != "candidate_rejected"
                     or rejected.get("fingerprint") != record["fingerprint"]

@@ -213,6 +213,65 @@ class CoreTests(unittest.TestCase):
             (study.workspace / "result.json").write_text("{}")
         return study, harness
 
+    def test_readonly_retry_retains_rejected_outputs_and_never_repeats_execute(self):
+        for failed_phase in ("plan", "review"):
+            with self.subTest(phase=failed_phase):
+                self.root = self.root.parent / failed_phase
+                study, harness = self.study()
+                original = harness.response
+                rejected = False
+
+                def response(phase, context, kwargs):
+                    nonlocal rejected
+                    value = original(phase, context, kwargs)
+                    if phase == failed_phase and not rejected:
+                        rejected = True
+                        if phase == "plan":
+                            value["references"] = ["invalid-reference"]
+                        else:
+                            value["decision"] = "invalid-decision"
+                    return value
+
+                harness.response = response
+                with self.assertRaises((StudyError, ValueError)):
+                    study.run()
+                before = study.status()
+                attempt = study.root / before["active_attempt"]
+                raw = (attempt / "response.json").read_bytes()
+                executes = harness.count("execute")
+                with patch.object(
+                    study,
+                    "_check_attempt_stopped",
+                    side_effect=StudyError("retained CLI is live"),
+                ):
+                    with self.assertRaisesRegex(StudyError, "CLI is live"):
+                        study.retry(readonly=True)
+                self.assertEqual(study.status(), before)
+                retried = study.retry(readonly=True)
+                self.assertEqual(retried["call_count"], before["call_count"])
+                self.assertEqual(retried["elapsed_seconds"], before["elapsed_seconds"])
+                self.assertEqual((attempt / "response.json").read_bytes(), raw)
+                study.run()
+                self.assertEqual(harness.count(failed_phase), 2)
+                self.assertEqual(harness.count("execute"), 1)
+                if failed_phase == "review":
+                    self.assertEqual(executes, 1)
+
+    def test_readonly_retry_rejects_execute_under_state_lock(self):
+        study, harness = self.study()
+
+        def fail(call):
+            if call["phase"] == "execute":
+                raise HarnessError("Unresolved execution")
+
+        harness.before = fail
+        with self.assertRaises(HarnessError):
+            study.run()
+        before = study.status()
+        with self.assertRaisesRegex(StudyError, "read-only phase"):
+            study.retry(readonly=True)
+        self.assertEqual(study.status(), before)
+
     def test_two_iterations_keep_route_snapshots_and_earlier_graph_references(self):
         study, harness = self.study()
         harness.stop_after = 2

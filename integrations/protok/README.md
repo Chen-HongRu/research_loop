@@ -43,6 +43,28 @@ uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --res
 uv run python integrations/protok/deploy_runtime.py --root RUN_ROOT --runtime RUNTIME --resume-submission
 ```
 
+A formal allocation with a confirmed Slurm `TIMEOUT`, frozen candidate identity
+and fully settled accounting completes Execute as `incomplete`, with retained
+failure evidence and no measurements. Independent Review records actual cost and
+fixed-budget feasibility, then decides the next investigation. This path neither
+repairs the candidate nor resubmits the timed-out job. Unknown effects, incomplete
+accounting, other uncertified failures, user STOP and exhausted authorization
+remain blocking.
+
+For an older runtime stopped on this settled timeout, retain the existing failed
+Agent attempt and prepare a separate controller reconciliation:
+
+```sh
+uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --reconcile-timed-out-execute --authorization 'User authorized failure Review and continuation'
+uv run python integrations/protok/deploy_runtime.py --root RUN_ROOT --runtime RUNTIME --resume-timeout
+```
+
+Preparation preserves STOP, the accepted Plan, candidate and original invocation
+and charges. Deployment requires the matching committed-runtime HANDOFF and
+unchanged prepared state, Plan, ownership, Study configuration and lease. Only the
+retained system attention STOP may be cleared; a newer or user STOP blocks resume.
+The original absolute deadline and all counters continue to apply.
+
 Preparation retains STOP and immutable per-attempt evidence. Deployment checks
 the matching preparation and HANDOFF. An unpublished Execute continues in the
 same iteration with only its unaccepted call pointer retired. An already published
@@ -137,6 +159,19 @@ trailing newline. The supervisor finishes its current investigation and exits.
 service, matching handoff request, fully published Review/control records, no
 outstanding effects, and exclusive supervisor/runner locks. It preserves the
 ownership and budget files and records the previous service configuration.
+
+## Supervisor state
+
+Settled timeouts and failed research scripts enter independent Review as incomplete
+experiments with real resource charges and no invented measurement. The supervisor
+keeps admission/effect failures observable in `control/supervisor-status.json`,
+with bounded polling and no automatic Execute replay. Only core-authorized read-only
+calls retry within persisted call/time budgets. User STOP, handoff, exhausted
+allowance and the original lease/ownership expiry still stop execution.
+
+Inspection and cleanup failures are recorded separately. Final summaries use
+`null` for unavailable accounting; the read-only dashboard retains study records
+and labels unavailable totals. Neither service substitutes zero or stale usage.
 
 ## Checks
 

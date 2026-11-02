@@ -71,6 +71,182 @@ class CandidateFailureTests(unittest.TestCase):
                 self.workspace, self.output, prepared["fingerprint"]
             )
 
+    def timed_out(self, *, fresh=False):
+        prepared, record, state = self.failed()
+        state["baseline"] = False
+        state["attempts"][0].update(
+            seed=42,
+            mode="evaluate",
+            budget_seconds=1800,
+            include_smoke=True,
+            terminal_state="TIMEOUT",
+            exit_code="0:0",
+            gpu_seconds=1828,
+            owned_job_id="790195",
+        )
+        if fresh:
+            state["fresh_attempt"] = "formal-019"
+            destination = self.records / allocation_record(
+                prepared["fingerprint"], state["fresh_attempt"]
+            )
+            record.rename(destination)
+            record = destination
+        self.write(record / "state.json", state)
+        return prepared, record, state
+
+    def timeout_receipt(self, prepared, record):
+        return self.backend.timed_out_receipt(
+            self.workspace,
+            self.output,
+            prepared["fingerprint"],
+            record_name=record.name,
+        )
+
+    def test_timeout_is_neutral_idempotent_and_readable_under_stop_expired_lease(self):
+        prepared, record, _ = self.timed_out(fresh=True)
+        lease = json.loads((self.control / "ownership.json").read_text())
+        self.write(self.control / "ownership.json", lease | {"expires_at": 0})
+        (self.control / "STOP").write_text("operator stop\n")
+        before = {
+            p: p.read_bytes()
+            for root in (self.records, self.control)
+            for p in root.rglob("*")
+            if p.is_file()
+        }
+        receipt = self.timeout_receipt(prepared, record)
+        self.assertEqual(receipt, self.timeout_receipt(prepared, record))
+        self.assertEqual(receipt["purpose"], "formal")
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual(receipt["failure_kind"], "allocation_timeout")
+        self.assertEqual(receipt["record_name"], record.name)
+        self.assertEqual(receipt["job_id"], "790195")
+        self.assertEqual(receipt["terminal_state"], "TIMEOUT")
+        self.assertEqual(receipt["exit_code"], "0:0")
+        self.assertEqual(receipt["gpu_seconds"], 1828)
+        self.assertIs(receipt["quality_score_eligible"], False)
+        for field in ("metric", "value", "measurements", "artifact", "kind"):
+            self.assertNotIn(field, receipt)
+        self.assertFalse((self.root / "invoked").exists())
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        with self.assertRaisesRegex(ProTokError, "candidate execution rejection"):
+            self.backend.settled_failure(
+                self.workspace,
+                self.output,
+                prepared["fingerprint"],
+                record_name=record.name,
+            )
+
+    def test_timeout_rejects_other_terminal_states_and_unknown_accounting(self):
+        prepared, record, state = self.timed_out()
+        original = state["attempts"][0].copy()
+        cases = [
+            {"terminal_state": terminal}
+            for terminal in ("CANCELLED", "FAILED", "OUT_OF_MEMORY", "COMPLETED", "")
+        ] + [{"gpu_seconds": cost} for cost in (None, -1, float("inf"))]
+        cases += [{"owned_job_id": ""}, {"status": "prepared"}]
+        for update in cases:
+            with self.subTest(update=update):
+                state["attempts"] = [original | update]
+                self.write(record / "state.json", state)
+                with self.assertRaises(ProTokError):
+                    self.timeout_receipt(prepared, record)
+        state["attempts"] = [original.copy()]
+        state["attempts"][0].pop("gpu_seconds")
+        self.write(record / "state.json", state)
+        with self.assertRaises(ProTokError):
+            self.timeout_receipt(prepared, record)
+
+    def test_timeout_requires_fixed_formal_and_fresh_record_identity(self):
+        prepared, record, state = self.timed_out(fresh=True)
+        original = state["attempts"][0].copy()
+        for key, value in (
+            ("seed", 43),
+            ("mode", "smoke"),
+            ("budget_seconds", 60),
+            ("include_smoke", False),
+        ):
+            with self.subTest(key=key):
+                state["attempts"] = [original | {key: value}]
+                self.write(record / "state.json", state)
+                with self.assertRaises(ProTokError):
+                    self.timeout_receipt(prepared, record)
+        state["attempts"] = [original]
+        for update in (
+            {"fresh_attempt": "other"},
+            {"baseline": True},
+            {"imported_baseline": True},
+            {"mode": "smoke"},
+            {"fingerprint": "other"},
+        ):
+            with self.subTest(update=update):
+                self.write(record / "state.json", state | update)
+                with self.assertRaises(ProTokError):
+                    self.timeout_receipt(prepared, record)
+
+    def test_timeout_rejects_source_config_owner_changes_and_other_outstanding(self):
+        prepared, record, state = self.timed_out()
+        paths = [
+            self.control / "ownership.json",
+            self.output,
+            record / "run-config.json",
+        ]
+        for path, update in zip(
+            paths,
+            ({"owner_token": "other"}, {"seeds": [43]}, {"seeds": [43]}),
+        ):
+            with self.subTest(path=path):
+                original = json.loads(path.read_text())
+                self.write(path, original | update)
+                with self.assertRaises(ProTokError):
+                    self.timeout_receipt(prepared, record)
+                self.write(path, original)
+        source = self.workspace / "protok/model/autoresearch_se3.py"
+        original_source = source.read_text()
+        source.write_text("# changed source\n")
+        with self.assertRaisesRegex(ProTokError, "frozen identity"):
+            self.timeout_receipt(prepared, record)
+        source.write_text(original_source)
+        self.write(self.control / "continuation.json", {"schema": 2})
+        state["controller_lease"] = {"owner_token": "other"}
+        self.write(record / "state.json", state)
+        with self.assertRaisesRegex(ProTokError, "another owner"):
+            self.timeout_receipt(prepared, record)
+        (self.control / "continuation.json").unlink()
+        from research_loop.debug_budget import DebugBudget
+
+        budget = DebugBudget(
+            self.control / "debug/0019", scope_id="0019", limit_gpu_seconds=1800
+        )
+        budget.reserve("smoke-001", 1800)
+        with self.assertRaisesRegex(ProTokError, "outstanding debug"):
+            self.timeout_receipt(prepared, record)
+
+    def test_timeout_rejects_unacknowledged_owner_and_outstanding_allocations(self):
+        prepared, record, state = self.timed_out()
+        lease_path = self.control / "ownership.json"
+        lease = json.loads(lease_path.read_text())
+        self.write(lease_path, lease | {"handoff_acknowledged": False})
+        with self.assertRaisesRegex(ProTokError, "acknowledged owner"):
+            self.timeout_receipt(prepared, record)
+        self.write(lease_path, lease)
+        self.write(record / "state.json", state | {"fresh_attempt": "wrong-record"})
+        with self.assertRaisesRegex(ProTokError, "identity differs"):
+            self.timeout_receipt(prepared, record)
+        self.write(record / "state.json", state)
+        outstanding = self.records / "unsettled/state.json"
+        outstanding.parent.mkdir()
+        self.write(outstanding, {"status": "running", "attempts": []})
+        with self.assertRaisesRegex(ProTokError, "unsettled"):
+            self.timeout_receipt(prepared, record)
+        outstanding.unlink()
+        (self.control / "research-jobs/0018").mkdir(parents=True)
+        self.write(
+            self.control / "research-jobs/0018/job.json",
+            {"allocated_seconds": 60, "source_identity": "research"},
+        )
+        with self.assertRaisesRegex(ProTokError, "outstanding debug or research"):
+            self.timeout_receipt(prepared, record)
+
     def test_debug_cost_is_separate_but_unknown_debug_blocks_new_formal(self):
         from research_loop.debug_budget import DebugBudget
 

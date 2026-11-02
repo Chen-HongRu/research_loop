@@ -16,9 +16,42 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {gitLayout, graphParent, drawGraph, renderProgress, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
+
+test('Scout refresh retains user expansion and collapse while updating findings', () => {
+  let markup='', fold=null;
+  const prior=elements.get('scoutBody');
+  elements.set('scoutBody',{
+    get innerHTML(){return markup;},
+    set innerHTML(value){
+      markup=value;
+      const tag=value.match(/<details data-disclosure="scout-findings"[^>]*>/);
+      fold=tag?{open:/\sopen(?:\s|>)/.test(tag[0])}:null;
+    },
+    querySelector:selector=>selector==='[data-disclosure="scout-findings"]'?fold:null,
+    querySelectorAll:()=>[],
+  });
+  try {
+    vm.runInContext("data={scout:{status:'completed',summary:'Scout summary',findings:['Initial finding']}};",context);
+    ui.renderScout();
+    assert.equal(fold.open,false);
+    fold.open=true;
+    for(let tick=1;tick<=3;tick++) {
+      vm.runInContext(`data.scout.observed_at=${tick};data.scout.findings=['Updated finding ${tick}'];`,context);
+      ui.renderScout();
+      assert.equal(fold.open,true,'auto-refresh must preserve user expansion');
+      assert.ok(markup.includes('Updated finding '+tick),'findings still refresh');
+    }
+    fold.open=false;
+    ui.renderScout();
+    assert.equal(fold.open,false,'auto-refresh must also preserve explicit collapse');
+  } finally {
+    if(prior) elements.set('scoutBody',prior); else elements.delete('scoutBody');
+    vm.runInContext('data=null;',context);
+  }
+});
 
 test('Git rows follow time; tracks follow code parents, independently of routes and references', () => {
   const nodes = [
@@ -339,4 +372,43 @@ test('Proven continuation shows the original Planner contract and separates exec
   const pending=ui.explanationPanel({id:'history-1:0015',explanation:{status:'unpublished'},plan_record:plan},{});
   assert.match(pending,/阅读原始研究合同与 Planner 输出/);
   assert.match(pending,/Original controlled intervention/);
+});
+
+
+test('Degraded accounting is unknown while retained research and interaction state survive refresh', async () => {
+  vm.runInContext(`
+    data={state:{iteration:1,status:'needs_attention'},nodes:[{id:'0001',route:'Retained question'}],
+      accounting_available:false,backend_error:'ProTokError: Invalid research GPU charge',
+      gpu_seconds:null,formal_gpu_seconds:null,research_gpu_seconds:null,debug_gpu_seconds:null,
+      progress:{title:'后端核账不可用 · 需要处理',reasons:[{title:'后端读取失败',detail:'Invalid research GPU charge'}]}};
+    selected='0001';following=false;tab='plan';view='routes';globalView=false;
+  `, context);
+  // Run the actual polling/connection update with drawing and detail I/O isolated.
+  vm.runInContext(`globalThis.savedRefresh={api,renderSnapshot,loadDetail};
+    api=async()=>data;renderSnapshot=()=>renderProgress();loadDetail=async()=>{};`,context);
+  try { await vm.runInContext('refresh()',context); }
+  finally {vm.runInContext('({api,renderSnapshot,loadDetail}=savedRefresh);delete globalThis.savedRefresh;',context);}
+  assert.match(elements.get('connection').textContent,/已连接 · 后端核账不可用/);
+  assert.equal(elements.get('connection').className,'amber');
+  assert.equal(elements.get('gpu').textContent,'未知');
+  assert.match(elements.get('statusline').innerHTML,/GPU 用量与待核账作业未知/);
+  assert.doesNotMatch(elements.get('statusline').innerHTML,/无待核账 GPU 作业|正式评分 0/);
+  assert.match(elements.get('reasons').innerHTML,/Invalid research GPU charge/);
+  assert.match(elements.get('currentSub').textContent,/Retained question/);
+  assert.deepEqual(plain(vm.runInContext('({selected,following,tab,view,globalView})',context)),
+    {selected:'0001',following:false,tab:'plan',view:'routes',globalView:false});
+  vm.runInContext("data=null;selected=null;following=true;tab='explanation';view='git';",context);
+});
+
+
+test('Settled research overruns show actual accounting without marking it unknown', () => {
+  vm.runInContext(`data={state:{iteration:17,phase:'done',status:'ready'},nodes:[],
+    accounting_available:true,gpu_seconds:180,formal_gpu_seconds:100,research_gpu_seconds:75,debug_gpu_seconds:5,
+    research_overruns:[{iteration:'0017',allocated_seconds:60,gpu_seconds:75,overrun_seconds:15}]};`,context);
+  ui.renderProgress();
+  assert.equal(elements.get('gpu').textContent,'0.05 小时');
+  assert.match(elements.get('statusline').innerHTML,/研究脚本 75 GPU 秒/);
+  assert.match(elements.get('statusline').innerHTML,/研究 #0017 已按实际 75 GPU 秒结算（申请 60 秒，超出 15 秒）/);
+  assert.doesNotMatch(elements.get('statusline').innerHTML,/核账作业未知|后端读取失败/);
+  vm.runInContext('data=null;',context);
 });
