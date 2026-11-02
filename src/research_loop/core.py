@@ -337,14 +337,20 @@ class Study:
             )
         _write(self.root / "state.json", state)
 
-    def retry(self) -> dict:
+    def retry(self, *, readonly: bool = False) -> dict:
         with self._lock():
             self._recover_observations()
             state = self.status()
             if state["status"] not in {"needs_attention", "running"}:
                 raise StudyError("There is no interrupted or failed call to retry")
+            if readonly and (
+                state["status"] != "needs_attention"
+                or state["phase"] not in {"selection", "plan", "review"}
+                or state.get("debugging")
+            ):
+                raise StudyError("Automatic retry requires a failed read-only phase")
             active = state["active_attempt"]
-            if active and completed_response(self.root / active) is None:
+            if active and (readonly or completed_response(self.root / active) is None):
                 self._check_attempt_stopped(self.root / active)
             if active and not (
                 state["phase"] == "execute"

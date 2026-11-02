@@ -252,6 +252,7 @@ class ProTokBackend:
             formal_gpu_seconds=used,
             research_gpu_seconds=research["gpu_seconds"],
             research_outstanding=research["outstanding"],
+            research_overruns=research["overruns"],
             used_gpu_seconds=used + research["gpu_seconds"],
             debug_gpu_seconds=debug_used,
             long_training_gpu_seconds=long_training["gpu_seconds"],
@@ -599,8 +600,10 @@ class ProTokBackend:
             )
         return result
 
-    def settled_failure(self, workspace, config_path, fingerprint, *, record_name=None):
-        """Certify a candidate-code rejection only after its allocation is settled."""
+    def _settled_failure_state(
+        self, workspace, config_path, fingerprint, *, record_name=None
+    ):
+        """Read source-bound, owned failure evidence without allocating work."""
         config = self._config()
         lease = _read(self.control / "ownership.json")
         if not (
@@ -663,6 +666,69 @@ class ProTokBackend:
         attempt = state["attempts"][-1]
         if not re.fullmatch(r"[1-9][0-9]*", str(attempt.get("owned_job_id", ""))):
             raise ProTokError("Failed allocation has no owned job identity")
+        return name, record, state
+
+    def timed_out_receipt(
+        self, workspace, config_path, fingerprint, *, record_name=None
+    ):
+        """Read a settled formal TIMEOUT as neutral evidence, never a score.
+
+        STOP and lease expiry do not prevent reading already settled accounting.
+        The pinned prepare helper validates source/configuration without evaluation.
+        """
+        name, record, state = self._settled_failure_state(
+            workspace, config_path, fingerprint, record_name=record_name
+        )
+        status = self.inspect()
+        if status["debug_outstanding"] or status["research_outstanding"]:
+            raise ProTokError("Timeout has outstanding debug or research allocations")
+        if state.get("baseline") is not False or state.get("imported_baseline"):
+            raise ProTokError("Timeout must belong to a non-baseline formal allocation")
+        if name == fingerprint and state.get("fresh_attempt") is not None:
+            raise ProTokError("Failed formal attempt identity differs")
+        attempts = state["attempts"]
+        if any(
+            a.get("seed") != 42
+            or a.get("mode") != "evaluate"
+            or a.get("budget_seconds") != 1800
+            or a.get("include_smoke") is not True
+            or a.get("status") not in {"complete", "failed"}
+            or not re.fullmatch(r"[1-9][0-9]*", str(a.get("owned_job_id", "")))
+            or not isinstance(a.get("exit_code"), str)
+            or not re.fullmatch(r"[0-9]+:[0-9]+", a["exit_code"])
+            for a in attempts
+        ):
+            raise ProTokError("Timeout has no settled full formal allocation identity")
+        attempt = attempts[-1]
+        if attempt.get("terminal_state") != "TIMEOUT":
+            raise ProTokError("Failure is not a settled allocation TIMEOUT")
+        evidence = [str(record / n) for n in ("state.json", "run-config.json")]
+        directory = attempt.get("directory", "")
+        if re.fullmatch(r"[A-Za-z0-9_-]+", directory):
+            log = record / directory / "run.log.tail"
+            if log.is_file() and not log.is_symlink():
+                evidence.append(str(log))
+        return {
+            "purpose": "formal",
+            "status": "failed",
+            "failure_kind": "allocation_timeout",
+            "fingerprint": fingerprint,
+            "record_name": name,
+            "job_id": attempt["owned_job_id"],
+            "terminal_state": "TIMEOUT",
+            "exit_code": attempt["exit_code"],
+            "gpu_seconds": sum(a["gpu_seconds"] for a in attempts),
+            "quality_score_eligible": False,
+            "cause": "Slurm ended the formal allocation at its scheduling time limit (TIMEOUT).",
+            "evidence": evidence,
+        }
+
+    def settled_failure(self, workspace, config_path, fingerprint, *, record_name=None):
+        """Certify a candidate-code rejection only after its allocation is settled."""
+        name, record, state = self._settled_failure_state(
+            workspace, config_path, fingerprint, record_name=record_name
+        )
+        attempt = state["attempts"][-1]
         if attempt.get("terminal_state") not in {"FAILED", "OUT_OF_MEMORY"}:
             raise ProTokError("Failure is not a settled candidate execution rejection")
         directory = attempt.get("directory", "")

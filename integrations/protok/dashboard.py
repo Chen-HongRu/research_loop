@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from integrations.protok.backend import METRIC, PROTOCOL, ProTokBackend
+from integrations.protok.backend import METRIC, PROTOCOL, ProTokBackend, ProTokError
 from integrations.protok.explanation import explanation_coverage, explanation_status
 from integrations.protok.plan_provenance import execution_plan
 from integrations.protok.run import job_path
@@ -140,7 +140,7 @@ def research_metadata(root, identity):
             and receipt.get("gpu_seconds") is None
             or receipt.get("status") in {"completed", "failed"}
             and type(receipt.get("gpu_seconds")) is int
-            and 0 <= receipt["gpu_seconds"] <= job["allocated_seconds"]
+            and receipt["gpu_seconds"] >= 0
         )
     )
     observed = receipt if valid_receipt else native
@@ -903,13 +903,24 @@ def snapshot(root, *, snapshot_only=False):
     study = root / "study"
     state = read(study / "state.json", {})
     best = read(root / "control/active-best.json", {})
+    backend_error = None
     if snapshot_only:
         backend = read(root / "control/backend-snapshot.json")
         if not backend:
             raise ValueError("Missing exported backend snapshot")
     else:
-        owner = read(root / "control/ownership.json", {})
-        backend = ProTokBackend(Path(owner["project"]), root / "control").inspect()
+        try:
+            owner = read(root / "control/ownership.json", {})
+            backend = ProTokBackend(Path(owner["project"]), root / "control").inspect()
+        except (ProTokError, OSError, ValueError, KeyError, TypeError) as error:
+            # Keep retained study facts readable without claiming stale accounting.
+            backend_error = f"{type(error).__name__}: {error}"
+            backend = {
+                "records": [],
+                "used_gpu_seconds": None,
+                "scored_records": None,
+                "outstanding": [],
+            }
     records = {r.get("record", r["fingerprint"]): r for r in backend["records"]}
     nodes = []
     for folder in sorted((study / "iterations").glob("[0-9]*")):
@@ -1138,12 +1149,28 @@ def snapshot(root, *, snapshot_only=False):
     used_debug = debug_budget.get("used_gpu_seconds", 0)
     reserved_debug = active_debug.get("allocated_gpu_seconds", 0)
     debug_limit = debug_budget.get("limit_gpu_seconds", 1800)
+    current_progress = progress(root, state, backend, runner, current_agents)
+    if backend_error:
+        current_progress["title"] = "后端核账不可用 · 需要处理"
+        current_progress["message"] = (
+            "保留的研究记录仍可阅读；当前 GPU 用量与作业核账状态未知。"
+        )
+        current_progress["reasons"].append(
+            {
+                "title": "后端读取失败",
+                "detail": backend_error,
+                "source": "backend.inspect",
+            }
+        )
     return {
         "observed_at": time.time(),
         "study_name": root.name,
         "study_root": str(root),
         "snapshot_only": snapshot_only,
         "backend_observed_at": backend.get("observed_at"),
+        "backend_error": backend_error,
+        "accounting_available": backend_error is None,
+        "research_overruns": backend.get("research_overruns", []),
         "state": {
             k: state.get(k)
             for k in (
@@ -1162,15 +1189,27 @@ def snapshot(root, *, snapshot_only=False):
         "effective_deadline": min(deadlines) if deadlines else None,
         "stop": (root / "control/STOP").exists(),
         "runner": runner,
-        "progress": progress(root, state, backend, runner, current_agents),
+        "progress": current_progress,
         "scout": scout_snapshot(root),
         "long_training": long_training_snapshot(root / "study"),
         "best": {"id": best.get("experiment_id"), "metrics": best.get("metrics", {})},
         "gpu_seconds": backend.get("total_gpu_seconds", backend["used_gpu_seconds"]),
         "formal_gpu_seconds": backend["used_gpu_seconds"]
-        - backend.get("research_gpu_seconds", 0),
-        "research_gpu_seconds": backend.get("research_gpu_seconds", 0),
-        "debug_gpu_seconds": backend.get("debug_gpu_seconds", 0),
+        - backend.get("research_gpu_seconds", 0)
+        if backend_error is None
+        else None,
+        "research_gpu_seconds": backend.get("research_gpu_seconds", 0)
+        if backend_error is None
+        else None,
+        "debug_gpu_seconds": backend.get("debug_gpu_seconds", 0)
+        if backend_error is None
+        else None,
+        "long_training_gpu_seconds": backend.get("long_training_gpu_seconds", 0)
+        if backend_error is None
+        else None,
+        "long_training_outstanding": backend.get("long_training_outstanding", [])
+        if backend_error is None
+        else None,
         "debug": {
             "phase": debug_flow.get("phase"),
             "used_gpu_seconds": used_debug,
@@ -1527,6 +1566,13 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         records_root, cutoff
     )
     limitations.extend(notes)
+    if active.get("backend_error"):
+        limitations.append("当前后端核账不可用：" + active["backend_error"])
+    for overrun in active.get("research_overruns", []):
+        limitations.append(
+            f"研究 #{overrun['iteration']} 已按实际 {overrun['gpu_seconds']} GPU 秒结算"
+            f"（申请 {overrun['allocated_seconds']} 秒，超出 {overrun['overrun_seconds']} 秒）。"
+        )
     if missing_cutoff_times:
         limitations.append(
             f"{missing_cutoff_times} 个 Study 迭代缺少创建时间，账本截止点仅依据已记录时间。"

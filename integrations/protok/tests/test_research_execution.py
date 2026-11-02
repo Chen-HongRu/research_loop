@@ -254,7 +254,8 @@ class ResearchExecutionTests(unittest.TestCase):
     ):
         self.evaluate()
         self.assertEqual(
-            research_usage(self.control), {"gpu_seconds": 30, "outstanding": []}
+            research_usage(self.control),
+            {"gpu_seconds": 30, "outstanding": [], "overruns": []},
         )
         real_backend = ProTokBackend(self.project, self.control, "test-owner")
         with patch.object(
@@ -312,18 +313,32 @@ class ResearchExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Insufficient incremental GPU"):
             backend.submit(config, None, {}, {})
         original_submit.assert_not_called()
-        # A settled overrun must remain visible as an accounting error, even if
-        # the operator grants enough aggregate budget for another formal job.
+        # Slurm may settle above --time; charge every second to the shared budget.
         receipt_path = self.control / "research-jobs/0002/receipt.json"
         receipt = RUNNER.read(receipt_path)
-        receipt["gpu_seconds"] = 61
+        receipt.update(status="failed", terminal_state="TIMEOUT", gpu_seconds=61)
         RUNNER.write(receipt_path, receipt)
-        control["additional_gpu_seconds"] = 1000
-        with self.assertRaisesRegex(ProTokError, "exceeds its bound"):
-            research_usage(self.control)
-        with self.assertRaisesRegex(ProTokError, "exceeds its bound"):
+        usage = research_usage(self.control)
+        self.assertEqual(usage["gpu_seconds"], 61)
+        self.assertEqual(usage["overruns"][0]["overrun_seconds"], 1)
+        control["additional_gpu_seconds"] = 131
+        self.assertEqual(backend.budget_check(config, {}, None, 1), 1061)
+        control["additional_gpu_seconds"] = 130
+        with self.assertRaisesRegex(RuntimeError, "Insufficient incremental GPU"):
             backend.submit(config, None, {}, {})
         original_submit.assert_not_called()
+        control["additional_gpu_seconds"] = 131
+        backend.submit(config, None, {}, {})
+        original_submit.assert_called_once()
+
+    def test_mismatched_execution_identity_still_blocks_accounting(self):
+        self.evaluate()
+        path = self.control / "research-jobs/0002/receipt.json"
+        receipt = RUNNER.read(path)
+        receipt["execution_identity"] = "another-job"
+        RUNNER.write(path, receipt)
+        with self.assertRaisesRegex(ProTokError, "inconsistent"):
+            research_usage(self.control)
 
     def test_formal_hook_refuses_new_job_with_unknown_research_accounting(self):
         RUNNER.write(

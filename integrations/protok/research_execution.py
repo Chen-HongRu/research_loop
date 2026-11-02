@@ -32,7 +32,7 @@ def policy(root):
 
 def research_usage(control):
     """Small controller receipts only; never read computational inputs/outputs."""
-    used, outstanding = 0, []
+    used, outstanding, overruns = 0, [], []
     for path in sorted((Path(control) / "research-jobs").glob("*/job.json")):
         job = read(path)
         receipt = path.parent / "receipt.json"
@@ -47,12 +47,25 @@ def research_usage(control):
             or settled.get("status") not in {"completed", "failed"}
             or type(seconds) is not int
             or seconds < 0
-            or seconds > job["allocated_seconds"]
+            or type(job.get("allocated_seconds")) is not int
+            or job["allocated_seconds"] < 0
+            or settled.get("allocated_seconds", job["allocated_seconds"])
+            != job["allocated_seconds"]
+            or settled.get("execution_identity") != job.get("execution_identity")
             or settled.get("source_identity") != job["source_identity"]
         ):
-            raise ProTokError("Research accounting is unresolved or exceeds its bound")
+            raise ProTokError("Research accounting is unresolved or inconsistent")
         used += seconds
-    return {"gpu_seconds": used, "outstanding": outstanding}
+        if seconds > job["allocated_seconds"]:
+            overruns.append(
+                {
+                    "iteration": path.parent.name,
+                    "allocated_seconds": job["allocated_seconds"],
+                    "gpu_seconds": seconds,
+                    "overrun_seconds": seconds - job["allocated_seconds"],
+                }
+            )
+    return {"gpu_seconds": used, "outstanding": outstanding, "overruns": overruns}
 
 
 def research_files(workspace):
