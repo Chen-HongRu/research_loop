@@ -107,19 +107,6 @@ def check_timeout_boundary(root, backend, *, research=False):
 
         trusted = completed_script(root, Path(record["workspace"]), iteration)
         preflight = trusted.get("failure_kind") == "preflight_rejected"
-        if preflight:
-            effects = backend.inspect()
-            if any(
-                effects.get(key)
-                for key in (
-                    "outstanding",
-                    "research_outstanding",
-                    "debug_outstanding",
-                    "long_training_outstanding",
-                    "manual_training_outstanding",
-                )
-            ):
-                raise RuntimeError("Outstanding effects prevent preflight recovery")
     stop = root / "control/STOP"
     stop_text = stop.read_text() if stop.exists() else None
     if (
@@ -155,6 +142,18 @@ def check_timeout_boundary(root, backend, *, research=False):
     ProTokHarness(backend, root, None, 0).validate_completed(
         result, workspace=Path(record["workspace"]), run_dir=attempt
     )
+    effects = backend.inspect()
+    if any(
+        effects.get(key)
+        for key in (
+            "outstanding",
+            "research_outstanding",
+            "debug_outstanding",
+            "long_training_outstanding",
+            "manual_training_outstanding",
+        )
+    ):
+        raise RuntimeError("Outstanding effects prevent runtime recovery")
     return state
 
 

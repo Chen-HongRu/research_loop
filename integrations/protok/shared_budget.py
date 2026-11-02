@@ -144,7 +144,13 @@ class SharedBudget:
                 or attempt.get("phase") not in {"submitting", "submitted", "settled"}
             ):
                 raise ValueError("Malformed shared GPU reservation")
-            if attempt["phase"] == "settled":
+            if "no_allocation_certificate" in attempt:
+                from integrations.protok.research_rejection import (
+                    validate_budget_certificate,
+                )
+
+                validate_budget_certificate(self.control, key, attempt)
+            elif attempt["phase"] == "settled":
                 self._receipt(attempt["receipt"])
         return policy, state
 
@@ -170,12 +176,12 @@ class SharedBudget:
         used = sum(
             item["receipt"]["gpu_seconds"]
             for item in state["attempts"].values()
-            if item["phase"] == "settled"
+            if item["phase"] == "settled" and "no_allocation_certificate" not in item
         )
         reserved = sum(
             item["reserved_seconds"]
             for item in state["attempts"].values()
-            if item["phase"] != "settled"
+            if item["phase"] != "settled" and "no_allocation_certificate" not in item
         )
         return {
             "budget_id": policy["budget_id"],
@@ -190,7 +196,9 @@ class SharedBudget:
             "limit_gpu_seconds": policy["limit_gpu_seconds"],
             "overrun_reserve_seconds": policy["overrun_reserve_seconds"],
             "unresolved_submission": any(
-                item["phase"] == "submitting" for item in state["attempts"].values()
+                item["phase"] == "submitting"
+                and "no_allocation_certificate" not in item
+                for item in state["attempts"].values()
             ),
         }
 
@@ -243,6 +251,32 @@ class SharedBudget:
             policy, state = self._load()
             self._check_admission(policy, self._status(policy, state), seconds)
 
+    def certify_no_allocation(self, key, certificate_path):
+        """Project certified scheduler rejection without changing raw accounting."""
+        from integrations.protok.research_rejection import validate_budget_certificate
+
+        with _lock(self.control):
+            _, state = self._load()
+            saved = state["attempts"].get(key)
+            if (
+                saved is None
+                or saved["phase"] != "submitting"
+                or saved.get("job_id") is not None
+                or "receipt" in saved
+            ):
+                raise ValueError(
+                    "No-allocation certificate requires an unresolved reservation"
+                )
+            certificate = str(certificate_path)
+            if "no_allocation_certificate" in saved:
+                if saved["no_allocation_certificate"] != certificate:
+                    raise ValueError("No-allocation certificate cannot be replaced")
+                return
+            projected = saved | {"no_allocation_certificate": certificate}
+            validate_budget_certificate(self.control, key, projected)
+            state["attempts"][key] = projected
+            _write(self.control / LEDGER, state)
+
     def reconcile(self, key, attempt):
         with _lock(self.control):
             policy, state = self._load()
@@ -251,6 +285,26 @@ class SharedBudget:
                 raise ValueError(
                     "Allocation has no shared GPU reservation; cannot import unknown effects"
                 )
+            if "no_allocation_certificate" in saved:
+                if (
+                    attempt.get("status") != "submitting"
+                    or attempt.get("owned_job_id") is not None
+                    or attempt.get("job_id") is not None
+                    or any(
+                        name in attempt
+                        for name in (
+                            "gpu_seconds",
+                            "terminal_state",
+                            "exit_code",
+                            "receipt",
+                        )
+                    )
+                    or attempt.get("phase", "submitting") != "submitting"
+                ):
+                    raise ValueError(
+                        "Certified no-allocation reservation cannot acquire accounting"
+                    )
+                return
             job = attempt.get("owned_job_id")
             if job is not None:
                 if saved["job_id"] not in (None, job):

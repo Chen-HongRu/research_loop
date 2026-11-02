@@ -195,6 +195,116 @@ class SharedBudgetTests(unittest.TestCase):
         install_shared_budget(backend, self.control, channel="long")
         self.assertIs(backend.submit, original)
 
+    def rejection_validator(self):
+        patcher = patch(
+            "integrations.protok.research_rejection.validate_budget_certificate"
+        )
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def test_no_allocation_projection_preserves_raw_ledger_and_other_accounting(self):
+        self.reserve("manual", "manual", 1200)
+        self.budget.reconcile("manual", self.terminal(90))
+        self.reserve("running", "long", 600)
+        self.budget.reconcile("running", {"owned_job_id": "456"})
+        self.reserve("rejected", "research", 600)
+        before = json.loads((self.control / LEDGER).read_text())
+        validator = self.rejection_validator()
+        certificate = self.control / "research-jobs/0043/no-allocation.json"
+        self.budget.certify_no_allocation("rejected", certificate)
+        after = json.loads((self.control / LEDGER).read_text())
+        projected = after["attempts"]["rejected"]
+        self.assertEqual(
+            projected,
+            before["attempts"]["rejected"]
+            | {"no_allocation_certificate": str(certificate)},
+        )
+        del projected["no_allocation_certificate"]
+        self.assertEqual(after, before)
+        validator.assert_called_once_with(
+            self.control,
+            "rejected",
+            before["attempts"]["rejected"]
+            | {"no_allocation_certificate": str(certificate)},
+        )
+        status = SharedBudget(self.control).status()
+        self.assertEqual(status["used_gpu_seconds"], 90)
+        self.assertEqual(status["reserved_gpu_seconds"], 900)
+        self.assertFalse(status["unresolved_submission"])
+        self.assertEqual(status["remaining_gpu_seconds"], 86400 - 90 - 900)
+        with self.assertRaisesRegex(ValueError, "submitted twice"):
+            self.reserve("rejected", "research", 600)
+
+    def test_no_allocation_certificate_is_idempotent_and_cannot_be_replaced(self):
+        self.reserve("rejected", "research", 600)
+        self.rejection_validator()
+        certificate = self.control / "certificate.json"
+        self.budget.certify_no_allocation("rejected", certificate)
+        published = (self.control / LEDGER).read_bytes()
+        self.budget.certify_no_allocation("rejected", certificate)
+        self.assertEqual((self.control / LEDGER).read_bytes(), published)
+        with patch.object(
+            self.budget, "_receipt", side_effect=AssertionError("invented receipt")
+        ):
+            status = self.budget.status()
+        self.assertEqual(status["used_gpu_seconds"], 0)
+        self.assertEqual(status["reserved_gpu_seconds"], 0)
+        self.assertFalse(status["unresolved_submission"])
+        with self.assertRaisesRegex(ValueError, "cannot be replaced"):
+            self.budget.certify_no_allocation("rejected", self.control / "other.json")
+        self.assertEqual((self.control / LEDGER).read_bytes(), published)
+
+    def test_invalid_certificate_cannot_publish_and_marked_load_fails_closed(self):
+        self.reserve("rejected", "research", 600)
+        validator = self.rejection_validator()
+        validator.side_effect = ValueError("Invalid no-allocation certificate")
+        original = (self.control / LEDGER).read_bytes()
+        with self.assertRaisesRegex(ValueError, "Invalid no-allocation"):
+            self.budget.certify_no_allocation("rejected", "relative.json")
+        self.assertEqual((self.control / LEDGER).read_bytes(), original)
+        state = json.loads(original)
+        state["attempts"]["rejected"]["no_allocation_certificate"] = ""
+        (self.control / LEDGER).write_text(json.dumps(state))
+        with self.assertRaisesRegex(ValueError, "Invalid no-allocation"):
+            self.budget.status()
+        with self.assertRaisesRegex(ValueError, "Invalid no-allocation"):
+            self.reserve("new", "manual", 600)
+
+    def test_no_allocation_requires_existing_unresolved_identity(self):
+        self.rejection_validator()
+        with self.assertRaisesRegex(ValueError, "unresolved reservation"):
+            self.budget.certify_no_allocation("missing", "/certificate.json")
+        self.reserve("running", "research", 600)
+        self.budget.reconcile("running", {"owned_job_id": "123"})
+        with self.assertRaisesRegex(ValueError, "unresolved reservation"):
+            self.budget.certify_no_allocation("running", "/certificate.json")
+        self.budget.reconcile("running", self.terminal())
+        with self.assertRaisesRegex(ValueError, "unresolved reservation"):
+            self.budget.certify_no_allocation("running", "/certificate.json")
+
+    def test_certified_reservation_cannot_acquire_job_or_accounting(self):
+        self.reserve("rejected", "research", 600)
+        self.rejection_validator()
+        self.budget.certify_no_allocation("rejected", "/certificate.json")
+        original = (self.control / LEDGER).read_bytes()
+        self.budget.reconcile("rejected", {"status": "submitting"})
+        self.assertEqual((self.control / LEDGER).read_bytes(), original)
+        for update in (
+            {"owned_job_id": "123"},
+            {"job_id": "123"},
+            {"terminal_state": "FAILED"},
+            {"gpu_seconds": 0},
+            {"exit_code": "1:0"},
+            {"receipt": {}},
+            {"phase": "submitted"},
+            {"status": "running"},
+            self.terminal(),
+        ):
+            with self.subTest(update=update):
+                with self.assertRaisesRegex(ValueError, "cannot acquire accounting"):
+                    self.budget.reconcile("rejected", {"status": "submitting"} | update)
+                self.assertEqual((self.control / LEDGER).read_bytes(), original)
+
 
 class ActiveLaneBudgetTests(unittest.TestCase):
     def fixture(self, cls, method):

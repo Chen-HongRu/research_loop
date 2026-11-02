@@ -203,6 +203,15 @@ def completed_script(root, workspace, iteration):
             raise ProTokError("Preflight rejection differs from its retained evidence")
         return result
     receipt = read(root / "control/research-jobs" / iteration / "receipt.json")
+    if receipt.get("failure_kind") == "operator_certified_no_allocation":
+        from integrations.protok.research_rejection import validate_budget_certificate
+
+        control = root / "control"
+        key = json.dumps(
+            ["research", str(control / "research-jobs" / iteration), "allocation"]
+        )
+        entry = read(control / "shared-gpu-budget.json")["attempts"][key]
+        validate_budget_certificate(control, key, entry)
     if (
         result.get("status") not in {"completed", "failed"}
         or result.get("purpose") != "research"
