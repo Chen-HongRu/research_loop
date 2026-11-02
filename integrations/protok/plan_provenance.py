@@ -18,6 +18,60 @@ def _json(root, path):
         return None
 
 
+def accepted_plan_response(root, ref, state, *, evidence_paths=None):
+    """Verify an accepted Plan; canonical fields come from controller selection."""
+    root = Path(root)
+    if not isinstance(ref, str) or not re.fullmatch(
+        r"iterations/[0-9]{4,}/plan/attempt-[0-9]+/(?:canonical-)?response.json", ref
+    ):
+        return None
+    calls = state.get("calls", {})
+    accepted = state.get("accepted_calls", {})
+    if (
+        not isinstance(calls, dict)
+        or not isinstance(accepted, dict)
+        or not any(
+            key.startswith("plan-")
+            and isinstance(call, str)
+            and ref in {call + "/response.json", call + "/canonical-response.json"}
+            and accepted.get(key)
+            for key, call in calls.items()
+        )
+    ):
+        return None
+    path = root / "study" / ref
+    paths = list(
+        dict.fromkeys(
+            [
+                path,
+                path.parent / "response.json",
+                path.parent / "completed.json",
+                path.parent / "process.json",
+            ]
+        )
+    )
+    for receipt in paths:
+        if evidence_paths is not None:
+            evidence_paths.append(str(receipt.relative_to(root)))
+        if receipt.exists() and _json(root, receipt) is None:
+            return None
+    raw = completed_response(path.parent)
+    if not isinstance(raw, dict) or _json(root, path.parent / "response.json") != raw:
+        return None
+    if path.name == "response.json":
+        return raw
+    selected = state.get("selected") or {}
+    proposal = selected.get("proposal") if isinstance(selected, dict) else None
+    if (
+        not isinstance(proposal, dict)
+        or "base_experiment" not in proposal
+        or "base_experiment" in raw
+    ):
+        return None
+    canonical = {**raw, "base_experiment": proposal["base_experiment"]}
+    return canonical if _json(root, path) == canonical else None
+
+
 def execution_plan(root, identity, *, evidence_paths=None):
     """Resolve only recorded links; never infer a continuation from equal code."""
     root = Path(root)
@@ -126,7 +180,7 @@ def execution_plan(root, identity, *, evidence_paths=None):
     if (
         not isinstance(plan_ref, str)
         or not re.fullmatch(
-            rf"iterations/{re.escape(number)}/plan/attempt-[0-9]+/response.json",
+            rf"iterations/{re.escape(number)}/plan/attempt-[0-9]+/(?:canonical-)?response.json",
             plan_ref,
         )
         or any(ref != plan_ref for ref in claimed_refs)
@@ -134,7 +188,7 @@ def execution_plan(root, identity, *, evidence_paths=None):
         or not any(
             key.startswith("plan-")
             and isinstance(call, str)
-            and call + "/response.json" == plan_ref
+            and plan_ref in {call + "/response.json", call + "/canonical-response.json"}
             and state.get("accepted_calls", {}).get(key)
             for key, call in calls.items()
         )
@@ -145,7 +199,7 @@ def execution_plan(root, identity, *, evidence_paths=None):
         value = load(receipt)
         if value is None and receipt.exists():
             return None
-    output = completed_response(path.parent)
+    output = accepted_plan_response(root, plan_ref, state, evidence_paths=evidence)
     if (
         not isinstance(output, dict)
         or output.get("decision") != "investigate"
@@ -159,6 +213,9 @@ def execution_plan(root, identity, *, evidence_paths=None):
         "plan_iteration": number,
         "plan_ref": "study/" + plan_ref,
         "output": output,
+        "output_owner": "controller"
+        if path.name == "canonical-response.json"
+        else "agent",
         "authorization": first["authorization"],
         "directive": first["directive"],
         "legacy": first["legacy"],

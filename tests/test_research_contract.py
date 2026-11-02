@@ -74,7 +74,7 @@ def contract():
 class ResearchHarness(RecordedHarness):
     def run(self, **kwargs):
         phase = next(p for p in SCHEMAS if f"Stage: {p}\n" in kwargs["prompt"])
-        result = super().run(**{**kwargs, "schema": SCHEMAS[phase]})
+        result = super().run(**kwargs)
         validate_response(phase, result, schema=kwargs["schema"])
         return result
 

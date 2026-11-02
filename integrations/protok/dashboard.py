@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.backend import METRIC, PROTOCOL, ProTokBackend, ProTokError
 from integrations.protok.explanation import explanation_coverage, explanation_status
-from integrations.protok.plan_provenance import execution_plan
+from integrations.protok.plan_provenance import accepted_plan_response, execution_plan
 from integrations.protok.run import job_path
 from integrations.protok.task_telemetry import TASK_ID, manual_locations
 from research_loop import telemetry
@@ -275,8 +275,15 @@ def agent_outputs(root, folder):
         reference = study_attempt + "/response.json"
         process = read(attempt / "process.json", {})
         output = completed_response(attempt)
-        is_accepted = study_attempt in accepted or reference in accepted_refs
-        is_published = reference in publication_refs
+        canonical_ref = study_attempt + "/canonical-response.json"
+        is_accepted = (
+            study_attempt in accepted
+            or reference in accepted_refs
+            or canonical_ref in accepted_refs
+        )
+        is_published = (
+            reference in publication_refs or canonical_ref in publication_refs
+        )
         status = (
             "completed" if output is not None else process.get("status", "unrecorded")
         )
@@ -388,7 +395,11 @@ def continuation_plan_record(root, folder):
             for agent in agent_outputs(root, owner)
             if agent["phase"] == "plan"
             and agent["accepted"]
-            and agent["source"] + "/response.json" == record["plan_ref"]
+            and record["plan_ref"]
+            in {
+                agent["source"] + "/response.json",
+                agent["source"] + "/canonical-response.json",
+            }
         ),
         None,
     )
@@ -964,6 +975,9 @@ def snapshot(root, *, snapshot_only=False):
             ),
             {},
         )
+        if str(plan_ref).endswith("/canonical-response.json"):
+            plan_state = current if current.get("plan_ref") == plan_ref else saved
+            accepted_plan = accepted_plan_response(root, plan_ref, plan_state) or {}
         continuation = (
             execution_plan(root, identity)
             if meta.get("continuation") or meta.get("operator_resume")

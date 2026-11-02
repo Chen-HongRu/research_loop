@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import json
@@ -22,6 +23,9 @@ from research_loop.harness import (
 )
 from research_loop.long_training import admission_path, admitted_round
 from research_loop.tasks import TaskQueue
+from research_loop.protocol import validate_response
+
+from integrations.protok.agent_output import REPORT_SCHEMA, report_response
 
 from integrations.protok.backend import CANDIDATE_FILES, ProTokBackend, ProTokError
 from integrations.protok.continuation import _load_backend
@@ -241,25 +245,45 @@ class ManualLongHarness:
             "authoring and Review retain their configured CLI timeout. Preserve the fixed "
             "fresh seed42/10k/full4491 protocol. Only the three candidate files may change. "
             "No short evaluation, submission API, SSH, package installation or direct training. "
-            "During Execute implement the requested candidate, then return completed with "
-            "measurements=[]; the trusted controller runs long training after authoring ends. "
+            "During Execute implement the requested candidate, then report authoring outcome "
+            "and markdown only; the trusted controller runs long training after authoring ends. "
             "The parent experiment is an external input, not a child graph reference."
         )
         if phase != "execute":
-            result = self.delegate.run(**kwargs)
-            if (
-                phase == "plan"
-                and result["decision"] == "investigate"
-                and (
-                    result["contract"]["timeout_seconds"] != allocation
-                    or result["local_evaluation"] is not None
-                    or result["base_experiment"] is not None
-                    or result["references"]
-                )
-            ):
-                raise ProTokError(
-                    "Manual long Plan changed its fixed execution protocol"
-                )
+            if phase != "plan":
+                return self.delegate.run(**kwargs)
+            schema = copy.deepcopy(kwargs["schema"])
+            for name in ("base_experiment", "local_evaluation", "references"):
+                schema["properties"].pop(name, None)
+                if name in schema["required"]:
+                    schema["required"].remove(name)
+            contract = schema["properties"]["contract"]
+            del contract["properties"]["timeout_seconds"]
+            contract["required"].remove("timeout_seconds")
+            outer = Path(kwargs["run_dir"])
+            agent = outer / "agent"
+            agent.mkdir()
+            shutil.copyfile(outer / "context.json", agent / "context.json")
+            _write(agent / "schema.json", schema)
+            result = self.delegate.run(
+                **{
+                    **kwargs,
+                    "run_dir": agent,
+                    "schema": schema,
+                    "prompt": kwargs["prompt"]
+                    + "\nPlan output override: omit base_experiment, local_evaluation, references and contract.timeout_seconds. The controller supplies the fixed external source, no local evaluation, no graph references, and the authorized GPU allocation timeout.\n",
+                }
+            )
+            validate_response("plan", result, schema=schema)
+            result = {
+                **result,
+                "local_evaluation": None,
+                "references": [],
+                "contract": {**result["contract"], "timeout_seconds": allocation},
+            }
+            if "base_experiment" in kwargs["schema"]["properties"]:
+                result["base_experiment"] = None
+            publish_completed_response(outer, result)
             return result
         outer, workspace = Path(kwargs["run_dir"]), Path(kwargs["workspace"])
         manifest = (
@@ -290,8 +314,19 @@ class ManualLongHarness:
             agent = outer / "agent"
             agent.mkdir()
             shutil.copyfile(outer / "context.json", agent / "context.json")
-            authored = self.delegate.run(**{**kwargs, "run_dir": agent})
-            if authored["outcome"] != "completed" or authored["measurements"]:
+            _write(agent / "schema.json", REPORT_SCHEMA)
+            authored = report_response(
+                self.delegate.run(
+                    **{
+                        **kwargs,
+                        "run_dir": agent,
+                        "schema": REPORT_SCHEMA,
+                        "prompt": kwargs["prompt"]
+                        + "\nAuthoring output override: return only outcome and markdown. Mark completed only when candidate authoring finished; otherwise incomplete. Do not output artifacts, measurements or scores. The controller checks source scope and runs the authorized long-training evaluation.\n",
+                    }
+                )
+            )
+            if authored["outcome"] != "completed":
                 raise ProTokError(
                     "Manual candidate authoring did not complete without scores"
                 )

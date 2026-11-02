@@ -180,12 +180,7 @@ class Delegate:
             (kwargs["workspace"] / "evaluation-request.json").write_text(
                 '{"action":"evaluate"}'
             )
-        return {
-            "outcome": "incomplete",
-            "markdown": "Implementation repaired; no allocation requested.",
-            "artifacts": [],
-            "measurements": [],
-        }
+        return {"markdown": "Implementation repaired; no allocation requested."}
 
 
 class DebugFlowTests(unittest.TestCase):
@@ -429,6 +424,36 @@ class DebugFlowTests(unittest.TestCase):
         (self.workspace / RECEIPT).unlink()
         with self.assertRaisesRegex(HarnessError, "certified original submission"):
             self.recover()
+
+    def test_completed_repair_survives_interruption_before_flow_transition(self):
+        self.backend.smokes = ["completed"]
+        original_run = self.delegate.run
+
+        def recorded_report(**kwargs):
+            report = original_run(**kwargs)
+            publish_completed_response(kwargs["run_dir"], report)
+            return report
+
+        original_invoke = self.invoke
+
+        def interrupted(*args, **kwargs):
+            original_invoke(*args, **kwargs)
+            raise ProcessLost()
+
+        with patch.object(self.delegate, "run", side_effect=recorded_report):
+            with patch.object(self, "invoke", side_effect=interrupted):
+                with self.assertRaises(ProcessLost):
+                    self.recover()
+            result = self.recover()
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(len(self.delegate.calls), 1)
+        self.assertEqual(len(self.invocations), 1)
+        attempts = list(
+            (self.workspace.parent / "execute/recovery/repairs").glob("*/attempt-*")
+        )
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(set(completed_response(attempts[0] / "agent")), {"markdown"})
+        self.assertEqual(completed_response(attempts[0])["outcome"], "incomplete")
 
     def test_smoke_interruption_recovers_same_attempt_without_second_charge(self):
         self.backend.smokes = ["completed"]
@@ -698,11 +723,19 @@ class DebugFlowTests(unittest.TestCase):
     def test_repair_delegate_clips_timeout_to_original_deadline_and_refuses_expiry(
         self,
     ):
-        delegate = SimpleNamespace(run=lambda **kwargs: kwargs)
+        delegate = SimpleNamespace(run=unittest.mock.Mock())
+        delegate.run.return_value = {"markdown": "Repair report"}
         wrapper = _RepairDelegate(delegate, self.root, 161.0)
+        attempt = self.root / "repair-attempt"
+        attempt.mkdir()
+        run.write(attempt / "context.json", {})
         with patch("integrations.protok.debug_flow.time.time", return_value=100.0):
-            result = wrapper.run(prompt="repair", timeout_seconds=600)
-        self.assertEqual(result["timeout_seconds"], 61)
+            result = wrapper.run(prompt="repair", timeout_seconds=600, run_dir=attempt)
+        self.assertEqual(delegate.run.call_args.kwargs["timeout_seconds"], 61)
+        self.assertEqual(result["outcome"], "incomplete")
+        self.assertEqual(
+            set(delegate.run.call_args.kwargs["schema"]["properties"]), {"markdown"}
+        )
         with patch("integrations.protok.debug_flow.time.time", return_value=161.0):
             with self.assertRaisesRegex(HarnessError, "deadline"):
                 wrapper.run(prompt="repair", timeout_seconds=600)

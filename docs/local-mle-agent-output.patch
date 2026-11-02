@@ -1,0 +1,345 @@
+--- a/benchmarks/local_mle/bridge.py
++++ b/benchmarks/local_mle/bridge.py
+@@ -23,6 +23,23 @@
+     publish_completed_response,
+ )
+ from research_loop.protocol import validate_response
++
++
++REPORT_SCHEMA = {
++    "type": "object",
++    "properties": {
++        "markdown": {"type": "string"},
++    },
++    "required": ["markdown"],
++    "additionalProperties": False,
++}
++REPORT_INSTRUCTIONS = """
++Final Execute response contract: return ONLY markdown, matching the
++supplied JSON schema. Describe actions, evidence paths and limitations. The
++controller builds artifact paths/versions, candidate IDs, scopes, metric values,
++evidence lists and actual job outcome from independently verified bridge receipts.
++Do not return or copy these fields. This overrides earlier full-output examples.
++"""
+
+
+ TASKS = (
+@@ -451,6 +468,7 @@
+                     self.bridge_errors.append(
+                         f"{path.name}: could not publish receipt: {type(exc).__name__}"
+                     )
++                    raise HarnessError("Job effects have no accepted receipt") from exc
+             stop.wait(0.05)
+
+     def validate_completed(
+@@ -586,12 +604,20 @@
+             path.mkdir(exist_ok=True)
+         staging = run_dir / "bridge-call"
+         staging.mkdir()
+-        delegated = dict(kwargs, run_dir=staging)
++        prior_jobs = set(self.jobs)
++        prior_errors = len(self.bridge_errors)
++        delegated = dict(kwargs, run_dir=staging, schema=REPORT_SCHEMA)
+         stop = threading.Event()
+         ready = threading.Event()
+-        watcher = threading.Thread(
+-            target=self._watch, args=(workspace, stop, ready), name="local-mle-bridge"
+-        )
++        worker_errors = []
++
++        def watch():
++            try:
++                self._watch(workspace, stop, ready)
++            except BaseException as error:
++                worker_errors.append(error)
++
++        watcher = threading.Thread(target=watch, name="local-mle-bridge")
+         watcher.start()
+         try:
+             if not ready.wait(timeout=2) or not watcher.is_alive():
+@@ -621,8 +647,9 @@
+                 "Continue to atomically publish requests/<job_id>.json under the "
+                 "existing request contract and wait for results/<job_id>/result.json. "
+                 "This readiness receipt is not a training result or measurement."
+-            )
+-            result = self.delegate.run(**delegated)
++                + REPORT_INSTRUCTIONS
++            )
++            report = self.delegate.run(**delegated)
+         finally:
+             stop.set()
+             watcher.join()
+@@ -636,6 +663,45 @@
+             ):
+                 if (staging / name).is_file():
+                     shutil.copy2(staging / name, run_dir / name)
++        if worker_errors:
++            raise HarnessError(
++                "Training request watcher failed; effects require reconciliation"
++            ) from worker_errors[0]
++        validate_response("execute", report, schema=REPORT_SCHEMA)
++        receipts = [
++            receipt
++            for job_id, receipt in sorted(self.jobs.items())
++            if job_id not in prior_jobs
++        ]
++        if any(receipt.get("status") == "unknown" for receipt in receipts):
++            raise HarnessError("Job effects are unknown; reconciliation required")
++        completed = [
++            receipt
++            for receipt in receipts
++            if receipt.get("status") == "completed"
++            and receipt.get("completed") is True
++            and receipt.get("workspace") == str(workspace)
++        ]
++        result = {
++            "outcome": "completed"
++            if receipts
++            and len(completed) == len(receipts)
++            and len(self.bridge_errors) == prior_errors
++            else "incomplete",
++            "markdown": report["markdown"],
++            "artifacts": [receipt["artifact"] for receipt in completed],
++            "measurements": [
++                {
++                    "candidate_id": receipt["job_id"],
++                    "artifact": receipt["artifact"],
++                    "evaluation_id": "global-development-v1",
++                    "comparison_scope": "development-v1",
++                    "metrics": [{"name": self.metric, "value": receipt["score"]}],
++                    "evidence": receipt["evidence"],
++                }
++                for receipt in completed
++            ],
++        }
+         validate_response("execute", result, schema=kwargs["schema"])
+         self.validate_completed(result, workspace=workspace, run_dir=run_dir)
+         publish_completed_response(run_dir, result)
+--- a/benchmarks/local_mle/run.py
++++ b/benchmarks/local_mle/run.py
+@@ -90,10 +90,10 @@
+ study has at most {max_jobs} jobs. Wait for `results/<job_id>/result.json` before
+ submitting another. An error or unknown result must not be automatically retried.
+
+-Use the result's artifact, metric, score and evidence exactly as supplied; the
+-measurement candidate_id must equal job_id. Declare each measured artifact in
+-artifacts and use evaluation_id `global-development-v1` and comparison_scope
+-`development-v1`. Never modify bridge results, fabricate measurements, inspect
++Return only markdown under the controller-supplied report schema.
++Describe actual evidence and limitations; the controller constructs artifacts,
++measurements, IDs, scopes, scores and outcome from verified receipts.
++Never modify bridge results, fabricate measurements, inspect
+ or grade test predictions, or report an incomplete job as completed. Only the
+ development score is feedback. The final test is scored outside the loop after
+ the candidate and study are frozen. Jobs have bounded settings and a single-file
+--- a/tests/test_local_mle_bridge.py
++++ b/tests/test_local_mle_bridge.py
+@@ -82,7 +82,8 @@
+                         raise AssertionError("Bridge produced no receipt")
+                     time.sleep(0.005)
+                 self.receipts.append(json.loads(result_path.read_text()))
+-        result = envelope(self.receipts)
++        full = envelope(self.receipts)
++        result = {key: full[key] for key in ("markdown",)}
+         if self.mutation:
+             self.mutation(result)
+         run_dir = kwargs["run_dir"]
+@@ -161,6 +162,7 @@
+             patch("benchmarks.local_mle.bridge._terminate_group") as terminate,
+             patch.object(bridge, "_score", return_value=0.75),
+         ):
++            self.last_terminate = terminate
+             result = bridge.run(**arguments)
+         return result, terminate
+
+@@ -511,11 +513,11 @@
+
+     def test_measurement_forgery_does_not_publish_parent_completion(self):
+         def forge(result):
+-            result["measurements"][0]["metrics"][0]["value"] = 1.0
++            result["measurements"] = [{"metrics": [{"name": "auc", "value": 1.0}]}]
+
+         delegate = RequestDelegate([REQUEST], mutation=forge)
+         arguments = self.arguments()
+-        with self.assertRaises(HarnessError):
++        with self.assertRaises(ValueError):
+             self.run_bridge(self.bridge(delegate), arguments)
+         self.assertIsNone(completed_response(arguments["run_dir"]))
+         self.assertFalse((arguments["run_dir"] / "response.json").exists())
+@@ -609,15 +611,9 @@
+         evidence = arguments["workspace"] / "execution-evidence" / "prerequisites.txt"
+         evidence.parent.mkdir()
+         evidence.write_text("Bridge presence was not established; no AUC measured.")
+-        result = dict(
+-            envelope([]),
+-            artifacts=[
+-                {"path": str(report), "version": "diagnostic-report-v1"},
+-                {"path": str(evidence), "version": "diagnostic-evidence-v1"},
+-            ],
+-        )
++        result = dict(envelope([]), markdown=f"Diagnostics: {report}; {evidence}")
+         delegate = Mock()
+-        delegate.run.return_value = result
++        delegate.run.return_value = {key: result[key] for key in ("markdown",)}
+         bridge = self.bridge(delegate)
+         accepted, _ = self.run_bridge(bridge, arguments)
+         self.assertEqual(accepted, result)
+@@ -637,11 +633,13 @@
+         report = arguments["workspace"] / "execution-report.md"
+         report.write_text("Qualitative discussion accompanying a measured candidate.")
+         diagnostic = {"path": "execution-report.md", "version": "diagnostic-v1"}
+-        delegate = RequestDelegate(
+-            [REQUEST], mutation=lambda result: result["artifacts"].append(diagnostic)
+-        )
++        delegate = RequestDelegate([REQUEST])
+         bridge = self.bridge(delegate)
+         result, _ = self.run_bridge(bridge, arguments)
++        result["artifacts"].append(diagnostic)
++        bridge.validate_completed(
++            result, workspace=arguments["workspace"], run_dir=arguments["run_dir"]
++        )
+         self.assertEqual(len(result["artifacts"]), 2)
+         self.assertEqual(len(result["measurements"]), 1)
+         forged = copy.deepcopy(result)
+@@ -794,14 +792,21 @@
+                         poll=lambda: 2 if mode == "failure" else None,
+                     )
+
+-                result, terminate = self.run_bridge(bridge, arguments, factory)
+-                self.assertEqual(result["measurements"], [])
++                if mode == "timeout":
++                    with self.assertRaisesRegex(
++                        HarnessError, "reconciliation required"
++                    ):
++                        self.run_bridge(bridge, arguments, factory)
++                    self.assertIsNone(completed_response(arguments["run_dir"]))
++                else:
++                    result, _ = self.run_bridge(bridge, arguments, factory)
++                    self.assertEqual(result["measurements"], [])
+                 self.assertEqual(
+                     delegate.receipts[0]["status"],
+                     "error" if mode == "failure" else "unknown",
+                 )
+                 self.assertFalse(delegate.receipts[0]["completed"])
+-                self.assertEqual(terminate.call_count, 1)
++                self.assertEqual(self.last_terminate.call_count, 1)
+                 self.assertTrue((self.jobs_root / mode / "train.py").is_file())
+                 self.assertTrue(
+                     (self.jobs_root / mode / "training-source.json").is_file()
+@@ -822,13 +827,14 @@
+             marker.touch()
+             return SimpleNamespace(pid=99999999, returncode=None, poll=lambda: None)
+
+-        result, terminate = self.run_bridge(self.bridge(delegate), arguments, factory)
+-        self.assertEqual(result["outcome"], "incomplete")
++        with self.assertRaisesRegex(HarnessError, "reconciliation required"):
++            self.run_bridge(self.bridge(delegate), arguments, factory)
++        self.assertIsNone(completed_response(arguments["run_dir"]))
+         receipt = json.loads(
+             (self.jobs_root / REQUEST["job_id"] / "result.json").read_text()
+         )
+         self.assertEqual(receipt["status"], "unknown")
+-        self.assertEqual(terminate.call_count, 1)
++        self.assertEqual(self.last_terminate.call_count, 1)
+
+     def test_unresolved_persistent_job_is_never_replayed(self):
+         bridge = self.bridge(Mock())
+--- /dev/null
++++ b/tests/test_local_mle_agent_output.py
+@@ -0,0 +1,96 @@
++"""CPU fixtures for the optional local-MLE report-only adapter patch."""
++
++import json
++import unittest
++from unittest.mock import patch
++
++from benchmarks.local_mle.bridge import REPORT_SCHEMA
++from research_loop.harness import completed_response, publish_completed_response
++from test_local_mle_bridge import BridgeTests, REQUEST, RequestDelegate
++
++
++class ReportDelegate(RequestDelegate):
++    def run(self, **kwargs):
++        full = super().run(**kwargs)
++        report = {"markdown": full["markdown"]}
++        publish_completed_response(kwargs["run_dir"], report)
++        return report
++
++
++class AgentOutputTests(unittest.TestCase):
++    def fixture(self):
++        fixture = BridgeTests()
++        fixture.setUp()
++        self.addCleanup(fixture.doCleanups)
++        return fixture
++
++    def test_controller_constructs_fields_and_retains_nested_raw_receipt(self):
++        fixture = self.fixture()
++        arguments = fixture.arguments()
++        delegate = ReportDelegate([REQUEST])
++        bridge = fixture.bridge(delegate)
++        result, _ = fixture.run_bridge(bridge, arguments)
++        self.assertEqual(result["outcome"], "completed")
++        self.assertEqual(delegate.kwargs["schema"], REPORT_SCHEMA)
++        measurement = result["measurements"][0]
++        self.assertEqual(measurement["candidate_id"], REQUEST["job_id"])
++        self.assertEqual(measurement["evaluation_id"], "global-development-v1")
++        self.assertEqual(measurement["comparison_scope"], "development-v1")
++        self.assertEqual(measurement["metrics"], [{"name": "auc", "value": 0.75}])
++        self.assertEqual(completed_response(arguments["run_dir"]), result)
++        raw = completed_response(arguments["run_dir"] / "bridge-call")
++        self.assertEqual(set(raw), {"markdown"})
++        # Existing source/effect validator must still reject receipt tampering.
++        public = arguments["workspace"] / "results" / REQUEST["job_id"] / "result.json"
++        receipt = json.loads(public.read_text())
++        receipt["score"] = 0.99
++        public.write_text(json.dumps(receipt))
++        with self.assertRaisesRegex(Exception, "trusted bridge receipt"):
++            bridge.validate_completed(
++                result, workspace=arguments["workspace"], run_dir=arguments["run_dir"]
++            )
++
++    def test_new_call_does_not_republish_previous_jobs(self):
++        fixture = self.fixture()
++        bridge = fixture.bridge(ReportDelegate([REQUEST]))
++        first = fixture.arguments()
++        fixture.run_bridge(bridge, first)
++        bridge.delegate = ReportDelegate([])
++        second = fixture.arguments("second")
++        result, _ = fixture.run_bridge(bridge, second)
++        self.assertEqual(result["outcome"], "incomplete")
++        self.assertEqual(result["artifacts"], [])
++        self.assertEqual(result["measurements"], [])
++        self.assertEqual(len(fixture.calls), 1)
++
++    def test_unreserved_error_and_success_cannot_report_completed(self):
++        fixture = self.fixture()
++        delegate = ReportDelegate([REQUEST])
++        bridge = fixture.bridge(delegate)
++        original = bridge._reserve
++
++        def reserve(*args, **kwargs):
++            bridge.bridge_errors.append("another request failed before reservation")
++            return original(*args, **kwargs)
++
++        with patch.object(bridge, "_reserve", side_effect=reserve):
++            result, _ = fixture.run_bridge(bridge, fixture.arguments())
++        self.assertEqual(result["outcome"], "incomplete")
++        self.assertEqual(len(result["measurements"]), 1)
++
++    def test_unexpected_worker_failure_blocks_parent_publication(self):
++        fixture = self.fixture()
++        delegate = ReportDelegate([])
++        bridge = fixture.bridge(delegate)
++        arguments = fixture.arguments()
++
++        def watch(workspace, stop, ready):
++            ready.set()
++            stop.wait()
++            raise RuntimeError("worker failed outside request handling")
++
++        with patch.object(bridge, "_watch", side_effect=watch):
++            with self.assertRaisesRegex(Exception, "effects require reconciliation"):
++                fixture.run_bridge(bridge, arguments)
++        self.assertIsNone(completed_response(arguments["run_dir"]))
++        self.assertIsNotNone(completed_response(arguments["run_dir"] / "bridge-call"))
