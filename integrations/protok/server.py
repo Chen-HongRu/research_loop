@@ -207,7 +207,12 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         reason = "attention"
         scout = None
+        long_training = None
         try:
+            from integrations.protok.long_training_loop import LongTrainingScheduler
+
+            long_training = LongTrainingScheduler(root, backend)
+            long_training.start()
             study_config = root / "study/study.json"
             if study_config.exists() and read(study_config).get("exploration"):
                 scout = ScoutScheduler(root)
@@ -231,6 +236,11 @@ def main():
         finally:
             if scout is not None:
                 scout.shutdown()
+            if long_training is not None:
+                # The independently granted active long run drains after short budget
+                # completion or HANDOFF. User STOP/signals and its absolute deadline
+                # cancel owned work through the backend; no next long run starts.
+                long_training.shutdown()
             if reason != "handoff":
                 (control / "STOP").write_text(f"Supervisor stopped: {reason}\n")
             status = backend.inspect()
@@ -244,6 +254,15 @@ def main():
                     "additional_gpu_seconds_used": status["used_gpu_seconds"]
                     - lease["initial_gpu_seconds"],
                     "outstanding": status["outstanding"],
+                    "long_training_gpu_seconds": status.get(
+                        "long_training_gpu_seconds", 0
+                    ),
+                    "long_training_outstanding": status.get(
+                        "long_training_outstanding", []
+                    ),
+                    "total_gpu_seconds": status.get(
+                        "total_gpu_seconds", status["used_gpu_seconds"]
+                    ),
                     "best": runner.read(control / "active-best.json")
                     if (control / "active-best.json").exists()
                     else None,

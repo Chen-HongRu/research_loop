@@ -20,6 +20,7 @@ from integrations.protok.explanation import explanation_coverage, explanation_st
 from integrations.protok.plan_provenance import execution_plan
 from integrations.protok.run import job_path
 from research_loop.harness import completed_response
+from research_loop.long_training import snapshot as long_training_snapshot
 
 
 def read(path, default=None):
@@ -1163,6 +1164,7 @@ def snapshot(root, *, snapshot_only=False):
         "runner": runner,
         "progress": progress(root, state, backend, runner, current_agents),
         "scout": scout_snapshot(root),
+        "long_training": long_training_snapshot(root / "study"),
         "best": {"id": best.get("experiment_id"), "metrics": best.get("metrics", {})},
         "gpu_seconds": backend.get("total_gpu_seconds", backend["used_gpu_seconds"]),
         "formal_gpu_seconds": backend["used_gpu_seconds"]
@@ -1307,6 +1309,17 @@ def details(root, identity):
         "agents": agent_outputs(root, folder),
         "plan_record": plan_record,
         "execution": execution_details(root, identity),
+        "long_training": [
+            run
+            for run in long_training_snapshot(root / "study")
+            if str(
+                run.get(
+                    "source_iteration",
+                    run.get("request", {}).get("source_iteration", ""),
+                )
+            ).zfill(4)
+            == identity
+        ],
         "explanation": explanation_status(root, identity),
         "metadata": read(folder / "iteration.json", {}),
         "sources": {
@@ -1531,7 +1544,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         )
         nodes.extend(ledger_nodes)
     active_frontier = active["frontier"]
-    history_frontiers = []
+    history_frontiers, long_training = [], []
     for definition in definitions:
         source_id, source_root, label = (
             definition["id"],
@@ -1542,6 +1555,10 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
             active
             if source_id == "active"
             else snapshot(source_root, snapshot_only=True)
+        )
+        long_training.extend(
+            {**run, "source_id": source_id, "source_label": label}
+            for run in local.get("long_training", [])
         )
         source_frontier = local["frontier"]
         compatible = all(
@@ -1742,6 +1759,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         if active["nodes"]
         else None,
         "frontier": merged_frontier,
+        "long_training": long_training,
         "coverage": {
             "study_count": len(definitions),
             "node_count": len(nodes),

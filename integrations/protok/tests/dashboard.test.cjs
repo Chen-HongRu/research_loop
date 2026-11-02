@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {gitLayout, graphParent, drawGraph, renderProgress, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -339,4 +339,18 @@ test('Proven continuation shows the original Planner contract and separates exec
   const pending=ui.explanationPanel({id:'history-1:0015',explanation:{status:'unpublished'},plan_record:plan},{});
   assert.match(pending,/阅读原始研究合同与 Planner 输出/);
   assert.match(pending,/Original controlled intervention/);
+});
+
+
+test('Long training separates reviewed 10k endpoints and best checkpoints with aligned metrics', () => {
+  const request={source_iteration:'0003',candidate:{id:'candidate3'},nomination:{basis:'quality',reason:'test reason',evidence:['short/result.json']},recipe:{total_steps:10000,validation_split:'full',initialization:'fresh'}};
+  const run={id:'L0123456789abcdef',request,status:'reviewed',phase:'done',result:{candidate_id:'candidate3',review:{markdown:'Independent knowledge',knowledge_changes:['long-run evidence']},execute:{artifacts:['metrics.json']},result:{curve:[{step:2000,ca_rmsd:1,tm_score:.5,lddt:.6,checkpoint:'checkpoint2k',proteins:100},{step:10000,ca_rmsd:2,tm_score:.7,lddt:.8,checkpoint:'checkpoint10k',proteins:100}],checkpoints:['checkpoint2k','checkpoint10k']}}};
+  const rendered=ui.longTrainingRuns([run]);
+  for(const label of ['最终 10k','曲线最优 CA RMSD','CA RMSD ↓','TM-score ↑','lDDT ↑','checkpoint2k','checkpoint10k','Independent knowledge','short/result.json','metrics.json'])assert.ok(rendered.includes(label),label);
+  assert.match(rendered, /最终 10k<\/th><td>10000<\/td><td>2<\/td><td>0.7<\/td><td>0.8/);
+  assert.match(rendered, /曲线最优 CA RMSD<\/th><td>2000<\/td><td>1<\/td><td>0.5<\/td><td>0.6/);
+  assert.equal((rendered.match(/<svg /g)||[]).length,3);
+  const pending=ui.longTrainingRuns([{...run,result:undefined,error:'<script>bad</script>'}]);
+  assert.match(pending,/尚未独立 Review 发布/);
+  assert.doesNotMatch(pending,/<svg |<script>|Independent knowledge|checkpoint2k/);
 });

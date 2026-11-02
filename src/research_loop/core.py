@@ -15,6 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .evaluation import build_frontier, validate_evaluation
+from .long_training import (
+    completed_results as long_training_results,
+    guidance as long_training_guidance,
+    nominations as long_training_nominations,
+    stage_schema as long_training_schema,
+    validate_policy as validate_long_training,
+)
 from .exploration import (
     allocation,
     guidance,
@@ -88,6 +95,7 @@ def initialize(
     strategy: dict | None = None,
     exploration: dict | None = None,
     research_execution: dict | None = None,
+    long_training: dict | None = None,
 ) -> Path:
     root = Path(root).resolve()
     workspace = Path(workspace).resolve() if workspace else root / "workspace"
@@ -102,6 +110,16 @@ def initialize(
             continue
         if type(value) is not int or value < 1:
             raise ValueError(f"{name} must be a positive integer")
+    long_training = validate_long_training(long_training)
+    if long_training and (
+        not global_evaluation
+        or global_evaluation["id"] == long_training["evaluation"]["id"]
+        or global_evaluation["comparison_scope"]
+        == long_training["evaluation"]["comparison_scope"]
+    ):
+        raise ValueError(
+            "Long training requires separate short and long development evaluations"
+        )
     strategy = validate_strategy(strategy)
     exploration = validate_exploration(exploration)
     research_execution = validate_research_execution(research_execution)
@@ -167,6 +185,7 @@ def initialize(
             "selection": policy,
             "strategy": strategy,
             **({"exploration": exploration} if exploration else {}),
+            **({"long_training": long_training} if long_training else {}),
             **(
                 {"research_execution": research_execution} if research_execution else {}
             ),
@@ -207,6 +226,7 @@ class Study:
         self.strategy = validate_strategy(self.config.get("strategy"))
         self.exploration = validate_exploration(self.config.get("exploration"))
         validate_research_execution(self.config.get("research_execution"))
+        self.long_training = validate_long_training(self.config.get("long_training"))
         self.workspace = Path(self.config["workspace"])
         self.harness = harness or make_harness(HarnessConfig(**self.config["harness"]))
         self._run_start = None
@@ -214,6 +234,12 @@ class Study:
 
     def status(self) -> dict:
         return _read(self.root / "state.json")
+
+    def knowledge(self) -> dict:
+        return {
+            "research": (self.root / "research.md").read_text(),
+            "long_training": long_training_results(self.root),
+        }
 
     def frontiers(self) -> dict:
         return _read(self.root / "frontiers.json")
@@ -493,6 +519,11 @@ class Study:
             target = context / destination
             if not target.exists():
                 _atomic_text(target, (self.root / source).read_text())
+        long_results = context / "long_training_results.json"
+        if not long_results.exists() and (
+            self.long_training or (self.root / "long-runs").exists()
+        ):
+            _write(long_results, long_training_results(self.root))
         if self.exploration:
             # Inputs arriving during this investigation are consumed next time.
             # A missing/failed scout never blocks the experiment loop.
@@ -770,6 +801,12 @@ class Study:
             "frontiers": views,
             "routes": _read(folder / "context/routes.before.json"),
         }
+        long_policy = validate_long_training(config.get("long_training"))
+        if long_policy:
+            context["long_training"] = long_policy
+        long_results = folder / "context/long_training_results.json"
+        if long_results.exists():
+            context["long_training_results"] = _read(long_results)
         metadata = _read(folder / "iteration.json")
         continuation = metadata.get("continuation")
         scientific_folder = folder
@@ -890,12 +927,15 @@ class Study:
                 result = harness.run(
                     prompt=prompt(phase, context)
                     + guidance(phase, context)
+                    + long_training_guidance(phase, context)
                     + (
                         "\n\n" + review_guidance(self.strategy)
                         if phase == "review" and review_guidance(self.strategy)
                         else ""
                     ),
-                    schema=stage_schema(phase, context, SCHEMAS),
+                    schema=long_training_schema(
+                        phase, context, stage_schema(phase, context, SCHEMAS)
+                    ),
                     workspace=workspace or self.workspace,
                     run_dir=attempt,
                     writable=phase == "execute" and self.config["allow_write"],
@@ -915,7 +955,13 @@ class Study:
         return result
 
     def _validate_result(self, phase: str, result: dict, context: dict) -> None:
-        validate_response(phase, result, schema=stage_schema(phase, context, SCHEMAS))
+        validate_response(
+            phase,
+            result,
+            schema=long_training_schema(
+                phase, context, stage_schema(phase, context, SCHEMAS)
+            ),
+        )
         validate_design(phase, result, context)
         if not result["markdown"].strip():
             raise StudyError("Stage report must be nonempty")
@@ -1540,6 +1586,20 @@ class Study:
             },
         )
         views = self._build_views(extra=folder)
+        if context.get("long_training"):
+            requests = long_training_nominations(
+                self.root,
+                context["long_training"],
+                result["long_training_decision"],
+                candidates,
+                context["frontiers"],
+                views,
+                context["experiment"],
+            )
+            _write(
+                folder / "long-training.json",
+                {"decision": result["long_training_decision"], "requests": requests},
+            )
         metadata = context["experiment"]
         metadata["status"] = "reviewed"
         metadata["references"] = sorted(

@@ -238,6 +238,9 @@ class ProTokBackend:
         from integrations.protok.research_execution import research_usage
 
         research = research_usage(self.control)
+        from integrations.protok.long_training import usage as long_usage
+
+        long_training = long_usage(self.control)
         return dict(
             project=str(self.project),
             protocol=PROTOCOL,
@@ -251,7 +254,12 @@ class ProTokBackend:
             research_outstanding=research["outstanding"],
             used_gpu_seconds=used + research["gpu_seconds"],
             debug_gpu_seconds=debug_used,
-            total_gpu_seconds=used + research["gpu_seconds"] + debug_used,
+            long_training_gpu_seconds=long_training["gpu_seconds"],
+            long_training_outstanding=long_training["outstanding"],
+            total_gpu_seconds=used
+            + research["gpu_seconds"]
+            + debug_used
+            + long_training["gpu_seconds"],
             debug_outstanding=debug_outstanding,
             outstanding=outstanding,
             off=(self.project / ".autoresearch-off").exists(),

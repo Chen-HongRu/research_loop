@@ -994,6 +994,8 @@ def init_study(root, backend):
     config = HarnessConfig(
         executable=CODEX, model="gpt-6.1-sol", reasoning="medium", timeout_seconds=3600
     )
+    from integrations.protok.long_training_loop import study_policy as long_study_policy
+
     initialize(
         Path(root) / "study",
         goal=GOAL,
@@ -1003,6 +1005,7 @@ def init_study(root, backend):
         max_iterations=None,
         max_calls=None,
         max_seconds=max(1, int(deadline - time.time())),
+        long_training=long_study_policy(root),
         global_evaluation={
             "id": PROTOCOL,
             "comparison_scope": PROTOCOL,
@@ -1486,8 +1489,12 @@ def main(argv=None):
         "repair-completed-control",
         "begin-debug",
         "resume-unsubmitted",
+        "enable-long-training",
+        "run-long-one",
+        "recover-long-run",
     ):
         modes.add_argument("--" + mode, action="store_true")
+    parser.add_argument("--long-run-id", help="Retained long run to reconcile")
     args = parser.parse_args(argv)
     root = args.root.resolve()
     owner = read(root / "control/ownership.json")
@@ -1500,6 +1507,17 @@ def main(argv=None):
             "backend": backend.inspect(),
             "paused": (root / "control/STOP").exists(),
         }
+    elif args.enable_long_training or args.run_long_one or args.recover_long_run:
+        from integrations.protok import long_training_loop
+
+        if args.enable_long_training:
+            result = long_training_loop.enable(root, backend)
+        elif args.recover_long_run:
+            if not args.long_run_id:
+                parser.error("--recover-long-run requires --long-run-id")
+            result = long_training_loop.recover(root, backend, args.long_run_id)
+        else:
+            result = long_training_loop.run_one(root, backend)
     elif args.init:
         result = init_study(root, backend)
     elif args.reconcile_local_incomplete:
