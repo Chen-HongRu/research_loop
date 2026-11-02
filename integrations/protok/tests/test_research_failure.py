@@ -201,10 +201,12 @@ class ResearchFailureTests(unittest.TestCase):
     def test_invalid_plan_is_not_published_as_accepted(self):
         self.initialize()
         delegate_run = self.delegate.run
+        schemas = []
 
         def invalid_plan(**kwargs):
             response = delegate_run(**kwargs)
             if "research_contract" in response:
+                schemas.append(kwargs["schema"])
                 response["research_contract"]["execution"]["inputs"] = [
                     {
                         "name": "hidden",
@@ -217,6 +219,18 @@ class ResearchFailureTests(unittest.TestCase):
         with patch.object(self.delegate, "run", side_effect=invalid_plan):
             with self.assertRaisesRegex(HarnessError, "input role"):
                 self.run_one()
+        schema = schemas[0]
+        research = schema["properties"]["research_contract"]["anyOf"][0]["properties"]
+        execution = research["execution"]["properties"]
+        inputs = execution["inputs"]["items"]["properties"]
+        self.assertIn("enum", inputs["role"])
+        for text in (
+            inputs["name"],
+            inputs["source"],
+            research["question"],
+            execution["entrypoint"]["anyOf"][0],
+        ):
+            self.assertNotIn("enum", text)
         state = self.study.status()
         self.assertEqual((state["phase"], state["status"]), ("plan", "needs_attention"))
         self.assertIsNone(completed_response(self.study.root / state["active_attempt"]))
