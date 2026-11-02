@@ -289,11 +289,16 @@ def _snapshot(backend, request, record, config, fixed):
     shutil.copyfile(
         Path(__file__).with_name("long_train.py"), destination / "long_train.py"
     )
+    from .telemetry import stage_writer, writer_source
+
+    event_writer, event_writer_identity = writer_source()
+    stage_writer(destination, event_writer)
     # Trusted driver identity is part of the allocation, independently of search locks.
     identity = hashlib.sha256(
         (
             identity
             + hashlib.sha256((destination / "long_train.py").read_bytes()).hexdigest()
+            + event_writer_identity
         ).encode()
     ).hexdigest()
     return destination, identity
@@ -593,6 +598,23 @@ def execute(
                 )
             if (record / "receipt.json").exists():
                 result = _retained_result(existing, _read(record / "receipt.json"))
+                from .telemetry import drain_existing
+
+                drain_existing(
+                    workspace.parent,
+                    "long-" + request["id"],
+                    {
+                        "kind": "long-training",
+                        "experiment_id": "0001",
+                        "source_identity": existing["source_identity"],
+                        "execution_identity": existing["source_identity"],
+                        "run_id": request["id"],
+                        "parent_iteration": request["source_iteration"],
+                    },
+                    config,
+                    existing["remote"] + "/train/events.jsonl",
+                    ssh=fixed.ssh,
+                )
                 _write(workspace / "result.json", result)
                 return _envelope(request, workspace / "result.json", result)
             if not recover:
@@ -656,6 +678,9 @@ def execute(
                 "deadline": effective,
                 "round_admission": token,
                 "wait_policy": "slurm-allocation",
+                "event_writer_identity": hashlib.sha256(
+                    (source / "research_loop_events.py").read_bytes()
+                ).hexdigest(),
                 "config": config,
                 "off": off_value,
                 "off_stat": off_stat,
@@ -708,6 +733,23 @@ def execute(
             return original_ssh(current, command, **kwargs)
 
         fixed.ssh = ssh
+        from .telemetry import job_relay
+
+        relay = job_relay(
+            workspace.parent,
+            "long-" + request["id"],
+            {
+                "kind": "long-training",
+                "experiment_id": "0001",
+                "source_identity": existing["source_identity"],
+                "execution_identity": existing["source_identity"],
+                "run_id": request["id"],
+                "parent_iteration": request["source_iteration"],
+            },
+            original_ssh,
+            config,
+            existing["remote"] + "/train/events.jsonl",
+        )
         error, curve = None, []
         try:
             if not recover:
@@ -778,6 +820,8 @@ def execute(
                     error += f"; reconciliation: {type(failure).__name__}: {failure}"
         finally:
             fixed.ssh = original_ssh
+            if relay is not None:
+                relay.close()
         settled = all(
             key in attempt
             for key in ("gpu_seconds", "terminal_state", "exit_code", "owned_job_id")

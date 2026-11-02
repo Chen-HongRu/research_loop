@@ -206,6 +206,9 @@ def fake_snapshot(backend, request, record, config, fixed):
         source / "fixed.json",
         {"teacher_checkpoint": "/teacher", "source_manifest": "/source-manifest"},
     )
+    from integrations.protok.telemetry import stage_writer, writer_source
+
+    stage_writer(source, writer_source()[0])
     return source, "b" * 64
 
 

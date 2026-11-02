@@ -270,6 +270,16 @@ Do not update Frontier, research memory or route state; Review and controller do
     "review": """Read only: inspect the contract, execution, relevant actual outputs
 and previous research. Do not write files, run new experiments or change the contract.
 Check execution, global evaluation, local evaluation and research knowledge separately.
+If telemetry is present, inspect evidence across ALL tags, including internal/custom
+tags omitted from the dashboard. Tags control presentation, not validity, authority
+or confidentiality. The manifest binds each stream to its source and exact byte_end;
+read only that frozen prefix using the telemetry reader's --until bound. Its preview
+is bounded, not the full record; page unfiltered events needed for the decision.
+Respect source, step, units, conditions, missing coverage and synchronization errors.
+Live/logged metrics remain observations until independently checked; never substitute
+them for fixed evaluation receipts or promote them directly into a Frontier.
+Records within one run are not independent replications. Preserve useful incomplete
+observations and distinguish them from unfinished measurements or missing endpoints.
 For every candidate, verify the exact artifact, evaluation definition/scope, complete
 objectives and constraints, data roles and evidence. Mark valid/verified with reasons;
 missing or incompatible evaluation is not zero or evidence of global regression.

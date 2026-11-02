@@ -29,6 +29,10 @@ Study 目标与固定评价
 
 Global Frontier 按 Study 的全局评价版本和可比范围维护所有路线的已核查候选；Local Frontier 按路线、局部评价版本和范围维护。只有完整、可比、满足约束且经过 Review 核查的精确产物版本参与支配比较。单目标保留最优集合，多目标保留非支配集合；不同局部范围不直接排名。局部改善不能代替全局成功条件，候选被支配也不意味着路线应关闭。诊断或定性调查可以没有可排序候选。
 
+## 实时观测接口
+
+Plan/Execute 可自定义结构化日志与标签。控制器按游标增量同步，面板读取 `dashboard` 标签；Review 可按冻结字节边界读取全部标签。实时数据保持未评审状态，不直接进入 Frontier。接口、ProTok 接入和本地读取方式见[实时观测](docs/telemetry.md)。
+
 ## 并行长训练
 
 Study 可选启用长训策略。Review 为有实质 Frontier 改善或较大架构改变且取得改善的候选提出带对照和证据的提名；独立子 Study 复用 Plan → Execute → Review，与短训并行。已评审长训在下一轮边界冻结为知识输入，`research-loop knowledge STUDY` 也会包含最后一轮短训之后完成的长训知识。协议、授权、恢复和 ProTok 的 10k/全量验证接入见[并行长训练](docs/long-training.md)。

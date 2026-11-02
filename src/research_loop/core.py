@@ -1498,6 +1498,10 @@ class Study:
             raise StudyError(
                 "Study goal changed during the investigation; reconcile the frozen contract"
             )
+        if (self.root / "telemetry").is_dir():
+            from .telemetry import freeze
+
+            freeze(self.root, folder.name, folder / "context/telemetry.json")
         paths = [
             "study.json",
             "goal.md",
@@ -1537,6 +1541,9 @@ class Study:
             .get("proposal", {})
             .get("research_design"),
         }
+        telemetry = folder / "context/telemetry.json"
+        if telemetry.exists():
+            context["telemetry"] = _read(telemetry)
         if context.get("long_training_run"):
             context["long_training_observations"] = long_observation_context(context)
         guidance = review_guidance(self.strategy)

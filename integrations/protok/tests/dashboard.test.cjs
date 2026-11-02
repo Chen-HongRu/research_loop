@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {telemetryGroups, telemetryPanel, longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -487,4 +487,16 @@ test('Legacy completed curves retain explicit whole-run review labels while part
   const partial=ui.longTrainingRuns([{id:'L0123456789abcdef',result:{...published,result:{...result,status:'failed',endpoint_complete:false}}}]);
   assert.doesNotMatch(partial,/整轮核查通过|<svg /);
   assert.match(partial,/尚无逐点核查通过的观测/);
+});
+
+
+test('Live telemetry stays unreviewed, escaped and split by metric unit and conditions', () => {
+  const event={name:'loss',value:.2,step:1,unit:'nats',tags:['dashboard'],context:{seed:42,scope:'dev'}};
+  const stream={stream_id:'same',source_id:'active',status:'running',events:[event,{...event,step:2,value:.1},{...event,context:{seed:43,scope:'dev'}},{...event,unit:'bits'},{...event,tags:['private'],value:'SECRET'}]};
+  assert.equal(ui.telemetryGroups(stream).length,3);
+  const shown=ui.telemetryPanel([stream,{...stream,source_id:'history-1',events:[{...event,value:{nonfinite:'NaN<script>'}}]}]);
+  for(const text of ['active / same','history-1 / same','观测 · 未评审','running','NaN&lt;script&gt;'])assert.ok(shown.includes(text),text);
+  assert.doesNotMatch(shown,/<script>|SECRET/);
+  assert.equal((shown.match(/<svg /g)||[]).length,3);
+  assert.match(ui.telemetryPanel([{stream_id:'empty',events:[]}]),/尚无 dashboard 标签观测/);
 });

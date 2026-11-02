@@ -251,6 +251,9 @@ class ResearchBackendTests(unittest.TestCase):
                     "execution": self.execution,
                     "inputs": receipt["inputs"],
                     "iteration": "0002",
+                    "event_writer_identity": research._read(
+                        self.control / "research-jobs/0002/job.json"
+                    )["event_writer_identity"],
                     "environment": environment,
                 },
                 sort_keys=True,
@@ -610,6 +613,9 @@ class ResearchBackendTests(unittest.TestCase):
                     "execution": self.execution,
                     "inputs": receipt["inputs"],
                     "iteration": "0002",
+                    "event_writer_identity": research._read(
+                        self.control / "research-jobs/0002/job.json"
+                    )["event_writer_identity"],
                 },
                 sort_keys=True,
             ).encode()
