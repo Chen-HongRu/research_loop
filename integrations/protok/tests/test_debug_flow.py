@@ -312,6 +312,38 @@ class DebugFlowTests(unittest.TestCase):
         ):
             self.assertEqual(self.recover(), result)
 
+    def _assert_expired_deadline_does_not_accept_interrupted_repair(self, error):
+        (self.root / "control/debug-policy.json").unlink()
+        self.failure["execution_deadline"] = time.time() + 120
+
+        def interrupted(**kwargs):
+            run.write(kwargs["run_dir"] / "process.json", {"status": "interrupted"})
+            raise error
+
+        self.delegate.run = interrupted
+        with self.assertRaises(type(error)):
+            self.recover()
+        with patch(
+            "integrations.protok.debug_flow.time.time",
+            return_value=self.failure["execution_deadline"] + 1,
+        ):
+            with self.assertRaisesRegex(
+                HarnessError, "Interrupted repair requires explicit reconciliation"
+            ):
+                self.recover()
+        self.assertFalse((self.root / "control/debug/0009/decision.json").exists())
+        self.assertEqual(self.backend.formal_calls, [])
+
+    def test_expired_deadline_does_not_accept_repair_os_error(self):
+        self._assert_expired_deadline_does_not_accept_interrupted_repair(
+            OSError("repair CLI interrupted")
+        )
+
+    def test_expired_deadline_does_not_accept_repair_keyboard_interrupt(self):
+        self._assert_expired_deadline_does_not_accept_interrupted_repair(
+            KeyboardInterrupt()
+        )
+
     def test_no_grant_without_retained_deadline_finishes_without_new_call(self):
         (self.root / "control/debug-policy.json").unlink()
         self.assertEqual(self.recover()["outcome"], "incomplete")

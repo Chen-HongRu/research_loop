@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 import subprocess
@@ -12,6 +13,7 @@ from research_loop.diagnostics import (
     diagnostic_view,
     fetch_remote_log,
     read_log_page,
+    redact_text,
 )
 
 
@@ -117,6 +119,191 @@ def ssh(config, command, **kwargs):
         self.assertNotIn("another-secret", whole)
         self.assertEqual(whole.count("z\n"), 50000)
         self.assertIn("[REDACTED]", whole)
+
+    def test_structured_authorization_headers_are_redacted(self):
+        for value in (
+            '{"Authorization":"Basic synthetic-credential"}',
+            "{'Proxy-Authorization': 'Bearer synthetic-credential'}",
+            "Authorization: Basic synthetic-credential\nnext line",
+            'authorization = "Basic synthetic-credential"',
+        ):
+            with self.subTest(value=value):
+                public = redact_text(value)
+                self.assertNotIn("synthetic-credential", public)
+                self.assertIn("[REDACTED]", public)
+
+    def test_nested_jsonl_credentials_keep_surrounding_log_evidence(self):
+        secret = "synthetic-nested-credential"
+        for header in ("Authorization", "Proxy-Authorization", "api_token"):
+            nested = json.dumps({header: "Bearer " + secret, "detail": "kept detail"})
+            for depth in range(4):
+                nested = json.dumps({"type": "tool_result", "output": nested})
+                with self.subTest(header=header, depth=depth):
+                    public = redact_text(nested)
+                    self.assertNotIn(secret, public)
+                    self.assertIn("kept detail", public)
+                    self.assertIn("[REDACTED]", public)
+                    path = self.root / "stdout.jsonl"
+                    path.write_text("plain before\n" + nested + "\nplain after\n")
+                    self.diagnostics.record_files([path])
+                    log = self.diagnostics.view()["logs"][-1]
+                    public = self.full(log["log_id"], limit=3)
+                    self.assertNotIn(secret, public)
+                    for evidence in ("plain before", "kept detail", "plain after"):
+                        self.assertIn(evidence, public)
+
+    def test_redacted_json_keeps_quotes_and_escaped_credential_tails(self):
+        for header in ("Authorization", "Proxy-Authorization", "api_token"):
+            for credential in (
+                'Bearer synthetic-prefix"synthetic-tail',
+                'Bearer synthetic-prefix\\"synthetic-tail',
+                "Bearer synthetic-prefix\\",
+                "Bearer synthetic-prefix'synthetic-tail",
+            ):
+                for depth in range(5):
+                    with self.subTest(
+                        header=header, credential=credential, depth=depth
+                    ):
+                        original = json.dumps({header: credential, "detail": "kept"})
+                        for _ in range(depth):
+                            original = json.dumps(
+                                {"output": original, "context": "kept"}
+                            )
+                        public = redact_text(original)
+                        self.assertNotIn("synthetic-prefix", public)
+                        self.assertNotIn("synthetic-tail", public)
+                        decoded = json.loads(public)
+                        for _ in range(depth):
+                            self.assertEqual(decoded["context"], "kept")
+                            decoded = json.loads(decoded["output"])
+                        self.assertEqual(decoded[header], "[REDACTED]")
+                        self.assertEqual(decoded["detail"], "kept")
+
+    def test_truncated_quoted_credentials_redact_to_end_of_line(self):
+        for header in ("Authorization", "Proxy-Authorization", "api_token"):
+            for ending in ("", "\nnext evidence\n", "\r\nnext evidence\r\n"):
+                for depth in range(3):
+                    with self.subTest(header=header, ending=ending, depth=depth):
+                        nested = json.dumps(
+                            {header: "Bearer synthetic-truncated-credential"}
+                        )
+                        for _ in range(depth):
+                            nested = json.dumps({"output": nested})
+                        truncated = nested[
+                            : nested.index("synthetic-truncated-credential")
+                        ]
+                        truncated += "synthetic-truncated-credential" + ending
+                        public = redact_text(truncated)
+                        self.assertNotIn("synthetic-truncated-credential", public)
+                        self.assertIn("[REDACTED]", public)
+                        if ending:
+                            self.assertIn("next evidence", public)
+
+    def test_utf8_pages_round_budget_up_and_keep_byte_offsets(self):
+        path = self.root / "unicode.log"
+        text = "a中é🙂終\n"
+        path.write_text(text)
+        self.diagnostics.record_files([path])
+        log_id = self.diagnostics.view()["logs"][0]["log_id"]
+        for limit in (1, 2, 3, 4, 5, 7):
+            with self.subTest(limit=limit):
+                offset, parts = 0, []
+                while True:
+                    page = read_log_page(
+                        self.diagnostics.directory, log_id, offset=offset, limit=limit
+                    )
+                    parts.append(page["text"])
+                    self.assertEqual(
+                        page["next_offset"] - offset,
+                        len(page["text"].encode("utf-8")),
+                    )
+                    self.assertGreater(page["next_offset"], offset)
+                    self.assertLessEqual(page["next_offset"] - offset, limit + 3)
+                    offset = page["next_offset"]
+                    if page["eof"]:
+                        break
+                self.assertEqual("".join(parts), text)
+                self.assertEqual(offset, len(text.encode("utf-8")))
+
+    def test_ssh_collector_projects_encoded_payload_without_losing_raw(self):
+        backend = self.backend()
+        payload = {
+            "files": [
+                {
+                    "name": "owner-value.txt",
+                    "data": base64.b64encode(b"owner-value artifact").decode(),
+                }
+            ],
+            "errors": ["missing owner-value.txt"],
+            "stdout_tail": base64.b64encode(
+                b"progress line\nAuthorization: Basic synthetic-credential\nowner-value"
+            ).decode(),
+            "future_payload": base64.b64encode(b"owner-value").decode(),
+        }
+        result = backend.ssh(
+            {"python": sys.executable},
+            "import base64; print(" + repr(json.dumps(payload)) + ")",
+        )
+        self.assertEqual(json.loads(result), payload)
+        logs = self.diagnostics.view()["logs"]
+        public = self.full(logs[0]["log_id"], limit=1)
+        self.assertIn("progress line", public)
+        self.assertIn("missing", public)
+        self.assertNotIn("owner-value", public)
+        self.assertNotIn("synthetic-credential", public)
+        self.assertNotIn(payload["files"][0]["data"], public)
+        self.assertNotIn(payload["stdout_tail"], public)
+        self.assertNotIn(payload["future_payload"], public)
+        raw = self.diagnostics.directory / "raw" / (logs[0]["log_id"] + ".log")
+        self.assertEqual(raw.read_text(), result)
+        self.assertNotIn("owner-value", json.dumps(self.diagnostics.view()))
+
+    def test_unknown_encoded_ssh_stdout_is_operator_only_but_stderr_survives(self):
+        backend = self.backend()
+        encoded = base64.b64encode(b"owner-value").decode()
+        result = backend.ssh(
+            {"python": sys.executable},
+            "import base64, sys; print(base64.b64encode(b'owner-value').decode()); "
+            "print('collector failed owner-value', file=sys.stderr)",
+        )
+        self.assertEqual(result.strip(), encoded)
+        logs = self.diagnostics.view()["logs"]
+        self.assertNotIn(encoded, self.full(logs[0]["log_id"]))
+        self.assertIn("collector failed [REDACTED]", self.full(logs[1]["log_id"]))
+
+    def test_encoded_telemetry_and_malformed_transport_are_not_public(self):
+        backend = self.backend()
+        encoded = base64.b64encode(b"owner-value").decode()
+        for output in (
+            json.dumps({"identity": [1, 2], "size": 11, "data": encoded}),
+            json.dumps({"files": None, "errors": [], "stdout_tail": encoded}),
+            '{"data": "' + encoded,
+        ):
+            with self.subTest(output=output):
+                backend.ssh(
+                    {"python": sys.executable},
+                    "import base64; print("
+                    + repr(output)
+                    + "); # base64.b64encode transport",
+                )
+                log = self.diagnostics.view()["logs"][-2]
+                self.assertNotIn(encoded, self.full(log["log_id"]))
+                raw = self.diagnostics.directory / "raw" / (log["log_id"] + ".log")
+                self.assertEqual(raw.read_text(), output + "\n")
+
+    def test_recaptured_transport_exception_keeps_stdout_operator_only(self):
+        backend = self.backend()
+        encoded = base64.b64encode(b"owner-value").decode()
+        error = subprocess.CalledProcessError(1, ["ssh"], encoded, "failed")
+        with patch.object(backend.subprocess.original, "run", side_effect=error):
+            with self.assertRaises(subprocess.CalledProcessError):
+                backend.ssh({"python": sys.executable}, "base64.b64encode transport")
+        self.diagnostics.record_error(error)
+        manifest = json.loads(
+            (self.diagnostics.directory / "diagnostic-manifest.json").read_text()
+        )
+        for log in manifest["logs"]:
+            self.assertNotIn(encoded, self.full(log["log_id"]))
 
     def test_unknown_ids_traversal_symlinks_and_bounds_are_rejected(self):
         path = self.root / "stdout.log"

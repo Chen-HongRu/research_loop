@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import codecs
 from contextvars import ContextVar
 import functools
 import json
@@ -38,20 +41,59 @@ def diagnostic_secrets(secrets=()):
     return tuple(value for value in values if value)
 
 
+def _redact_assignments(text, key, unquoted):
+    pattern = re.compile(
+        r"(?i)(?<![\w-])(?:\\*[\"'])?(?:" + key + r")(?:\\*[\"'])?\s*[:=]\s*"
+    )
+    opening_pattern = re.compile(r"(\\*)([\"'])")
+    closing_pattern = re.compile(r"(\\*)([\"']|[\r\n])")
+    unquoted_pattern = re.compile(unquoted)
+    parts, cursor = [], 0
+    for match in pattern.finditer(text):
+        if match.start() < cursor:
+            continue
+        start = match.end()
+        opening = opening_pattern.match(text, start)
+        end, wrapper = start, ""
+        if opening:
+            wrapper = opening.group()
+            end = len(text)
+            slashes, quote = opening.groups()
+            # At escape depth d, a delimiter has 2**d - 1 backslashes;
+            # an escaped quote has 2**(d + 1) - 1. Count the full run so
+            # escaped quotes (including trailing credentials) stay in the value.
+            for candidate in closing_pattern.finditer(text, opening.end()):
+                run, character = candidate.groups()
+                if character in "\r\n":
+                    end = candidate.start()
+                    break
+                if character == quote and len(run) % (2 * (len(slashes) + 1)) == len(
+                    slashes
+                ):
+                    end = candidate.end()
+                    break
+        if not wrapper:
+            value = unquoted_pattern.match(text, start)
+            end = value.end() if value else start
+        parts.extend([text[cursor:start], wrapper, "[REDACTED]", wrapper])
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def _redact(value, secrets=()):
     text = str(value)
     for secret in sorted({str(s) for s in secrets if s}, key=len, reverse=True):
         text = text.replace(secret, "[REDACTED]")
-    text = re.sub(
-        r"(?i)(\b(?:authorization|proxy-authorization)\s*[:=]\s*)(?:bearer\s+|basic\s+)?[^\r\n,;]+",
-        r"\1[REDACTED]",
-        text,
-    )
-    text = re.sub(
-        r"(?i)(?<![\w-])((?:[\"']?)(?:[\w-]*(?:token|password|passwd|secret|api[_-]?key|credential)[\w-]*)(?:[\"']?)\s*[:=]\s*)(?:[\"'][^\"'\r\n]*[\"']|[^\s,;}]+)",
-        r"\1[REDACTED]",
-        text,
-    )
+    # Preserve JSON quoting at each escape layer and surrounding plain logs.
+    for key, unquoted in (
+        (r"authorization|proxy-authorization", r"[^\r\n,;}]+"),
+        (
+            r"[\w-]*(?:token|password|passwd|secret|api[_-]?key|credential)[\w-]*",
+            r"[^\s,;}]+",
+        ),
+    ):
+        text = _redact_assignments(text, key, unquoted)
     return re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", text)
 
 
@@ -163,14 +205,76 @@ def read_log_page(directory, log_id, *, offset=0, limit=8192):
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
         handle.seek(offset)
         data = handle.read(limit)
+        # A page is a byte budget rounded up to the next UTF-8 boundary. Even a
+        # one-byte budget must emit a whole character and advance the raw cursor.
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        text = decoder.decode(data)
+        while decoder.getstate()[0]:
+            extra = handle.read(1)
+            data += extra
+            text += decoder.decode(extra, final=not extra)
+            if not extra:
+                break
         eof = handle.read(1) == b""
     return {
         "log_id": log_id,
         "offset": offset,
         "next_offset": offset + len(data),
         "eof": eof,
-        "text": data.decode("utf-8", errors="replace"),
+        "text": text,
     }
+
+
+def _public_stream(raw, secrets, *, encoded_transport=False):
+    """Project known SSH transfer envelopes without publishing encoded files."""
+    try:
+        envelope = json.loads(raw)
+    except (ValueError, TypeError):
+        envelope = None
+    collector = isinstance(envelope, dict) and {
+        "files",
+        "errors",
+        "stdout_tail",
+    }.issubset(envelope)
+    telemetry = isinstance(envelope, dict) and {"identity", "size", "data"}.issubset(
+        envelope
+    )
+    if collector and not (
+        isinstance(envelope["files"], list) and isinstance(envelope["errors"], list)
+    ):
+        return "[invalid transfer envelope retained in operator log]\n"
+    if collector or telemetry:
+        # Artifact bodies and telemetry bytes are not diagnostic text. Preserve
+        # their original transfer only in the operator stream. Use an allowlist
+        # so a new payload field cannot silently become publicly readable.
+        public = {}
+        if collector:
+            public["files"] = [
+                {
+                    "name": _redact(_text(item.get("name")), secrets),
+                    "data": "[operator-only payload]",
+                }
+                for item in envelope["files"]
+                if isinstance(item, dict)
+            ]
+            public["errors"] = [
+                _redact(_text(error), secrets) for error in envelope["errors"]
+            ]
+            try:
+                public["stdout_tail"] = _redact(
+                    base64.b64decode(envelope["stdout_tail"], validate=True).decode(
+                        "utf-8", errors="replace"
+                    ),
+                    secrets,
+                )
+            except (ValueError, TypeError, binascii.Error):
+                public["stdout_tail"] = "[invalid encoded log; operator-only payload]"
+        else:
+            public = {"data": "[operator-only payload]"}
+        return _redact(json.dumps(public, ensure_ascii=False), secrets)
+    if encoded_transport:
+        return "[encoded transport stdout retained in operator log]\n"
+    return _redact(raw, secrets)
 
 
 def _text(value):
@@ -235,9 +339,21 @@ class CommandDiagnostics:
         temporary.write_text(json.dumps(manifest, indent=2) + "\n")
         temporary.replace(path)
 
-    def _stream(self, value, *, stream, stage, returncode, owner):
+    def _stream(
+        self, value, *, stream, stage, returncode, owner, encoded_transport=False
+    ):
         log_id = uuid.uuid4().hex
-        raw, public = _text(value), _redact(_text(value), self.secrets)
+        raw = _text(value)
+        active = _ACTIVE.get()
+        encoded_transport = stream == "stdout" and (
+            encoded_transport
+            or (
+                active is not None
+                and active[0] is self
+                and active[1]["encoded_transport"]
+            )
+        )
+        public = _public_stream(raw, self.secrets, encoded_transport=encoded_transport)
         for kind, content in (("raw", raw), ("public", public)):
             folder = _file(self.directory, kind)
             folder.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -260,6 +376,15 @@ class CommandDiagnostics:
 
     def _capture(self, result, stage, *, error=None, owner="unknown"):
         try:
+            active = _ACTIVE.get()
+            if (
+                error is not None
+                and active is not None
+                and active[0] is self
+                and active[1]["encoded_transport"]
+            ):
+                # record_error may capture this same exception after SSH returns.
+                error._diagnostic_encoded_transport = True
             self._capture_impl(result, stage, error=error, owner=owner)
         except Exception as failure:
             # Recording must never replace the original command result/exception.
@@ -286,6 +411,9 @@ class CommandDiagnostics:
                     stage=stage,
                     returncode=code,
                     owner=owner,
+                    encoded_transport=getattr(
+                        result, "_diagnostic_encoded_transport", False
+                    ),
                 )
                 for stream in ("stdout", "stderr")
             )
@@ -332,7 +460,11 @@ class CommandDiagnostics:
     def wrap_ssh(self, function):
         @functools.wraps(function)
         def ssh(config, command, *args, **kwargs):
-            state = {"stage": _stage(command), "captured": False}
+            state = {
+                "stage": _stage(command),
+                "captured": False,
+                "encoded_transport": "base64.b64encode" in command,
+            }
             token = _ACTIVE.set((self, state))
             try:
                 result = function(config, command, *args, **kwargs)
@@ -376,8 +508,6 @@ class CommandDiagnostics:
         # Literal credentials may straddle input chunks or line boundaries. Keep
         # their longest possible prefix until more input arrives, before generic
         # line redaction. Memory is bounded by chunk + longest credential/line.
-        import codecs
-
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         overlap = max((len(secret) for secret in self.secrets), default=1)
         pending, line, tail, size = "", "", "", 0

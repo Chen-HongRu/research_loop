@@ -293,12 +293,6 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         if state["phase"] == "repair":
             if budget_status()["active_attempt"] is not None:
                 raise HarnessError("Unresolved debug accounting blocks a new repair")
-            if wall_deadline <= time.time() or (
-                budget is not None and budget.remaining() < 60
-            ):
-                return finish(
-                    "debug budget exhausted or original wall deadline reached"
-                )
             key = f"repair-{state['revision']:03d}-try-{state['repair_try']:03d}"
             directory = run_dir / "repairs" / key
             attempts = sorted(directory.glob("attempt-*"))
@@ -307,6 +301,12 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                 _no_interface(workspace, failure.get("submission"))
                 raise HarnessError(
                     "Interrupted repair requires explicit reconciliation"
+                )
+            if wall_deadline <= time.time() or (
+                budget is not None and budget.remaining() < 60
+            ):
+                return finish(
+                    "debug budget exhausted or original wall deadline reached"
                 )
             remaining = context.get("budget", {})
             if not attempts and (

@@ -38,6 +38,8 @@ streams and redacted `public/` streams. Explicit controller credentials and comm
 credential fields are removed from the public projection. Arguments, prompts,
 ownership records and authorization grants are not copied into Agent diagnostics.
 Raw streams remain available to operators through the protected filesystem.
+Encoded artifact and telemetry transfer payloads remain in raw streams; collector
+log tails are decoded and redacted before entering the public projection.
 These projections do not replace the host's existing sandbox or filesystem access
 policy; raw paths are not part of the Agent log-reading interface.
 
@@ -51,10 +53,12 @@ uv run python -m research_loop.diagnostics read \
   --log-id REGISTERED_ID --offset 0 --limit 8192
 ```
 
-Use `next_offset` to continue until `eof`. The reader accepts only registered IDs,
-refuses path traversal and symlinks, and reads already-redacted streams so secrets
-cannot appear across page boundaries. Each stream is an immutable snapshot; later
-commands receive new IDs. Previews are not the complete evidence.
+Use `next_offset` to continue until `eof`. The byte limit may extend by up to three
+bytes to finish a UTF-8 character; `next_offset` remains the actual byte position.
+The reader accepts only registered IDs, refuses path traversal and symlinks, and
+reads already-redacted streams so secrets cannot appear across page boundaries.
+Each stream is an immutable snapshot; later commands receive new IDs. Previews are
+not the complete evidence.
 
 ## Recovery and evidence
 
