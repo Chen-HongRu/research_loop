@@ -561,6 +561,7 @@ class ResearchBackendTests(unittest.TestCase):
             ) as query,
             patch("ctypes.CDLL", side_effect=OSError("driver probe unavailable")),
             patch("os.path.exists", return_value=True),
+            patch("os.path.isfile", return_value=True),
             patch("os.execve") as execute,
             patch("sys.stdout", output),
         ):
@@ -585,6 +586,9 @@ class ResearchBackendTests(unittest.TestCase):
             if arg == "--ro-bind"
         ]
         self.assertIn(("/sbin", "/sbin"), read_only_mounts)
+        self.assertIn(
+            ("/etc/alternatives/ld", "/etc/alternatives/ld"), read_only_mounts
+        )
         self.assertIn(("/remote/attempt/code", "/workspace"), read_only_mounts)
         for item in inputs:
             self.assertIn((item["path"], item["mount"]), read_only_mounts)

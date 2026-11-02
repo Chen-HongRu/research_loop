@@ -415,6 +415,8 @@ print("RESEARCH_GPU_RESOURCES "+json.dumps(resources,sort_keys=True),flush=True)
 args=["/bin/bwrap","--unshare-user","--unshare-pid","--as-pid-1","--unshare-net","--unshare-ipc","--unshare-uts","--die-with-parent","--new-session","--cap-drop","ALL","--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/tmp/home","--dir","/inputs"]
 for src,dst in {mounts!r}: args += ["--ro-bind",src,dst]
 if os.path.isfile("/etc/ld.so.cache"): args += ["--ro-bind","/etc/ld.so.cache","/etc/ld.so.cache"]
+# GCC's /usr/bin/ld points outside /usr through the cluster's alternatives link.
+if os.path.isfile("/etc/alternatives/ld"): args += ["--ro-bind","/etc/alternatives/ld","/etc/alternatives/ld"]
 args += ["--bind",{remote + "/output"!r},"/output"]
 for dev in ["/dev/nvidiactl","/dev/nvidia"+minor,"/dev/nvidia-uvm","/dev/nvidia-uvm-tools"]:
  if os.path.exists(dev): args += ["--dev-bind",dev,dev]
