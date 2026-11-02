@@ -500,3 +500,12 @@ test('Live telemetry stays unreviewed, escaped and split by metric unit and cond
   assert.equal((shown.match(/<svg /g)||[]).length,3);
   assert.match(ui.telemetryPanel([{stream_id:'empty',events:[]}]),/尚无 dashboard 标签观测/);
 });
+
+test('Native telemetry groups scientific conditions independently of transport cursors', () => {
+  const point={name:'native/training',value:.2,step:10,tags:['dashboard'],context:{scope:'training',source:'/train.csv',remote_start_offset:10,remote_end_offset:20}};
+  const stream={source:{kind:'fixed-short'},events:[point,{...point,step:20,value:.1,context:{...point.context,remote_start_offset:20,remote_end_offset:30}}]};
+  assert.equal(ui.telemetryGroups(stream).length,1);
+  assert.equal(ui.telemetryGroups(stream)[0].length,2);
+  stream.events.push({...point,context:{...point.context,scope:'full'}});
+  assert.equal(ui.telemetryGroups(stream).length,2);
+});

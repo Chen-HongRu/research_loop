@@ -1900,11 +1900,19 @@ def telemetry_view(
         if source_id is not None and definition["id"] != source_id:
             continue
         study = definition["root"] / "study"
-        locations = [(None, study)]
+        locations = [(None, study)] if run_id is None else []
+        if run_id is None:
+            long_runs = sorted((study / "long-runs").glob("L*"))[:32]
+        elif re.fullmatch(r"L[0-9a-f]{16}", run_id):
+            long_runs = [study / "long-runs" / run_id]
+        else:
+            long_runs = []
         locations.extend(
             (folder.name, folder / "study")
-            for folder in sorted((study / "long-runs").glob("L*"))[:32]
-            if re.fullmatch(r"L[0-9a-f]{16}", folder.name) and not folder.is_symlink()
+            for folder in long_runs
+            if re.fullmatch(r"L[0-9a-f]{16}", folder.name)
+            and folder.is_dir()
+            and not folder.is_symlink()
         )
         for lane, location in locations:
             if run_id is not None and lane != run_id:

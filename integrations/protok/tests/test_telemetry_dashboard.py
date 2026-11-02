@@ -146,3 +146,39 @@ class TelemetryDashboardTests(unittest.TestCase):
             self.assertIn(b"200 OK", response)
             self.assertNotIn(b"SECRET", response)
             self.assertEqual(snapshot.call_args.kwargs["tag"], "dashboard")
+
+    def test_explicit_long_run_paging_is_not_limited_to_the_first_32_runs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index in range(33):
+                (root / "study/long-runs" / f"L{index:016x}" / "study").mkdir(
+                    parents=True
+                )
+            run_id = f"L{32:016x}"
+            with (
+                patch.object(
+                    dash.telemetry, "info", return_value=self.fixture()["streams"][0]
+                ),
+                patch.object(
+                    dash.telemetry,
+                    "read_events",
+                    return_value={"events": [], "next_offset": 40, "byte_end": 80},
+                ) as reader,
+            ):
+                result = dash.telemetry_view(
+                    root,
+                    source_id="active",
+                    run_id=run_id,
+                    stream_id="stream1",
+                    after=20,
+                )
+            reader.assert_called_once_with(
+                root / "study/long-runs" / run_id / "study",
+                "stream1",
+                after=20,
+                tag="dashboard",
+                max_bytes=131072,
+                limit=200,
+            )
+            self.assertEqual(result["streams"][0]["run_id"], run_id)
+            self.assertEqual(result["streams"][0]["next_offset"], 40)

@@ -288,6 +288,7 @@ class NativeCSVRelay(RemoteRelay):
     def _recover_cursor(self):
         current = store.info(self.root, self.stream_id)
         self.offset, self.header = 0, None
+        self._discard_csv_fragment = False
         # Recover the source cursor from the last retained converted event,
         # including the append-before-metadata crash window.
         path = Path(current["log_path"])
@@ -301,6 +302,9 @@ class NativeCSVRelay(RemoteRelay):
                 context = json.loads(line)["context"]
                 self.offset = context["remote_end_offset"]
                 self.header = context["csv_header"]
+                self._discard_csv_fragment = context.get(
+                    "csv_discard_until_newline", False
+                )
                 break
             except (ValueError, KeyError, TypeError):
                 continue
@@ -341,34 +345,11 @@ class NativeCSVRelay(RemoteRelay):
             self._status(remote_identity=identity, remote_size=size)
             events, cursor = [], self.offset
             for line in data.splitlines(keepends=True):
+                start = cursor
                 cursor += len(line)
-                values = next(csv.reader(io.StringIO(line.decode())))
-                if self.header is None:
-                    self.header = values
-                    continue
-                if len(values) != len(self.header):
-                    raise ValueError("Native CSV row differs from header")
-                row = dict(zip(self.header, values, strict=True))
-                step = next(
-                    (
-                        row[key]
-                        for key in ("optimizer_step", "step", "global_step")
-                        if key in row
-                    ),
-                    None,
-                )
-                if step is None:
-                    raise ValueError(
-                        "Native metric requires an explicit optimizer step"
-                    )
-                step = int(step)
-                metrics = {}
-                for key, value in row.items():
-                    if key not in {"optimizer_step", "step", "global_step", "scope"}:
-                        try:
-                            metrics[key] = store._observed(float(value))
-                        except ValueError:
-                            metrics[key] = value
+                complete = line.endswith(b"\n")
+                discard = self._discard_csv_fragment
+                self._discard_csv_fragment = not complete
                 event = {
                     "version": 1,
                     "id": str(
@@ -376,23 +357,83 @@ class NativeCSVRelay(RemoteRelay):
                     ),
                     "time": time.time(),
                     "name": "native/" + self.scope,
-                    "value": metrics,
+                    "value": None,
                     "tags": ["dashboard", "unreviewed", "native"],
-                    "step": step,
+                    "step": None,
                     "unit": None,
                     "context": {
                         "source": self.remote_path,
-                        "scope": row.get("scope", self.scope),
+                        "scope": self.scope,
+                        "remote_start_offset": start,
                         "remote_end_offset": cursor,
                         "csv_header": self.header,
+                        "csv_discard_until_newline": self._discard_csv_fragment,
                     },
                 }
-                encoded = (
-                    json.dumps(event, allow_nan=False, separators=(",", ":")).encode()
-                    + b"\n"
-                )
-                if len(encoded) > MAX_LINE_BYTES:
-                    raise ValueError("Converted native row exceeds event bound")
+                try:
+                    if discard or not complete or len(line) > MAX_LINE_BYTES:
+                        raise ValueError("Oversized native CSV row fragment discarded")
+                    values = next(csv.reader(io.StringIO(line.decode()), strict=True))
+                    if self.header is None:
+                        if not any(
+                            key in values
+                            for key in ("optimizer_step", "step", "global_step")
+                        ):
+                            raise ValueError(
+                                "Native CSV header requires an explicit step column"
+                            )
+                        # Keep the recovery context and any error event bounded.
+                        if len(json.dumps(values).encode()) > MAX_LINE_BYTES // 2:
+                            raise ValueError("Native CSV header exceeds context bound")
+                        self.header = values
+                        continue
+                    if len(values) != len(self.header):
+                        raise ValueError("Native CSV row differs from header")
+                    row = dict(zip(self.header, values, strict=True))
+                    step = next(
+                        row[key]
+                        for key in ("optimizer_step", "step", "global_step")
+                        if key in row
+                    )
+                    event["step"] = int(step)
+                    metrics = {}
+                    for key, value in row.items():
+                        if key not in {
+                            "optimizer_step",
+                            "step",
+                            "global_step",
+                            "scope",
+                        }:
+                            try:
+                                metrics[key] = store._observed(float(value))
+                            except ValueError:
+                                metrics[key] = value
+                    event["value"] = metrics
+                    event["context"]["scope"] = row.get("scope", self.scope)
+                    encoded = (
+                        json.dumps(
+                            event, allow_nan=False, separators=(",", ":")
+                        ).encode()
+                        + b"\n"
+                    )
+                    if len(encoded) > MAX_LINE_BYTES:
+                        raise ValueError("Converted native row exceeds event bound")
+                except (ValueError, UnicodeError, csv.Error, StopIteration) as error:
+                    # Nonmetric evidence commits the source cursor too, so a bad
+                    # row cannot hide later observations or replay after restart.
+                    event.update(
+                        name="native/csv_error",
+                        value=f"{type(error).__name__}: {error}"[:500],
+                        tags=["internal", "unreviewed", "native", "error"],
+                        step=None,
+                    )
+                    event["context"]["scope"] = self.scope
+                    encoded = (
+                        json.dumps(
+                            event, allow_nan=False, separators=(",", ":")
+                        ).encode()
+                        + b"\n"
+                    )
                 events.append(encoded)
             if events:
                 self._append(b"".join(events), offset=current["byte_end"])

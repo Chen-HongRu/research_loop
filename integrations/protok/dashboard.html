@@ -542,10 +542,12 @@ function longTrainingRuns(runs) {
 }
 function telemetryGroups(stream) {
   const groups=new Map();
+  const transportKeys=new Set(['remote_start_offset','remote_end_offset','raw_fragment_bytes','raw_fragment_complete','csv_discard_until_newline']);
   for(const event of stream.events || []) {
     if(!Array.isArray(event.tags)||!event.tags.includes('dashboard'))continue;
     const stable=value=>Array.isArray(value)?value.map(stable):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])])):value;
-    const key=JSON.stringify([event.name,event.unit,stable(event.context || {})]);
+    const conditions=stream.source?.kind==='fixed-short'?Object.fromEntries(Object.entries(event.context || {}).filter(([key])=>!transportKeys.has(key))):event.context || {};
+    const key=JSON.stringify([event.name,event.unit,stable(conditions)]);
     if(!groups.has(key))groups.set(key,[]);groups.get(key).push(event);
   }
   return [...groups.values()];

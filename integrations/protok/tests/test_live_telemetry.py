@@ -204,6 +204,63 @@ class LiveTelemetryTests(unittest.TestCase):
         self.assertEqual([event["step"] for event in self.events()], [10, 20])
         self.assertEqual(self.events()[-1]["value"]["train/loss"], 0.4)
 
+    def test_native_csv_bad_rows_preserve_good_rows_and_recovery_offsets(self):
+        header = b"optimizer_step,loss\n"
+        prefix = header + b"10,1.0\nbad,row,extra\nno-step,0.7\n"
+        complete = prefix + b"20,0.5\n"
+        self.remote.write_bytes(complete + b"30,0.4")
+        relay = self.relay(transport.NativeCSVRelay, scope="training")
+        self.assertTrue(relay.poll())
+        events = self.events()
+        self.assertEqual([event["step"] for event in events], [10, None, None, 20])
+        errors = events[1:3]
+        self.assertTrue(all(event["name"] == "native/csv_error" for event in errors))
+        self.assertTrue(all(isinstance(event["value"], str) for event in errors))
+        self.assertTrue(all("dashboard" not in event["tags"] for event in errors))
+        self.assertTrue(all("unreviewed" in event["tags"] for event in errors))
+        self.assertEqual(
+            errors[0]["context"]["remote_start_offset"], len(header + b"10,1.0\n")
+        )
+        self.assertEqual(errors[-1]["context"]["remote_end_offset"], len(prefix))
+        resumed = self.relay(transport.NativeCSVRelay, scope="training")
+        self.assertEqual(resumed.cursor(), len(complete))
+        self.assertFalse(resumed.poll())
+        with self.remote.open("ab") as handle:
+            handle.write(b"\n40,0.3\n")
+        self.assertTrue(resumed.poll())
+        recovered = self.relay(transport.NativeCSVRelay, scope="training")
+        self.assertFalse(recovered.poll())
+        self.assertEqual(
+            [event["step"] for event in self.events()], [10, None, None, 20, 30, 40]
+        )
+        self.assertEqual(recovered.cursor(), self.remote.stat().st_size)
+
+    def test_native_csv_oversized_fragment_resumes_at_next_complete_row(self):
+        self.remote.write_bytes(
+            b"optimizer_step,loss\n10,1\n"
+            + b"x" * (3 * transport.MAX_POLL_BYTES)
+            + b"30,9\n20,.5\n"
+        )
+        relay = self.relay(transport.NativeCSVRelay, scope="training")
+        self.assertTrue(relay.poll())
+        self.assertTrue(relay._discard_csv_fragment)
+        resumed = self.relay(transport.NativeCSVRelay, scope="training")
+        self.assertTrue(resumed._discard_csv_fragment)
+        for _ in range(5):
+            if not resumed.poll():
+                break
+        events = self.events()
+        metrics = [event for event in events if "dashboard" in event["tags"]]
+        self.assertEqual([event["step"] for event in metrics], [10, 20])
+        self.assertEqual(resumed.cursor(), self.remote.stat().st_size)
+        self.assertTrue(
+            all(
+                len(json.dumps(event).encode()) < transport.MAX_LINE_BYTES
+                for event in events
+            )
+        )
+        self.assertFalse(self.relay(transport.NativeCSVRelay, scope="training").poll())
+
     def test_native_json_only_complete_scoped_marker_has_dashboard_tag(self):
         rows = [
             "compiler noise",
