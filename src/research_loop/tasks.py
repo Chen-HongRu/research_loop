@@ -6,6 +6,7 @@ import fcntl
 import json
 import math
 import re
+import subprocess
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -184,10 +185,27 @@ class TaskQueue:
                 self.root / "routes/index.json"
             ):
                 raise ValueError("Unknown task route")
-            if not source["revision"] and (
-                normalized["kind"] == "long_training"
-                or (config["allow_write"] and normalized["allow_changes"])
-            ):
+            if not source["revision"] and base is None:
+                project = Path(source["project"])
+                if (project / ".git").exists():
+                    try:
+                        source["revision"] = subprocess.check_output(
+                            [
+                                "git",
+                                "-C",
+                                str(project),
+                                "rev-parse",
+                                "--verify",
+                                "HEAD^{commit}",
+                            ],
+                            text=True,
+                            stderr=subprocess.PIPE,
+                        ).strip()
+                    except subprocess.CalledProcessError as error:
+                        raise ValueError(
+                            "Task requires a frozen Git source revision"
+                        ) from error
+            if not source["revision"]:
                 raise ValueError("Task requires a frozen Git source revision")
             request = normalized | {
                 "submitted_at": datetime.now(timezone.utc).isoformat(),

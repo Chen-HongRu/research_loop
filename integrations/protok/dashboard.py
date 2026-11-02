@@ -2,8 +2,10 @@
 
 import argparse
 import json
+from itertools import islice
 import math
 import mimetypes
+import http.client
 import sys
 import re
 import time
@@ -19,6 +21,7 @@ from integrations.protok.backend import METRIC, PROTOCOL, ProTokBackend, ProTokE
 from integrations.protok.explanation import explanation_coverage, explanation_status
 from integrations.protok.plan_provenance import execution_plan
 from integrations.protok.run import job_path
+from integrations.protok.task_telemetry import TASK_ID, manual_locations
 from research_loop import telemetry
 from research_loop.tasks import TaskQueue
 from research_loop.harness import completed_response
@@ -2410,7 +2413,15 @@ def source_details(root, source_id, local_id, *, history_roots=(), records_root=
 
 
 def telemetry_view(
-    root, *, history_roots=(), source_id=None, run_id=None, stream_id=None, after=0
+    root,
+    *,
+    history_roots=(),
+    source_id=None,
+    run_id=None,
+    stream_id=None,
+    after=0,
+    experiment_id=None,
+    manual_task_id=None,
 ):
     """Bounded local-only projection of dashboard-tagged observations."""
     streams = []
@@ -2418,28 +2429,47 @@ def telemetry_view(
         if source_id is not None and definition["id"] != source_id:
             continue
         study = definition["root"] / "study"
-        locations = [(None, study)] if run_id is None else []
-        if run_id is None:
+        locations = (
+            [(None, study, None)] if run_id is None and manual_task_id is None else []
+        )
+        if experiment_id is not None or manual_task_id is not None:
+            long_runs = []
+        elif run_id is None:
             long_runs = sorted((study / "long-runs").glob("L*"))[:32]
         elif re.fullmatch(r"L[0-9a-f]{16}", run_id):
             long_runs = [study / "long-runs" / run_id]
         else:
             long_runs = []
         locations.extend(
-            (folder.name, folder / "study")
+            (folder.name, folder / "study", None)
             for folder in long_runs
             if re.fullmatch(r"L[0-9a-f]{16}", folder.name)
             and folder.is_dir()
             and not folder.is_symlink()
         )
-        for lane, location in locations:
+        if run_id is None and experiment_id is None:
+            manual = manual_locations(study, manual_task_id)
+            locations.extend(
+                (None, location, identity)
+                for identity, _, location in islice(manual, 32)
+            )
+        for lane, location, task_identity in locations:
             if run_id is not None and lane != run_id:
                 continue
             try:
                 local = (
                     {"streams": [telemetry.info(location, stream_id)]}
                     if stream_id is not None
-                    else telemetry.snapshot(location, tag="dashboard", limit=32)
+                    else telemetry.snapshot(
+                        location,
+                        tag="dashboard",
+                        limit=32,
+                        **(
+                            {"experiment_id": experiment_id}
+                            if experiment_id is not None
+                            else {}
+                        ),
+                    )
                 )
             except (OSError, ValueError, KeyError):
                 continue
@@ -2458,11 +2488,21 @@ def telemetry_view(
                         limit=200,
                     )
                 source = page.get("source", item.get("source", {}))
+                if (
+                    experiment_id is not None
+                    and source.get("experiment_id") != experiment_id
+                ):
+                    continue
                 streams.append(
                     {
                         "stream_id": identity,
                         "source_id": definition["id"],
                         "run_id": lane,
+                        **(
+                            {"manual_task_id": task_identity}
+                            if task_identity is not None
+                            else {}
+                        ),
                         "source": {
                             key: source[key]
                             for key in (
@@ -2479,6 +2519,8 @@ def telemetry_view(
                         "updated_at": item.get("updated_at"),
                         "byte_end": page.get("byte_end", item.get("byte_end")),
                         "next_offset": page.get("next_offset"),
+                        "preview_after": page.get("preview_after", 0),
+                        "omitted_events": page.get("omitted_events", 0),
                         "error_count": len(page.get("errors", [])),
                         "sync_error": bool(item.get("error")),
                         "events": [
@@ -2508,12 +2550,165 @@ def telemetry_view(
     return {"version": 1, "observed_at": time.time(), "streams": streams}
 
 
-def serve(root, port, *, snapshot_only=False, history_roots=(), records_root=None):
+def serve(
+    root,
+    port,
+    *,
+    snapshot_only=False,
+    history_roots=(),
+    records_root=None,
+    tensorboard_port=None,
+):
+    if tensorboard_port is not None and not 1 <= tensorboard_port <= 65535:
+        raise ValueError("TensorBoard port must be a local TCP port")
+
     class Handler(BaseHTTPRequestHandler):
+        def tensorboard_proxy(self):
+            if tensorboard_port is None:
+                self.send_error(503, "TensorBoard is not configured")
+                return
+            if self.path.split("?", 1)[0] == "/tensorboard":
+                self.send_response(302)
+                self.send_header(
+                    "Location",
+                    "/tensorboard/"
+                    + ("?" + self.path.split("?", 1)[1] if "?" in self.path else ""),
+                )
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            length = self.headers.get("Content-Length", "0")
+            if (
+                not length.isdigit()
+                or int(length) > 1_048_576
+                or self.headers.get("Transfer-Encoding")
+                or self.command != "POST"
+                and int(length) != 0
+            ):
+                self.send_error(400, "Invalid TensorBoard request length")
+                return
+            body = self.rfile.read(int(length)) if self.command == "POST" else None
+            excluded = {
+                "connection",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "authorization",
+                "te",
+                "trailer",
+                "transfer-encoding",
+                "upgrade",
+            }
+            excluded.update(
+                header.strip().lower()
+                for header in self.headers.get("Connection", "").split(",")
+            )
+            headers = {
+                key: value
+                for key, value in self.headers.items()
+                if key.lower() not in excluded
+            }
+            index_request = urlparse(self.path).path == "/tensorboard/"
+            if index_request:
+                headers = {
+                    key: value
+                    for key, value in headers.items()
+                    if key.lower()
+                    not in {"accept-encoding", "if-none-match", "if-modified-since"}
+                }
+                headers["Accept-Encoding"] = "identity"
+            upstream = http.client.HTTPConnection(
+                "127.0.0.1", tensorboard_port, timeout=30
+            )
+            try:
+                upstream.request(self.command, self.path, body=body, headers=headers)
+                response = upstream.getresponse()
+            except (OSError, http.client.HTTPException):
+                upstream.close()
+                self.send_error(503, "TensorBoard is temporarily unavailable")
+                return
+            try:
+                document = None
+                if (
+                    index_request
+                    and self.command == "GET"
+                    and response.status == 200
+                    and (response.getheader("Content-Type") or "").startswith(
+                        "text/html"
+                    )
+                ):
+                    document = response.read(1_048_577)
+                    if len(document) > 1_048_576:
+                        self.send_error(502, "TensorBoard index exceeds expected size")
+                        return
+                    document = document.replace(
+                        b"</head>",
+                        b'<script src="/assets/tensorboard-live.js"></script></head>',
+                        1,
+                    )
+                self.send_response(response.status)
+                response_excluded = excluded | {
+                    header.strip().lower()
+                    for header in (response.getheader("Connection") or "").split(",")
+                }
+                for key, value in response.getheaders():
+                    if key.lower() in response_excluded or key.lower() in {
+                        "server",
+                        "date",
+                    }:
+                        continue
+                    if document is not None and key.lower() in {
+                        "content-length",
+                        "cache-control",
+                        "etag",
+                        "last-modified",
+                    }:
+                        continue
+                    if key.lower() == "location" and value.startswith(
+                        f"http://127.0.0.1:{tensorboard_port}/"
+                    ):
+                        value = value.removeprefix(
+                            f"http://127.0.0.1:{tensorboard_port}"
+                        )
+                    self.send_header(key, value)
+                if document is not None:
+                    self.send_header("Content-Length", str(len(document)))
+                    self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+                if document is not None:
+                    self.wfile.write(document)
+                elif self.command != "HEAD":
+                    while chunk := response.read(65536):
+                        self.wfile.write(chunk)
+            except (OSError, http.client.HTTPException):
+                self.close_connection = True
+            finally:
+                upstream.close()
+
+        def do_HEAD(self):
+            if (
+                urlparse(self.path).path.startswith("/tensorboard/")
+                or urlparse(self.path).path == "/tensorboard"
+            ):
+                self.tensorboard_proxy()
+            else:
+                self.send_error(405)
+
+        def do_POST(self):
+            if urlparse(self.path).path.startswith("/tensorboard/"):
+                self.tensorboard_proxy()
+            else:
+                self.send_error(405)
+
         def do_GET(self):
             path = urlparse(self.path).path
             try:
-                if path == "/":
+                if path == "/tensorboard" or path.startswith("/tensorboard/"):
+                    self.tensorboard_proxy()
+                    return
+                elif path == "/":
                     body = Path(__file__).with_suffix(".html").read_bytes()
                     mime = "text/html; charset=utf-8"
                 elif path.startswith("/assets/"):
@@ -2537,9 +2732,28 @@ def serve(root, port, *, snapshot_only=False, history_roots=(), records_root=Non
                     source = query.get("source", [None])[0]
                     lane = query.get("run", [None])[0]
                     stream = query.get("stream", [None])[0]
+                    experiment = query.get("experiment", [None])[0]
+                    manual_task = query.get("task", [None])[0]
                     after = int(query.get("after", ["0"])[0])
                     if (
                         after < 0
+                        or (
+                            manual_task is not None
+                            and (
+                                not source
+                                or lane is not None
+                                or experiment is not None
+                                or not re.fullmatch(TASK_ID, manual_task)
+                            )
+                        )
+                        or (
+                            experiment is not None
+                            and (
+                                not source
+                                or lane is not None
+                                or not re.fullmatch(r"[0-9]{4,}", experiment)
+                            )
+                        )
                         or (
                             source is not None
                             and not re.fullmatch(r"active|history-[1-9][0-9]*", source)
@@ -2568,20 +2782,26 @@ def serve(root, port, *, snapshot_only=False, history_roots=(), records_root=Non
                             run_id=lane,
                             stream_id=stream,
                             after=after,
+                            experiment_id=experiment,
+                            manual_task_id=manual_task,
                         ),
                         ensure_ascii=False,
                     ).encode()
                     mime = "application/json; charset=utf-8"
                 elif path == "/api/snapshot":
-                    body = json.dumps(
-                        view_snapshot(
-                            root,
-                            snapshot_only=snapshot_only,
-                            history_roots=history_roots,
-                            records_root=records_root,
-                        ),
-                        ensure_ascii=False,
-                    ).encode()
+                    payload = view_snapshot(
+                        root,
+                        snapshot_only=snapshot_only,
+                        history_roots=history_roots,
+                        records_root=records_root,
+                    )
+                    payload["tensorboard"] = {
+                        "enabled": tensorboard_port is not None,
+                        "url": "/tensorboard/"
+                        if tensorboard_port is not None
+                        else None,
+                    }
+                    body = json.dumps(payload, ensure_ascii=False).encode()
                     mime = "application/json; charset=utf-8"
                 elif re.fullmatch(
                     r"/api/task/(?:active|history-[1-9][0-9]*)/(?:long/L[0-9a-f]{16}|manual/[A-Za-z0-9][A-Za-z0-9_-]{0,63})",
@@ -2664,6 +2884,11 @@ if __name__ == "__main__":
     parser.add_argument("--snapshot-only", action="store_true")
     parser.add_argument("--history-root", type=Path, action="append", default=[])
     parser.add_argument("--records-root", type=Path)
+    parser.add_argument(
+        "--tensorboard-port",
+        type=int,
+        help="Proxy a loopback TensorBoard under /tensorboard/",
+    )
     args = parser.parse_args()
     serve(
         args.root.resolve(),
@@ -2671,4 +2896,5 @@ if __name__ == "__main__":
         snapshot_only=args.snapshot_only,
         history_roots=[path.resolve() for path in args.history_root],
         records_root=args.records_root.resolve() if args.records_root else None,
+        tensorboard_port=args.tensorboard_port,
     )

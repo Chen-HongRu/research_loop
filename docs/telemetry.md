@@ -104,6 +104,73 @@ copies without SSH, model calls, allocation or filesystem writes. Explicit strea
 paging works beyond the preview window. History Study IDs and long-run IDs remain
 separate, and curves group by source, observation name, unit and conditions.
 
+Manual long-training tasks retain telemetry in
+`study/tasks/TASK/study/iterations/ITERATION/telemetry`. Readers resolve the immutable
+request and canonical binding; queued tasks have no stream yet. Running and reviewed
+tasks share the same stable task identity. The selected-task API uses
+`/api/telemetry?source=active&task=TASK` (or a configured `history-N` source),
+optionally with `stream` and `after` for incremental paging. `task`, automatic
+`run`, and main-study `experiment` selectors are mutually exclusive; existing
+automatic/main queries keep their behavior. Manual responses include
+`manual_task_id`; their actual execution run ID stays in stream provenance.
+TensorBoard discovers the same bound locations and gives each manual task and
+iteration its own lane, preserving source, Study and execution separation.
+
+## Task progress and TensorBoard
+
+Select a main investigation, research script or independent long-training task in
+the Work tree. Its **实时回传指标** panel shows only that task's `dashboard`-tagged
+observations, including numeric leaves of small JSON objects. The default overview
+shows up to six recent series; the selector opens one series. Hover/focus reveals
+the exact recorded value and step; click or Enter pins a point. Selection, pinned
+values and expanded conditions survive the five-second dashboard refresh.
+
+Sources, executions, original names, units and scientific conditions form separate
+curves. Native CSV transport offsets do not split a scientific series. Explicit
+null/nonfinite values and decreasing steps break lines. Records without a step use
+their source timestamp. Arrays, strings and booleans are not inferred to be scalar
+metrics. Each selected stream retains at most 256 recent dashboard events in the
+browser; this is a live preview, not the complete evidence history.
+
+The panel's **TensorBoard · 全量指标** button opens a real TensorBoard at
+`/tensorboard/`. Install the optional CPU-only dependency and start its separate
+service with the same active and history roots as the dashboard:
+
+```sh
+uv sync --extra dashboard
+uv run --extra dashboard python -m integrations.protok.tensorboard \
+  --root /path/to/run --history-root /path/to/archive \
+  --logdir /path/to/derived/tensorboard --port 6006
+uv run python integrations/protok/dashboard.py \
+  --root /path/to/run --history-root /path/to/archive \
+  --tensorboard-port 6006 --port 8767
+```
+
+The exporter reads only retained local telemetry. Each poll reads at most one
+128 KiB / 200-event page per stream, including non-dashboard tags. It publishes
+finite scalar/object fields to TensorBoard Scalars and each original JSON record
+to Text. Arrays remain text; no histogram or image semantics are invented. Runs
+identify configured source, Study, investigation/long run, execution, metric, unit
+and conditions. Without a recorded step, a separate `event-order` run uses the
+retained event order; the original timestamp remains TensorBoard's wall time.
+
+The derived logdir must be outside the source Study. Only that directory receives
+event files and incremental cursor journals. Restart completes a partially
+published page without duplicate points, then catches up over successive polls.
+`--once` exports one bounded page per stream and exits. No source log, control
+state, data, cache or checkpoint is modified or read for validation.
+
+The service binds only to `127.0.0.1`; the dashboard proxies it under the existing
+protected origin. Do not expose port 6006 directly. Export and TensorBoard server
+reload default to five seconds. TensorBoard 2.21.0 is pinned because the dashboard
+bootstrap enables its native browser auto-reload on first visit, using that
+version's persisted setting. Browser refresh defaults to 30 seconds; explicit
+existing user preferences are preserved. TensorBoard can operate without
+TensorFlow. It is an observation viewer; Review and Frontier eligibility still use
+the existing frozen evidence boundaries.
+
+## Review evidence
+
 At the Review boundary, the Study publishes immutable
 `iterations/NNNN/context/telemetry.json`. This manifest includes every stream for
 that experiment, its provenance, absolute log reference, exact `byte_end`, sync

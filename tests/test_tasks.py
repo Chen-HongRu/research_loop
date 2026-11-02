@@ -23,6 +23,31 @@ class TaskTests(unittest.TestCase):
         self.root = Path(temporary.name) / "study"
         initialize(self.root, goal="Record useful evidence")
         self.queue = TaskQueue(self.root)
+        self.workspace = self.root / "workspace"
+        self.git("init", "-q")
+        self.git("commit", "--allow-empty", "-qm", "Initial readonly input")
+
+    def git(self, *arguments):
+        return subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(self.workspace),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@localhost",
+                *arguments,
+            ],
+            text=True,
+            stderr=subprocess.PIPE,
+        ).strip()
+
+    def commit_source(self, text):
+        (self.workspace / "model.py").write_text(text)
+        self.git("add", "model.py")
+        self.git("commit", "-qm", "Update readonly input")
+        return self.git("rev-parse", "HEAD")
 
     def submit(self, identity="manual", **kwargs):
         return self.queue.submit(
@@ -310,3 +335,80 @@ class TaskTests(unittest.TestCase):
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.submit(**changes)
+
+    def test_unversioned_readonly_investigation_is_rejected(self):
+        root = self.root.parent / "unversioned"
+        initialize(root, goal="Inspect unversioned source")
+        workspace = root / "workspace"
+        (workspace / "model.py").write_text("version = 1\n")
+        with self.assertRaisesRegex(ValueError, "frozen Git source revision"):
+            TaskQueue(root).submit(
+                {"id": "manual", "instruction": "Inspect", "allow_changes": False}
+            )
+        self.assertFalse((root / "tasks/manual/request.json").exists())
+
+    def test_readonly_task_uses_submitted_commit_after_workspace_changes(self):
+        revision = self.commit_source("version = 1\n")
+        request = self.submit(allow_changes=False)
+        self.assertEqual(request["source"]["revision"], revision)
+        self.assertIsNone(read(self.root / "study.json")["baseline"])
+        self.commit_source("version = 2\n")
+        harness = RecordedHarness()
+        Study(self.root, harness).run()
+        self.assertEqual(harness.execute_inputs, ["version = 1\n"])
+        execute = next(call for call in harness.calls if call["phase"] == "execute")
+        self.assertFalse(execute["writable"])
+        self.assertFalse(execute["context"]["execution_writes_enabled"])
+        self.assertEqual((self.workspace / "model.py").read_text(), "version = 2\n")
+        frozen = Path(read(self.root / "iterations/0001/iteration.json")["workspace"])
+        self.assertEqual(frozen, (self.root / "iterations/0001/workspace").resolve())
+        self.assertEqual(
+            read(self.root / "iterations/0001/iteration.json")["workspace_ref"],
+            revision,
+        )
+
+    def test_readonly_restart_and_published_base_keep_original_source(self):
+        revision = self.commit_source("version = 1\n")
+        self.submit(allow_changes=False)
+        first = RecordedHarness()
+        first.stop_after = 99
+        study = Study(self.root, first)
+        state = study.status()
+        study._begin(state)
+        study._step(state)
+        self.assertEqual(state["phase"], "execute")
+        self.commit_source("version = 2\n")
+        resumed = RecordedHarness()
+        resumed.stop_after = 99
+        Study(self.root, resumed).run()
+        self.assertEqual(
+            [call["phase"] for call in resumed.calls], ["execute", "review"]
+        )
+        self.assertEqual(resumed.execute_inputs, ["version = 1\n"])
+        request = self.submit(
+            "from-published", base_experiment="0001", allow_changes=False
+        )
+        self.assertEqual(request["source"]["revision"], revision)
+        self.commit_source("version = 3\n")
+        next_run = RecordedHarness()
+        Study(self.root, next_run).run()
+        self.assertEqual(next_run.execute_inputs, ["version = 1\n"])
+
+    def test_legacy_unversioned_readonly_request_stops_before_execute(self):
+        request = self.submit(allow_changes=False)
+        request["source"]["revision"] = None
+        (self.root / "tasks/manual/request.json").write_text(json.dumps(request))
+        harness = RecordedHarness()
+        with self.assertRaisesRegex(Exception, "no recoverable Git version"):
+            Study(self.root, harness).run()
+        self.assertEqual(harness.count("execute"), 0)
+
+    def test_published_readonly_base_without_revision_is_rejected(self):
+        harness = RecordedHarness()
+        harness.stop_after = 99
+        Study(self.root, harness).run()
+        self.assertIsNone(
+            read(self.root / "iterations/0001/iteration.json")["workspace_ref"]
+        )
+        with self.assertRaisesRegex(ValueError, "frozen Git source revision"):
+            self.submit(base_experiment="0001", allow_changes=False)

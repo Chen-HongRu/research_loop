@@ -19,6 +19,8 @@
 - **研究脚本**依据 `control/research-jobs/<轮次>/` 的小型控制回执展示作业状态、GPU 费用与证据产物路径，不读取产物内容。Plan 直接展示研究问题、观测量与判断合同；无 RMSD 的研究轮次展示为研究证据，不进入质量 Frontier。正式评分、研究计算和调试费用分别列出；没有 Study 节点的操作员验证作业只计入资源和作业状态。
 - **调用完成、控制器接纳、正式发布**分别标明。未完成的 `response.json` 不作为完成输出；历史发布引用决定实际采用的 Plan 和 Review，后续 attempt 不替换已发布结论。只有已发布且匹配候选身份、有效、已核查的测量进入指标图。
 - **任务进度**根据所选任务的状态、调用元数据和本地回执说明停点与原因，保留来源。主循环与长训的进度分别归属各自任务，顶部仅汇总任务数量、费用与主循环入轮截止。耗时不等于卡死判定，`running` 不证明进程或 GPU 活性；未记录的训练 step 不作推断。终态、目标达成和研究路线状态分开记录。刷新和任务切换保留各任务、各页签的展开状态与阅读位置。
+- **实时回传指标**位于所选任务的“任务进展”内，仅展示该任务的 `dashboard` 标签。默认展示最多六条近期标量曲线，支持对象中的数值字段、指标筛选、悬停/键盘查看精确值和点击固定。来源、执行、单位和观测条件分别成线；没有 Step 时按原始上报时间绘图。显式缺失/非有限值及 Step 回退处断线。浏览器每条来源最多保留最近 256 条观测；固定值与条件展开状态在刷新后保留。
+- **TensorBoard 全量指标**按钮打开同一访问入口下的真实 TensorBoard。所有标签的有限标量和对象数值字段进入 Scalars，原始小型记录进入 Text；数组保留文本，不猜测直方图或图片含义。主循环、长训与历史来源按各自身份区分；这些观测仍需独立 Review，不进入短训 Frontier。
 - **Scout**区分最近调用状态和仍保留的建议，分别显示时间、检索限制和外部主张核查状态。外部建议不自动成为实验证据。
 
 页面每 5 秒读取一次选定目录。页首标明 Study 名称，悬停可查看绝对目录；归档模式明确显示“归档快照”及后端核账时间。刷新时间只代表读取时间，不代表远端作业进展。
@@ -46,6 +48,23 @@ uv run python integrations/protok/dashboard.py \
 
 `--history-root` 可重复指定，每个历史来源都使用离线快照。`--records-root` 仅读取早于所有已接入 Study 首轮的小型账本元数据；缺失创建时间的记录不会被猜测为前置历史。页面列出来源、覆盖数量与缺失限制。全局 GPU 费用仍读取当前后端的统一账本，不将各历史快照相加。
 
+### 启用 TensorBoard
+
+使用独立的 CPU 服务，源目录与看板保持一致，派生日志单独存放：
+
+```sh
+uv sync --extra dashboard
+uv run --extra dashboard python -m integrations.protok.tensorboard \
+  --root /root/research-loop/runs/protok-resume-20261101 \
+  --history-root /root/research-loop/deployments/protok-se3-20261101/archive \
+  --logdir /root/research-loop/dashboard-runtimes/tensorboard-data/protok-resume-20261101 \
+  --port 6006
+```
+
+看板原启动命令增加 `--tensorboard-port 6006` 后显示按钮。TensorBoard 仅监听本机，由看板在 `/tensorboard/` 转发，沿用现有认证与访问路径；不对外开放 6006 端口。服务未配置或暂不可用时，任务进展仍可读取回传数据。
+
+导出器每五秒增量读取各来源的一页本地 JSONL，并只向派生目录写入 TensorBoard event 文件与续传游标；重启后继续补传，不重复写点，不读取训练数据或 checkpoint。TensorBoard 网页首次打开默认开启原生自动刷新，周期 30 秒；保留用户已有的显式偏好。依赖固定为 TensorBoard 2.21.0，更新版本时须重新核对首次访问的设置接口。详细数据映射及读取边界见 [telemetry.md](../../docs/telemetry.md#task-progress-and-tensorboard)。
+
 ## 与冻结控制器独立部署
 
 看板使用当前的 `integrations.protok.backend` 和 `research_loop.harness`。旧冻结运行版本可能仍使用 `research_loop.protok`，不能只把新的 `dashboard.py` 放进旧运行版本后沿用其模块路径。
@@ -60,11 +79,17 @@ integrations/protok/dashboard.py
 integrations/protok/dashboard.html
 integrations/protok/explanation.py
 integrations/protok/plan_provenance.py
+integrations/protok/tensorboard.py
+integrations/protok/task_telemetry.py
 integrations/protok/assets/**
 src/research_loop/*.py
+pyproject.toml
+uv.lock
 ```
 
 将包解压到新的看板版本目录，从该目录启动独立的只读服务即可。入口自行优先加载包内模块，不依赖控制器的 `PYTHONPATH`。保留原研究服务、冻结 runtime、预算与控制记录；看板升级不需要控制器交接。
+
+启用 TensorBoard 时在新版本目录用 `uv sync --extra dashboard` 创建独立环境，不向研究服务共用的环境安装依赖。TensorBoard 单独管理进程；看板与它分别重启，均无需重启研究 Runner。
 
 阿里云活动目录和归档目录必须分别绑定。例如活动 Study 的独立看板启动命令为：
 
@@ -126,3 +151,5 @@ node --test integrations/protok/tests/dashboard.test.cjs
 ```
 
 另用实际研究目录检查 HTTP 快照、Agent 详情、Git 历史、路线视图、知识文档与自动刷新。测试证明展示和记录语义，不证明研究收益。
+
+人工长训练的实时指标按稳定任务 ID 查询（`/api/telemetry?source=active&task=TASK`），从请求绑定的 `study/tasks/TASK/study/iterations/ITERATION/telemetry` 读取。运行中和已评审任务使用同一位置；历史 Study、自动长训和各执行来源分别隔离。TensorBoard 增量导出同一批本地来源的全部标签，重启沿用游标。

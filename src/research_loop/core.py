@@ -1451,20 +1451,21 @@ class Study:
         manual = self._context(folder).get("manual_task")
         if manual:
             version = manual["source"]["revision"]
-            if not self.config["allow_write"]:
-                workdir = Path(manual["source"]["workspace"])
         if result["base_experiment"] and not manual:
             version = _read(
                 self.root / "iterations" / result["base_experiment"] / "iteration.json"
             ).get("workspace_ref")
-        if self.config["allow_write"]:
+        if self.config["allow_write"] or manual:
             if not version:
                 raise StudyError("Selected experiment has no recoverable Git version")
             workdir = folder / "workspace"
             if not workdir.exists():
-                _git(
-                    self.workspace, "worktree", "add", "--detach", str(workdir), version
+                project = (
+                    Path(manual["source"]["project"])
+                    if manual and not self.config["allow_write"]
+                    else self.workspace
                 )
+                _git(project, "worktree", "add", "--detach", str(workdir), version)
             if _git(workdir, "rev-parse", "HEAD") != version:
                 raise StudyError(
                     "Unexpected workspace version while preparing execution"
