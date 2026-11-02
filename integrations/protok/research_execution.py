@@ -255,7 +255,10 @@ The available compute profile is the existing H100 debug allocation, gpu=true,
 profile consume and report GPU allocation seconds from the original shared budget.
 Request the smallest useful limit and leave polling/queue time within Plan timeout.
 Script inputs must be declared by name/source/role: sources hidden_cache, targets,
-teacher, or checkpoint:<published iteration>:<step>. Use development or exploratory
+teacher, checkpoint:<published iteration>:<step>, or independently reviewed
+long-checkpoint:<run ID>:<2000|4000|6000|8000|10000>. Long checkpoints retain their
+separate full-validation protocol; inspect their published Review and exact source.
+Use development or exploratory
 data only; final-only evidence cannot feed adaptive search. No full data/cache copy
 or validation scan. Load only samples/checkpoints needed for actual computation.
 The remote manifest /inputs.json describes resolved read-only paths under /inputs/;

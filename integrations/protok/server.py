@@ -311,6 +311,15 @@ def final_summary(root, runner, backend, reason, *, first_error=None):
             "research_outstanding": status.get("research_outstanding")
             if status is not None
             else None,
+            "long_training_gpu_seconds": status.get("long_training_gpu_seconds", 0)
+            if status is not None
+            else None,
+            "long_training_outstanding": status.get("long_training_outstanding", [])
+            if status is not None
+            else None,
+            "total_gpu_seconds": status.get("total_gpu_seconds", used)
+            if status is not None
+            else None,
             "accounting_status": "known" if status is not None else "unknown",
             "cleanup_errors": errors,
             "best": best,
@@ -347,7 +356,12 @@ def main():
         reason = "attention"
         scout = None
         first_error = None
+        long_training = None
         try:
+            from integrations.protok.long_training_loop import LongTrainingScheduler
+
+            long_training = LongTrainingScheduler(root, backend)
+            long_training.start()
             study_config = root / "study/study.json"
             if study_config.exists() and read(study_config).get("exploration"):
                 scout = ScoutScheduler(root)
@@ -370,6 +384,17 @@ def main():
                 first_error = first_error or f"{type(error).__name__}: {error}"
                 write(
                     control / "scout-shutdown-error.json",
+                    {"error": f"{type(error).__name__}: {error}", "at": time.time()},
+                )
+            try:
+                if long_training is not None:
+                    # Drain independently authorized work before stopping the
+                    # parent after a normal budget completion or handoff.
+                    long_training.shutdown()
+            except Exception as error:
+                first_error = first_error or f"{type(error).__name__}: {error}"
+                write(
+                    control / "long-training-shutdown-error.json",
                     {"error": f"{type(error).__name__}: {error}", "at": time.time()},
                 )
             if reason != "handoff":

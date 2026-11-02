@@ -44,6 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--goal", type=Path, required=True)
     init.add_argument("--workspace", type=Path)
     init.add_argument("--evaluation", type=Path, help="Global evaluation JSON file")
+    init.add_argument(
+        "--long-training", type=Path, help="Authorized long-training policy JSON"
+    )
     init.add_argument("--harness", choices=["codex", "pi"], default="codex")
     init.add_argument("--model", default="gpt-6.1-sol")
     init.add_argument("--reasoning", default="medium")
@@ -69,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
         ("status", "Read the controller state; no model call"),
         ("graph", "Read published experiment nodes; no model call"),
         ("frontiers", "Read the Frontier views; no model call"),
+        (
+            "knowledge",
+            "Read current research plus independently reviewed long training",
+        ),
         ("rebuild-frontiers", "Rebuild Frontier views from published records"),
         ("retry", "Allow one new attempt after reconciling failed/unknown effects"),
     ):
@@ -123,6 +130,9 @@ def main(argv: list[str] | None = None) -> int:
                     if args.evaluation
                     else None
                 ),
+                long_training=json.loads(args.long_training.read_text(encoding="utf-8"))
+                if args.long_training
+                else None,
                 max_calls=args.max_calls,
                 max_seconds=args.max_seconds,
                 selection={
@@ -144,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = study.retry()
             elif args.command == "graph":
                 result = study.graph()
+            elif args.command == "knowledge":
+                result = study.knowledge()
             elif args.command == "frontiers":
                 result = study.frontiers()
             elif args.command == "rebuild-frontiers":

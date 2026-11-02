@@ -129,7 +129,8 @@ def _execution(value, policy):
             raise ProTokError("Invalid named research input")
         allowed_roles = {"development", "exploratory"}
         if item["source"] == "teacher" or (
-            isinstance(item["source"], str) and item["source"].startswith("checkpoint:")
+            isinstance(item["source"], str)
+            and item["source"].startswith(("checkpoint:", "long-checkpoint:"))
         ):
             allowed_roles |= {"reference", "model"}
         if item["role"] not in allowed_roles:
@@ -205,6 +206,21 @@ def _inputs(root, config, execution, iteration):
         provenance = {"source": source}
         if source in {"hidden_cache", "targets"}:
             path = config["cache_root" if source == "hidden_cache" else "target_root"]
+        elif isinstance(source, str) and source.startswith("long-checkpoint:"):
+            match = re.fullmatch(r"long-checkpoint:(L[a-f0-9]{16}):([0-9]+)", source)
+            if not match:
+                raise ProTokError("Invalid reviewed long checkpoint reference")
+            from integrations.protok.long_training import resolve_checkpoint
+
+            run_id, step = match.groups()
+            request = _read(root / "study/long-runs" / run_id / "request.json")
+            if int(request["source_iteration"]) >= int(iteration):
+                raise ProTokError(
+                    "Long checkpoint source must precede this investigation"
+                )
+            resolved = resolve_checkpoint(root, run_id, int(step))
+            path = resolved["path"]
+            provenance.update(resolved)
         elif source == "teacher":
             path = _read(Path(config["template"]) / config["fixed_config"])[
                 "teacher_checkpoint"

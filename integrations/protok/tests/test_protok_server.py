@@ -369,6 +369,9 @@ class ProTokServerTests(unittest.TestCase):
             "additional_gpu_seconds_used",
             "outstanding",
             "research_outstanding",
+            "long_training_gpu_seconds",
+            "long_training_outstanding",
+            "total_gpu_seconds",
         ):
             self.assertIsNone(summary[key])
         self.assertIn("accounting unavailable", summary["cleanup_errors"][0])
@@ -383,6 +386,8 @@ class ProTokServerTests(unittest.TestCase):
         spec = SimpleNamespace(loader=SimpleNamespace(exec_module=Mock()))
         scout = Mock()
         scout.shutdown.side_effect = RuntimeError("scout shutdown failed")
+        long_training = Mock()
+        long_training.shutdown.side_effect = RuntimeError("long shutdown failed")
         with (
             patch.object(
                 SERVER.sys,
@@ -397,6 +402,10 @@ class ProTokServerTests(unittest.TestCase):
                 SERVER.importlib.util, "module_from_spec", return_value=self.runner
             ),
             patch.object(SERVER, "ScoutScheduler", return_value=scout),
+            patch(
+                "integrations.protok.long_training_loop.LongTrainingScheduler",
+                return_value=long_training,
+            ),
             patch.object(SERVER, "drive", side_effect=RuntimeError("first failure")),
             patch.object(
                 SERVER, "recover_owned", side_effect=RuntimeError("cannot reconcile")
@@ -409,7 +418,66 @@ class ProTokServerTests(unittest.TestCase):
         self.assertEqual(summary["accounting_status"], "unknown")
         self.assertIn("accounting unavailable", summary["cleanup_errors"][0])
         self.assertTrue((self.root / "control/scout-shutdown-error.json").exists())
+        self.assertTrue(
+            (self.root / "control/long-training-shutdown-error.json").exists()
+        )
         self.assertTrue((self.root / "control/recovery-error.json").exists())
+
+    def test_long_training_drains_before_stop_and_accounting_is_published(self):
+        self.write(
+            "control/ownership.json", {"project": "/project", "owner_token": "owned"}
+        )
+        self.runner.ProTokBackend = Mock(return_value=self.backend)
+        self.backend.inspect.return_value.update(
+            long_training_gpu_seconds=80,
+            long_training_outstanding=[],
+            total_gpu_seconds=180,
+        )
+        spec = SimpleNamespace(loader=SimpleNamespace(exec_module=Mock()))
+        for reason in ("handoff", "budget"):
+            with self.subTest(reason=reason):
+                (self.root / "control/STOP").unlink(missing_ok=True)
+                scheduler = Mock()
+
+                def drain():
+                    self.assertFalse((self.root / "control/STOP").exists())
+
+                scheduler.shutdown.side_effect = drain
+                with (
+                    patch.object(
+                        SERVER.sys,
+                        "argv",
+                        ["server", "--root", str(self.root), "--runner", "/runner.py"],
+                    ),
+                    patch.object(SERVER.signal, "signal"),
+                    patch.object(
+                        SERVER.importlib.util,
+                        "spec_from_file_location",
+                        return_value=spec,
+                    ),
+                    patch.object(
+                        SERVER.importlib.util,
+                        "module_from_spec",
+                        return_value=self.runner,
+                    ),
+                    patch(
+                        "integrations.protok.long_training_loop.LongTrainingScheduler",
+                        return_value=scheduler,
+                    ),
+                    patch.object(SERVER, "drive", return_value=reason),
+                    patch.object(SERVER, "recover_owned") as recovery,
+                ):
+                    SERVER.main()
+                scheduler.start.assert_called_once()
+                scheduler.shutdown.assert_called_once()
+                self.assertEqual(recovery.call_count, int(reason != "handoff"))
+                self.assertEqual(
+                    (self.root / "control/STOP").exists(), reason == "budget"
+                )
+                summary = SERVER.read(self.root / "control/final-summary.json")
+                self.assertEqual(summary["long_training_gpu_seconds"], 80)
+                self.assertEqual(summary["long_training_outstanding"], [])
+                self.assertEqual(summary["total_gpu_seconds"], 180)
 
     def test_blocked_outstanding_deadline_recovers_and_summarizes_failure(self):
         self.write(

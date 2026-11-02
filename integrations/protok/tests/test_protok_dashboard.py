@@ -109,6 +109,8 @@ class DashboardTests(unittest.TestCase):
                     "formal_gpu_seconds",
                     "research_gpu_seconds",
                     "debug_gpu_seconds",
+                    "long_training_gpu_seconds",
+                    "long_training_outstanding",
                     "scored_records",
                 ):
                     self.assertIsNone(payload[key], key)
@@ -192,6 +194,29 @@ class DashboardTests(unittest.TestCase):
                     for item in result["coverage"]["limitations"]
                 )
             )
+
+    def test_snapshot_exposes_separately_accounted_long_training(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "control").mkdir()
+            outstanding = ["/runs/control/long-training-jobs/L0123456789abcdef"]
+            (root / "control/backend-snapshot.json").write_text(
+                json.dumps(
+                    {
+                        "records": [],
+                        "used_gpu_seconds": 100,
+                        "total_gpu_seconds": 180,
+                        "long_training_gpu_seconds": 80,
+                        "long_training_outstanding": outstanding,
+                        "scored_records": 0,
+                        "outstanding": [],
+                    }
+                )
+            )
+            result = DASH.view_snapshot(root, snapshot_only=True)
+            self.assertEqual(result["long_training_gpu_seconds"], 80)
+            self.assertEqual(result["long_training_outstanding"], outstanding)
+            self.assertEqual(result["gpu_seconds"], 180)
 
     def test_only_published_matching_verified_measurement_is_plotted(self):
         with tempfile.TemporaryDirectory() as temporary:

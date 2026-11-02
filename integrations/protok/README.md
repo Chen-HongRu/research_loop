@@ -17,6 +17,15 @@ Historical deployment evidence is retained in [deployment.md](deployment.md),
 `research-inputs/`, and `archive/exploration-v1/verification/`. The archived
 manifest describes the original snapshot and is not a current deployment check.
 
+## Parallel long training
+
+Reviewed short candidates may be nominated into an independently authorized lane:
+fresh seed42, 10k updates, full4491 validation every2k, CA RMSD/TM-score/CA-lDDT,
+and low-priority `acd_u`. The child reuses Study Plan → Execute → Review, retains
+remote checkpoints, and returns reviewed evidence to the parent at iteration
+boundaries. Configuration, scheduling, knowledge, dashboard and checkpoint
+interfaces are specified in [Parallel long training](../../docs/long-training.md).
+
 ## Recovery
 
 Evaluation submission uses the reusable `research_loop.submission` API:

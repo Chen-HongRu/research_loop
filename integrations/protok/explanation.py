@@ -115,6 +115,7 @@ execution_iteration 是中断后的执行续接记录；execution_directive 仅�
 续接记录中的实际测量与 Review 属于该执行记录；不能仅因续接就声称提出了新假说或改变了候选方案。
 不得复述 RMSD、误差数值、百分比、分数或指标差值；它们由独立权威元数据面板呈现。
 含 RMSD、重建误差、评分或分数的句子不得出现数字；测量条件也由独立面板呈现。
+长训证据仅引用冻结 long_training_results；区分最终步数端点与曲线最优，同一 checkpoint 的三个指标应一起解释。长训独立 Review 的知识不代表短训 Frontier 排名。
 不得修改测量有效性或资格。facts 是控制器记录，不是你能重写的结论。
 observations/supported/hypotheses/unmeasured 分开；next_tests 必须 proposed=true,not_run=true。
 not_run 表示说明作者没有执行建议，不表示后续轮次从未做过相似验证；仅以本轮冻结材料说明。
@@ -237,6 +238,10 @@ def collect_material(root, identity):
         missing.append(PUBLICATION_MISSING)
     for name in ("goal.md", "study.before.json", "route.before.md"):
         add(folder / "context" / name, "frozen_context")
+    # Freeze reviewed long-run evidence with the parent, never read live runs.
+    long_results = folder / "context/long_training_results.json"
+    if long_results.exists():
+        add(long_results, "long_training_results")
     if saved.get("selected"):
         add(folder / "publication.json", "selection", saved["selected"])
     marked_continuation = "continuation" in meta or "operator_resume" in meta
@@ -551,10 +556,21 @@ def _cached_state(root, identity, *, writer_owned=False):
     meta = _json(root, root / "study/iterations" / identity / "iteration.json") or {}
     marked_continuation = "continuation" in meta or "operator_resume" in meta
     deps = cached.get("dependencies", [])
-    if not deps or _identity(
-        [_stamp(root, root / dep[0]) for dep in deps],
-        continuation=marked_continuation,
-    ) != cached.get("source_identity"):
+    long_results = (
+        root / "study/iterations" / identity / "context/long_training_results.json"
+    )
+    new_long_evidence = long_results.exists() and str(
+        long_results.relative_to(root)
+    ) not in {dep[0] for dep in deps}
+    if (
+        new_long_evidence
+        or not deps
+        or _identity(
+            [_stamp(root, root / dep[0]) for dep in deps],
+            continuation=marked_continuation,
+        )
+        != cached.get("source_identity")
+    ):
         return {
             "status": "stale",
             "source_identity": cached.get("source_identity"),

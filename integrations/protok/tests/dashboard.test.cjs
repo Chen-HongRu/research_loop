@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -410,5 +410,29 @@ test('Settled research overruns show actual accounting without marking it unknow
   assert.match(elements.get('statusline').innerHTML,/研究脚本 75 GPU 秒/);
   assert.match(elements.get('statusline').innerHTML,/研究 #0017 已按实际 75 GPU 秒结算（申请 60 秒，超出 15 秒）/);
   assert.doesNotMatch(elements.get('statusline').innerHTML,/核账作业未知|后端读取失败/);
+  vm.runInContext('data=null;',context);
+});
+
+test('Long training separates reviewed 10k endpoints and best checkpoints with aligned metrics', () => {
+  const request={source_iteration:'0003',candidate:{id:'candidate3'},nomination:{basis:'quality',reason:'test reason',evidence:['short/result.json']},recipe:{total_steps:10000,validation_split:'full',initialization:'fresh'}};
+  const run={id:'L0123456789abcdef',request,status:'reviewed',phase:'done',result:{candidate_id:'candidate3',review:{markdown:'Independent knowledge',knowledge_changes:['long-run evidence']},execute:{artifacts:['metrics.json']},result:{curve:[{step:2000,ca_rmsd:1,tm_score:.5,lddt:.6,checkpoint:'checkpoint2k',proteins:100},{step:10000,ca_rmsd:2,tm_score:.7,lddt:.8,checkpoint:'checkpoint10k',proteins:100}],checkpoints:['checkpoint2k','checkpoint10k']}}};
+  const rendered=ui.longTrainingRuns([run]);
+  for(const label of ['最终 10k','曲线最优 CA RMSD','CA RMSD ↓','TM-score ↑','lDDT ↑','checkpoint2k','checkpoint10k','Independent knowledge','short/result.json','metrics.json'])assert.ok(rendered.includes(label),label);
+  assert.match(rendered, /最终 10k<\/th><td>10000<\/td><td>2<\/td><td>0.7<\/td><td>0.8/);
+  assert.match(rendered, /曲线最优 CA RMSD<\/th><td>2000<\/td><td>1<\/td><td>0.5<\/td><td>0.6/);
+  assert.equal((rendered.match(/<svg /g)||[]).length,3);
+  const pending=ui.longTrainingRuns([{...run,result:undefined,error:'<script>bad</script>'}]);
+  assert.match(pending,/尚未独立 Review 发布/);
+  assert.doesNotMatch(pending,/<svg |<script>|Independent knowledge|checkpoint2k/);
+});
+
+test('Long training allocations appear in accounting when no short job is outstanding', () => {
+  vm.runInContext(`data={state:{},nodes:[],accounting_available:true,outstanding:[],
+    formal_gpu_seconds:10,research_gpu_seconds:0,debug_gpu_seconds:0,
+    long_training_gpu_seconds:80,long_training_outstanding:['/jobs/L0123456789abcdef']};`,context);
+  ui.renderProgress();
+  assert.match(elements.get('statusline').innerHTML,/长训练作业 L0123456789abcdef · 待核账/);
+  assert.match(elements.get('statusline').innerHTML,/长训练 80 GPU 秒/);
+  assert.doesNotMatch(elements.get('statusline').innerHTML,/无待核账 GPU 作业/);
   vm.runInContext('data=null;',context);
 });

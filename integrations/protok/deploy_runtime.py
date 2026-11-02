@@ -78,6 +78,7 @@ def check_boundary(root, backend):
         status["outstanding"]
         or status.get("debug_outstanding")
         or status.get("research_outstanding")
+        or status.get("long_training_outstanding")
     ):
         raise RuntimeError("Outstanding evaluation effects prevent a handoff")
     return state
@@ -159,6 +160,7 @@ def check_debug_boundary(root, backend):
         status["outstanding"]
         or status.get("debug_outstanding")
         or status.get("research_outstanding")
+        or status.get("long_training_outstanding")
     ):
         raise RuntimeError(
             "Outstanding effects prevent starting a prepared debug session"
