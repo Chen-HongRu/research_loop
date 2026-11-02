@@ -19,6 +19,7 @@ from types import ModuleType
 # The evaluator launches this trusted file with Python -I, outside the release
 # directory. Resolve sibling controller packages from this file, never the CWD.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 
 def _read(path):
@@ -354,6 +355,17 @@ def install_hooks(
         backend.wait_for_job,
         backend.submit,
     )
+    from research_loop.diagnostics import CommandDiagnostics
+
+    diagnostic_root = (
+        Path(control_dir) / "command-diagnostics"
+        if control_dir
+        else Path(config["records_root"]) / "command-diagnostics"
+    )
+    diagnostics = CommandDiagnostics(
+        diagnostic_root, secrets=(control.get("owner_token"),)
+    )
+    diagnostics.install(backend)
     original_ssh = backend.ssh
     records = Path(config["records_root"])
     deadline = control["effective_deadline"]
@@ -442,8 +454,11 @@ def install_hooks(
                     raise ValueError(
                         "Fresh recovery requires this allocation's outstanding attempt"
                     )
+                diagnostics.directory = diagnostic_root / record.name
                 return record, state
-            return reserve(current, identity, baseline_identity, smoke=False)
+            result = reserve(current, identity, baseline_identity, smoke=False)
+            diagnostics.directory = diagnostic_root / record.name
+            return result
         session = backend.session_state(current)
         budget_check(current, session, records, 1)
         count = sum(state.get("mode") == "scored" for _, state in states)
@@ -482,6 +497,7 @@ def install_hooks(
             "cumulative_scored_records": count + 1,
         }
         backend.save_state(record, state)
+        diagnostics.directory = diagnostic_root / record.name
         return record, state
 
     def budget_check(
@@ -574,6 +590,27 @@ def install_hooks(
         budget_check(current, backend.session_state(current), records, 1)
         return submit(current, record, state, attempt)
 
+    if hasattr(backend, "collect_logs"):
+        collect_logs = backend.collect_logs
+        fetched_logs = set()
+
+        def collect_full_logs(current, record, attempt):
+            try:
+                return collect_logs(current, record, attempt)
+            finally:
+                remote = attempt.get("remote")
+                if (
+                    remote
+                    and attempt.get("terminal_state")
+                    and attempt.get("gpu_seconds") is not None
+                    and remote not in fetched_logs
+                ):
+                    from research_loop.diagnostics import fetch_remote_log
+
+                    fetched_logs.add(remote)
+                    fetch_remote_log(backend, current, remote)
+
+        backend.collect_logs = collect_full_logs
     backend.ssh = ssh
     backend.submit = submit_owned
     backend.reserve_record = reserve_record

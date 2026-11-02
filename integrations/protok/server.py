@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.run import job_path  # noqa: E402
+from research_loop.diagnostics import CommandDiagnostics, diagnostic_view  # noqa: E402
 
 
 class ScoutScheduler:
@@ -173,6 +174,12 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
     previous = read(supervisor_path) if supervisor_path.exists() else {}
     first_error = previous.get("first_error")
     failed_state = previous.get("failed_state")
+    owner_token = getattr(backend, "owner_token", None)
+    diagnostics = CommandDiagnostics(
+        control / "pipeline-diagnostics",
+        secrets=(owner_token,) if isinstance(owner_token, str) else (),
+    )
+    last_error = (previous.get("stage"), previous.get("error"))
     delay = 5
     repaired = False
     while not (control / "STOP").exists():
@@ -236,6 +243,9 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             first_error = first_error or message
+            if (stage, message) != last_error:
+                diagnostics.record_error(error, stage=stage, owner="pipeline")
+                last_error = (stage, message)
             if stage in {"iteration", "initialization"}:
                 path = root / "study/state.json"
                 failed_state = state
@@ -252,6 +262,7 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
                     "first_error": first_error,
                     "error": message,
                     "failed_state": failed_state,
+                    "diagnostics": diagnostics.view(owner="pipeline"),
                 },
             )
             # Polling only reads receipts. Execute remains blocked until explicit
@@ -394,7 +405,16 @@ def main():
             first_error = f"{type(error).__name__}: {error}"
             write(
                 control / "supervisor-error.json",
-                {"error": f"{type(error).__name__}: {error}", "at": time.time()},
+                {
+                    "error": f"{type(error).__name__}: {error}",
+                    "at": time.time(),
+                    "diagnostics": diagnostic_view(
+                        error,
+                        owner="pipeline",
+                        stage="supervisor",
+                        secrets=(getattr(backend, "owner_token", None),),
+                    ),
+                },
             )
             (control / "STOP").write_text("Stopped; preserve and reconcile effects.\n")
             if isinstance(error, KeyboardInterrupt):

@@ -851,6 +851,12 @@ def execute(
             _write(record / "job.json", existing)
             _write(record / "state.json", state)
         attempt = state["attempts"][0]
+        from research_loop.diagnostics import CommandDiagnostics, redact_text
+
+        diagnostics = CommandDiagnostics(
+            record / "command-diagnostics", secrets=(backend.owner_token,)
+        )
+        diagnostics.install(fixed)
         original_ssh = fixed.ssh
         watching = True
 
@@ -963,7 +969,7 @@ def execute(
             ):
                 raise ProTokError("Long allocation did not finish successfully")
         except BaseException as failure:
-            error = f"{type(failure).__name__}: {failure}"
+            error = diagnostics.record_error(failure)
             watching = False
             if attempt["status"] in {"submitting", "running"}:
                 fixed.cancel_interrupted(config, record, state)
@@ -972,7 +978,9 @@ def execute(
                         config, {"deadline": time.time()}, record, state, attempt
                     )
                 except BaseException as failure:
-                    error += f"; reconciliation: {type(failure).__name__}: {failure}"
+                    error += "; reconciliation: " + diagnostics.record_error(
+                        failure, stage="reconciliation"
+                    )
         finally:
             fixed.ssh = original_ssh
             if relay is not None:
@@ -999,7 +1007,9 @@ def execute(
             try:
                 collected.update(_collect(fixed, config, existing["remote"]))
             except Exception as collection:
-                collected["errors"].append(str(collection))
+                collected["errors"].append(
+                    diagnostics.record_error(collection, stage="collection")
+                )
             if error is None:
                 try:
                     curve = _curve(
@@ -1035,6 +1045,10 @@ def execute(
             )
         except (ProTokError, ValueError, TypeError):
             progress = {}
+        if settled:
+            from research_loop.diagnostics import fetch_remote_log
+
+            fetch_remote_log(fixed, config, existing["remote"])
         result = {
             "status": "completed"
             if settled and error is None
@@ -1061,15 +1075,25 @@ def execute(
                 for key in ("optimizer_step", "phase", "last_training")
                 if key in progress
             },
-            "training_log_tail": collected.get("training_log_tail", ""),
-            "stdout_tail": collected.get("stdout_tail", ""),
+            "training_log_tail": redact_text(
+                collected.get("training_log_tail", ""), secrets=(backend.owner_token,)
+            ),
+            "stdout_tail": redact_text(
+                collected.get("stdout_tail", ""), secrets=(backend.owner_token,)
+            ),
             "log_evidence": [
                 existing["remote"] + "/train/long-curve.json",
                 existing["remote"] + "/train/train.csv",
                 existing["remote"] + "/run.log",
             ],
-            "evidence_errors": collected.get("errors", []),
-            "error": error,
+            "evidence_errors": [
+                redact_text(message, secrets=(backend.owner_token,))
+                for message in collected.get("errors", [])
+            ],
+            "error": redact_text(error, secrets=(backend.owner_token,))
+            if error
+            else None,
+            "diagnostics": diagnostics.view(),
         }
         if manual:
             result.update(manual_task_id=task_id, budget_pool="manual")

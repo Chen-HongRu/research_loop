@@ -159,6 +159,30 @@ class DebugRecoveryTests(unittest.TestCase):
             study.frontiers()["global"]["fixed"]["candidate_ids"], ["0001:fixed"]
         )
 
+    def test_repair_and_review_receive_the_original_failure_diagnostics(self):
+        study, harness = self.study()
+        harness.diagnostic_context = lambda iteration: {
+            "iteration": iteration,
+            "owner": "workspace",
+            "logs": [{"log_id": "registered-native-log", "tail": "actual failure"}],
+        }
+        study.run()
+        self.assert_completed(study, harness)
+        repair_context = read(harness.repair.calls[0]["run_dir"] / "context.json")
+        review_context = next(
+            call["context"] for call in harness.calls if call["phase"] == "review"
+        )
+        for context in (repair_context, review_context):
+            diagnostic = context["diagnostics"]
+            self.assertEqual(diagnostic["server"]["iteration"], "0001")
+            self.assertEqual(diagnostic["server"]["logs"][0]["tail"], "actual failure")
+            original = diagnostic["attempts"][0]["record"]
+            self.assertEqual(original["owner"], "workspace")
+            self.assertEqual(original["effects"], "reconciled")
+            self.assertIn(
+                "Known terminal candidate failure", str(original["cause_chain"])
+            )
+
     def test_adapter_budget_exhaustion_returns_incomplete_for_review(self):
         study, harness = self.study()
         harness.exhausted = True
@@ -286,6 +310,10 @@ class DebugRecoveryTests(unittest.TestCase):
         harness.unknown = True
         with self.assertRaisesRegex(HarnessError, "Unknown external"):
             study.run()
+        failure = read(self.root / study.status()["diagnostic_ref"])
+        self.assertEqual(failure["owner"], "pipeline")
+        self.assertEqual(failure["effects"], "unknown")
+        self.assertEqual(failure["iteration"], 1)
         with self.assertRaisesRegex(StudyError, "explicitly retry"):
             study.run()
         self.assertEqual(len(harness.recoveries), 0)
