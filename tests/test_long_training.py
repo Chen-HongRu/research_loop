@@ -98,6 +98,12 @@ class LongHarness(RecordedHarness):
 
     def response(self, phase, context, kwargs):
         result = super().response(phase, context, kwargs)
+        if phase == "plan":
+            result = {key: result[key] for key in kwargs["schema"]["properties"]}
+            result["contract"] = {
+                key: result["contract"][key]
+                for key in kwargs["schema"]["properties"]["contract"]["properties"]
+            }
         if phase == "review" and context.get("long_training_run"):
             observations = context["long_training_observations"]
             result["observation_reviews"] = [
@@ -331,7 +337,12 @@ class LongTrainingTests(unittest.TestCase):
         parent = stage_schema("review", {"long_training": policy()}, SCHEMAS["review"])
         self.assertNotIn("observation_reviews", parent["properties"])
         child = stage_schema(
-            "review", {"long_training_run": {"id": "frozen"}}, SCHEMAS["review"]
+            "review",
+            {
+                "long_training_run": {"id": "frozen"},
+                "long_training_observations": {"curve": [{"step": 5}]},
+            },
+            SCHEMAS["review"],
         )
         self.assertIn("observation_reviews", child["required"])
         self.assertNotIn("long_training_decision", child["properties"])
@@ -606,15 +617,22 @@ class LongTrainingTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_inconsistent_fixed_controller_plan_cannot_allocate(self):
+        class InvalidPlan(LongHarness):
+            def response(self, phase, context, kwargs):
+                result = super().response(phase, context, kwargs)
+                if phase == "plan":
+                    result["contract"]["timeout_seconds"] = 60
+                return result
+
         self.nominate()
         calls = []
         manager = LongTrainingManager(
             self.root,
-            LongHarness(),
+            InvalidPlan(),
             self.executor(calls),
             admission=lambda request, token: {"policy": {"gpu_seconds_per_run": 10800}},
         )
-        with self.assertRaisesRegex(ValueError, "GPU allocation timeout"):
+        with self.assertRaisesRegex(ValueError, "contract: must contain exactly"):
             manager.run_one(deadline=time.time() + 1000)
         self.assertEqual(calls, [])
 

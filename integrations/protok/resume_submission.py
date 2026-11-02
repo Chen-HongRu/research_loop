@@ -228,14 +228,11 @@ def _original_plan(study, source_id):
         owner_state = study.status()
     else:
         raise ProTokError("Original Plan owner is not published")
-    if owner_state.get("plan_ref") != plan_ref or not any(
-        key.startswith("plan-")
-        and str(Path(call) / "response.json") == plan_ref
-        and owner_state.get("accepted_calls", {}).get(key)
-        for key, call in owner_state["calls"].items()
-    ):
+    from integrations.protok.plan_provenance import accepted_plan_response
+
+    plan = accepted_plan_response(study.root.parent, plan_ref, owner_state)
+    if owner_state.get("plan_ref") != plan_ref or plan is None:
         raise ProTokError("Original Plan is not an accepted scientific Plan")
-    plan = run.read(study.root / plan_ref)
     validate_response("plan", plan)
     if plan["decision"] != "investigate":
         raise ProTokError("Resume requires an investigating original Plan")

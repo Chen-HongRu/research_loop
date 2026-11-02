@@ -13,6 +13,7 @@ import uuid
 
 from .evaluation import build_frontier, validate_evaluation
 from .harness import HarnessConfig, HarnessError, publish_completed_response
+from .protocol import validate_response
 
 
 def _read(path):
@@ -96,6 +97,13 @@ def stage_schema(phase, context, schema):
             },
         }
         result["required"].append("observation_reviews")
+        steps = [
+            point["step"] for point in context["long_training_observations"]["curve"]
+        ]
+        if steps:
+            fields["step"]["enum"] = steps
+        else:
+            result["properties"]["observation_reviews"]["maxItems"] = 0
     if not context.get("long_training"):
         return result
     result = copy.deepcopy(result)
@@ -109,6 +117,14 @@ def stage_schema(phase, context, schema):
         "reason": text,
         "evidence": {"type": "array", "items": text},
     }
+    current_ids = list(
+        dict.fromkeys(
+            m["candidate_id"]
+            for m in context.get("execute", {}).get("measurements", [])
+        )
+    )
+    if current_ids:
+        nomination["candidate_id"] = {"type": "string", "enum": current_ids}
     fields = {
         "reason": text,
         "nominations": {
@@ -622,16 +638,54 @@ class _LongHarness:
             except Exception as error:
                 raise HarnessError(str(error)) from error
         else:
+            delegate_kwargs = dict(kwargs)
+            if phase == "plan":
+                schema = copy.deepcopy(kwargs["schema"])
+                for name in ("base_experiment", "references", "local_evaluation"):
+                    schema["properties"].pop(name, None)
+                    if name in schema["required"]:
+                        schema["required"].remove(name)
+                if gpu_limit:
+                    contract = schema["properties"]["contract"]
+                    del contract["properties"]["timeout_seconds"]
+                    contract["required"].remove("timeout_seconds")
+                inner = Path(kwargs["run_dir"]) / "agent"
+                inner.mkdir(exist_ok=True)
+                _write(inner / "context.json", context)
+                _write(inner / "schema.json", schema)
+                delegate_kwargs.update(schema=schema, run_dir=inner)
+                delegate_kwargs["prompt"] += (
+                    "\nThe controller supplies base_experiment=null, references=[], "
+                    "local_evaluation=null. Omit those fields from your output."
+                    + (
+                        " The controller supplies contract.timeout_seconds; omit that field too."
+                        if gpu_limit
+                        else ""
+                    )
+                )
             result = self.delegate.run(
                 **{
-                    **kwargs,
-                    "prompt": kwargs["prompt"]
+                    **delegate_kwargs,
+                    "prompt": delegate_kwargs["prompt"]
                     + "\nFrozen long-training request (external parent evidence, not an editable recipe):\n"
                     + json.dumps(self.request, ensure_ascii=False)
                     + controller_contract
                     + "\nNo candidate changes, alternative recipe, checkpoint selection or new measurements are authorized. Review the full curve and all metrics at matching checkpoint steps; distinguish endpoint from best-over-curve, and preserve negative/incomplete results. The short-study goal is not proved by this independent protocol.\n",
                 }
             )
+            if phase == "plan":
+                validate_response("plan", result, schema=schema)
+                result = {
+                    **result,
+                    "base_experiment": None,
+                    "references": [],
+                    "local_evaluation": None,
+                }
+                if gpu_limit:
+                    result["contract"] = {
+                        **result["contract"],
+                        "timeout_seconds": gpu_limit,
+                    }
             if phase == "plan" and result["decision"] == "investigate":
                 if gpu_limit and result["contract"]["timeout_seconds"] != gpu_limit:
                     raise ValueError(
@@ -645,6 +699,10 @@ class _LongHarness:
                     raise ValueError(
                         "Long-training Plan changed the frozen evaluation or source"
                     )
+        if phase == "plan" and "base_experiment" not in kwargs["schema"]["properties"]:
+            result = {
+                key: value for key, value in result.items() if key != "base_experiment"
+            }
         publish_completed_response(kwargs["run_dir"], result)
         return result
 

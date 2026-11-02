@@ -297,9 +297,10 @@ not a substitute for complete fixed validation or a source of automatic scores.
 Import protected project modules from /workspace. See the actual trusted result
 for locally collected output/evidence paths. No checkpoint is promised to exist:
 missing input is a failed prerequisite, never permission to substitute another.
-For script results return measurements=[] and exactly the returned artifact;
-outcome=completed only when the declared computation succeeded, otherwise incomplete
-with its settled failure evidence. Independent Review may learn from a negative or
+For script results the controller constructs measurements=[] and exactly the returned
+artifact; it sets outcome=completed only when the declared computation succeeded,
+otherwise incomplete with its settled failure evidence. Your final response contains
+only the execution report requested by the adapter. Independent Review may learn from a negative or
 inconclusive result without a formal score. Do not turn script outputs into official
 RMSD measurements. New local benchmarks have their own frozen definition/data role;
 they are evidence in the artifact and never replace the official Frontier.

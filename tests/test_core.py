@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +7,6 @@ from unittest.mock import patch
 
 from research_loop import Study, StudyError, initialize
 from research_loop.harness import HarnessError
-from research_loop.protocol import SCHEMAS
 
 
 def read(path):
@@ -54,15 +54,16 @@ class RecordedHarness:
         self.helper_inputs = []
 
     def run(self, **kwargs):
-        phase = next(
-            name for name, schema in SCHEMAS.items() if schema is kwargs["schema"]
-        )
+        phase = re.search(r"^Stage: (\w+)$", kwargs["prompt"], re.MULTILINE)[1]
         context = read(kwargs["run_dir"] / "context.json")
         call = {**kwargs, "phase": phase, "context": context}
         self.calls.append(call)
         if self.before:
             self.before(call)
         result = self.response(phase, context, kwargs)
+        properties = kwargs["schema"]["properties"]
+        if phase == "execute" and set(properties) <= {"outcome", "markdown"}:
+            result = {key: result[key] for key in properties}
         (kwargs["run_dir"] / "prompt.md").write_text(kwargs["prompt"])
         (kwargs["run_dir"] / "response.json").write_text(json.dumps(result))
         (kwargs["run_dir"] / "process.json").write_text(
@@ -76,7 +77,7 @@ class RecordedHarness:
         if phase == "proposal":
             return {
                 "markdown": "Compare a bounded intervention; mechanism remains unknown.",
-                "route_id": context["route"]["id"],
+                **({"route_id": "new"} if context["route"]["id"] == "new" else {}),
                 "route_title": "A useful empirical question",
                 "action": "Measure one bounded intervention",
                 "base_experiment": self.base,
@@ -110,7 +111,15 @@ class RecordedHarness:
                 "decision": "investigate",
                 "markdown": "One bounded investigation with fixed evaluation conditions.",
                 "route_research": "Question and evidence gap; no mechanism claim.",
-                "base_experiment": context["selected"]["proposal"]["base_experiment"],
+                **(
+                    {
+                        "base_experiment": context["selected"]["proposal"][
+                            "base_experiment"
+                        ]
+                    }
+                    if "base_experiment" in kwargs["schema"]["properties"]
+                    else {}
+                ),
                 "references": context["selected"]["proposal"]["references"],
                 "input_artifacts": [],
                 "local_evaluation": self.local,
@@ -257,6 +266,23 @@ class CoreTests(unittest.TestCase):
                 if failed_phase == "review":
                     self.assertEqual(executes, 1)
 
+    def test_plan_rejects_model_supplied_base_before_execute(self):
+        study, harness = self.study()
+        original = harness.response
+
+        def injected(phase, context, kwargs):
+            result = original(phase, context, kwargs)
+            if phase == "plan":
+                result["base_experiment"] = None
+            return result
+
+        harness.response = injected
+        with self.assertRaisesRegex(ValueError, "plan: must contain exactly"):
+            study.run()
+        self.assertEqual(harness.count("execute"), 0)
+        call = next(c for c in harness.calls if c["phase"] == "plan")
+        self.assertIn("base_experiment", read(call["run_dir"] / "response.json"))
+
     def test_readonly_retry_rejects_execute_under_state_lock(self):
         study, harness = self.study()
 
@@ -283,6 +309,18 @@ class CoreTests(unittest.TestCase):
         second = self.root / "iterations/0002"
         self.assertEqual((state["status"], state["stop_reason"]), ("stopped", "review"))
         self.assertEqual(len(harness.calls), 20)
+        sampled = next(
+            c
+            for c in harness.calls
+            if c["phase"] == "proposal" and c["context"]["route"]["id"] == route_id
+        )
+        self.assertNotIn("route_id", sampled["schema"]["properties"])
+        self.assertNotIn("route_id", read(sampled["run_dir"] / "response.json"))
+        selection = read(second / "selection.json")
+        side = sampled["context"]["role"]
+        self.assertEqual(
+            selection["rounds"]["0"]["proposals"][side]["route_id"], route_id
+        )
         self.assertEqual(
             (second / "context/global.before.md").read_text(),
             (first / "global.after.md").read_text(),
@@ -294,6 +332,13 @@ class CoreTests(unittest.TestCase):
         graph = study.graph()
         self.assertEqual(graph[1]["route_id"], route_id)
         self.assertEqual(graph[1]["base_experiment"], "0001")
+        plan_call = [c for c in harness.calls if c["phase"] == "plan"][-1]
+        self.assertNotIn("base_experiment", plan_call["schema"]["properties"])
+        self.assertNotIn(
+            "base_experiment", read(plan_call["run_dir"] / "response.json")
+        )
+        self.assertEqual(Path(state["plan_ref"]).name, "canonical-response.json")
+        self.assertEqual(read(self.root / state["plan_ref"])["base_experiment"], "0001")
         self.assertEqual(graph[1]["references"], ["0001"])
         self.assertEqual(graph[0]["status"], "reviewed")
         result = read(self.root / state["review_ref"])
@@ -511,7 +556,7 @@ class CoreTests(unittest.TestCase):
         final.update(data_role="final", allow_feedback=False)
         study, harness = self.study(global_evaluation=final)
         harness.measure = True
-        with self.assertRaisesRegex(StudyError, "Final-only"):
+        with self.assertRaisesRegex(ValueError, "execute.measurements"):
             study.run()
         self.assertEqual(study.status()["phase"], "execute")
         self.assertEqual(harness.count("review"), 0)

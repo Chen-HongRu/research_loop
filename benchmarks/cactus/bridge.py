@@ -11,7 +11,13 @@ import threading
 import time
 from pathlib import Path, PurePosixPath
 
-from research_loop.harness import CodexHarness, HarnessConfig
+from research_loop.harness import (
+    CodexHarness,
+    HarnessConfig,
+    HarnessError,
+    publish_completed_response,
+)
+from research_loop.protocol import validate_response
 
 _JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _FILES = (
@@ -51,6 +57,49 @@ def _publish(path: Path, value: dict) -> None:
         json.dump(value, stream, ensure_ascii=False, indent=2, allow_nan=False)
         stream.write("\n")
     temporary.replace(path)
+
+
+REPORT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "markdown": {"type": "string"},
+    },
+    "required": ["markdown"],
+    "additionalProperties": False,
+}
+REPORT_INSTRUCTIONS = """
+Final Execute output: return ONLY markdown under the supplied JSON schema.
+Describe actual actions, evidence and limitations. The trusted bridge constructs
+artifacts, measurements, IDs, metric values and receipt-derived outcome. Do not copy
+these fields into your response. Earlier full-output examples are superseded.
+"""
+
+
+def report_arguments(kwargs):
+    return {
+        **kwargs,
+        "schema": REPORT_SCHEMA,
+        "prompt": kwargs["prompt"] + REPORT_INSTRUCTIONS,
+    }
+
+
+def publish_execution(run_dir, report, artifacts, measurements, completed):
+    validate_response("execute", report, schema=REPORT_SCHEMA)
+    # Preserve the original author receipt before publishing the controller envelope.
+    run_dir = Path(run_dir)
+    _publish(run_dir / "agent-report.json", report)
+    original = run_dir / "completed.json"
+    if original.is_file():
+        _publish(run_dir / "agent-completed.json", json.loads(original.read_text()))
+    result = {
+        "outcome": "completed" if completed else "incomplete",
+        "markdown": report["markdown"],
+        "artifacts": artifacts,
+        "measurements": measurements,
+    }
+    validate_response("execute", result)
+    publish_completed_response(run_dir, result)
+    return result
 
 
 class CactusBridge:
@@ -276,16 +325,23 @@ class CactusBridge:
         if not kwargs.get("writable", False):
             return self.delegate.run(**kwargs)
         stop = threading.Event()
+        worker_errors = []
+
+        def watch():
+            try:
+                self._watch(Path(kwargs["workspace"]).resolve(), stop)
+            except BaseException as error:
+                worker_errors.append(error)
+
         watcher = threading.Thread(
-            target=self._watch,
-            args=(Path(kwargs["workspace"]).resolve(), stop),
+            target=watch,
             name="cactus-trusted-bridge",
             daemon=True,
         )
         watcher.start()
         try:
             # Includes timeout_seconds, when supplied by the controller.
-            return self.delegate.run(**kwargs)
+            report = self.delegate.run(**report_arguments(kwargs))
         finally:
             stop.set()
             watcher.join(timeout=max(0, self.deadline - time.monotonic()) + 2)
@@ -293,3 +349,35 @@ class CactusBridge:
                 self.bridge_errors.append(
                     "Bridge worker did not settle before smoke deadline"
                 )
+
+        if worker_errors:
+            raise HarnessError(
+                "Bridge worker failed; effects require reconciliation"
+            ) from worker_errors[0]
+        if (
+            watcher.is_alive()
+            or self.bridge_errors
+            or any(job.get("status") != "completed" for job in self.jobs.values())
+        ):
+            raise HarnessError("Bridge effects are unresolved; reconciliation required")
+        completed = [
+            job for job in self.jobs.values() if job.get("status") == "completed"
+        ]
+        artifacts, measurements = [], []
+        success = (
+            len(completed) == 1 and not watcher.is_alive() and not self.bridge_errors
+        )
+        if success:
+            job = completed[0]
+            artifacts = [job["artifact"]]
+            measurements = [
+                {
+                    "candidate_id": job["job_id"],
+                    "artifact": job["artifact"],
+                    "evaluation_id": "global-development-v1",
+                    "comparison_scope": "development-v1",
+                    "metrics": [{"name": "auc", "value": job["score"]}],
+                    "evidence": job["evidence"],
+                }
+            ]
+        return publish_execution(self.run_dir, report, artifacts, measurements, success)

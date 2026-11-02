@@ -12,10 +12,15 @@ from pathlib import Path
 
 from research_loop.core import BudgetExhausted
 from research_loop.debug_budget import DebugBudget
-from research_loop.harness import HarnessError, completed_response
+from research_loop.harness import (
+    HarnessError,
+    completed_response,
+    publish_completed_response,
+)
 from research_loop.submission import RECEIPT, STAGING
 
 from .backend import CANDIDATE_FILES, METRIC, PROTOCOL, allocation_record
+from .agent_output import REPORT_SCHEMA, report_response
 
 
 REPAIR = """CONTROLLER DEBUG REPAIR ONLY. This invocation repairs an already failed
@@ -25,8 +30,9 @@ candidate files. Fix the supplied actual failure; preserve the scientific interv
 data, teacher, scorer, native gradient/finite gates and fixed protocol. No network,
 SSH, training, GPU launch, evaluation request, interface file, gate bypass, dependency
 installation or change outside candidate scope. The controller may run smoke and
-formal evaluation only when separately authorized and within the existing budget. Return ordinary Execute JSON with outcome=incomplete,
-artifacts=[], measurements=[] and a concise account of the implementation repair.
+formal evaluation only when separately authorized and within the existing budget.
+Return only markdown with a concise account of the implementation repair. The
+controller supplies incomplete status and empty artifacts/measurements.
 """
 
 
@@ -46,7 +52,31 @@ class _RepairDelegate:
             kwargs.get("timeout_seconds", remaining), remaining
         )
         kwargs["prompt"] = REPAIR + "\n" + kwargs["prompt"] + "\n" + REPAIR
-        return self.delegate.run(**kwargs)
+        # Repair status and absence of measurements are controller-owned facts.
+        kwargs["schema"] = {
+            **REPORT_SCHEMA,
+            "properties": {"markdown": {"type": "string"}},
+            "required": ["markdown"],
+        }
+        kwargs["prompt"] += (
+            "\nFinal output overrides the ordinary Execute envelope: return only "
+            "markdown describing the repair. The controller supplies incomplete "
+            "status and empty artifacts/measurements; do not request evaluation.\n"
+        )
+        outer = Path(kwargs["run_dir"])
+        agent = outer / "agent"
+        agent.mkdir()
+        shutil.copyfile(outer / "context.json", agent / "context.json")
+        kwargs["run_dir"] = agent
+        report = self.delegate.run(**kwargs)
+        from research_loop.protocol import validate_response
+
+        validate_response("execute", report, schema=kwargs["schema"])
+        result = report_response(
+            {"outcome": "incomplete", "markdown": report["markdown"]}
+        )
+        publish_completed_response(outer, result)
+        return result
 
 
 def _no_interface(workspace, expected_submission=None):

@@ -196,6 +196,9 @@ Mechanism work needs at least two competing explanations with different predicti
 and interpretation referencing their observable IDs. Other purposes may use empty
 explanations/interpretation. Each observable declares definition, method, inputs,
 timing, aggregation and cost. Freeze these declarations before Execute.
+Explanation and observable IDs must be unique within their lists. Every
+interpretation references an existing explanation and a nonempty list of existing
+observable IDs; mechanism work needs an interpretation for every explanation.
 When live telemetry is available, state the observable names, steps/units, conditions,
 publication boundaries and intended tags. Use dashboard only for user-facing progress;
 retain diagnostic/custom tags for Review. Log tags do not change the frozen scientific
@@ -203,7 +206,11 @@ scope, data roles, required evidence or interpretation of incomplete measurement
 execution selects fixed_evaluation or script. A script uses research/*.py, named
 inputs with source and role, relative output evidence files, GPU requirement and a
 whole-minute time limit no greater than 1800 seconds. Source resolution belongs to
-the execution adapter. Fixed evaluation may use entrypoint=null, inputs=[],
+the execution adapter. Time limits are 60..1800 seconds in multiples of 60.
+Input names are unique simple letters/digits/underscore/dot/hyphen names without
+traversal; sources and roles are nonempty. Script entrypoints are Python files
+under research/; output paths are unique relative files without dot/traversal
+components, and scripts require at least one output. Fixed evaluation requires entrypoint=null, inputs=[],
 outputs=[], gpu=true, time_limit_seconds=1800. No decision requires training.
 For reselect/stop research_contract may be null; do not invent an experiment.
 """

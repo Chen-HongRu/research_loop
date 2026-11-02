@@ -27,7 +27,7 @@ class ExplorationHarness(RecordedHarness):
     def run(self, **kwargs):
         phase = next(p for p in SCHEMAS if f"Stage: {p}\n" in kwargs["prompt"])
         schema = kwargs["schema"]
-        result = super().run(**{**kwargs, "schema": SCHEMAS[phase]})
+        result = super().run(**kwargs)
         validate_response(phase, result, schema=schema)
         return result
 
@@ -36,7 +36,6 @@ class ExplorationHarness(RecordedHarness):
         slot = context.get("exploration")
         if slot and phase == "proposal":
             result["research_design"] = {
-                "kind": slot["kind"],
                 "question": "Is condition information lost?",
                 "structural_change": "Inject the unchanged condition at each layer",
                 "prior_attempts": ["Historical architecture comparison"],
@@ -140,7 +139,7 @@ class ExplorationTests(unittest.TestCase):
         self.assertEqual(s.graph()[0]["status"], "reviewed")
         self.assertIn("unavailable", h.calls[0]["context"]["scout_inputs"])
 
-    def test_refinement_cannot_satisfy_architecture_envelope(self):
+    def test_model_cannot_supply_controller_allocation_label(self):
         s, h = self.study()
         response = h.response
 
@@ -154,6 +153,21 @@ class ExplorationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.run()
         self.assertEqual(h.count("execute"), 0)
+
+    def test_allocation_is_constructed_without_mutating_raw_proposal(self):
+        s, h = self.study()
+        s.run()
+        call = next(c for c in h.calls if c["phase"] == "proposal")
+        raw = read(call["run_dir"] / "response.json")
+        self.assertNotIn("kind", raw["research_design"])
+        self.assertNotIn(
+            "kind", call["schema"]["properties"]["research_design"]["properties"]
+        )
+        selected = read(s.root / "iterations/0001/selection.json")
+        self.assertEqual(
+            selected["rounds"]["0"]["proposals"]["a"]["research_design"]["kind"],
+            "architecture",
+        )
 
     def test_policy_validation(self):
         for policy in ({}, {**POLICY, "cycle": []}, {**POLICY, "version": 9}):
