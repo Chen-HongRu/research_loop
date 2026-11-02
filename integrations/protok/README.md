@@ -136,12 +136,20 @@ uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --rec
 uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --repair-completed-control
 ```
 
-The first command requires a fully completed, eligible, candidate-bound backend
-record and creates a separately labeled operator attempt. It preserves the
+The first command requires a fully completed, eligible, candidate-bound fixed
+backend record or an unchanged frozen completed research receipt and creates a
+separately labeled operator attempt. Research results remain unscored. It preserves the
 interrupted Agent output and proceeds through independent Review. Known failed
 wrapper receipts, changed source/configuration, unsettled accounting and unknown
 effects block repair. The second finishes retained Review/control publication.
 Neither command clears STOP, resets costs or extends the lease.
+
+After research submission, do not add a Markdown report under `research/`:
+the complete source file set is frozen. Put narrative in the final Agent response.
+If an extra report already blocks receipt validation, an operator may preserve it
+outside the source tree, restore exact frozen source identity, then use
+`--reconcile-completed-execute`. Do not change original code, loosen source checks
+or resubmit the completed computation.
 
 ## Bounded candidate debugging
 

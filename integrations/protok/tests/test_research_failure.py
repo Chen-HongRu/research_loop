@@ -33,6 +33,10 @@ class ScriptDelegate(RecordedHarness):
                     raise AssertionError("Controller did not return")
                 time.sleep(0.01)
             trusted = json.loads((workspace / "evaluation-result.json").read_text())
+            if getattr(self, "add_report", False):
+                (workspace / "research/report.md").write_text(
+                    "Post-submission narrative\n"
+                )
             if self.fail_reporting:
                 raise HarnessError("Agent stopped after the allocation settled")
             return {
@@ -109,6 +113,13 @@ class ResearchFailureTests(unittest.TestCase):
             "error": "Slurm TIMEOUT",
             "evidence": [str(directory / "state.json")],
         }
+        if getattr(self, "completed_research", False):
+            receipt.update(
+                status="completed",
+                terminal_state="COMPLETED",
+                gpu_seconds=17,
+                error=None,
+            )
         RUNNER.write(directory / "receipt.json", receipt)
         return receipt
 
@@ -132,6 +143,46 @@ class ResearchFailureTests(unittest.TestCase):
         state = self.run_one()
         self.assertEqual((state["iteration"], state["phase"]), (3, "done"))
         self.assertEqual(self.allocations, 2)
+
+    def test_completed_research_report_is_archived_then_reconciled_without_replay(self):
+        self.initialize()
+        self.completed_research = True
+        self.delegate.add_report = True
+        with self.assertRaisesRegex(RUNNER.ProTokError, "Research code changed"):
+            self.run_one()
+        before = self.study.status()
+        previous = self.study.root / before["active_attempt"]
+        original = (previous / "agent/response.json").read_bytes()
+        plan = (self.study.root / before["plan_ref"]).read_bytes()
+        workspace = Path(
+            RUNNER.read(self.study.root / "iterations/0002/iteration.json")["workspace"]
+        )
+        with self.assertRaisesRegex(RUNNER.ProTokError, "Research code changed"):
+            RUNNER.reconcile_completed_execute(self.root, self.backend)
+        archive = previous / "operator-retained-source-additions"
+        archive.mkdir()
+        (workspace / "research/report.md").replace(archive / "report.md")
+        effects = self.backend.inspect()
+        with patch.object(
+            self.backend,
+            "inspect",
+            return_value={**effects, "research_outstanding": ["unknown"]},
+        ):
+            with self.assertRaisesRegex(RUNNER.ProTokError, "Unresolved effects"):
+                RUNNER.reconcile_completed_execute(self.root, self.backend)
+        state = RUNNER.reconcile_completed_execute(self.root, self.backend)
+        self.assertEqual(state["call_count"], before["call_count"])
+        self.assertEqual(state["elapsed_seconds"], before["elapsed_seconds"])
+        self.assertEqual((previous / "agent/response.json").read_bytes(), original)
+        self.assertEqual((self.study.root / before["plan_ref"]).read_bytes(), plan)
+        response = completed_response(self.study.root / state["calls"]["execute"])
+        self.assertEqual(response["outcome"], "completed")
+        self.assertEqual(response["measurements"], [])
+        state = self.run_one()
+        self.assertEqual((state["phase"], state["status"]), ("done", "ready"))
+        self.assertEqual(self.delegate.count("execute"), 1)
+        self.assertEqual(self.allocations, 1)
+        self.assertEqual(research_usage(self.control)["gpu_seconds"], 17)
 
     def test_legacy_invalid_plan_reconciles_without_job_then_enters_review(self):
         from integrations.protok.research_backend import _execution
