@@ -1904,8 +1904,6 @@ def reconcile_completed_execute(root, backend):
                         "outstanding",
                         "research_outstanding",
                         "debug_outstanding",
-                        "long_training_outstanding",
-                        "manual_training_outstanding",
                     )
                 ):
                     raise ProTokError(

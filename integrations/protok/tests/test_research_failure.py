@@ -170,7 +170,18 @@ class ResearchFailureTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RUNNER.ProTokError, "Unresolved effects"):
                 RUNNER.reconcile_completed_execute(self.root, self.backend)
-        state = RUNNER.reconcile_completed_execute(self.root, self.backend)
+        # Independent long/manual lanes may remain queued during a read-only
+        # reconciliation; no supervisor restart or new allocation happens here.
+        with patch.object(
+            self.backend,
+            "inspect",
+            return_value={
+                **effects,
+                "manual_training_outstanding": ["known-independent-job"],
+                "long_training_outstanding": ["known-independent-child"],
+            },
+        ):
+            state = RUNNER.reconcile_completed_execute(self.root, self.backend)
         self.assertEqual(state["call_count"], before["call_count"])
         self.assertEqual(state["elapsed_seconds"], before["elapsed_seconds"])
         self.assertEqual((previous / "agent/response.json").read_bytes(), original)

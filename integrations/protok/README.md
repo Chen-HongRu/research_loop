@@ -150,6 +150,9 @@ If an extra report already blocks receipt validation, an operator may preserve i
 outside the source tree, restore exact frozen source identity, then use
 `--reconcile-completed-execute`. Do not change original code, loosen source checks
 or resubmit the completed computation.
+This receipt reconciliation leaves independently scheduled long/manual training
+untouched. A runtime deployment still requires its separate quiescent HANDOFF
+boundary; do not stop those jobs merely to publish a completed research receipt.
 
 ## Bounded candidate debugging
 
