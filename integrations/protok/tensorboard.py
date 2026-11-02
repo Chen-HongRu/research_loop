@@ -45,10 +45,6 @@ def identity(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
-def label(value):
-    return quote(str(value), safe="=,{}: ")[:100] or "none"
-
-
 def atomic_json(path, value):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(canonical(value))
@@ -71,51 +67,68 @@ def scalar_values(value):
                 yield "/" + key.replace("~", "~0").replace("/", "~1") + suffix, number
 
 
-def summaries(event):
+def summaries(event, source, stream_id):
     from tensorboard.compat.proto import summary_pb2, tensor_pb2, types_pb2
     from tensorboard.plugins.text import summary_v2
 
-    # The original record preserves tags, context, nonnumeric values and offsets.
-    result = summary_v2.text_pb("evidence/" + event["name"], canonical(event))
+    # Shared task runs retain exact stream provenance for nonnumeric evidence too.
+    evidence_id = identity({"stream": stream_id, "source": source})[:16]
+    result = summary_v2.text_pb(
+        "evidence/" + event["name"] + " [" + stream_id + "; " + evidence_id + "]",
+        canonical({**event, "stream_id": stream_id, "source": source}),
+    )
+    conditions = event["context"]
+    if source["kind"] == "fixed-short":
+        conditions = {k: v for k, v in conditions.items() if k not in TRANSPORT_KEYS}
+    axis = "step" if event["step"] is not None else "event-order"
+    contract = {
+        "name": event["name"],
+        "unit": event["unit"],
+        "conditions": conditions,
+        "axis": axis,
+        "stream": stream_id,
+        "source": source,
+    }
+    # Conditions belong to a series, not to the experiment's run selector.
+    readable = ", ".join(
+        f"{key}={canonical(value)}"
+        for key, value in sorted(conditions.items())
+        if key not in {"source", "csv_header"}
+    )[:80]
+    details = "; ".join(part for part in (readable, event["unit"], axis) if part)
     for suffix, value in scalar_values(event["value"]):
         result.value.add(
-            tag="observations/" + event["name"] + suffix,
+            tag="observations/"
+            + event["name"]
+            + suffix
+            + " ["
+            + details
+            + "; "
+            + identity(contract)[:16]
+            + "]",
             tensor=tensor_pb2.TensorProto(
                 dtype=types_pb2.DT_DOUBLE, double_val=[value]
             ),
             metadata=summary_pb2.SummaryMetadata(
+                display_name=event["name"] + suffix + " [" + details + "]",
+                summary_description=canonical(contract),
                 plugin_data=summary_pb2.SummaryMetadata.PluginData(
                     plugin_name="scalars"
-                )
+                ),
             ),
         )
     return result
 
 
-def run_name(source_id, root, lane, stream_id, source, event):
-    conditions = event["context"]
-    if source["kind"] == "fixed-short":
-        conditions = {
-            key: value for key, value in conditions.items() if key not in TRANSPORT_KEYS
-        }
-    axis = "step" if event["step"] is not None else "event-order"
-    contract = {"unit": event["unit"], "conditions": conditions, "axis": axis}
-    execution = identity({"stream": stream_id, "source": source})[:16]
-    return "/".join(
-        [
-            source_id,
-            "study-" + identity(root)[:16],
-            label(lane or ("experiment-" + source["experiment_id"])),
-            label(stream_id) + "-" + execution,
-            "metric=" + label(event["name"]) + "-" + identity(event["name"])[:12],
-            "unit=" + label(event["unit"]),
-            "conditions="
-            + label(canonical(conditions))
-            + "-"
-            + identity(contract)[:16],
-            axis,
-        ]
-    )
+def task_name(source_id, lane, source):
+    if lane and lane.startswith("manual:"):
+        _, task_id, iteration = lane.split(":")
+        name = "manual/" + task_id + "/#" + iteration
+    elif lane:
+        name = "long/" + lane
+    else:
+        name = "#" + quote(source["experiment_id"], safe="")
+    return source_id + "/" + name
 
 
 class Exporter:
@@ -135,8 +148,9 @@ class Exporter:
                 self.logdir
             ):
                 raise ValueError("Derived logdir must be separate from source Studies")
-        self.state_dir = self.logdir / ".export-state"
-        self.events_dir = self.logdir / "events"
+        # Rebuild only this derived layout; keep the previous mirror intact.
+        self.state_dir = self.logdir / ".export-state-v2"
+        self.events_dir = self.logdir / "events-v2"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.events_dir.mkdir(parents=True, exist_ok=True)
 
@@ -144,7 +158,31 @@ class Exporter:
     def locked(self):
         with (self.state_dir / "lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.layout_path = self.state_dir / "layout.json"
+            sources = [[key, str(root)] for key, root in self.sources]
+            self.layout = (
+                json.loads(self.layout_path.read_text())
+                if self.layout_path.exists()
+                else {"sources": sources, "executions": {}, "next_page": 0}
+            )
+            if self.layout["sources"] != sources:
+                raise ValueError("Derived logdir belongs to different source Studies")
             yield
+
+    def page_identity(self, source_id, lane, source):
+        task = task_name(source_id, lane, source)
+        execution = [
+            source[key] for key in ("kind", "source_identity", "execution_identity")
+        ]
+        attempts = self.layout["executions"].setdefault(task, [])
+        if execution not in attempts:
+            attempts.append(execution)
+        attempt = attempts.index(execution) + 1
+        run = task if attempt == 1 else f"{task} (attempt {attempt})"
+        sequence = self.layout["next_page"]
+        self.layout["next_page"] += 1
+        atomic_json(self.layout_path, self.layout)
+        return run, sequence
 
     def streams(self):
         for source_id, root in self.sources:
@@ -172,14 +210,7 @@ class Exporter:
 
         grouped = defaultdict(list)
         for index, event in enumerate(pending["page"]["events"], 1):
-            run = run_name(
-                pending["source_id"],
-                pending["root"],
-                pending["lane"],
-                pending["stream_id"],
-                pending["source"],
-                event,
-            )
+            run = pending["run"]
             step = event["step"]
             if step is None:
                 step = pending["order"] + index
@@ -189,13 +220,12 @@ class Exporter:
                 step = pending["order"] + index
             grouped[run].append(
                 event_pb2.Event(
-                    wall_time=event["time"], step=step, summary=summaries(event)
+                    wall_time=event["time"],
+                    step=step,
+                    summary=summaries(event, pending["source"], pending["stream_id"]),
                 )
             )
-        page = pending["page"]
-        filename = (
-            f"events.out.tfevents.{page['after']:020d}-{page['next_offset']:020d}"
-        )
+        filename = f"events.out.tfevents.{pending['sequence']:020d}"
         for run, events in grouped.items():
             target = self.events_dir / run / filename
             if target.exists():
@@ -232,6 +262,7 @@ class Exporter:
             page = telemetry.read_events(location, stream_id, after=state["offset"])
             if page["next_offset"] == state["offset"]:
                 return 0
+            run, sequence = self.page_identity(source_id, lane, source)
             pending = {
                 "source_id": source_id,
                 "root": str(root),
@@ -240,16 +271,21 @@ class Exporter:
                 "source": source,
                 "order": state["order"],
                 "page": page,
+                "run": run,
+                "sequence": sequence,
             }
             atomic_json(pending_path, pending)
+        return self.finish_page(pending_path, pending)
+
+    def finish_page(self, pending_path, pending):
         self.publish(pending)
         page = pending["page"]
         atomic_json(
-            state_path,
+            pending_path.with_suffix(".json"),
             {
                 "offset": page["next_offset"],
                 "order": pending["order"] + len(page["events"]),
-                "source": source,
+                "source": pending["source"],
                 "errors": page["errors"],
             },
         )
@@ -260,6 +296,20 @@ class Exporter:
         """One bounded page per stream; bad streams cannot stop healthy streams."""
         count, errors = 0, []
         with self.locked():
+            # TensorBoard tails event files in filename order. Complete an older
+            # transaction before publishing newer pages into a shared task run.
+            pending = [
+                (path, json.loads(path.read_text()))
+                for path in self.state_dir.glob("*.pending")
+            ]
+            if pending:
+                for path, page in sorted(pending, key=lambda item: item[1]["sequence"]):
+                    try:
+                        count += self.finish_page(path, page)
+                    except Exception as exc:
+                        errors.append(f"Pending page: {type(exc).__name__}")
+                        break
+                return {"exported": count, "errors": errors}
             for source_id, root, lane, location, stream_id in self.streams():
                 try:
                     count += self.export_stream(
@@ -269,6 +319,8 @@ class Exporter:
                     errors.append(
                         f"{source_id}/{lane or 'main'}/{stream_id}: {type(exc).__name__}"
                     )
+                    if any(self.state_dir.glob("*.pending")):
+                        break
         return {"exported": count, "errors": errors}
 
 

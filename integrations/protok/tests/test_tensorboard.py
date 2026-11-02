@@ -43,8 +43,10 @@ class TensorBoardTests(unittest.TestCase):
 
     def reader(self):
         return [
-            (file.parent.relative_to(self.logdir / "events").as_posix(), event)
-            for file in sorted((self.logdir / "events").rglob("events.out.tfevents.*"))
+            (file.parent.relative_to(self.logdir / "events-v2").as_posix(), event)
+            for file in sorted(
+                (self.logdir / "events-v2").rglob("events.out.tfevents.*")
+            )
             for event in EventFileLoader(str(file)).Load()
             if event.HasField("summary")
         ]
@@ -76,7 +78,9 @@ class TensorBoardTests(unittest.TestCase):
         points = self.scalars()
         self.assertEqual(len(points), 3)
         self.assertEqual(points[0][3], precise)
-        self.assertIn("observations/train/loss/a~1b~0c", [p[2] for p in points])
+        self.assertTrue(
+            any(p[2].startswith("observations/train/loss/a~1b~0c [") for p in points)
+        )
         evidence = self.evidence()
         self.assertEqual(len(evidence), 5)
         self.assertTrue(any(e["tags"] == ["internal"] for e in evidence))
@@ -101,10 +105,11 @@ class TensorBoardTests(unittest.TestCase):
         mirror.Exporter(self.root, self.logdir, [archive]).poll()
         points = self.scalars()
         self.assertEqual(len(points), 8)
-        self.assertEqual(len({point[0] for point in points}), 7)
+        self.assertEqual(len({(point[0], point[2]) for point in points}), 7)
+        self.assertEqual(len({point[0] for point in points}), 4)
         self.assertTrue(any(run.startswith("history-1/") for run, *_ in points))
         self.assertTrue(any("L" + "a" * 16 in run for run, *_ in points))
-        order = [p for p in points if p[0].endswith("/event-order")]
+        order = [p for p in points if "event-order;" in p[2]]
         self.assertEqual(len(order), 1)
         self.assertEqual(order[0][1], 5)
         self.assertIsNone(next(e for e in self.evidence() if e["step"] is None)["step"])
@@ -129,7 +134,7 @@ class TensorBoardTests(unittest.TestCase):
         original = mirror.atomic_json
 
         def fail_state(path, value):
-            if path.suffix == ".json":
+            if path.suffix == ".json" and path.name != "layout.json":
                 raise OSError("simulated cursor publication crash")
             return original(path, value)
 
@@ -146,7 +151,7 @@ class TensorBoardTests(unittest.TestCase):
 
     def test_partial_page_publication_restarts_without_duplicate_points(self):
         self.emit(1, step=1, unit="loss")
-        self.emit(2, step=2, unit="seconds")
+        self.emit(2, step=2**64, unit="seconds")
         exporter = mirror.Exporter(self.root, self.logdir)
         original = Path.replace
         published = 0
@@ -178,12 +183,15 @@ class TensorBoardTests(unittest.TestCase):
         result = exporter.poll()
         self.assertEqual(result["exported"], 1)
         self.assertEqual(len(result["errors"]), 1)
-        state = json.loads(next(exporter.state_dir.glob("*.json")).read_text())
+        state_path = next(
+            p for p in exporter.state_dir.glob("*.json") if p.name != "layout.json"
+        )
+        state = json.loads(state_path.read_text())
         self.assertEqual(len(state["errors"]), 1)
         boundary = state["offset"]
         exporter.poll()
         self.assertEqual(len(self.scalars()), 1)
-        state = json.loads(next(exporter.state_dir.glob("*.json")).read_text())
+        state = json.loads(state_path.read_text())
         self.assertEqual(state["offset"], boundary)
         self.emit(2, step=2)
         exporter.poll()
@@ -194,6 +202,126 @@ class TensorBoardTests(unittest.TestCase):
             mirror.Exporter(self.root, self.study / "derived")
         with self.assertRaises(ValueError):
             mirror.Exporter(self.root, self.base)
+
+    def scalar_app(self):
+        """Exercise TensorBoard's real reader, provider and HTTP scalar routes."""
+        from tensorboard.backend.application import TensorBoardWSGI
+        from tensorboard.backend.event_processing.data_provider import (
+            MultiplexerDataProvider,
+        )
+        from tensorboard.backend.event_processing.plugin_event_multiplexer import (
+            EventMultiplexer,
+        )
+        from tensorboard.plugins.base_plugin import TBContext
+        from tensorboard.plugins.scalar.scalars_plugin import ScalarsPlugin
+        from werkzeug.test import Client
+
+        multiplexer = EventMultiplexer(size_guidance={"tensors": 0})
+        provider = MultiplexerDataProvider(multiplexer, str(self.logdir / "events-v2"))
+        plugin = ScalarsPlugin(TBContext(data_provider=provider))
+        app = TensorBoardWSGI(
+            [plugin], path_prefix="/tensorboard", data_provider=provider
+        )
+        return multiplexer, Client(app)
+
+    def reload_scalars(self, multiplexer, client):
+        multiplexer.AddRunsFromDirectory(str(self.logdir / "events-v2"))
+        multiplexer.Reload()
+        response = client.get("/tensorboard/data/plugin/scalars/tags")
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()
+
+    def test_many_conditions_share_dashboard_run_and_real_scalar_api_tracks_curve(self):
+        for seed in range(60):
+            self.emit(seed + 0.25, step=10, unit="loss", context={"seed": seed})
+        self.emit(0.125, step=20, unit="loss", context={"seed": 0})
+        exporter = mirror.Exporter(self.root, self.logdir)
+        exporter.poll()
+        multiplexer, client = self.scalar_app()
+        tags = self.reload_scalars(multiplexer, client)
+        self.assertEqual(list(tags), ["active/#0001"])
+        self.assertEqual(len(tags["active/#0001"]), 60)
+        tag = next(
+            t for t, m in tags["active/#0001"].items() if "seed=0;" in m["displayName"]
+        )
+        response = client.get(
+            "/tensorboard/data/plugin/scalars/scalars",
+            query_string={"run": "active/#0001", "tag": tag},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [row[1:] for row in response.get_json()], [[10, 0.25], [20, 0.125]]
+        )
+
+    def test_shared_run_streams_append_and_crash_replay_reach_existing_reader(self):
+        telemetry.register(self.study, "evaluation", self.source)
+        self.emit(1, step=10)
+        self.emit(2, step=10, stream="evaluation")
+        exporter = mirror.Exporter(self.root, self.logdir)
+        self.assertEqual(exporter.poll()["exported"], 2)
+        multiplexer, client = self.scalar_app()
+        self.assertEqual(
+            list(self.reload_scalars(multiplexer, client)), ["active/#0001"]
+        )
+        self.emit(3, step=20)
+        self.emit(4, step=20, stream="evaluation")
+        original = mirror.atomic_json
+
+        def fail_cursor(path, value):
+            if path.suffix == ".json" and path.name != "layout.json":
+                raise OSError("cursor crash")
+            return original(path, value)
+
+        with patch.object(mirror, "atomic_json", side_effect=fail_cursor):
+            self.assertEqual(len(exporter.poll()["errors"]), 1)
+        self.reload_scalars(multiplexer, client)
+        mirror.Exporter(self.root, self.logdir).poll()
+        mirror.Exporter(self.root, self.logdir).poll()
+        tags = self.reload_scalars(multiplexer, client)
+        values = []
+        for tag in tags["active/#0001"]:
+            response = client.get(
+                "/tensorboard/data/plugin/scalars/scalars",
+                query_string={"run": "active/#0001", "tag": tag},
+            )
+            self.assertEqual(response.status_code, 200)
+            values.extend(row[1:] for row in response.get_json())
+        self.assertEqual(sorted(values), [[10, 1], [10, 2], [20, 3], [20, 4]])
+
+    def test_layout_upgrade_preserves_old_mirror_and_rejects_rebound_study(self):
+        old = self.logdir / "events/old-run/events.out.tfevents.old"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"retained old mirror")
+        self.emit(1, step=1)
+        mirror.Exporter(self.root, self.logdir).poll()
+        self.assertEqual(old.read_bytes(), b"retained old mirror")
+        with self.assertRaisesRegex(ValueError, "different source Studies"):
+            mirror.Exporter(self.base / "other-study", self.logdir).poll()
+
+    def test_scalar_object_name_aliases_keep_separate_series(self):
+        self.emit({"mean": 1}, step=1)
+        telemetry.emit(
+            "train/loss/mean",
+            2,
+            step=1,
+            path=self.study / "telemetry/live/events.jsonl",
+        )
+        mirror.Exporter(self.root, self.logdir).poll()
+        self.assertEqual(len({p[2] for p in self.scalars()}), 2)
+
+    def test_shared_run_keeps_nonnumeric_stream_provenance(self):
+        other = self.source | {"native_log": "other.log"}
+        telemetry.register(self.study, "other", other)
+        self.emit("first", step=1)
+        self.emit("second", stream="other", step=1)
+        mirror.Exporter(self.root, self.logdir).poll()
+        evidence = {e["stream_id"]: e for e in self.evidence()}
+        self.assertEqual(evidence["live"]["source"], self.source)
+        self.assertEqual(evidence["other"]["source"], other)
+        self.assertEqual({run for run, _ in self.reader()}, {"active/#0001"})
+        self.assertEqual(
+            len({v.tag for _, e in self.reader() for v in e.summary.value}), 2
+        )
 
 
 if __name__ == "__main__":

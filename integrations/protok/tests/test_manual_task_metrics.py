@@ -196,7 +196,7 @@ class ManualMetricsTests(unittest.TestCase):
             mirror.Exporter(self.root, logdir, [self.history]).poll()["exported"], 0
         )
         runs = sorted(
-            {file.parent for file in (logdir / "events").rglob("events.out.tfevents.*")}
+            {file.parent for file in exporter.events_dir.rglob("events.out.tfevents.*")}
         )
         values, evidence = [], []
         for directory in runs:
@@ -205,14 +205,18 @@ class ManualMetricsTests(unittest.TestCase):
             ).Reload()
             values.extend(
                 (
-                    directory.relative_to(logdir / "events").as_posix(),
+                    directory.relative_to(exporter.events_dir).as_posix(),
                     event.tensor_proto.double_val[0],
                 )
-                for event in accumulator.Tensors("observations/train/loss")
+                for tag in accumulator.Tags()["tensors"]
+                if accumulator.SummaryMetadata(tag).plugin_data.plugin_name == "scalars"
+                for event in accumulator.Tensors(tag)
             )
             evidence.extend(
                 json.loads(event.tensor_proto.string_val[0])
-                for event in accumulator.Tensors("evidence/train/loss")
+                for tag in accumulator.Tags()["tensors"]
+                if accumulator.SummaryMetadata(tag).plugin_data.plugin_name == "text"
+                for event in accumulator.Tensors(tag)
             )
         self.assertEqual(
             sorted(value for _, value in values), [1, 2, 3, 4, 9, 777, 888]
@@ -220,7 +224,7 @@ class ManualMetricsTests(unittest.TestCase):
         self.assertEqual(len({run for run, _ in values}), 6)
         self.assertTrue(
             any(
-                run.startswith("history-1/") and "manual:manual-check:0001" in run
+                run.startswith("history-1/manual/manual-check/#0001")
                 for run, _ in values
             )
         )

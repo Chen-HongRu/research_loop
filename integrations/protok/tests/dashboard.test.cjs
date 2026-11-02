@@ -16,9 +16,27 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, tensorboardTaskURL, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
+
+test('TensorBoard link filters the selected dashboard task before the native 40-run limit', () => {
+  const cases=[
+    [{source:'active',experiment:'0026'},['active/#0026','active/#0026 (attempt 2)'],['active/#00260','history-1/#0026','active/manual/t/#0026']],
+    [{source:'history-1',run:'L0123456789abcdef'},['history-1/long/L0123456789abcdef'],['active/long/L0123456789abcdef','history-1/#0001']],
+    [{source:'active',task:'manual-check'},['active/manual/manual-check/#0001','active/manual/manual-check/#0002 (attempt 2)'],['active/manual/manual-check-other/#0001','history-1/manual/manual-check/#0001']],
+  ];
+  for(const [task,matches,others] of cases) {
+    const url=ui.tensorboardTaskURL(task);
+    assert.ok(url.startsWith('/tensorboard/#scalars&runFilter='));
+    const regex=new RegExp(decodeURIComponent(url.split('runFilter=')[1]));
+    for(const run of matches)assert.ok(regex.test(run),run);
+    for(const run of others)assert.ok(!regex.test(run),run);
+    // Even after the total experiment count exceeds 40, this task stays small.
+    const all=[...matches,...Array.from({length:60},(_,i)=>'active/#'+String(i+100).padStart(4,'0'))];
+    assert.equal(all.filter(run=>regex.test(run)).length,matches.length);
+  }
+});
 
 test('Scout refresh retains user expansion and collapse while updating findings', () => {
   let markup='', fold=null;
