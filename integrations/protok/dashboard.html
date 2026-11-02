@@ -15,6 +15,9 @@
 @media(max-width:1050px){.frontier-content{grid-template-columns:1fr}.frontier-summary{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:4px 20px;align-items:start}.frontier-legend{margin-top:8px}.frontier-readout{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.frontier-readout>button{grid-column:1/-1;justify-self:start}.frontier-panel{padding:18px}.frontier-content{gap:12px}}@media(max-width:620px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.cards .card:last-child{grid-column:1/-1}.frontier-panel{padding:14px}.frontier-panel h2{font-size:21px}.frontier-best{font-size:28px}.frontier-readout{grid-template-columns:1fr}.frontier-summary{grid-template-columns:1fr}.frontier-legend{display:flex;gap:8px 16px;flex-wrap:wrap;margin-top:5px}.frontier-content{gap:5px}.frontier-scrub{gap:6px}#frontierChart{height:260px}.frontier-readout{padding:12px}.frontier-panel .toolbar button{font-size:11px;padding:5px 8px}}
 .table-wrap table{min-width:640px}#taskProgress{border-top:1px solid var(--line);padding-top:13px;margin-top:12px}#taskProgress .phase{margin-bottom:12px}
 </style>
+<style>
+.task-metrics{margin-top:15px;border-top:1px solid var(--line);padding-top:14px}.task-metrics h4{margin:0}.metric-tools{margin:8px 0}.metric-tools select{max-width:100%;width:100%;font-size:12px}.metric-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;max-height:550px;overflow:auto}.metric-card{min-width:0;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--inset);overflow-wrap:anywhere}.metric-card h4{font-size:12px}.metric-card .caption{font-size:10px;margin:5px 0}.metric-card .metric-value{font:550 19px/1.5 ui-monospace,SFMono-Regular,monospace;color:var(--amber);overflow-wrap:anywhere;margin-top:8px}.metric-plot{width:100%;display:block}.metric-plot circle{cursor:pointer}.metric-plot circle:focus{outline:none;stroke:var(--blue);stroke-width:3}.metric-latest{font-size:10px;padding:2px 5px}.metric-empty{padding:10px;color:var(--muted);font-size:12px;grid-column:1/-1}.tensorboard-link{font-size:12px;border:1px solid var(--line);border-radius:6px;padding:5px 9px;text-decoration:none;white-space:nowrap}.metric-card details .facts{grid-template-columns:1fr;font-size:11px;gap:3px}.metric-card summary{font-size:11px}@media(max-width:620px){.metric-cards{grid-template-columns:1fr}}
+</style>
 </head>
 <body>
 <header>
@@ -55,18 +58,25 @@
       <section id="taskProgress" aria-labelledby="now">
         <div class="progress-title"><div><h3 id="now">正在读取任务状态…</h3><div id="intent" class="caption"></div></div><span id="goal" class="badge">目标尚未判定</span></div>
         <div class="phase" id="phases"></div><div id="reasons" class="reasons"></div>
+        <section id="taskMetrics" class="task-metrics" hidden aria-labelledby="taskMetricTitle">
+          <div class="toolbar between"><h4 id="taskMetricTitle">实时回传指标</h4><a id="tensorboardLink" class="tensorboard-link" href="/tensorboard/" target="_blank" rel="noopener noreferrer" hidden>TensorBoard · 全量指标 ↗</a><span id="tensorboardDisabled" class="muted" style="font-size:11px">TensorBoard 未启用</span></div>
+          <p id="taskMetricStatus" class="caption" aria-live="polite">等待回传…</p>
+          <div class="metric-tools"><select id="taskMetricFilter" aria-label="选择任务回传指标"><option value="">进度概览（最多 6 项）</option></select></div>
+          <div id="taskMetricCards" class="metric-cards"></div>
+          <p class="caption">dashboard 标签 · 尚未评审 · 近期回传点。悬停查看精确值，点击固定；缺失值和 Step 回退处断开曲线。</p>
+        </section>
       </section>
       <div class="tabs" id="tabs" role="tablist" aria-label="调查输出"><button role="tab" aria-selected="true" data-tab="explanation" class="on">研究说明</button><button id="rawToggle" class="raw-toggle" aria-expanded="false">核对原始记录</button><button role="tab" aria-selected="false" data-tab="plan" class="raw-tab" hidden>Plan · 调查合同</button><button role="tab" aria-selected="false" data-tab="execute" class="raw-tab" hidden>Execute · 执行与调试</button><button role="tab" aria-selected="false" data-tab="review" class="raw-tab" hidden>Review · 判断与发现</button><button role="tab" aria-selected="false" data-tab="selection" class="raw-tab" hidden>提案与决策</button><button role="tab" aria-selected="false" data-tab="route" class="raw-tab" hidden>研究知识</button></div>
       <div id="detailBody" class="detail-body" aria-live="polite"><div class="loading">正在载入 Agent 输出…</div></div>
     </section>
   </div>
-  <section class="panel scout" id="telemetryPanel" hidden><h3>实时训练观测</h3><p class="caption">仅展示 dashboard 标签 · 尚未 Review · 同步自本地日志；不更新 Frontier 或已接受长训曲线。</p><div id="telemetryBody"></div></section>
   <section class="panel scout" id="scoutPanel" hidden><div class="toolbar between"><h3>Scout · 外部研究输入</h3><span id="scoutStatus" class="badge"></span></div><div id="scoutBody"></div></section>
   <div class="footer">固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板读取本地研究记录与回执，不发起训练、模型调用或远程轮询。Execute 展示已完成的执行与修复输出、作业回执及调试历史；调试不计正式质量，正式测量经过独立 Review 后才进入质量曲线。</div>
 </main>
 <script src="/assets/vendor/markdown-it/markdown-it.umd.min.js"></script>
 <script src="/assets/vendor/katex/katex.min.js"></script>
 <script src="/assets/research-explanation.js"></script>
+<script src="/assets/task-metrics.js"></script>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
@@ -87,7 +97,7 @@ const LABELS = {
   mode:'记录类型', record_mode:'账本类型', diagnostic:'诊断记录', observed_value:'诊断观测值（不计正式质量）',
   source_commit:'源码版本', record_name:'记录名称', phase:'调试阶段', used_gpu_seconds:'已用 GPU 秒', reserved_gpu_seconds:'预留 GPU 秒', remaining_gpu_seconds:'剩余 GPU 秒', limit_gpu_seconds:'预算上限 GPU 秒', allocated_gpu_seconds:'分配 GPU 秒', failure_kind:'失败类别', cause:'原因',
   total_steps:'计划总更新步数',validation_interval:'验证间隔',validation_split:'验证集范围',initialization:'初始化',basis:'提名依据',comparison_candidate_id:'对照候选',evidence:'证据引用',checkpoints:'Checkpoint 引用',curve_evidence:'曲线证据',checkpoint:'Checkpoint',checkpoint_path:'Checkpoint 路径',publication_ref:'发布引用',global_research:'全局研究知识',progress:'保留的执行进度',optimizer_step:'已执行优化步数',missing_validation_steps:'缺失验证步数',log_evidence:'日志证据引用',observation_reviews:'逐点观测核查',
-  execution_identity:'执行标识', source_identity:'源码标识', outputs:'证据产物', purpose:'计算用途', research_contract:'研究问题与验证合同', explanations:'待区分的解释', observables:'直接观测量', intervention:'干预与对照', interpretation:'结果判断', inconclusive:'无法判定的情况', execution:'执行方式', entrypoint:'验证脚本', gpu:'使用 GPU', time_limit_seconds:'执行上限（秒）', inputs:'只读输入', role:'数据用途', timing:'观测时点', method:'观测方法', supports:'支持条件', refutes:'反驳条件', explanation_id:'解释标识', observable_ids:'观测量标识', statement:'解释内容', prediction:'可检验的预测', definition:'观测量定义', aggregation:'聚合方法', cost:'观测成本',
+  execution_identity:'执行标识', source_identity:'源码标识', observation:'原始观测名', field:'数值字段', conditions:'观测条件', split:'数据划分', outputs:'证据产物', purpose:'计算用途', research_contract:'研究问题与验证合同', explanations:'待区分的解释', observables:'直接观测量', intervention:'干预与对照', interpretation:'结果判断', inconclusive:'无法判定的情况', execution:'执行方式', entrypoint:'验证脚本', gpu:'使用 GPU', time_limit_seconds:'执行上限（秒）', inputs:'只读输入', role:'数据用途', timing:'观测时点', method:'观测方法', supports:'支持条件', refutes:'反驳条件', explanation_id:'解释标识', observable_ids:'观测量标识', statement:'解释内容', prediction:'可检验的预测', definition:'观测量定义', aggregation:'聚合方法', cost:'观测成本',
 };
 const VALUES = {full:'完整开发集',fresh:'相同 seed 从头训练',architecture_gain:'较大架构改动获得改善',significant_frontier_gain:'实质 Frontier 改善',active:'继续研究', paused:'暂停', closed:'关闭', met:'已达到', not_met:'未达到', undetermined:'尚未判定', investigate:'开展调查', reselect:'返回重选', stop:'停止', continue:'继续', select:'选择', resample:'重新采样', minimize:'越低越好', maximize:'越高越好', development:'开发集', architecture:'架构探索', diagnostic:'诊断研究', refinement:'局部改进', unreviewed_external_advice:'未经评审的外部建议', full_text:'全文', abstract:'摘要', code:'代码', context_only:'仅上下文，未检索核实', paper:'论文', official_code:'官方代码', prior_record:'已有记录', smoke:'冒烟检查',scored:'正式评价', research:'研究计算', script:'研究脚本', fixed_evaluation:'固定协议评分', performance:'性能研究', mechanism:'机制研究', observation:'观察研究', theory:'理论研究', true:'是', false:'否'};
 const STATUS = {running:'进行中', ready:'等待推进', needs_attention:'需要处理', stopped:'已停止', paused:'已暂停', reviewed:'Review 已发布', planned:'Plan 已冻结', executed:'执行已返回', selecting:'路线选择中', complete:'已完成', completed:'调用已完成', succeeded:'调用已完成', failed:'失败', interrupted:'已中断', timed_out:'超时', partial:'输出未完成', pending:'尚未开始', unknown:'状态未确认', unrecorded:'状态未记录', published:'已发布', accepted:'已接纳', submitted:'作业已提交', prepared:'作业已准备', preparing:'准备中', unavailable:'暂无记录', degraded:'检索不完整，保留既有建议'};
@@ -227,6 +237,7 @@ function renderTaskProgress() {
   }).join('');
   const reasons = progress.reasons || (state.error ? [{title:'当前错误', detail:state.error}] : []);
   $('reasons').innerHTML = reasons.map(reason => '<div class="reason"><strong>'+esc(reason.title)+'</strong><p>'+esc(reason.detail || reason.message || '')+'</p>'+(reason.source ? '<small>'+esc(reason.source)+'</small>' : '')+'</div>').join('');
+  renderTaskMetrics();
 }
 
 // Git lanes reserve the next expected parent. Route IDs never influence positions.
@@ -414,7 +425,7 @@ function renderSnapshot() {
   $('sourceFilter').innerHTML='<option value="">所有阶段</option>'+(data.sources || []).map(item=>'<option value="'+esc(item.id)+'">'+esc(item.label+' · '+item.count+' 条')+'</option>').join('');
   $('sourceFilter').value=source;
   $('follow').setAttribute('aria-pressed',String(following)); $('follow').textContent = following ? '● 跟随主循环' : '跟随主循环';
-  drawGraph(); drawRoutes(); drawChart(); updateView(); renderScout(); renderTelemetry(); renderDetailHeader();
+  drawGraph(); drawRoutes(); drawChart(); updateView(); renderScout(); renderDetailHeader();
 }
 function renderDetailHeader() {
   const node = taskNodes().find(item => item.id === selected), long=node?.task_kind==='long_training';
@@ -579,7 +590,7 @@ async function choose(id, preferredTab) {
     rawVisible=true;$('rawToggle').setAttribute('aria-expanded','true');$('rawToggle').textContent='收起原始记录';
   }
   following=false; globalView=false; selected=id; detailSignature=''; detail=null;
-  renderSnapshot(); renderDetail(); await loadDetail(true);
+  renderSnapshot(); renderDetail(); await Promise.all([loadDetail(true),loadTaskMetrics()]);
 }
 function longTrainingCurve(curve, metric, title) {
   const points=curve.filter(point=>Number.isFinite(point.step)&&Number.isFinite(point[metric])).sort((a,b)=>a.step-b.step);
@@ -623,18 +634,6 @@ function telemetryGroups(stream) {
   }
   return [...groups.values()];
 }
-function telemetryPanel(streams) {
-  return streams.map(stream=>'<article class="agent-card"><div class="agent-header"><h4>'+esc([stream.source_id,stream.run_id,stream.stream_id].filter(Boolean).join(' / '))+'</h4>'+badge('观测 · 未评审','amber')+'</div><p class="caption">同步状态：'+esc(stream.status || 'pending')+(stream.sync_error?' · 同步错误':'')+' · 读取错误 '+esc(stream.error_count || 0)+' · 实验 '+esc(stream.source?.experiment_id || '—')+'</p>'+telemetryGroups(stream).map(events=>{
-    const latest=events.at(-1), printable=value=>typeof value==='string'?value:JSON.stringify(value);
-    const numeric=events.filter(event=>typeof event.step==='number'&&Number.isFinite(event.step)&&typeof event.value==='number'&&Number.isFinite(event.value));
-    let chart='';
-    if(numeric.length){const values=numeric.map(event=>event.value),steps=numeric.map(event=>event.step),lo=Math.min(...values),hi=Math.max(...values),first=Math.min(...steps),last=Math.max(...steps);chart='<svg viewBox="0 0 480 95" role="img" aria-label="'+esc(latest.name)+' 实时未评审曲线" style="width:100%;max-width:480px"><polyline fill="none" stroke="#e5bd72" stroke-width="2" points="'+numeric.map(event=>(12+(event.step-first)/(last-first||1)*450)+','+(80-(event.value-lo)/(hi-lo||1)*65)).join(' ')+'"/></svg>';}
-    return '<div class="fact-block"><b>'+esc(latest.name)+'</b> '+esc(printable(latest.value))+' '+esc(latest.unit || '')+'<p class="caption">最新 Step：'+esc(latest.step ?? '—')+' · '+esc(latest.time || '')+'</p><div class="source">'+esc(printable(latest.context || {}))+'</div>'+chart+'</div>';
-  }).join('')+(!(stream.events || []).length?'<p class="empty">尚无 dashboard 标签观测。</p>':'')+'</article>').join('');
-}
-function renderTelemetry() {
-  const streams=data.telemetry?.streams || [];$('telemetryPanel').hidden=!streams.length;$('telemetryBody').innerHTML=telemetryPanel(streams);
-}
 function renderScout() {
   const scout=data.scout; $('scoutPanel').hidden=!scout; if(!scout)return;
   const body=$('scoutBody'), open=body.querySelector('[data-disclosure="scout-findings"]')?.open || false;
@@ -655,10 +654,10 @@ $('rawToggle').onclick=()=>{rawVisible=!rawVisible;$('rawToggle').setAttribute('
 $('refs').onchange=drawGraph;
 $('graphBtn').onclick=()=>{view='git';updateView();}; $('routesBtn').onclick=()=>{view='routes';updateView();};
 $('tabs').querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{tab=button.dataset.tab;globalView=false;renderDetailHeader();renderDetail();});
-$('follow').onclick=async()=>{following=true;globalView=false;detailSignature='';renderSnapshot();renderDetail();await loadDetail(true);const row=$('graph').querySelector('.selected');if(row)$('graphWrap').scrollTop=Math.max(0,row.offsetTop-102);};
-$('researchBtn').onclick=async()=>{following=false;globalView=true;research='';renderSnapshot();renderDetail();await loadDetail(true);};
+$('follow').onclick=async()=>{following=true;globalView=false;detailSignature='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);const row=$('graph').querySelector('.selected');if(row)$('graphWrap').scrollTop=Math.max(0,row.offsetTop-102);};
+$('researchBtn').onclick=async()=>{following=false;globalView=true;research='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);};
 async function refresh() {
-  try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.backend_error?'● 研究目录已连接 · 后端核账不可用':snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className=snapshot.backend_error?'amber':'green';renderSnapshot();await loadDetail(); }
+  try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.backend_error?'● 研究目录已连接 · 后端核账不可用':snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className=snapshot.backend_error?'amber':'green';renderSnapshot();await Promise.all([loadDetail(),loadTaskMetrics()]); }
   catch(error){$('connection').textContent='读取失败 · '+error.message;$('connection').className='red';}
   finally{setTimeout(refresh,5000);}
 }
