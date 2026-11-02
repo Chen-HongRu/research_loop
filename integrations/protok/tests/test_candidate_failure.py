@@ -24,7 +24,9 @@ class CandidateFailureTests(unittest.TestCase):
         attempt = record / "seed-42-attempt-1"
         attempt.mkdir()
         (attempt / "run.log.tail").write_text(
-            "Traceback (most recent call last):\n" + cause + "\n"
+            'Traceback (most recent call last):\n  File "/remote/current/code/scripts/train_autoresearch_se3.py", line 428, in step\n'
+            + cause
+            + "\n"
         )
         state = {
             "status": "failed",
@@ -33,6 +35,7 @@ class CandidateFailureTests(unittest.TestCase):
             "attempts": [
                 {
                     "directory": attempt.name,
+                    "remote": "/remote/current",
                     "owned_job_id": "123",
                     "status": "failed",
                     "terminal_state": "FAILED",
@@ -57,6 +60,173 @@ class CandidateFailureTests(unittest.TestCase):
         self.assertFalse(failure["quality_score_eligible"])
         self.assertNotIn("value", failure)
         self.assertEqual((record / "state.json").read_bytes(), before)
+
+    def test_runtime_and_configuration_failures_bind_exact_attempt_workspace(self):
+        prepared, record, state = self.failed()
+        log = record / state["attempts"][0]["directory"] / "run.log.tail"
+        for frame, cause in (
+            ("protok/model/autoresearch_se3.py", "ValueError: invalid pair dimension"),
+            (
+                "scripts/train_autoresearch_se3.py",
+                "ValueError: Candidate architecture must be a nonempty string",
+            ),
+        ):
+            with self.subTest(cause=cause):
+                log.write_text(
+                    'Traceback (most recent call last):\n  File "/remote/current/code/'
+                    + frame
+                    + '", line 12, in forward\n'
+                    + cause
+                    + "\n"
+                )
+                failure = self.backend.settled_failure(
+                    self.workspace, self.output, prepared["fingerprint"]
+                )
+                self.assertEqual(failure["cause"], cause)
+                self.assertEqual(failure["diagnostics"]["owner"], "workspace")
+        for cause in (
+            "FileNotFoundError: [Errno 2] No such file or directory: '/shared/train.zarr'",
+            "ModuleNotFoundError: No module named 'shared_dependency'",
+            "PermissionError: protected dataset",
+            "RuntimeError: CUDA driver is unavailable",
+        ):
+            with self.subTest(cause=cause):
+                log.write_text(
+                    'Traceback (most recent call last):\n  File "/remote/current/code/protok/model/autoresearch_se3.py", line 12, in forward\n'
+                    + cause
+                    + "\n"
+                )
+                with self.assertRaisesRegex(ProTokError, "not certified"):
+                    self.backend.settled_failure(
+                        self.workspace, self.output, prepared["fingerprint"]
+                    )
+        log.write_text(
+            'Traceback (most recent call last):\n  File "/shared/pipeline.py", line 12, in forward\nRuntimeError: Missing first-step active gradients\n'
+        )
+        with self.assertRaisesRegex(ProTokError, "not certified"):
+            self.backend.settled_failure(
+                self.workspace, self.output, prepared["fingerprint"]
+            )
+        log.write_text(
+            'Traceback (most recent call last):\n  File "/remote/other/code/protok/model/autoresearch_se3.py", line 12, in forward\nValueError: invalid shape\n'
+        )
+        with self.assertRaisesRegex(ProTokError, "not certified"):
+            self.backend.settled_failure(
+                self.workspace, self.output, prepared["fingerprint"]
+            )
+
+    def test_candidate_import_and_editable_target_are_repairable_but_shared_leaf_is_not(
+        self,
+    ):
+        prepared, record, state = self.failed()
+        log = record / state["attempts"][0]["directory"] / "run.log.tail"
+        candidate = "/remote/current/code/protok/model/autoresearch_se3.py"
+        cases = (
+            (
+                f"  File \"{candidate}\", line 1, in <module>\n    import misspelled_candidate_module\nModuleNotFoundError: No module named 'misspelled_candidate_module'\n",
+                True,
+            ),
+            (
+                f"  File \"{candidate}\", line 2, in forward\nPermissionError: [Errno 13] denied: '{candidate}'\n",
+                True,
+            ),
+            (
+                f"  File \"{candidate}\", line 2, in forward\nFileNotFoundError: [Errno 2] missing: '{candidate}'\n",
+                True,
+            ),
+            (
+                "  File \"/remote/current/code/scripts/train_autoresearch_se3.py\", line 1, in <module>\n    import shared_dependency\nModuleNotFoundError: No module named 'shared_dependency'\n",
+                False,
+            ),
+            (
+                f'  File "{candidate}", line 2, in forward\n    library()\n  File "/shared/library.py", line 3, in library\n    import missing_shared_dependency\nModuleNotFoundError: No module named \'missing_shared_dependency\'\n',
+                False,
+            ),
+            (
+                f'  File "{candidate}", line 2, in forward\n    library()\n  File "/shared/library.py", line 3, in library\nValueError: corrupt shared input\n',
+                False,
+            ),
+        )
+        for trace, reparable in cases:
+            with self.subTest(trace=trace):
+                log.write_text("Traceback (most recent call last):\n" + trace)
+                if reparable:
+                    self.assertEqual(
+                        self.backend.settled_failure(
+                            self.workspace, self.output, prepared["fingerprint"]
+                        )["kind"],
+                        "candidate_rejected",
+                    )
+                else:
+                    with self.assertRaisesRegex(ProTokError, "not certified"):
+                        self.backend.settled_failure(
+                            self.workspace, self.output, prepared["fingerprint"]
+                        )
+
+    def test_candidate_library_shape_failure_is_repairable_without_owning_library(self):
+        prepared, record, state = self.failed()
+        log = record / state["attempts"][0]["directory"] / "run.log.tail"
+        candidate = "/remote/current/code/protok/model/autoresearch_se3.py"
+        callsite = (
+            f'  File "{candidate}", line 15, in forward\n    return self.linear(x)\n'
+        )
+        torch = (
+            '  File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl\n'
+            "    return forward_call(*args, **kwargs)\n"
+            '  File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/linear.py", line 125, in forward\n'
+            "    return F.linear(input, self.weight, self.bias)\n"
+        )
+        cases = (
+            (
+                torch
+                + "RuntimeError: mat1 and mat2 shapes cannot be multiplied (8x4 and 6x2)\n",
+                True,
+            ),
+            (
+                '  File "/usr/lib/python3.12/functools.py", line 909, in wrapper\nTypeError: invalid argument type\n',
+                True,
+            ),
+            (
+                '  File "/shared/environment.py", line 8, in environment\nValueError: shared runtime configuration changed\n',
+                False,
+            ),
+            (
+                torch
+                + '  File "/remote/current/code/scripts/train_autoresearch_se3.py", line 12, in native_callback\nValueError: corrupt shared input\n',
+                False,
+            ),
+            (torch + "RuntimeError: CUDA driver is unavailable\n", False),
+            (
+                torch + "ModuleNotFoundError: No module named 'shared_dependency'\n",
+                False,
+            ),
+            (torch + "FileNotFoundError: missing '/shared/train.zarr'\n", False),
+            (torch + "PermissionError: denied '/shared/train.zarr'\n", False),
+        )
+        for suffix, reparable in cases:
+            with self.subTest(suffix=suffix):
+                log.write_text(
+                    "Traceback (most recent call last):\n" + callsite + suffix
+                )
+                if reparable:
+                    failure = self.backend.settled_failure(
+                        self.workspace, self.output, prepared["fingerprint"]
+                    )
+                    self.assertEqual(failure["kind"], "candidate_rejected")
+                else:
+                    with self.assertRaisesRegex(ProTokError, "not certified"):
+                        self.backend.settled_failure(
+                            self.workspace, self.output, prepared["fingerprint"]
+                        )
+        from integrations.protok.debug_backend import candidate_cause
+
+        trace = "Traceback (most recent call last):\n" + callsite + cases[0][0]
+        self.assertIsNone(
+            candidate_cause(trace, workspace="/remote/current/code", stage="prepare")
+        )
+        self.assertIsNone(
+            candidate_cause(trace, workspace="/remote/other/code", stage="formal")
+        )
 
     def test_accounting_missing_or_infrastructure_failure_cannot_enter_debug(self):
         prepared, record, state = self.failed("RuntimeError: SSH connection lost")

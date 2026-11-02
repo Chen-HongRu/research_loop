@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from research_loop.diagnostics import read_log_page
 from research_loop.harness import (
     HarnessConfig,
     HarnessError,
@@ -195,6 +196,50 @@ class HarnessTests(unittest.TestCase):
         self.assertLess(process["returncode"], 0)
         self.assertEqual((self.run_dir / "stdout.jsonl").read_text(), "started\n")
         self.assertIsNotNone(process["ended"])
+
+    def test_failed_cli_preserves_raw_and_full_public_diagnostics(self):
+        secret = "private-owner-value"
+        executable = self.executable(
+            "import sys\n"
+            f"print('first-output ' + {secret!r})\n"
+            "print('x' * 20000)\n"
+            "print('candidate command failed', file=sys.stderr)\n"
+            "sys.exit(9)\n"
+        )
+        harness = make_harness(HarnessConfig(executable=executable))
+        harness.diagnostic_secrets = (secret,)
+        with self.assertRaisesRegex(HarnessError, "exited 9"):
+            harness.run(
+                prompt="Execute within the original workspace.",
+                schema={"type": "object"},
+                workspace=self.workspace,
+                run_dir=self.run_dir,
+                writable=True,
+            )
+        detail = json.loads((self.run_dir / "failure-diagnostics.json").read_text())
+        self.assertEqual(detail["owner"], "pipeline")
+        self.assertEqual(detail["effects"], "unknown")
+        self.assertEqual(detail["returncode"], 9)
+        self.assertNotIn(secret, json.dumps(detail))
+        self.assertIn(secret, (self.run_dir / "stdout.jsonl").read_text())
+        stdout = next(log for log in detail["logs"] if log["stream"] == "stdout.jsonl")
+        page = read_log_page(detail["directory"], stdout["log_id"], limit=1024)
+        self.assertIn("first-output [REDACTED]", page["text"])
+        self.assertFalse(page["eof"])
+        self.assertIsNone(completed_response(self.run_dir))
+
+    def test_diagnostic_io_failure_does_not_replace_primary_cli_failure(self):
+        with (
+            patch(
+                "research_loop.harness.CommandDiagnostics.record_files",
+                side_effect=OSError("diagnostic disk unavailable"),
+            ),
+            self.assertRaisesRegex(HarnessError, "exited 7"),
+        ):
+            self.run_agent("codex", "import sys\nsys.exit(7)\n")
+        process = json.loads((self.run_dir / "process.json").read_text())
+        self.assertIn("exited 7", process["error"])
+        self.assertIn("diagnostic disk unavailable", str(process["diagnostic_error"]))
 
 
 if __name__ == "__main__":

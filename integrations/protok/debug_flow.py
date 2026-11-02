@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+from research_loop.core import BudgetExhausted
 from research_loop.debug_budget import DebugBudget
 from research_loop.harness import HarnessError, completed_response
 from research_loop.submission import RECEIPT, STAGING
@@ -23,8 +24,8 @@ to request evaluation do not apply to this repair invocation. Edit only the thre
 candidate files. Fix the supplied actual failure; preserve the scientific intervention,
 data, teacher, scorer, native gradient/finite gates and fixed protocol. No network,
 SSH, training, GPU launch, evaluation request, interface file, gate bypass, dependency
-installation or change outside candidate scope. The controller alone runs smoke and
-formal evaluation after this call. Return ordinary Execute JSON with outcome=incomplete,
+installation or change outside candidate scope. The controller may run smoke and
+formal evaluation only when separately authorized and within the existing budget. Return ordinary Execute JSON with outcome=incomplete,
 artifacts=[], measurements=[] and a concise account of the implementation repair.
 """
 
@@ -33,6 +34,7 @@ class _RepairDelegate:
     def __init__(self, delegate, root, deadline):
         self.delegate = delegate
         self.root, self.deadline = Path(root), deadline
+        self.diagnostic_secrets = getattr(delegate, "diagnostic_secrets", ())
 
     def run(self, **kwargs):
         remaining = int(self.deadline - time.time())
@@ -90,6 +92,8 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
     # Local import avoids coupling the generic controller to this adapter.
     from .run import (
         candidate_bytes,
+        check_fixed_candidate,
+        certify_candidate_failure,
         check_scope,
         freeze_source,
         git,
@@ -114,19 +118,40 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         raise HarnessError(
             "Debug requires an explicitly certified investigation failure"
         )
-    policy = read(root / "control/debug-policy.json")
-    if (
-        policy.get("schema") != 1
-        or policy.get("gpu_seconds_per_investigation") != 1800
-        or policy.get("independent_of_formal_budget") is not True
-        or not policy.get("authorization")
-    ):
-        raise HarnessError(
-            "Explicit independent per-investigation debug policy required"
-        )
+    fixed = check_fixed_candidate(root, workspace, iteration)
+    if fixed is not None:
+        trusted = certify_candidate_failure(root, harness.backend, workspace, iteration)
+        if failure != trusted or failure["source_signatures"] != fixed:
+            raise HarnessError("Fixed-candidate failure differs from its original job")
+    from .run import debug_policy
+
+    policy = (
+        debug_policy(root) if (root / "control/debug-policy.json").exists() else None
+    )
     debug = root / "control/debug" / iteration
     debug.mkdir(parents=True, exist_ok=True)
-    budget = DebugBudget(debug, scope_id=iteration, limit_gpu_seconds=1800)
+    if policy is None and (debug / "debug-budget.json").exists():
+        raise HarnessError("GPU recovery ledger requires its original authorization")
+    budget = (
+        DebugBudget(debug, scope_id=iteration, limit_gpu_seconds=1800)
+        if policy is not None
+        else None
+    )
+
+    def budget_status():
+        return (
+            budget.status()
+            if budget is not None
+            else {
+                "limit_gpu_seconds": 0,
+                "used_gpu_seconds": 0,
+                "remaining_gpu_seconds": 0,
+                "active_attempt": None,
+                "breached": False,
+                "attempts": {},
+            }
+        )
+
     baseline = read(root / "study/study.json")["baseline"]
     allow_research = research_policy(root) is not None
     check_scope(workspace, baseline, allow_research=allow_research)
@@ -159,15 +184,39 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         }
         write(flow_path, state)
 
+    if fixed is not None:
+        if (
+            state["failed_signatures"] != fixed
+            or state.get("source_signatures", fixed) != fixed
+            or state["failures"] != [failure]
+        ):
+            raise HarnessError("Fixed-candidate recovery retained a modified candidate")
+        for attempt in run_dir.glob("repairs/*/attempt-*"):
+            _stopped(attempt, read)
+            if completed_response(attempt) is None:
+                raise HarnessError(
+                    "Interrupted repair requires explicit reconciliation"
+                )
+
     from .round_admission import execution_deadline
 
-    wall_deadline = execution_deadline(
-        root,
-        state["deadline"],
-        3600,
-        owner_token=harness.backend.owner_token,
-        attempt=f"debug-flow/{iteration}",
-    )
+    if fixed is not None:
+        wall_deadline = 0  # No repair or new allocation is authorized for this task.
+    elif policy is None:
+        original_deadline = failure.get("execution_deadline")
+        if type(original_deadline) not in (int, float) or not math.isfinite(
+            original_deadline
+        ):
+            original_deadline = 0
+        wall_deadline = min(state["deadline"], original_deadline)
+    else:
+        wall_deadline = execution_deadline(
+            root,
+            state["deadline"],
+            3600,
+            owner_token=harness.backend.owner_token,
+            attempt=f"debug-flow/{iteration}",
+        )
 
     def save():
         write(flow_path, state)
@@ -175,11 +224,15 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
     def finish(reason, result=None):
         check_scope(workspace, baseline, allow_research=allow_research)
         _no_interface(workspace, failure.get("submission"))
-        accounting = budget.status()
+        accounting = budget_status()
         if accounting["active_attempt"] is not None or accounting["breached"]:
             raise HarnessError("Cannot finish with unresolved debug accounting")
         effects = harness.backend.inspect()
-        if effects["outstanding"] or effects.get("research_outstanding"):
+        if (
+            effects["outstanding"]
+            or effects.get("debug_outstanding")
+            or effects.get("research_outstanding")
+        ):
             raise HarnessError("Cannot finish with unresolved formal effects")
         if result is None:
             result = {
@@ -199,7 +252,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
             "response": result,
             "source_signatures": signatures(candidate_bytes(workspace)),
             "failures": state["failures"],
-            "budget": budget.status(),
+            "budget": budget_status(),
         }
         immutable_record(debug / "decision.json", decision)
         state["phase"] = "done"
@@ -232,7 +285,12 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         pending = (state["phase"] == "smoke" and state.get("smoke_submitted")) or (
             state["phase"] == "formal" and state.get("formal_submitted")
         )
-        if (root / "control/STOP").exists() and not pending:
+        if (
+            (root / "control/STOP").exists()
+            and not pending
+            and state["phase"] != "done"
+            and not (debug / "decision.json").exists()
+        ):
             raise HarnessError("Debug recovery is paused by control/STOP")
         if (
             state["phase"] not in {"repair", "done"}
@@ -241,7 +299,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
             raise HarnessError("Candidate changed outside the retained repair call")
         if state["phase"] == "done" or (debug / "decision.json").exists():
             decision = read(debug / "decision.json")
-            accounting = budget.status()
+            accounting = budget_status()
             if (
                 accounting["active_attempt"] is not None
                 or accounting["breached"]
@@ -255,25 +313,43 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
             state["phase"] = "done"
             save()
             return decision["response"]
+        if fixed is not None:
+            return finish(
+                "fixed candidate failed: "
+                + failure["cause"]
+                + "; actual GPU allocation charge "
+                + str(failure["gpu_seconds"])
+                + " seconds; allow_changes=false forbids repair or a new evaluation. "
+                "Independent Review must assess this incomplete experiment. "
+                "Any repair requires a separate task that allows changes"
+            )
         if state["phase"] == "repair":
-            if budget.status()["active_attempt"] is not None:
+            if budget_status()["active_attempt"] is not None:
                 raise HarnessError("Unresolved debug accounting blocks a new repair")
-            if min(budget.remaining(), wall_deadline - time.time()) < 60:
-                return finish(
-                    "debug budget exhausted or original wall deadline reached"
-                )
             key = f"repair-{state['revision']:03d}-try-{state['repair_try']:03d}"
             directory = run_dir / "repairs" / key
             attempts = sorted(directory.glob("attempt-*"))
             if attempts and completed_response(attempts[-1]) is None:
                 _stopped(attempts[-1], read)
                 _no_interface(workspace, failure.get("submission"))
-                state["failures"].append(
-                    {"kind": "partial_repair", "attempt": str(attempts[-1])}
+                raise HarnessError(
+                    "Interrupted repair requires explicit reconciliation"
                 )
-                state["repair_try"] += 1
-                save()
-                continue
+            if wall_deadline <= time.time() or (
+                budget is not None and budget.remaining() < 60
+            ):
+                return finish(
+                    "debug budget exhausted or original wall deadline reached"
+                )
+            remaining = context.get("budget", {})
+            if not attempts and (
+                (
+                    remaining.get("calls_left") is not None
+                    and remaining["calls_left"] <= 1
+                )
+                or remaining.get("seconds_left", 1) < 1
+            ):
+                return finish("original call/time budget cannot admit a repair")
             try:
                 invoke(
                     key,
@@ -287,19 +363,21 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                     directory,
                     _RepairDelegate(harness.delegate, root, wall_deadline),
                 )
-            except HarnessError as error:
+            except BudgetExhausted:
+                return finish("original call/time repair budget exhausted")
+            except HarnessError:
                 check_scope(workspace, baseline, allow_research=allow_research)
                 _no_interface(workspace, failure.get("submission"))
                 for attempt in directory.glob("attempt-*"):
                     _stopped(attempt, read)
-                return finish(
-                    "repair Agent failed without known external effects: " + str(error)
-                )
+                raise
             check_scope(workspace, baseline, allow_research=allow_research)
             _no_interface(workspace, failure.get("submission"))
             changed = signatures(candidate_bytes(workspace))
             if changed == state["failed_signatures"]:
                 return finish("repair did not change the failed candidate source")
+            if policy is None:
+                return finish("single CPU repair completed; no independent GPU grant")
             state.update(phase="smoke_prepare", source_signatures=changed)
             save()
         if state["phase"] == "smoke_prepare":
@@ -348,7 +426,7 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                 )
             if (
                 receipt.get("status") == "blocked"
-                or budget.status()["active_attempt"] is not None
+                or budget_status()["active_attempt"] is not None
             ):
                 immutable_record(revision / "blocked.json", receipt)
                 raise HarnessError("Debug smoke has unknown/unaccounted effects")

@@ -89,6 +89,14 @@ class FakeBackend:
         self.completed[prepared["fingerprint"]] = result
         return result
 
+    def settled_failure(self, workspace, config_path, fingerprint, *, record_name=None):
+        raise ProTokError("No certified candidate failure")
+
+    def timed_out_receipt(
+        self, workspace, config_path, fingerprint, *, record_name=None
+    ):
+        raise ProTokError("No settled allocation timeout")
+
     def completed_receipt(self, workspace, config_path, fingerprint):
         prepared = self.prepare_config(workspace, config_path)
         if prepared["fingerprint"] != fingerprint or self.inspect()["outstanding"]:
@@ -344,7 +352,7 @@ class ProTokRunnerTests(unittest.TestCase):
         self.assertIn("small regular source file", diagnostic["source_error"])
         self.assertEqual(self.backend.evaluations, 0)
 
-    def test_retained_incomplete_transport_receipt_is_not_accepted(self):
+    def test_completed_local_failure_enters_review_without_static_fault(self):
         from research_loop.harness import publish_completed_response
 
         response = {
@@ -361,14 +369,17 @@ class ProTokRunnerTests(unittest.TestCase):
             attempt = self.root / f"study/iterations/0002/execute/attempt-{number:03d}"
             attempt.mkdir(parents=True)
             publish_completed_response(attempt, response)
-            with self.assertRaisesRegex(HarnessError, "before submission"):
+            self.assertEqual(
                 self.harness.validate_completed(
                     response, workspace=self.workspace, run_dir=attempt
-                )
+                ),
+                response,
+            )
             diagnostic = RUNNER.read(
                 self.control / "diagnostics" / iteration / (attempt.name + ".json")
             )
-            self.assertEqual(diagnostic["classification"], "unsubmitted-interruption")
+            self.assertEqual(diagnostic["classification"], "completed-incomplete")
+            self.assertTrue(diagnostic["completed_response"])
             self.assertEqual(diagnostic["attempt"], str(attempt))
         self.assertEqual(legacy.read_bytes(), previous)
         self.assertEqual(
@@ -376,6 +387,85 @@ class ProTokRunnerTests(unittest.TestCase):
         )
         self.assertFalse((self.control / "jobs").exists())
         self.assertEqual(self.backend.evaluations, 0)
+
+    def test_unexpected_certification_error_returns_pipeline_diagnostic_without_fallback(
+        self,
+    ):
+        RUNNER.write(self.workspace / REQUEST, {"action": "evaluate"})
+        with (
+            patch.object(
+                self.harness,
+                "evaluate_request",
+                side_effect=ProTokError("evaluator rejected"),
+            ),
+            patch.object(
+                RUNNER,
+                "certify_candidate_failure",
+                side_effect=AttributeError("certifier defect"),
+            ),
+            patch.object(RUNNER, "timed_out_job") as timeout,
+        ):
+            self.harness._watch(
+                self.workspace, "0002", threading.Event(), self.deadline
+            )
+        result = RUNNER.read(self.workspace / "evaluation-result.json")
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["diagnostics"]["owner"], "pipeline")
+        self.assertIn("certifier defect", result["error"])
+        self.assertTrue(self.harness.errors)
+        self.assertIsNone(self.harness.recoverable_failure)
+        timeout.assert_not_called()
+
+    def test_diagnostic_context_finds_this_iterations_research_receipt(self):
+        public = {
+            "owner": "workspace",
+            "logs": [{"log_id": "safe-id", "tail": "traceback detail"}],
+        }
+        RUNNER.write(
+            self.control / "research-jobs/0002/receipt.json",
+            {"diagnostics": public, "private": "operator-only"},
+        )
+        RUNNER.write(
+            self.control / "research-jobs/0003/receipt.json",
+            {"diagnostics": {"logs": [{"tail": "other iteration"}]}},
+        )
+        self.assertEqual(self.harness.diagnostic_context("0002"), [public])
+
+    def test_completed_local_response_still_blocks_scope_violation_and_unknown_effects(
+        self,
+    ):
+        from research_loop.harness import publish_completed_response
+
+        response = {
+            "outcome": "incomplete",
+            "markdown": "No measurement.",
+            "artifacts": [],
+            "measurements": [],
+        }
+        attempt = self.root / "study/iterations/0002/execute/attempt-001"
+        attempt.mkdir(parents=True)
+        publish_completed_response(attempt, response)
+        (self.workspace / "README.md").write_text("unauthorized protected change")
+        with self.assertRaisesRegex(HarnessError, "frozen candidate scope"):
+            self.harness.validate_completed(
+                response, workspace=self.workspace, run_dir=attempt
+            )
+        (self.workspace / "README.md").write_text("Protected source.\n")
+        with patch.object(
+            self.backend, "inspect", return_value={"outstanding": ["unknown job"]}
+        ):
+            with self.assertRaisesRegex(ProTokError, "Outstanding backend effects"):
+                self.harness.validate_completed(
+                    response, workspace=self.workspace, run_dir=attempt
+                )
+        interrupted = attempt.parent / "attempt-002"
+        interrupted.mkdir()
+        RUNNER.write(interrupted / "response.json", response)
+        RUNNER.write(interrupted / "process.json", {"status": "failed", "exit_code": 1})
+        with self.assertRaisesRegex(HarnessError, "no successful completion receipt"):
+            self.harness.validate_completed(
+                response, workspace=self.workspace, run_dir=interrupted
+            )
 
     def test_parent_interfaces_are_cleared_once_and_current_submission_is_retained(
         self,
@@ -1074,12 +1164,10 @@ class ProTokRunnerTests(unittest.TestCase):
                     )
                     if self.interrupt:
                         self.interrupt = False
-                        return {
-                            "outcome": "incomplete",
-                            "artifacts": [],
-                            "measurements": [],
-                            "markdown": "linkat failed with ENOENT before publication.",
-                        }
+                        (kwargs["run_dir"] / "partial.json").write_text(
+                            '{"error":"linkat failed with ENOENT before publication"}'
+                        )
+                        raise HarnessError("CLI interrupted before submission")
                 submit(
                     workspace, action="import" if iteration == "0001" else "evaluate"
                 )
@@ -1126,10 +1214,9 @@ class ProTokRunnerTests(unittest.TestCase):
                 (2, "execute", "needs_attention"),
             )
             attempt = study.root / paused["calls"]["execute"]
-            raw = completed_response(attempt / "agent")
-            self.assertIn("linkat", raw["markdown"])
+            self.assertIsNone(completed_response(attempt / "agent"))
             self.assertIsNone(completed_response(attempt))
-            raw_bytes = (attempt / "agent/response.json").read_bytes()
+            raw_bytes = (attempt / "agent/partial.json").read_bytes()
             plan_path = study.root / paused["plan_ref"]
             plan_bytes = plan_path.read_bytes()
             workspace = Path(
@@ -1141,11 +1228,6 @@ class ProTokRunnerTests(unittest.TestCase):
             self.assertEqual(delegate.count("review"), 1)
             self.assertEqual(self.backend.evaluations, 0)
             self.assertEqual(self.backend.inspect()["outstanding"], [])
-            diagnostic = RUNNER.read(
-                self.control / "diagnostics/0002" / (attempt.name + ".json")
-            )
-            self.assertEqual(diagnostic["classification"], "unsubmitted-interruption")
-            self.assertEqual(diagnostic["attempt"], str(attempt))
             plan_count = delegate.count("plan")
             retried = study.retry()
             self.assertEqual((retried["iteration"], retried["phase"]), (2, "execute"))
@@ -1156,7 +1238,7 @@ class ProTokRunnerTests(unittest.TestCase):
         self.assertEqual(delegate.count("review"), 2)
         self.assertEqual(self.backend.evaluations, 1)
         self.assertEqual(plan_path.read_bytes(), plan_bytes)
-        self.assertEqual((attempt / "agent/response.json").read_bytes(), raw_bytes)
+        self.assertEqual((attempt / "agent/partial.json").read_bytes(), raw_bytes)
         self.assertTrue((study.root / "iterations/0002/publication.json").exists())
 
 

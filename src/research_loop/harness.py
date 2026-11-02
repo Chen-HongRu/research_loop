@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from .diagnostics import CommandDiagnostics, diagnostic_view
+
 
 class HarnessError(RuntimeError):
     pass
@@ -218,6 +220,7 @@ class _Harness:
         if config.backend != self.backend:
             raise ValueError(f"{type(self).__name__} requires backend={self.backend!r}")
         self.config = config
+        self.diagnostic_secrets = ()
 
     def run(
         self,
@@ -268,6 +271,46 @@ class _Harness:
                     "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
                 )
             record["error"] = f"{type(exc).__name__}: {exc}"
+            # Keep the CLI's original streams available to operators and give
+            # subsequent repair/Review calls a separate, redacted read view.
+            # A local CLI failure never certifies that remote effects settled.
+            try:
+                diagnostics = CommandDiagnostics(
+                    run_dir / "diagnostics", secrets=self.diagnostic_secrets
+                )
+                streams = {
+                    name: run_dir / name
+                    for name in (
+                        "stdout.jsonl",
+                        "stderr.txt",
+                        "preflight.stdout.jsonl",
+                        "preflight.stderr.txt",
+                    )
+                    if (run_dir / name).exists()
+                }
+                diagnostics.record_files(streams, stage="agent", owner="pipeline")
+                detail = diagnostic_view(
+                    exc,
+                    owner="pipeline",
+                    stage=record.get("phase", "agent"),
+                    returncode=record.get("returncode"),
+                    secrets=self.diagnostic_secrets,
+                )
+                _write_json(
+                    run_dir / "failure-diagnostics.json",
+                    {
+                        **diagnostics.view(owner="pipeline"),
+                        **{
+                            key: value for key, value in detail.items() if key != "logs"
+                        },
+                        "effects": "unknown" if writable else "read_only",
+                    },
+                )
+            except (OSError, ValueError) as diagnostic_error:
+                # A secondary logging failure must not replace the CLI failure.
+                record["diagnostic_error"] = diagnostic_view(diagnostic_error)[
+                    "cause_chain"
+                ]
             if isinstance(exc, OSError):
                 raise HarnessError(f"Cannot run {self.backend}: {exc}") from exc
             raise

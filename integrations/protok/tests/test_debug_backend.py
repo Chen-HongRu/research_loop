@@ -1,5 +1,6 @@
 import hashlib
 import fcntl
+import re
 from pathlib import Path
 import shlex
 import tempfile
@@ -31,6 +32,8 @@ class Scheduler:
 
     def ssh(self, config, command, **kwargs):
         self.commands.append(command)
+        if "shutil.copyfileobj" in command and "/run.log" in command:
+            return self.failure_log
         if command == "sbatch":
             job = str(100 + len(self.jobs))
             self.jobs[job] = {"state": self.terminal, "elapsed": self.elapsed}
@@ -151,6 +154,11 @@ class FakeNative:
         pass
 
     def collect_logs(self, config, record, attempt):
+        self.scheduler.failure_log = re.sub(
+            r'File "[^"\n]*/code/scripts/train_autoresearch_se3.py"',
+            'File "' + attempt["remote"] + '/code/scripts/train_autoresearch_se3.py"',
+            self.scheduler.failure_log,
+        )
         (record / attempt["directory"] / "run.log.tail").write_text(
             self.scheduler.failure_log
         )
@@ -343,6 +351,33 @@ class DebugBackendTests(unittest.TestCase):
         # These exact producer fields are debug_flow's prerequisite for retry.
         self.assertTrue(result["failure_kind"] == "candidate" and result["cause"])
 
+    def test_settled_server_log_is_complete_redacted_and_pageable(self):
+        from research_loop.diagnostics import read_log_page
+
+        self.scheduler.failure_log = (
+            "full-start owner-token-test\n"
+            + "x" * 40000
+            + "\n"
+            + self.scheduler.failure_log
+        )
+        result = self.run_attempt()
+        diagnostics = result["diagnostics"]
+        streams = [
+            row
+            for row in diagnostics["logs"]
+            if row["stream"] == "stdout" and row["bytes"] > 40000
+        ]
+        self.assertEqual(len(streams), 1)
+        page = read_log_page(
+            diagnostics["directory"], streams[0]["log_id"], limit=65536
+        )
+        self.assertIn("full-start [REDACTED]-token-test", page["text"])
+        self.assertNotIn("owner", page["text"])
+        self.assertIn("Missing first-step active gradients", page["text"])
+        self.assertTrue(page["eof"])
+        self.assertEqual(result["failure_kind"], "candidate")
+        self.assertEqual(self.scheduler.commands.count("sbatch"), 1)
+
     def test_same_failed_accounting_with_infrastructure_or_unknown_log_is_not_candidate(
         self,
     ):
@@ -385,10 +420,15 @@ class DebugBackendTests(unittest.TestCase):
             '  File "/remote/protok/model/autoresearch_se3_loss.py", line 12, in loss\n'
             "ValueError: invalid loss shape\n"
         )
-        self.assertEqual(debug.candidate_cause(text), "ValueError: invalid loss shape")
+        self.assertEqual(
+            debug.candidate_cause(text, workspace="/remote", stage="smoke"),
+            "ValueError: invalid loss shape",
+        )
         self.assertEqual(
             debug.candidate_cause(
-                text.replace("ValueError: invalid loss shape", "AssertionError")
+                text.replace("ValueError: invalid loss shape", "AssertionError"),
+                workspace="/remote",
+                stage="smoke",
             ),
             "AssertionError",
         )

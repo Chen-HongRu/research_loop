@@ -407,6 +407,32 @@ class ContinuationTest(unittest.TestCase):
                 recover=True,
             )
 
+    def test_command_diagnostics_are_scoped_to_successfully_reserved_record(self):
+        backend, config = self.hooked()
+        record, _ = backend.reserve_record(config, "owned", "baseline")
+        self.assertEqual(backend.ssh(config, "echo ready"), "RUNNING")
+        capture = backend.command_diagnostics.view()
+        self.assertEqual(Path(capture["directory"]).name, record.name)
+        self.assertEqual(Path(capture["directory"]).parent.name, "command-diagnostics")
+        self.assertEqual(capture["log_count"], 2)
+        self.assertEqual(capture["logs"][0]["tail"], "RUNNING")
+
+    def test_full_log_fetch_survives_tail_collection_error(self):
+        backend, config, control = self.validate()
+        failure = OSError("tail unavailable")
+        backend.collect_logs = lambda *args: (_ for _ in ()).throw(failure)
+        install_hooks(backend, config, control, lambda: None)
+        attempt = {
+            "remote": "/owned/run",
+            "terminal_state": "FAILED",
+            "gpu_seconds": 12,
+        }
+        with patch("research_loop.diagnostics.fetch_remote_log") as fetch:
+            with self.assertRaises(OSError) as caught:
+                backend.collect_logs(config, self.records / "owned", attempt)
+            self.assertIs(caught.exception, failure)
+            fetch.assert_called_once_with(backend, config, "/owned/run")
+
     def test_original_main_enforces_global_lock(self):
         with (self.records / ".eval.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
