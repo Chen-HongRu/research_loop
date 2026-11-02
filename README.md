@@ -57,7 +57,7 @@ uv run research-loop graph studies/proof-v2
 uv run research-loop frontiers studies/proof-v2
 ```
 
-`init` 不调用模型；`status`、`graph`、`frontiers` 只读。`run` 默认推进一轮，`--iterations 3` 最多推进三轮，还受总预算约束。默认总预算为 10 轮、100 次 CLI 调用、3600 秒；每个 CLI 子进程默认超时 600 秒，初始化时用 `--timeout` 调整。没有后台无限运行。
+`init` 不调用模型；`status`、`graph`、`frontiers` 只读。`run` 默认推进一轮，`--iterations 3` 最多推进三轮，还受总预算约束。默认总预算为 10 轮、100 次 CLI 调用、3600 秒；每次 Harness 调用默认超时 600 秒，Pi 的目录预检和实际请求共用此额度，初始化时用 `--timeout` 调整。没有后台无限运行。
 
 路线选择默认 `--selection-seed 0 --debate-rounds 1 --max-resamples 1`。每位 Advocate 每轮各有一次质疑与回应；Plan 返回选择也使用同一重采样额度，调用均计入总预算。预算用尽只结束当前有界运行，不表示目标完成。
 
@@ -71,7 +71,20 @@ uv run research-loop frontiers studies/proof-v2
 
 Codex 使用现有 CLI 登录，本项目不读取、复制或保存 token，也不创建 API key。Pi 使用其 `openai-codex` provider，请在 Pi 中自行 `/login`；不复用 Codex token。可用 `--executable /absolute/path/to/codex` 或 Pi 路径指定客户端。
 
-允许型号为 `gpt-6-astra / gpt-6.1-sol / gpt-6-luna`，默认 Sol/medium，不自动切换型号。Pi 请求前精确检查本地目录；Codex 传递精确型号。型号存在不代表账号可用；`process.json` 区分请求值、Pi 返回元数据和未核实的服务端实际型号。
+Pi CLI 接线已验证 `@earendil-works/pi-coding-agent` 1.4.0。登录后可用以下命令创建独立 Study：
+
+```bash
+uv run research-loop init studies/pi-proof \
+  --goal examples/proof-goal.md \
+  --harness pi --executable /absolute/path/to/pi \
+  --model gpt-6.1-sol --reasoning medium \
+  --max-iterations 1 --max-calls 20 --max-seconds 900
+uv run research-loop run studies/pi-proof
+```
+
+允许型号为 `gpt-6-astra / gpt-6.1-sol / gpt-6-luna`，默认 Sol/medium，不自动切换型号。Pi 请求前精确检查本地可用目录；目录缺少指定 provider/model 时停止，不改用其他 provider。两后端均通过 stdin 接收提示词，并使用相同的阶段校验和完成/恢复回执。Pi 仅在最终 `agent_settled` 未中止、最终 assistant 正常结束且 provider/model、有效 `thinkingLevel` 匹配请求后接纳 JSON；旧版缺少这些字段会明确失败。
+
+目录匹配与 Pi 的配置回报不证明服务端实际采用该型号或推理强度；`process.json` 保留请求、客户端回报与未核实的服务端信息。真实 CLI 的本地固定响应验证和订阅调用的验证边界见 [Pi 验证记录](docs/pi-harness.md)。后台 Scout 使用 Codex 的原生 web search，Pi 工具白名单不提供这一能力。
 
 默认只读。需要修改代码或运行写文件程序时，在初始化授权 Execute：
 
