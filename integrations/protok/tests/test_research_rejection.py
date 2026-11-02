@@ -294,3 +294,31 @@ class ResearchRejectionTests(unittest.TestCase):
         with self.assertRaises(RUNNER.ProTokError):
             self.certify()
         self.assertTrue(self.budget.status()["unresolved_submission"])
+
+    def test_existing_handoff_is_retained_and_must_match_explicit_expectation(self):
+        self.prepare_rejection()
+        marker = self.control / "HANDOFF"
+        expected = "Upgrade to " + "a" * 40 + "\n"
+        marker.write_text(expected)
+        with self.assertRaises(RUNNER.ProTokError):
+            self.certify()
+        with self.assertRaises(RUNNER.ProTokError):
+            rejection.certify(
+                self.root,
+                self.backend,
+                "0002",
+                audits=self.audits,
+                authorization="Explicit recovery",
+                expected_handoff="Upgrade to " + "b" * 40 + "\n",
+            )
+        self.assertTrue(self.budget.status()["unresolved_submission"])
+        result = rejection.certify(
+            self.root,
+            self.backend,
+            "0002",
+            audits=self.audits,
+            authorization="Explicit recovery",
+            expected_handoff=expected,
+        )
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(marker.read_text(), expected)

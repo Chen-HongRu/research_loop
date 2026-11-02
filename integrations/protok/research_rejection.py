@@ -318,7 +318,7 @@ def _validate_budget_certificate(control, key, entry):
         raise ProTokError("Certified rejection result changed")
 
 
-def certify(root, backend, iteration, *, audits, authorization):
+def certify(root, backend, iteration, *, audits, authorization, expected_handoff=None):
     """Operator-only publication, serialized with submission and the runner."""
     control = Path(root) / "control"
     with (
@@ -328,11 +328,16 @@ def certify(root, backend, iteration, *, audits, authorization):
         for lock in (runner, allocation):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return _certify(
-            root, backend, iteration, audits=audits, authorization=authorization
+            root,
+            backend,
+            iteration,
+            audits=audits,
+            authorization=authorization,
+            expected_handoff=expected_handoff,
         )
 
 
-def _certify(root, backend, iteration, *, audits, authorization):
+def _certify(root, backend, iteration, *, audits, authorization, expected_handoff):
     from integrations.protok import run
     from integrations.protok.research_execution import (
         completed_script,
@@ -345,11 +350,16 @@ def _certify(root, backend, iteration, *, audits, authorization):
     control = root / "control"
     study = run.Study(root / "study")
     state = study.status()
+    handoff = control / "HANDOFF"
+    if expected_handoff is not None and not re.fullmatch(
+        r"Upgrade to [a-f0-9]{40}\n", expected_handoff
+    ):
+        raise ProTokError("Certification requires an exact expected runtime handoff")
     if (
         f"{state['iteration']:04d}" != iteration
         or (state["phase"], state["status"]) != ("execute", "needs_attention")
         or (control / "STOP").exists()
-        or (control / "HANDOFF").exists()
+        or (handoff.read_text() if handoff.exists() else None) != expected_handoff
     ):
         raise ProTokError("Only the unchanged interrupted research Execute may certify")
     previous = study.root / state["active_attempt"]
@@ -386,6 +396,10 @@ def _certify(root, backend, iteration, *, audits, authorization):
     key = json.dumps(["research", str(record), "allocation"])
     entry = read(control / "shared-gpu-budget.json")["attempts"][key]
     certificate_path = record / "rejected-submission.json"
+    if (handoff.read_text() if handoff.exists() else None) != expected_handoff or (
+        control / "STOP"
+    ).exists():
+        raise ProTokError("Operator STOP or HANDOFF changed during certification")
     if not certificate_path.exists():
         certificate = {
             "schema": 1,
