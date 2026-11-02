@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -19,6 +19,7 @@ from integrations.protok.backend import METRIC, PROTOCOL, ProTokBackend, ProTokE
 from integrations.protok.explanation import explanation_coverage, explanation_status
 from integrations.protok.plan_provenance import execution_plan
 from integrations.protok.run import job_path
+from research_loop import telemetry
 from research_loop.harness import completed_response
 from research_loop.long_training import snapshot as long_training_snapshot
 
@@ -1337,13 +1338,13 @@ def long_job_metadata(root, run_id):
     """Expose small local job receipts, excluding ownership and authorization data."""
     directory = Path(root) / "control/long-training-jobs" / run_id
 
-    def small(name):
+    def small(name, max_bytes=96_000):
         path = directory / name
         try:
             if (
                 path.is_symlink()
                 or not path.resolve().is_relative_to(Path(root).resolve())
-                or path.stat().st_size > 96_000
+                or path.stat().st_size > max_bytes
             ):
                 return {}
             value = json.loads(path.read_text())
@@ -1365,7 +1366,8 @@ def long_job_metadata(root, run_id):
     receipt_name = (
         "receipt.json" if (directory / "receipt.json").exists() else "blocked.json"
     )
-    receipt = small(receipt_name)
+    # Completed observations include two bounded log tails as well as metrics.
+    receipt = small(receipt_name, max_bytes=4 * 1024 * 1024)
     valid = (
         bool(receipt)
         and receipt.get("run_id") == run_id
@@ -1391,6 +1393,19 @@ def long_job_metadata(root, run_id):
         "source_identity": job["source_identity"],
         "source_commit": job.get("request", {}).get("source_workspace_ref"),
         "curve": receipt.get("curve", []) if valid else [],
+        **{
+            key: receipt[key]
+            for key in (
+                "endpoint_complete",
+                "missing_validation_steps",
+                "progress",
+                "training_log_tail",
+                "stdout_tail",
+                "log_evidence",
+                "evidence_errors",
+            )
+            if valid and key in receipt
+        },
         "error": "长训回执与原作业身份或核账不匹配"
         if invalid
         else receipt.get("error"),
@@ -2027,6 +2042,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         if active["nodes"]
         else None,
         "frontier": merged_frontier,
+        "telemetry": telemetry_view(root, history_roots=history_roots),
         "long_training": long_training,
         "tasks": tasks,
         "active_task_ids": [
@@ -2117,6 +2133,105 @@ def source_details(root, source_id, local_id, *, history_roots=(), records_root=
     }
 
 
+def telemetry_view(
+    root, *, history_roots=(), source_id=None, run_id=None, stream_id=None, after=0
+):
+    """Bounded local-only projection of dashboard-tagged observations."""
+    streams = []
+    for definition in study_sources(root, history_roots):
+        if source_id is not None and definition["id"] != source_id:
+            continue
+        study = definition["root"] / "study"
+        locations = [(None, study)] if run_id is None else []
+        if run_id is None:
+            long_runs = sorted((study / "long-runs").glob("L*"))[:32]
+        elif re.fullmatch(r"L[0-9a-f]{16}", run_id):
+            long_runs = [study / "long-runs" / run_id]
+        else:
+            long_runs = []
+        locations.extend(
+            (folder.name, folder / "study")
+            for folder in long_runs
+            if re.fullmatch(r"L[0-9a-f]{16}", folder.name)
+            and folder.is_dir()
+            and not folder.is_symlink()
+        )
+        for lane, location in locations:
+            if run_id is not None and lane != run_id:
+                continue
+            try:
+                local = (
+                    {"streams": [telemetry.info(location, stream_id)]}
+                    if stream_id is not None
+                    else telemetry.snapshot(location, tag="dashboard", limit=32)
+                )
+            except (OSError, ValueError, KeyError):
+                continue
+            for item in local.get("streams", [])[:32]:
+                identity = item.get("stream_id")
+                if stream_id is not None and identity != stream_id:
+                    continue
+                page = item
+                if stream_id is not None:
+                    page = telemetry.read_events(
+                        location,
+                        identity,
+                        after=after,
+                        tag="dashboard",
+                        max_bytes=131072,
+                        limit=200,
+                    )
+                source = page.get("source", item.get("source", {}))
+                streams.append(
+                    {
+                        "stream_id": identity,
+                        "source_id": definition["id"],
+                        "run_id": lane,
+                        "source": {
+                            key: source[key]
+                            for key in (
+                                "kind",
+                                "experiment_id",
+                                "source_identity",
+                                "execution_identity",
+                                "run_id",
+                                "parent_iteration",
+                            )
+                            if key in source
+                        },
+                        "status": item.get("status"),
+                        "updated_at": item.get("updated_at"),
+                        "byte_end": page.get("byte_end", item.get("byte_end")),
+                        "next_offset": page.get("next_offset"),
+                        "error_count": len(page.get("errors", [])),
+                        "sync_error": bool(item.get("error")),
+                        "events": [
+                            {
+                                key: event[key]
+                                for key in (
+                                    "version",
+                                    "id",
+                                    "time",
+                                    "name",
+                                    "value",
+                                    "step",
+                                    "unit",
+                                    "tags",
+                                    "context",
+                                    "offset",
+                                    "end_offset",
+                                )
+                                if key in event
+                            }
+                            for event in page.get("events", [])
+                            if isinstance(event.get("tags"), list)
+                            and "dashboard" in event["tags"]
+                        ],
+                    }
+                )
+    return {"version": 1, "observed_at": time.time(), "streams": streams}
+
+
 def serve(root, port, *, snapshot_only=False, history_roots=(), records_root=None):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -2141,6 +2256,46 @@ def serve(root, port, *, snapshot_only=False, history_roots=(), records_root=Non
                         mimetypes.guess_type(asset.name)[0]
                         or "application/octet-stream"
                     )
+                elif path == "/api/telemetry":
+                    query = parse_qs(urlparse(self.path).query)
+                    source = query.get("source", [None])[0]
+                    lane = query.get("run", [None])[0]
+                    stream = query.get("stream", [None])[0]
+                    after = int(query.get("after", ["0"])[0])
+                    if (
+                        after < 0
+                        or (
+                            source is not None
+                            and not re.fullmatch(r"active|history-[1-9][0-9]*", source)
+                        )
+                        or (
+                            lane is not None
+                            and not re.fullmatch(r"L[0-9a-f]{16}", lane)
+                        )
+                        or (
+                            stream is not None
+                            and (
+                                not source
+                                or not re.fullmatch(
+                                    r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", stream
+                                )
+                            )
+                        )
+                    ):
+                        self.send_error(400)
+                        return
+                    body = json.dumps(
+                        telemetry_view(
+                            root,
+                            history_roots=history_roots,
+                            source_id=source,
+                            run_id=lane,
+                            stream_id=stream,
+                            after=after,
+                        ),
+                        ensure_ascii=False,
+                    ).encode()
+                    mime = "application/json; charset=utf-8"
                 elif path == "/api/snapshot":
                     body = json.dumps(
                         view_snapshot(

@@ -264,6 +264,34 @@ or validation scan. Load only samples/checkpoints needed for actual computation.
 The remote manifest /inputs.json describes resolved read-only paths under /inputs/;
 code is at /workspace, working/output directory is /output. Write only declared
 relative output files there (small JSON/CSV/Markdown/figures; 16 MiB total).
+Publish completed subtests incrementally: after each completed configuration or
+measurement, atomically replace a declared small JSON file with completed
+observations and pending/missing items. Retain conditions, warmup, measured steps,
+timing boundaries and units; synchronize asynchronous GPU work for GPU timing.
+Write an initial empty/pending record before expensive setup, and update at useful
+boundaries. Do not wait until the entire experiment succeeds to write results.
+A time limit does not invalidate earlier complete observations; explain exactly
+which comparisons remain incomplete. Never invent observations still in memory
+or treat an interrupted measurement or missing configuration as zero.
+Live structured observations use the controller-supplied standalone helper:
+    from research_loop_events import emit
+    emit("train/loss", float(loss), step=step, unit="loss",
+         tags=["dashboard", "training"], context={"split": "development"})
+    emit("diagnostic/gradient", statistics, step=step, tags=["diagnostic"])
+Names, values, units, steps, tags and small condition objects are chosen by Plan/Execute.
+Without an explicit dashboard tag, an event stays outside the default live panel.
+Every tag remains available to Review; tags are presentation labels, not access rights
+or evidence verification. Data roles remain development/exploratory only. Do not log
+final-only evaluation data, dataset contents, hidden caches or checkpoint tensors.
+Each event is a small JSON record (8192-byte maximum); nonfinite floating observations
+are represented explicitly as nonnumeric JSON, never as valid numeric measurements.
+The helper appends to the reserved controller stream at RESEARCH_LOOP_EVENT_FILE;
+do not truncate/replace/edit it, and do not declare it as a scientific output artifact.
+Publish at useful completed-observation boundaries; recording partial progress is
+allowed but must be labeled in its context. The controller incrementally synchronizes
+the complete records; this neither extends compute nor starts additional allocations.
+Keep declared final/partial artifacts as before: live telemetry is additional evidence,
+not a substitute for complete fixed validation or a source of automatic scores.
 Import protected project modules from /workspace. See the actual trusted result
 for locally collected output/evidence paths. No checkpoint is promised to exist:
 missing input is a failed prerequisite, never permission to substitute another.

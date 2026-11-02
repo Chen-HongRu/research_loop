@@ -238,6 +238,33 @@ class TaskTreeTests(unittest.TestCase):
         self.assertEqual(task["attempts"][0]["curve"], [])
         self.assertIn("不匹配", task["progress"]["reasons"][0]["detail"])
 
+    def test_partial_receipt_with_both_bounded_log_tails_remains_visible(self):
+        self.lane()
+        directory = self.job()
+        receipt = dash.read(directory / "receipt.json")
+        receipt.update(
+            endpoint_complete=False,
+            missing_validation_steps=[4000, 6000, 8000, 10000],
+            progress={"optimizer_step": 2500, "phase": "training"},
+            training_log_tail="x" * 65536,
+            stdout_tail="y" * 65536,
+        )
+        path = self.put(directory, "receipt.json", receipt)
+        self.assertGreater(path.stat().st_size, 96_000)
+        detail = dash.long_task_details(self.root, self.run_id, "active", "当前")
+        observed = detail["long_training"][0]["observations"]
+        self.assertEqual(observed["status"], "failed")
+        self.assertEqual(observed["curve"][0]["step"], 2000)
+        self.assertFalse(observed["endpoint_complete"])
+        self.assertEqual(observed["progress"]["optimizer_step"], 2500)
+        self.assertEqual(
+            observed["missing_validation_steps"], [4000, 6000, 8000, 10000]
+        )
+        self.assertEqual(observed["training_log_tail"], receipt["training_log_tail"])
+        self.assertEqual(observed["stdout_tail"], receipt["stdout_tail"])
+        for secret in ("PRIVATE_OWNER", "PRIVATE_AUTHORIZATION"):
+            self.assertNotIn(secret, json.dumps(detail))
+
     def test_queued_task_enters_plan_without_changing_its_id(self):
         lane = self.lane(started=False)
         first = dash.long_task(

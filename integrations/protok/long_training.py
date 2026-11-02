@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import fcntl
 import hashlib
 import json
@@ -290,11 +289,16 @@ def _snapshot(backend, request, record, config, fixed):
     shutil.copyfile(
         Path(__file__).with_name("long_train.py"), destination / "long_train.py"
     )
+    from .telemetry import stage_writer, writer_source
+
+    event_writer, event_writer_identity = writer_source()
+    stage_writer(destination, event_writer)
     # Trusted driver identity is part of the allocation, independently of search locks.
     identity = hashlib.sha256(
         (
             identity
             + hashlib.sha256((destination / "long_train.py").read_bytes()).hexdigest()
+            + event_writer_identity
         ).encode()
     ).hexdigest()
     return destination, identity
@@ -339,24 +343,36 @@ def _batch(config, remote, seconds, inputs=None):
     )
 
 
-def _curve(completion, request, identity, remote):
+def _curve(completion, request, identity, remote, *, complete=True):
+    if not isinstance(completion, dict):
+        raise ProTokError("Long evidence must be an object")
     if (
-        completion.get("status") != "complete"
+        completion.get("status")
+        not in ({"complete"} if complete else {"complete", "incomplete"})
         or completion.get("run_id") != request["id"]
         or completion.get("protocol") != request["evaluation"]["id"]
         or completion.get("source_identity") != identity
         or completion.get("recipe") != RECIPE
-        or completion.get("optimizer_step") != 10000
+        or type(completion.get("optimizer_step")) is not int
+        or not 0 <= completion["optimizer_step"] <= 10000
+        or (complete and completion["optimizer_step"] != 10000)
         or completion.get("scheduler_horizon") != 50000
     ):
         raise ProTokError("Long completion identity/recipe differs")
     points = completion.get("points", [])
-    if len(points) != len(STEPS):
-        raise ProTokError("Five complete full validations required")
+    if (
+        not isinstance(points, list)
+        or len(points) > len(STEPS)
+        or (complete and len(points) != len(STEPS))
+    ):
+        raise ProTokError("Five complete full validations required for the endpoint")
+    steps = STEPS[: len(points)]
     curve = []
-    for step, point in zip(STEPS, points, strict=True):
+    for step, point in zip(steps, points, strict=True):
         if (
-            point.get("optimizer_step") != step
+            not isinstance(point, dict)
+            or point.get("optimizer_step") != step
+            or step > completion["optimizer_step"]
             or point.get("proteins") != 4491
             or point.get("scope") != "full"
         ):
@@ -387,7 +403,7 @@ def _curve(completion, request, identity, remote):
         )
     expected = [
         {"optimizer_step": step, "path": remote + f"/train/checkpoint-step-{step}.pt"}
-        for step in STEPS
+        for step in steps
     ]
     if completion.get("checkpoints") != expected:
         raise ProTokError("Long checkpoint references differ")
@@ -395,12 +411,36 @@ def _curve(completion, request, identity, remote):
 
 
 def _collect(fixed, config, remote):
-    script = f"from pathlib import Path; import base64; p=Path({remote + '/train/long-completion.json'!r}); n=p.stat().st_size; assert n<={MAX_EVIDENCE_BYTES}; print(base64.b64encode(p.read_bytes()).decode())"
-    encoded = fixed.ssh(config, shlex.join([config["remote_python"], "-c", script]))
-    data = base64.b64decode(encoded.strip(), validate=True)
-    if len(data) > MAX_EVIDENCE_BYTES:
-        raise ProTokError("Long completion evidence exceeds bound")
-    return json.loads(data)
+    # Read at most two small, atomically published records and bounded log tails.
+    # These are actual experimental outputs, not dataset/checkpoint validation.
+    script = f"""import json
+from pathlib import Path
+root=Path({remote!r}); result={{"completion":None,"progress":None,"errors":[]}}
+for key,name in [("completion","train/long-completion.json"),("progress","train/long-curve.json")]:
+ try:
+  path=root/name
+  if path.exists():
+   if path.is_symlink() or path.stat().st_size>{MAX_EVIDENCE_BYTES}: raise ValueError("unsafe or oversized evidence")
+   record=json.loads(path.read_text())
+   json.dumps(record,allow_nan=False)
+   result[key]=record
+ except Exception as error: result["errors"].append(name+": "+str(error))
+for key,name in [("training_log_tail","train/train.csv"),("stdout_tail","run.log")]:
+ try:
+  path=root/name
+  if path.is_symlink(): raise ValueError("symlink log")
+  with path.open("rb") as handle:
+   handle.seek(0,2); handle.seek(max(0,handle.tell()-65536)); result[key]=handle.read(65536).decode("utf-8",errors="replace")
+ except FileNotFoundError: result[key]=""
+ except Exception as error: result[key]=""; result["errors"].append(name+": "+str(error))
+print(json.dumps(result,allow_nan=False))
+"""
+    collected = json.loads(
+        fixed.ssh(config, shlex.join([config["remote_python"], "-c", script]))
+    )
+    if len(json.dumps(collected).encode()) > 2 * MAX_EVIDENCE_BYTES + 2 * 65536 * 6:
+        raise ProTokError("Long collected evidence exceeds bound")
+    return collected
 
 
 def _retained_result(job, result):
@@ -417,22 +457,32 @@ def _retained_result(job, result):
         or result.get("status") not in {"completed", "failed"}
     ):
         raise ProTokError("Retained long result differs from its allocation")
-    if result["status"] == "completed":
-        points = result.get("curve", [])
-        if len(points) != len(STEPS):
-            raise ProTokError("Retained long result lacks five full validations")
-        for step, point in zip(STEPS, points, strict=True):
-            if (
-                point.get("step") != step
-                or point.get("proteins") != 4491
-                or point.get("checkpoint") != f"long-checkpoint:{request['id']}:{step}"
-                or point.get("checkpoint_path")
-                != job["remote"] + f"/train/checkpoint-step-{step}.pt"
-                or not all(_finite(point.get(key)) for key in METRICS.values())
-            ):
-                raise ProTokError(
-                    "Retained long validation differs from its allocation"
-                )
+    points = result.get("curve", [])
+    if (
+        not isinstance(points, list)
+        or len(points) > len(STEPS)
+        or (result["status"] == "completed" and len(points) != len(STEPS))
+    ):
+        raise ProTokError("Retained long result lacks complete full validations")
+    for step, point in zip(STEPS[: len(points)], points, strict=True):
+        if (
+            point.get("step") != step
+            or point.get("proteins") != 4491
+            or point.get("checkpoint") != f"long-checkpoint:{request['id']}:{step}"
+            or point.get("checkpoint_path")
+            != job["remote"] + f"/train/checkpoint-step-{step}.pt"
+            or not all(_finite(point.get(key)) for key in METRICS.values())
+        ):
+            raise ProTokError("Retained long validation differs from its allocation")
+    if "endpoint_complete" in result and result["endpoint_complete"] != (
+        result["status"] == "completed"
+    ):
+        raise ProTokError("Retained endpoint completion differs from execution")
+    if (
+        "missing_validation_steps" in result
+        and result["missing_validation_steps"] != STEPS[len(points) :]
+    ):
+        raise ProTokError("Retained missing validation steps differ")
     return result
 
 
@@ -460,7 +510,8 @@ def _envelope(request, result_path, result):
             "outcome": "completed" if measurements else "incomplete",
             "markdown": "Fresh seed42 long training: "
             + result["status"]
-            + ("; " + result["error"] if result.get("error") else ""),
+            + ("; " + result["error"] if result.get("error") else "")
+            + f"; complete validation steps: {[point['step'] for point in result['curve']]}; missing: {result.get('missing_validation_steps', [])}. Only complete full-validation points are observations; missing endpoint is not a zero score.",
             "artifacts": [artifact],
             "measurements": measurements,
         },
@@ -549,6 +600,23 @@ def execute(
                 )
             if (record / "receipt.json").exists():
                 result = _retained_result(existing, _read(record / "receipt.json"))
+                from .telemetry import drain_existing
+
+                drain_existing(
+                    workspace.parent,
+                    "long-" + request["id"],
+                    {
+                        "kind": "long-training",
+                        "experiment_id": "0001",
+                        "source_identity": existing["source_identity"],
+                        "execution_identity": existing["source_identity"],
+                        "run_id": request["id"],
+                        "parent_iteration": request["source_iteration"],
+                    },
+                    config,
+                    existing["remote"] + "/train/events.jsonl",
+                    ssh=fixed.ssh,
+                )
                 _write(workspace / "result.json", result)
                 return _envelope(request, workspace / "result.json", result)
             if not recover:
@@ -612,6 +680,9 @@ def execute(
                 "deadline": effective,
                 "round_admission": token,
                 "wait_policy": "slurm-allocation",
+                "event_writer_identity": hashlib.sha256(
+                    (source / "research_loop_events.py").read_bytes()
+                ).hexdigest(),
                 "config": config,
                 "off": off_value,
                 "off_stat": off_stat,
@@ -664,6 +735,23 @@ def execute(
             return original_ssh(current, command, **kwargs)
 
         fixed.ssh = ssh
+        from .telemetry import job_relay
+
+        relay = job_relay(
+            workspace.parent,
+            "long-" + request["id"],
+            {
+                "kind": "long-training",
+                "experiment_id": "0001",
+                "source_identity": existing["source_identity"],
+                "execution_identity": existing["source_identity"],
+                "run_id": request["id"],
+                "parent_iteration": request["source_iteration"],
+            },
+            original_ssh,
+            config,
+            existing["remote"] + "/train/events.jsonl",
+        )
         error, curve = None, []
         try:
             if not recover:
@@ -721,12 +809,6 @@ def execute(
                 or attempt.get("exit_code") != "0:0"
             ):
                 raise ProTokError("Long allocation did not finish successfully")
-            curve = _curve(
-                _collect(fixed, config, existing["remote"]),
-                request,
-                existing["source_identity"],
-                existing["remote"],
-            )
         except BaseException as failure:
             error = f"{type(failure).__name__}: {failure}"
             watching = False
@@ -740,6 +822,8 @@ def execute(
                     error += f"; reconciliation: {type(failure).__name__}: {failure}"
         finally:
             fixed.ssh = original_ssh
+            if relay is not None:
+                relay.close()
         settled = all(
             key in attempt
             for key in ("gpu_seconds", "terminal_state", "exit_code", "owned_job_id")
@@ -751,6 +835,53 @@ def execute(
             error = (error or "") + "; invalid authoritative accounting"
         if settled and seconds > existing["allocated_seconds"]:
             error = (error or "") + "; Slurm accounting exceeded the allocation limit"
+        collected = {
+            "completion": None,
+            "progress": None,
+            "errors": [],
+            "training_log_tail": "",
+            "stdout_tail": "",
+        }
+        if settled:
+            try:
+                collected.update(_collect(fixed, config, existing["remote"]))
+            except Exception as collection:
+                collected["errors"].append(str(collection))
+            if error is None:
+                try:
+                    curve = _curve(
+                        collected.get("completion") or {},
+                        request,
+                        existing["source_identity"],
+                        existing["remote"],
+                    )
+                except (ProTokError, ValueError, TypeError) as invalid:
+                    error = "Completion evidence: " + str(invalid)
+            if error is not None:
+                progress = collected.get("progress") or collected.get("completion")
+                if progress is not None:
+                    try:
+                        curve = _curve(
+                            progress,
+                            request,
+                            existing["source_identity"],
+                            existing["remote"],
+                            complete=False,
+                        )
+                    except (ProTokError, ValueError, TypeError) as invalid:
+                        collected["errors"].append("Progress evidence: " + str(invalid))
+        progress = collected.get("progress") or collected.get("completion") or {}
+        # An unbound/malformed journal never supplies trusted progress metadata.
+        try:
+            _curve(
+                progress,
+                request,
+                existing["source_identity"],
+                existing["remote"],
+                complete=False,
+            )
+        except (ProTokError, ValueError, TypeError):
+            progress = {}
         result = {
             "status": "completed"
             if settled and error is None
@@ -769,7 +900,22 @@ def execute(
             "terminal_state": attempt.get("terminal_state"),
             "exit_code": attempt.get("exit_code"),
             "remote": existing["remote"],
-            "curve": curve if error is None else [],
+            "curve": curve,
+            "endpoint_complete": settled and error is None,
+            "missing_validation_steps": STEPS[len(curve) :],
+            "progress": {
+                key: progress[key]
+                for key in ("optimizer_step", "phase", "last_training")
+                if key in progress
+            },
+            "training_log_tail": collected.get("training_log_tail", ""),
+            "stdout_tail": collected.get("stdout_tail", ""),
+            "log_evidence": [
+                existing["remote"] + "/train/long-curve.json",
+                existing["remote"] + "/train/train.csv",
+                existing["remote"] + "/run.log",
+            ],
+            "evidence_errors": collected.get("errors", []),
             "error": error,
         }
         _write(
@@ -787,7 +933,7 @@ def execute(
 
 
 def resolve_checkpoint(root, run_id, step):
-    """Resolve only independently reviewed completed long-run evidence."""
+    """Resolve only independently reviewed complete checkpoint observations."""
     if type(step) is not int or step not in STEPS:
         raise ProTokError("Unsupported long checkpoint step")
     run = _directory(root, run_id)
@@ -818,14 +964,52 @@ def resolve_checkpoint(root, run_id, step):
         or wrapper.get("candidate_id") != candidate_id
         or wrapper.get("review") != review
         or wrapper.get("execute") != execute
-        or receipt.get("status") != "completed"
         or receipt.get("run_id") != run_id
-        or not any(
-            row.get("candidate_id") == candidate_id
-            and row.get("valid") is True
-            and row.get("verified") is True
-            for row in review.get("candidate_reviews", [])
+    ):
+        raise ProTokError("Long checkpoint needs its independently published Review")
+    reviews = review.get("observation_reviews")
+    if reviews is not None or receipt["status"] != "completed":
+        if (
+            not isinstance(reviews, list)
+            or len(
+                [
+                    row
+                    for row in reviews
+                    if row.get("step") == step
+                    and row.get("valid") is True
+                    and row.get("verified") is True
+                ]
+            )
+            != 1
+        ):
+            raise ProTokError(
+                "Checkpoint observation has no independent accepting Review"
+            )
+    if reviews is not None:
+        frozen_context = child / Path(state["review_ref"]).with_name("context.json")
+        if _read(frozen_context).get("long_training_observations") != receipt:
+            raise ProTokError("Long observations changed after their frozen Review")
+    declared = {
+        "path": str(child / "workspace/result.json"),
+        "version": receipt["source_identity"],
+    }
+    if (
+        not any(
+            Path(item["path"]).resolve() == Path(declared["path"]).resolve()
+            and item["version"] == declared["version"]
+            for item in execute.get("artifacts", [])
         )
+        or _read(declared["path"]) != receipt
+    ):
+        raise ProTokError("Reviewed long artifact differs from the allocation receipt")
+    if receipt["status"] != "completed":
+        if execute.get("outcome") != "incomplete" or execute.get("measurements"):
+            raise ProTokError("Partial observations cannot supply a complete endpoint")
+    elif reviews is None and not any(
+        row.get("candidate_id") == candidate_id
+        and row.get("valid") is True
+        and row.get("verified") is True
+        for row in review.get("candidate_reviews", [])
     ):
         raise ProTokError(
             "Completed long checkpoint needs independent accepting Review"
@@ -835,21 +1019,24 @@ def resolve_checkpoint(root, run_id, step):
         for row in execute.get("measurements", [])
         if row.get("candidate_id") == candidate_id
     ]
-    if len(measurements) != 1:
-        raise ProTokError("Accepted long candidate measurement is missing or ambiguous")
-    measurement = measurements[0]
-    final = receipt["curve"][-1]
-    expected = {name: final[key] for name, key in METRICS.items()}
-    observed = {row["name"]: row["value"] for row in measurement["metrics"]}
-    if (
-        measurement["artifact"]["version"] != receipt["source_identity"]
-        or measurement.get("evaluation_id") != receipt["evaluation"]["id"]
-        or measurement.get("comparison_scope")
-        != receipt["evaluation"]["comparison_scope"]
-        or observed != expected
-        or len(measurement["metrics"]) != len(expected)
-    ):
-        raise ProTokError("Reviewed long output differs from allocation evidence")
+    if receipt["status"] == "completed":
+        if len(measurements) != 1:
+            raise ProTokError(
+                "Accepted long candidate measurement is missing or ambiguous"
+            )
+        measurement = measurements[0]
+        final = receipt["curve"][-1]
+        expected = {name: final[key] for name, key in METRICS.items()}
+        observed = {row["name"]: row["value"] for row in measurement["metrics"]}
+        if (
+            measurement["artifact"]["version"] != receipt["source_identity"]
+            or measurement.get("evaluation_id") != receipt["evaluation"]["id"]
+            or measurement.get("comparison_scope")
+            != receipt["evaluation"]["comparison_scope"]
+            or observed != expected
+            or len(measurement["metrics"]) != len(expected)
+        ):
+            raise ProTokError("Reviewed long output differs from allocation evidence")
     point = next((row for row in receipt["curve"] if row["step"] == step), None)
     if point is None:
         raise ProTokError("Checkpoint not present in accepted full-validation curve")

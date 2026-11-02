@@ -932,6 +932,17 @@ class ProTokBackend:
                     / "state.json"
                 )
                 if record.exists() and _read(record).get("status") == "complete":
+                    from .telemetry import fixed_relay
+
+                    relay = fixed_relay(
+                        self.control,
+                        workspace,
+                        record.parent.name,
+                        prepared["fingerprint"],
+                        self._config(),
+                    )
+                    if relay is not None:
+                        relay.close()
                     return self.completed_receipt(
                         workspace,
                         output,
@@ -1007,6 +1018,15 @@ class ProTokBackend:
                     stdout=stdout,
                     stderr=stderr,
                 )
+                from .telemetry import fixed_relay
+
+                relay = fixed_relay(
+                    self.control,
+                    workspace,
+                    allocation_record(identity, fresh_attempt),
+                    identity,
+                    self._config(),
+                )
                 deadline = time.monotonic() + timeout_seconds
                 receipt.update(timed_out=False, cancelled=False)
                 while process.poll() is None:
@@ -1027,6 +1047,8 @@ class ProTokBackend:
                         process.wait(timeout=min(0.5, remaining))
                     except subprocess.TimeoutExpired:
                         pass
+            if relay is not None:
+                relay.close()
             receipt.update(exit_code=process.returncode, finished_at=time.time())
             _write(run / "receipt.json", receipt)
             try:

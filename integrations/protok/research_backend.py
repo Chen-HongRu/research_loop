@@ -413,7 +413,7 @@ if os.path.isfile("/etc/ld.so.cache"): args += ["--ro-bind","/etc/ld.so.cache","
 args += ["--bind",{remote + "/output"!r},"/output"]
 for dev in ["/dev/nvidiactl","/dev/nvidia"+minor,"/dev/nvidia-uvm","/dev/nvidia-uvm-tools"]:
  if os.path.exists(dev): args += ["--dev-bind",dev,dev]
-for key,value in {{"HOME":"/tmp/home","PATH":"/usr/bin:/bin","TMPDIR":"/tmp","PYTHONPATH":{pythonpath!r},"PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1","OMP_NUM_THREADS":"1","CUDA_VISIBLE_DEVICES":uuid,"TORCHINDUCTOR_CACHE_DIR":"/tmp/torch","TRITON_CACHE_DIR":"/tmp/triton","MPLBACKEND":"Agg","MPLCONFIGDIR":"/tmp/matplotlib","NUMBA_CACHE_DIR":"/tmp/numba","JOBLIB_TEMP_FOLDER":"/tmp/joblib"}}.items(): args += ["--setenv",key,value]
+for key,value in {{"HOME":"/tmp/home","PATH":"/usr/bin:/bin","TMPDIR":"/tmp","PYTHONPATH":{pythonpath!r},"PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1","OMP_NUM_THREADS":"1","CUDA_VISIBLE_DEVICES":uuid,"TORCHINDUCTOR_CACHE_DIR":"/tmp/torch","TRITON_CACHE_DIR":"/tmp/triton","MPLBACKEND":"Agg","MPLCONFIGDIR":"/tmp/matplotlib","NUMBA_CACHE_DIR":"/tmp/numba","JOBLIB_TEMP_FOLDER":"/tmp/joblib","RESEARCH_LOOP_EVENT_FILE":"/output/events.jsonl"}}.items(): args += ["--setenv",key,value]
 args += ["--chdir","/output",{config["remote_python"]!r},"-B",{str(PurePosixPath("/workspace") / execution["entrypoint"])!r}]
 os.execve(args[0],args,{{"PATH":"/usr/bin:/bin"}})
 """
@@ -560,6 +560,25 @@ def run_script(
                     "Retained research job identity/authorization changed"
                 )
             if (record / "receipt.json").exists():
+                from .telemetry import drain_existing
+
+                try:
+                    fixed, _ = _load_backend(backend.project, lease)
+                    drain_existing(
+                        root / "study",
+                        "research-" + iteration,
+                        {
+                            "kind": "research",
+                            "experiment_id": iteration,
+                            "source_identity": identity,
+                            "execution_identity": existing["execution_identity"],
+                        },
+                        existing["base_config"],
+                        existing["remote"] + "/output/events.jsonl",
+                        ssh=fixed.ssh,
+                    )
+                except Exception:
+                    pass
                 return _read(record / "receipt.json")
             if not recover:
                 raise ProTokError(
@@ -645,6 +664,9 @@ def run_script(
                 if environment_path.stat().st_size > 256 * 1024:
                     raise ProTokError("Trusted research environment exceeds 256 KiB")
                 environment = _environment(_read(environment_path))
+            from .telemetry import writer_source
+
+            event_writer, event_writer_identity = writer_source()
             execution_identity = hashlib.sha256(
                 json.dumps(
                     {
@@ -652,6 +674,7 @@ def run_script(
                         "execution": execution,
                         "inputs": inputs,
                         "iteration": iteration,
+                        "event_writer_identity": event_writer_identity,
                         **(
                             {"environment": environment}
                             if environment is not None
@@ -677,6 +700,7 @@ def run_script(
                 "quality_score_eligible": False,
                 "source_identity": identity,
                 "execution_identity": execution_identity,
+                "event_writer_identity": event_writer_identity,
                 "iteration": iteration,
                 "execution": execution,
                 "gpu": True,
@@ -732,6 +756,21 @@ def run_script(
             return original_ssh(config, command, **kwargs)
 
         fixed.ssh = ssh
+        from .telemetry import job_relay
+
+        relay = job_relay(
+            root / "study",
+            "research-" + iteration,
+            {
+                "kind": "research",
+                "experiment_id": iteration,
+                "source_identity": identity,
+                "execution_identity": existing["execution_identity"],
+            },
+            original_ssh,
+            config,
+            existing["remote"] + "/output/events.jsonl",
+        )
         error, outputs = None, []
         try:
             if not recover:
@@ -743,6 +782,9 @@ def run_script(
                     destination = staging / "code" / name
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source / name, destination)
+                from .telemetry import stage_writer
+
+                stage_writer(staging / "code", event_writer)
                 (staging / "code/autoresearch-se3.sbatch").write_text(
                     _batch(
                         config,
@@ -822,6 +864,8 @@ def run_script(
                     error += f"; reconciliation: {type(reconciliation).__name__}: {reconciliation}"
         finally:
             fixed.ssh = original_ssh
+            if relay is not None:
+                relay.close()
         settled = all(
             key in attempt
             for key in ("gpu_seconds", "terminal_state", "exit_code", "owned_job_id")
