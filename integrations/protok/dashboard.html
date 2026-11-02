@@ -107,11 +107,11 @@ function duration(seconds) { if (seconds == null || !Number.isFinite(Number(seco
 function badge(text, tone = '') { return '<span class="badge '+tone+'">'+esc(text)+'</span>'; }
 function nodeOrder(node) { return node.task_sequence ?? node.sequence ?? Number(node.local_id || node.id); }
 function nodeLabel(node) { return node?.label || (node ? '#'+node.id : '—'); }
-function activeNode() { return data.nodes.find(node=>data.active_node_id ? node.id===data.active_node_id : +(node.local_id || node.id)===+data.state.iteration); }
+function activeNode() { const task=taskNodes().find(node=>node.id===data.active_node_id); return task || data.nodes.find(node=>data.active_node_id ? node.id===data.active_node_id : +(node.local_id || node.id)===+data.state.iteration); }
 function taskNodes() { return data?.tasks || data?.nodes || []; }
 function taskState(node) { return node.task_status || (node.published?'completed':node.status==='ready'?'waiting':node.status || 'unknown'); }
-function taskKind(node) { return {long_training:'长训验证',research_script:'研究脚本',ledger:'历史账本',investigation:'主循环调查'}[node.task_kind] || '调查'; }
-function taskStateLabel(node) { return {running:'● 进行中',queued:'等待调度',waiting:'等待推进',completed:'已完成',needs_attention:'需要处理',stopped:'已停止',withdrawn:'已撤回'}[taskState(node)] || STATUS[node.status] || '状态未确认'; }
+function taskKind(node) { if(node.task_origin==='user')return node.task_kind==='long_training'?'人工长训':'人工调查'; return {long_training:'长训验证',research_script:'研究脚本',ledger:'历史账本',investigation:'主循环调查'}[node.task_kind] || '调查'; }
+function taskStateLabel(node) { return {running:'● 进行中',queued:'等待调度',waiting:'等待推进',completed:'已完成',needs_attention:'需要处理',stopped:'已停止',withdrawn:'已撤回',cancelled:'已取消',expired:'预算授权已过期'}[taskState(node)] || STATUS[node.status] || '状态未确认'; }
 function visibleTasks() {
   const nodes=taskNodes(), filter=$('taskFilter').value;
   if(!filter)return nodes;
@@ -122,7 +122,7 @@ function visibleTasks() {
   }
   return nodes.filter(node=>keep.has(node.id));
 }
-function resolveReference(id) { if (String(id).includes(':') || !data?.sources) return String(id); const source=detail?.source_id || data.nodes.find(node=>node.id===selected)?.source_id || 'active'; return source+':'+id; }
+function resolveReference(id) { const alias=taskNodes().find(node=>node.experiment_id===String(id)); if(alias)return alias.id; if (String(id).includes(':') || !data?.sources) return String(id); const source=detail?.source_id || data.nodes.find(node=>node.id===selected)?.source_id || 'active'; return source+':'+id; }
 function experimentLink(id, label, preferredTab) { const resolved=resolveReference(id),node=taskNodes().find(item=>item.id===resolved);return '<button class="link" data-node="'+esc(resolved)+'"'+(preferredTab?' data-task-tab="'+esc(preferredTab)+'"':'')+'>'+esc(label || (node?nodeLabel(node):'#'+id))+'</button>'; }
 function exactScore(value) { return typeof value==='number' && Number.isFinite(value) ? String(value) : '未测量'; }
 async function api(path) { const result = await fetch(path, {cache:'no-store'}); if (!result.ok) throw new Error('HTTP '+result.status); return result.json(); }
@@ -188,13 +188,15 @@ function renderProgress() {
   $('deadline').textContent = deadline == null ? '入轮截止时间未记录' : clock(effectiveDeadline)+' 北京时间 · 已入轮任务可继续完成';
   renderTaskProgress();
   const jobs = (data.outstanding || []).flatMap(row => {const label=row.mode==='research'?'研究脚本作业 ':'正式评测作业 ';return row.attempts?.length?row.attempts.map(attempt=>label+(attempt.owned_job_id || '待绑定')+' · '+(attempt.terminal_state || attempt.status || '待核账')):[label+'状态待确认 · '+(row.status || '待核账')];});
+  for (const path of data.manual_training_outstanding || []) jobs.push('人工长训练作业 '+path.split('/').pop()+' · 待核账');
   for (const path of data.long_training_outstanding || []) jobs.push('长训练作业 '+path.split('/').pop()+' · 待核账');
   const bits = [data.snapshot_only ? '归档快照 · 非实时 HPC · 核账时间 '+clock(data.backend_observed_at) : '读取本地控制记录与后端回执', data.accounting_available===false ? 'GPU 用量与待核账作业未知 · 后端读取失败' : jobs.length ? jobs.join(' / ') : '无待核账 GPU 作业', '主循环角色调用 '+(state.call_count ?? '—')+' 次'];
   if (progress.active_role) bits.push((state.status==='running'?'主循环当前角色 ':'主循环最近调用角色 ')+progress.active_role);
   if (progress.elapsed_seconds != null) bits.push((state.status==='running'?'主循环本次调用已用 ':'主循环最近调用耗时 ')+duration(progress.elapsed_seconds));
   if (data.runner?.status) bits.push('主循环 Runner '+(STATUS[data.runner.status] || data.runner.status));
   if (data.formal_gpu_seconds != null) bits.push('正式评分 '+data.formal_gpu_seconds+' GPU 秒 · 研究脚本 '+(data.research_gpu_seconds || 0)+' GPU 秒 · 调试 '+(data.debug_gpu_seconds || 0)+' GPU 秒（独立记账）');
-  if (data.long_training_gpu_seconds != null) bits.push('长训练 '+data.long_training_gpu_seconds+' GPU 秒（独立记账）');
+  if (data.manual_training_gpu_seconds != null) bits.push('人工长训练 '+data.manual_training_gpu_seconds+' GPU秒（任务独立预算）');
+  if (data.long_training_gpu_seconds != null) bits.push('自动长训练 '+data.long_training_gpu_seconds+' GPU 秒（独立记账）');
   for (const overrun of data.research_overruns || []) bits.push('研究 #'+overrun.iteration+' 已按实际 '+overrun.gpu_seconds+' GPU 秒结算（申请 '+overrun.allocated_seconds+' 秒，超出 '+overrun.overrun_seconds+' 秒）');
   if (data.debug) bits.push('主循环本调查调试 '+data.debug.used_gpu_seconds+'/'+data.debug.limit_gpu_seconds+' GPU 秒 · 已预留 '+data.debug.reserved_gpu_seconds+' GPU 秒');
   $('statusline').innerHTML = bits.map(bit => '<span>'+esc(bit)+'</span>').join('');
@@ -425,12 +427,12 @@ function renderDetailHeader() {
     else button.hidden=long?['selection','route'].includes(button.dataset.tab)||button.dataset.tab==='execute'&&!rawVisible:!rawVisible;
   });
   const cachedTitle=detail?.id===selected && detail.explanation?.status==='ready' ? detail.explanation.content?.title : (data.sources || []).find(s=>s.id===node?.source_id)?.explanation?.entries?.find(e=>e.id===node?.local_id && e.status==='ready')?.title;
-  $('detailTitle').textContent = globalView ? '全局研究理解' : node ? nodeLabel(node)+' · '+(long?'长训验证':cachedTitle || node.route || '调查') : '尚无任务记录';
+  $('detailTitle').textContent = globalView ? '全局研究理解' : node ? nodeLabel(node)+' · '+(long?taskKind(node):cachedTitle || node.route || '调查') : '尚无任务记录';
   $('detailMeta').textContent = globalView ? '当前实例已发布的全局知识；历史实例的文档可从对应节点查看。' : node ? (node.archived?'归档 · ':'')+taskStateLabel(node)+' · '+(long?'10k / 完整开发集 · 独立 Plan → Execute → Review':(node.source_id==='ledger'?'早期评价账本，未经本 Loop 评审':node.published?'Review 已发布':'尚未发布 Review')+' · '+(node.imported?'历史回执导入 · ':'')+(node.execution_kind==='research_script'?'研究脚本证据 · 无 RMSD 评分':node.value==null?'无已核查的质量测量':'RMSD '+exactScore(node.value)+' Å')) : '等待第一个任务节点';
   if (!node || globalView) { $('context').innerHTML = ''; return; }
   if(long) {
     const job=(node.attempts || [])[0] || {};
-    $('context').innerHTML='<div class="context-box"><p>长训验证来源：'+experimentLink(node.validation_of)+'</p><p>相同源码与 seed42 初始化重新训练至 10k；每 2k 对完整 4491 条开发蛋白验证。</p>'+facts(job,['owned_job_id','status','terminal_state','gpu_seconds','allocated_gpu_seconds'])+'<p class="muted">进展来自本地控制记录。未记录的训练 step 不作推断。</p></div>';
+    $('context').innerHTML='<div class="context-box"><p>长训验证来源：'+(node.validation_of?experimentLink(node.validation_of):'请求指定的冻结源码')+'</p><p>相同源码与 seed42 初始化重新训练至 10k；每 2k 对完整 4491 条开发蛋白验证。</p>'+facts(job,['owned_job_id','status','terminal_state','gpu_seconds','allocated_gpu_seconds'])+'<p class="muted">进展来自本地控制记录。未记录的训练 step 不作推断。</p></div>';
     bindExperiments($('context'));return;
   }
   if(node.source_id==='ledger'){$('context').innerHTML='<div class="context-box ledger-record">'+((node.record_mode || node.mode)==='smoke'?'早期冒烟检查 · 不构成正式质量测量':'早期评价账本')+' · '+esc(clock(node.created_at))+'<br>只展示原始元数据；未由本 Loop 独立评审，未记录可确认的比较范围，不进入已评审 Frontier 曲线。</div>';return;}
@@ -527,10 +529,11 @@ function renderDetail() {
   else if (!selected) body.innerHTML = '<div class="empty">尚无调查记录。</div>';
   else if (!detail || detail.id !== selected) body.innerHTML = '<div class="loading">正在读取 #'+esc(selected)+' 的记录…</div>';
   else if (detail.ledger) body.innerHTML='<div class="notice">'+esc(detail.summary)+'</div>'+structured(detail.ledger)+disclosure('ledger-sources','元数据来源',structured(detail.sources));
+  else if (detail.task_origin==='user' && tab==='explanation' && (detail.task_kind==='long_training' || !taskNodes().find(node=>node.id===selected)?.experiment_id)) body.innerHTML='<h3>人工任务请求</h3>'+structured(detail.manual_request)+(detail.task_kind==='long_training'?longTrainingRuns(detail.long_training || []):'<div class="notice">等待绑定主循环；绑定后可查看本轮 Plan、Execute 和 Review。</div>');
   else if (detail.task_kind==='long_training' && tab==='explanation') body.innerHTML='<div class="notice">长训使用独立的 10k / 完整开发集协议。最终端点、曲线最优和未评审观测分别标明；指标不进入短训 Frontier。</div>'+longTrainingRuns(detail.long_training || []);
   else if (tab === 'explanation') {
-    const node=data.nodes.find(item=>item.id===selected), source=data.sources?.find(item=>item.id===node?.source_id);
-    body.innerHTML=explanationPanel(detail,node,source);
+    const node=data.nodes.find(item=>item.id===(taskNodes().find(task=>task.id===selected)?.experiment_id || selected)), source=data.sources?.find(item=>item.id===node?.source_id);
+    body.innerHTML=(detail.manual_request?disclosure('manual-request','人工任务请求',structured(detail.manual_request)):'')+explanationPanel(detail,node,source);
     bindExplanation(body);
   }
   else if (tab === 'execute') body.innerHTML = executePanel(detail);
@@ -570,6 +573,7 @@ async function loadDetail(force = false) {
   } catch(error) { if(token===detailToken){retainDetailReading();renderedDetailKey=null;detailError=true;$('detailBody').innerHTML='<div class="empty red">读取任务记录失败：'+esc(error.message)+'。下一次刷新会重试。</div>';} }
 }
 async function choose(id, preferredTab) {
+  id=taskNodes().find(node=>node.experiment_id===id)?.id || id;
   const node=taskNodes().find(node=>node.id===id);
   if(!node) { $('detailBody').innerHTML='<div class="empty">引用的任务 '+esc(id)+' 不在当前 Study 中。</div>'; return; }
   if(selected)taskTabs.set(selected,tab);

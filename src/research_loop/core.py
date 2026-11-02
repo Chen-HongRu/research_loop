@@ -44,6 +44,7 @@ from .harness import (
 from .protocol import SCHEMAS, prompt, validate_response
 from .research_contract import validate_research_execution
 from .strategy import debate_rounds, review_guidance, validate_strategy
+from .tasks import TaskQueue, completed_results as task_results
 
 
 class StudyError(RuntimeError):
@@ -241,6 +242,7 @@ class Study:
         return {
             "research": (self.root / "research.md").read_text(),
             "long_training": long_training_results(self.root),
+            "tasks": task_results(self.root),
         }
 
     def frontiers(self) -> dict:
@@ -544,6 +546,16 @@ class Study:
             target = context / destination
             if not target.exists():
                 _atomic_text(target, (self.root / source).read_text())
+        task_path = context / "task.json"
+        if not task_path.exists():
+            manual = self.config.get("manual_task") or TaskQueue(self.root).claim(
+                "investigation", iteration=state["iteration"] + 1
+            )
+            _write(task_path, manual)
+        results_path = context / "task_results.json"
+        if not results_path.exists():
+            _write(results_path, task_results(self.root))
+        manual = _read(task_path)
         long_results = context / "long_training_results.json"
         if not long_results.exists() and (
             self.long_training or (self.root / "long-runs").exists()
@@ -620,6 +632,36 @@ class Study:
             error=None,
             debugging=None,
         )
+        if manual:
+            external = manual["kind"] == "long_training"
+            route = "new" if external else manual["route_id"]
+            base = None if external else manual["base_experiment"]
+            proposal = {
+                "markdown": manual["instruction"],
+                "route_id": route,
+                "route_title": manual["title"],
+                "action": manual["instruction"],
+                "base_experiment": base,
+                "references": [base] if base else [],
+            }
+            state.update(
+                phase="plan",
+                selected={
+                    "proposal": proposal,
+                    "judge": {
+                        "decision": "select",
+                        "choice": "manual",
+                        "action": manual["instruction"],
+                        "markdown": "Operator supplied task",
+                        "goal_status": "undetermined",
+                        "stop_reason": None,
+                    },
+                },
+            )
+            _write(
+                metadata,
+                _read(metadata) | {"task_id": manual["id"], "task_origin": "manual"},
+            )
         self._save(state)
 
     def _continue_execution(
@@ -832,6 +874,31 @@ class Study:
             "frontiers": views,
             "routes": _read(folder / "context/routes.before.json"),
         }
+        task_path = folder / "context/task.json"
+        manual = _read(task_path) if task_path.exists() else None
+        if manual:
+            context["manual_task"] = manual
+            context["manual_task_constraints"] = (
+                "This operator request fixes the question, instruction, route, base and frozen source. "
+                "Plan must preserve them, respect allow_changes and budget, and must not reselect. "
+                "When allow_changes is false, do not edit candidate source code; execution may "
+                "still write evaluation transport files and result artifacts when Study permits writes. "
+                "Stop with an explicit limitation if infeasible. Preserve ordinary Plan/Execute/Review evidence."
+            )
+            long_request = folder / "context/manual-long-request.json"
+            if manual["kind"] == "long_training" and long_request.exists():
+                actual = _read(long_request)
+                if actual.get("manual_task_id") != manual["id"]:
+                    raise StudyError("Manual long request belongs to another task")
+                context["long_training_run"] = actual
+        results_path = folder / "context/task_results.json"
+        if results_path.exists():
+            context["task_results"] = _read(results_path)
+            context["task_results_guidance"] = (
+                "Reviewed manual long-training children are reusable evidence with their frozen "
+                "source, evaluation scope and stated limitations. Do not mix them into short-run "
+                "Frontiers or infer comparable rankings across different evaluations."
+            )
         if config.get("long_training_run") is not None:
             context["long_training_run"] = config["long_training_run"]
         long_policy = validate_long_training(config.get("long_training"))
@@ -858,7 +925,7 @@ class Study:
         slot = allocation(
             scientific_config.get("exploration"), int(scientific_folder.name)
         )
-        if slot:
+        if slot and not manual:
             context["exploration"] = slot
             for name in ("research_inputs", "scout_inputs", "recent_insights"):
                 path = scientific_folder / "context" / f"{name}.json"
@@ -964,6 +1031,16 @@ class Study:
                     prompt=prompt(phase, context)
                     + guidance(phase, context)
                     + long_training_guidance(phase, context)
+                    + (
+                        "\n\n" + context["task_results_guidance"]
+                        if context.get("task_results")
+                        else ""
+                    )
+                    + (
+                        "\n\n" + context["manual_task_constraints"]
+                        if context.get("manual_task")
+                        else ""
+                    )
                     + (
                         "\n\n" + review_guidance(self.strategy)
                         if phase == "review" and review_guidance(self.strategy)
@@ -1216,6 +1293,8 @@ class Study:
             self._save(state)
 
     def _reselect(self, state: dict) -> None:
+        if self._context(self._folder(state)).get("manual_task"):
+            raise StudyError("Manual task cannot reselect its question or base")
         if state["selection_round"] >= self.config["selection"]["max_resamples"]:
             self._stop(state, "selection_budget")
         else:
@@ -1369,7 +1448,12 @@ class Study:
         _atomic_text(folder / "plan.md", result["markdown"])
         workdir = self.workspace
         version = self.config["baseline"]
-        if result["base_experiment"]:
+        manual = self._context(folder).get("manual_task")
+        if manual:
+            version = manual["source"]["revision"]
+            if not self.config["allow_write"]:
+                workdir = Path(manual["source"]["workspace"])
+        if result["base_experiment"] and not manual:
             version = _read(
                 self.root / "iterations" / result["base_experiment"] / "iteration.json"
             ).get("workspace_ref")

@@ -719,6 +719,21 @@ class ProTokHarness:
         return remaining
 
     def evaluate_request(self, workspace, iteration, request, stop, deadline):
+        manual_path = self.root / "study/iterations" / iteration / "context/task.json"
+        manual = read(manual_path) if manual_path.exists() else None
+        if manual and not manual["allow_changes"]:
+            for name, content in candidate_bytes(workspace).items():
+                frozen = subprocess.check_output(
+                    [
+                        "git",
+                        "-C",
+                        str(workspace),
+                        "show",
+                        manual["source"]["revision"] + ":" + name,
+                    ]
+                )
+                if content != frozen:
+                    raise ProTokError("Fixed-candidate manual task changed source")
         if request == {"action": "research"}:
             from integrations.protok.research_execution import execute_script
 
@@ -893,6 +908,22 @@ class ProTokHarness:
             raise HarnessError("Continuation deadline reached or control/STOP set")
         kwargs["timeout_seconds"] = min(kwargs["timeout_seconds"], remaining, 3600)
         kwargs["prompt"] += "\n\n" + submission_instructions()
+        context_path = (
+            Path(kwargs["run_dir"]) / "context.json" if kwargs.get("run_dir") else None
+        )
+        manual = (
+            read(context_path).get("manual_task")
+            if context_path is not None and context_path.exists()
+            else None
+        )
+        if manual:
+            kwargs["prompt"] += (
+                "\nThe user task fixes this investigation's question and exact source. "
+                "Its selected source replaces the automatic preference to start from the "
+                "current Frontier best. Preserve all protected evaluation/data/resource "
+                "rules. Do not change candidate source when allow_changes=false; the "
+                "evaluation transport is still permitted.\n"
+            )
         kwargs["prompt"] += """
 For a controller-certified formal result with status=failed and
 failure_kind=allocation_timeout, return outcome=incomplete, measurements=[],

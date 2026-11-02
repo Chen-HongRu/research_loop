@@ -623,3 +623,15 @@ test('Task detail refresh and task switching retain each task reading position a
     vm.runInContext('data=null;detail=null;selected=null;renderedDetailKey=null;detailReading.clear();',context);
   }
 });
+
+test('Manual task aliases preserve experiment links and current follow identity', () => {
+  context.manualView={state:{iteration:1},nodes:[{id:'active:0001'}],active_node_id:'active:manual:operator-check',tasks:[{id:'active:manual:operator-check',experiment_id:'active:0001',task_origin:'user',task_kind:'investigation'}]};
+  vm.runInContext('data=manualView;',context);
+  assert.equal(ui.resolveReference('active:0001'),'active:manual:operator-check');
+  assert.equal(vm.runInContext('activeNode().id',context),'active:manual:operator-check');
+  assert.equal(vm.runInContext('taskKind(data.tasks[0])',context),'人工调查');
+  assert.equal(vm.runInContext('taskKind({...data.tasks[0],task_kind:"long_training"})',context),'人工长训');
+  assert.equal(vm.runInContext('taskStateLabel({task_status:"cancelled"})',context),'已取消');
+  assert.match(vm.runInContext('taskStateLabel({task_status:"expired"})',context),/过期/);
+  vm.runInContext('data=null;',context);
+});

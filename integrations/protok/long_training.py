@@ -57,8 +57,26 @@ def _run_id(value):
     return value
 
 
-def _policy(control):
-    value = _read(control / "long-training-policy.json")
+def _task_folder(control, task_id):
+    if not isinstance(task_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", task_id
+    ):
+        raise ProTokError("Invalid manual task ID")
+    folder = Path(control).parent / "study/tasks" / task_id
+    if folder.is_symlink():
+        raise ProTokError("Manual task must be anchored in its parent Study")
+    return folder
+
+
+def _policy(control, *, task_id=None):
+    control = Path(control)
+    if task_id is None:
+        value = _read(control / "long-training-policy.json")
+    else:
+        request = _read(_task_folder(control, task_id) / "request.json")
+        if request.get("id") != task_id or request.get("kind") != "long_training":
+            raise ProTokError("Manual long-training request identity differs")
+        value = {"schema": 1, **request["budget"]}
     if (
         value.get("schema") != 1
         or not isinstance(value.get("authorization"), str)
@@ -79,7 +97,8 @@ def round_authorization(backend, root, request, token=None, *, reconcile=False):
     control = root / "control"
     if not reconcile and (control / "STOP").exists():
         raise ProTokError("Parent Study is stopped")
-    policy = _policy(control)
+    task_id = request.get("manual_task_id")
+    policy = _policy(control, task_id=task_id)
     owner = _read(control / "ownership.json")
     continuation_path = control / "continuation.json"
     continuation = _read(continuation_path) if continuation_path.exists() else None
@@ -89,13 +108,22 @@ def round_authorization(backend, root, request, token=None, *, reconcile=False):
     ):
         raise ProTokError("Parent ownership identity required")
     identity = {"policy": policy, "owner": owner, "continuation": continuation}
+    if task_id is not None:
+        # The complete user request is the immutable authority, including source,
+        # edit permission and budget; budget equality alone cannot authorize rebinding.
+        manual = _read(_task_folder(control, task_id) / "request.json")
+        identity["manual_task"] = manual
+        if token and token.get("request") != manual:
+            raise ProTokError("Manual round request identity changed")
     if token:
         if token.get("authorization") != identity:
             raise ProTokError("Long round authorization identity changed")
         return identity
     if (control / "HANDOFF").exists() or time.time() >= policy["deadline"]:
         raise ProTokError("Long round admission closed")
-    spent = usage(control)
+    spent = usage(
+        control, pool="manual" if task_id is not None else "automatic", task_id=task_id
+    )
     if spent["outstanding"]:
         raise ProTokError("Long allocation accounting is unresolved")
     if (
@@ -110,12 +138,29 @@ def _directory(root, run_id):
     return Path(root) / "study" / "long-runs" / _run_id(run_id)
 
 
-def usage(control):
+def usage(control, *, pool="automatic", task_id=None):
     """Read only small allocation ledgers; unresolved jobs remain charged/outstanding."""
     control = Path(control)
+    if pool not in {"automatic", "manual"} or (
+        pool == "automatic" and task_id is not None
+    ):
+        raise ProTokError("Invalid long-training budget pool")
+    if task_id is not None:
+        _task_folder(control, task_id)
     used, outstanding = 0, []
-    for path in sorted((control / "long-training-jobs").glob("L*/job.json")):
+    ledger = "manual-training-jobs" if pool == "manual" else "long-training-jobs"
+    for path in sorted((control / ledger).glob("L*/job.json")):
         job = _read(path)
+        if pool == "manual":
+            identity = job.get("manual_task_id")
+            if (
+                not identity
+                or job.get("budget_pool") != "manual"
+                or job.get("request", {}).get("manual_task_id") != identity
+            ):
+                raise ProTokError("Manual allocation identity is invalid")
+            if task_id is not None and identity != task_id:
+                continue
         receipt_path = path.parent / "receipt.json"
         if not receipt_path.exists():
             outstanding.append(str(path.parent))
@@ -128,6 +173,13 @@ def usage(control):
             or receipt.get("source_identity") != job["source_identity"]
             or receipt.get("run_id") != job["run_id"]
             or receipt.get("status") not in {"completed", "failed"}
+            or (
+                pool == "manual"
+                and (
+                    receipt.get("manual_task_id") != identity
+                    or receipt.get("budget_pool") != "manual"
+                )
+            )
         ):
             raise ProTokError("Long-training accounting receipt is invalid")
         used += seconds
@@ -236,6 +288,67 @@ def _scored_source(fixed, config, request, source):
     )
 
 
+def _manual_source(root, request, config, fixed):
+    """Bind an operator allocation to its admitted child and frozen candidate source."""
+    folder = _task_folder(Path(root) / "control", request["manual_task_id"])
+    child = folder / "study"
+    manual = _read(folder / "request.json")
+    binding = _read(folder / "binding.json")
+    child_config = _read(child / "study.json")
+    context = child / "iterations/0001/context"
+    source = Path(request["source_workspace"])
+    expected_source = folder / "source"
+    baseline = folder / "baseline"
+    if (
+        binding != {"study": str(child.resolve()), "iteration": "0001"}
+        or child_config.get("manual_task") != manual
+        or _read(context / "task.json") != manual
+        or _read(context / "manual-long-request.json") != request
+        or manual.get("id") != request["manual_task_id"]
+        or manual.get("kind") != "long_training"
+        or request.get("source_iteration") != "0001"
+        or source != expected_source
+        or source.is_symlink()
+        or source.resolve() != expected_source
+        or Path(request["source_project"]).resolve()
+        != Path(child_config["workspace"]).resolve()
+        or Path(request["source_project"]) != baseline
+        or baseline.is_symlink()
+        or baseline.resolve() != baseline
+        or child_config.get("baseline") != manual["source"]["revision"]
+        or not admitted_round(folder)
+    ):
+        raise ProTokError("Manual long source differs from its admitted task binding")
+    revision = request["source_workspace_ref"]
+    original = subprocess.check_output(
+        ["git", "-C", str(baseline), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if original != manual["source"]["revision"]:
+        raise ProTokError("Manual baseline differs from the requested frozen source")
+    observed = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if observed != revision:
+        raise ProTokError("Manual frozen source Git revision changed")
+    # These are bounded candidate and protected source bytes, never model/data artifacts.
+    _source_identity(source, config)
+    for name in sorted(set(config["locked_files"]) | set(CANDIDATE_FILES)):
+        committed = subprocess.check_output(
+            ["git", "-C", str(source), "show", f"{revision}:{name}"]
+        )
+        if (source / name).read_bytes() != committed:
+            raise ProTokError("Manual source bytes differ from its frozen Git revision")
+    fingerprint = fixed.fingerprint(
+        config, {name: (source / name).read_bytes() for name in CANDIDATE_FILES}
+    )
+    if request["candidate"] != {
+        "id": fingerprint,
+        "artifact": {"path": config["candidate_config"], "version": fingerprint},
+    }:
+        raise ProTokError("Manual candidate differs from its frozen fingerprint")
+    return fingerprint
+
+
 def _sandbox_inputs(source, config):
     fixed = _read(source / config["fixed_config"])
     paths = [
@@ -285,7 +398,15 @@ def _snapshot(backend, request, record, config, fixed):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
     identity, _ = _source_identity(destination, config)
-    _scored_source(fixed, config, request, destination)
+    if request.get("manual_task_id") is None:
+        _scored_source(fixed, config, request, destination)
+    else:
+        fingerprint = fixed.fingerprint(
+            config,
+            {name: (destination / name).read_bytes() for name in CANDIDATE_FILES},
+        )
+        if fingerprint != request["candidate"]["artifact"]["version"]:
+            raise ProTokError("Manual snapshot differs from its frozen fingerprint")
     shutil.copyfile(
         Path(__file__).with_name("long_train.py"), destination / "long_train.py"
     )
@@ -455,6 +576,13 @@ def _retained_result(job, result):
         or type(result.get("gpu_seconds")) is not int
         or result["gpu_seconds"] < 0
         or result.get("status") not in {"completed", "failed"}
+        or (
+            request.get("manual_task_id") is not None
+            and (
+                result.get("manual_task_id") != request["manual_task_id"]
+                or result.get("budget_pool") != "manual"
+            )
+        )
     ):
         raise ProTokError("Retained long result differs from its allocation")
     points = result.get("curve", [])
@@ -532,12 +660,17 @@ def execute(
     root, workspace = Path(root).resolve(), Path(workspace).resolve()
     control = root / "control"
     control.mkdir(parents=True, exist_ok=True)
-    record = control / "long-training-jobs" / request["id"]
-    with (control / "long-training.lock").open("a") as lock:
+    task_id = request.get("manual_task_id")
+    manual = task_id is not None
+    pool = "manual" if manual else "automatic"
+    lane = "manual-training" if manual else "long-training"
+    record = control / (lane + "-jobs") / request["id"]
+    with (control / (lane + ".lock")).open("a") as lock:
         # This lane's lock deliberately does not block search/research jobs.
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = backend._config()
-        _published_source(root, request)
+        if not manual:
+            _published_source(root, request)
         fixed, _ = _load_backend(
             backend.project,
             {
@@ -546,7 +679,9 @@ def execute(
                 ]
             },
         )
-        policy = _policy(control)
+        if manual:
+            _manual_source(root, request, config, fixed)
+        policy = _policy(control, task_id=task_id)
         owner = _read(control / "ownership.json")
         if (
             owner.get("owner_token") != backend.owner_token
@@ -555,11 +690,15 @@ def execute(
             or not _finite(deadline)
         ):
             raise ProTokError("Active parent ownership required")
-        token = admitted_round(root / "study/long-runs" / request["id"])
+        token = admitted_round(
+            _task_folder(control, task_id)
+            if manual
+            else root / "study/long-runs" / request["id"]
+        )
         # Recovery of legacy jobs remains receipt-only and cannot create allocations.
         if token:
             round_authorization(backend, root, request, token, reconcile=recover)
-        elif not recover:
+        elif manual or not recover:
             raise ProTokError(
                 "Long allocation requires a committed child round admission"
             )
@@ -594,6 +733,13 @@ def execute(
                 or existing["off"] != off_value
                 or existing["off_stat"] != off_stat
                 or existing["config"] != config
+                or (
+                    manual
+                    and (
+                        existing.get("manual_task_id") != task_id
+                        or existing.get("budget_pool") != "manual"
+                    )
+                )
             ):
                 raise ProTokError(
                     "Retained long allocation identity/authorization changed"
@@ -631,7 +777,7 @@ def execute(
         else:
             if recover:
                 raise ProTokError("No long allocation to recover")
-            spent = usage(control)
+            spent = usage(control, pool=pool, task_id=task_id)
             allocated = policy["gpu_seconds_per_run"]
             if (
                 spent["outstanding"]
@@ -643,7 +789,7 @@ def execute(
                 )
             record.mkdir(parents=True)
             source, identity = _snapshot(backend, request, record, config, fixed)
-            remote = config["remote_root"] + "/long-training/" + request["id"]
+            remote = config["remote_root"] + "/" + lane + "/" + request["id"]
             launcher_config = {
                 **{
                     key: config[key]
@@ -690,6 +836,8 @@ def execute(
                 "allocated_seconds": allocated,
                 "remote": remote,
             }
+            if manual:
+                existing.update(manual_task_id=task_id, budget_pool="manual")
             state = {
                 "attempts": [
                     {
@@ -719,7 +867,12 @@ def execute(
             if (
                 (control / "STOP").exists()
                 or _read(control / "ownership.json") != owner
-                or _policy(control) != policy
+                or _policy(control, task_id=task_id) != policy
+                or (
+                    manual
+                    and _read(_task_folder(control, task_id) / "request.json")
+                    != token["request"]
+                )
                 or current != existing["off_stat"]
                 or (_read(off) if off.exists() else None) != existing["off"]
                 or (_read(continuation_path) if continuation_path.exists() else None)
@@ -918,6 +1071,8 @@ def execute(
             "evidence_errors": collected.get("errors", []),
             "error": error,
         }
+        if manual:
+            result.update(manual_task_id=task_id, budget_pool="manual")
         _write(
             record
             / ("receipt.json" if result["status"] != "blocked" else "blocked.json"),
@@ -938,13 +1093,43 @@ def resolve_checkpoint(root, run_id, step):
         raise ProTokError("Unsupported long checkpoint step")
     run = _directory(root, run_id)
     allocation = Path(root) / "control" / "long-training-jobs" / run_id
-    receipt = _retained_result(
-        _read(allocation / "job.json"), _read(allocation / "receipt.json")
-    )
-    wrapper = _read(run / "review.json")
+    manual_allocation = Path(root) / "control/manual-training-jobs" / run_id
+    manual = (manual_allocation / "job.json").exists()
+    if manual:
+        if (allocation / "job.json").exists():
+            raise ProTokError("Ambiguous automatic/manual long checkpoint ID")
+        allocation = manual_allocation
+        job = _read(allocation / "job.json")
+        request = job["request"]
+        task_id = request.get("manual_task_id")
+        run = _task_folder(Path(root) / "control", task_id)
+        child = run / "study"
+        user_request = _read(run / "request.json")
+        token = admitted_round(run)
+        if (
+            job.get("manual_task_id") != task_id
+            or job.get("budget_pool") != "manual"
+            or _read(child / "study.json").get("manual_task") != user_request
+            or _read(run / "binding.json")
+            != {"study": str(child.resolve()), "iteration": "0001"}
+            or _read(child / "iterations/0001/context/task.json") != user_request
+            or _read(child / "iterations/0001/context/manual-long-request.json")
+            != request
+            or not token
+            or token != job.get("round_admission")
+            or token["authorization"].get("manual_task") != user_request
+            or token["authorization"]["policy"] != job.get("policy")
+        ):
+            raise ProTokError("Manual checkpoint differs from its admitted task")
+        _validate_request(request)
+        wrapper = None
+    else:
+        job = _read(allocation / "job.json")
+        wrapper = _read(run / "review.json")
+    receipt = _retained_result(job, _read(allocation / "receipt.json"))
     child = run / "study"
     publication_path = child / "iterations/0001/publication.json"
-    if wrapper.get("publication_ref") != str(publication_path):
+    if wrapper is not None and wrapper.get("publication_ref") != str(publication_path):
         raise ProTokError("Long Review publication does not belong to its child Study")
     publication = _read(publication_path)
     metadata = _read(publication_path.parent / "iteration.json")
@@ -954,21 +1139,30 @@ def resolve_checkpoint(root, run_id, step):
         or state.get("iteration") != 1
         or metadata.get("status") != "reviewed"
         or publication.get("metadata") != metadata
+        or (
+            manual
+            and any(
+                publication.get("state_after", {}).get(name) != state.get(name)
+                for name in ("review_ref", "execution_ref")
+            )
+        )
     ):
         raise ProTokError("Long child Review has not been published")
     review = _read(child / state["review_ref"])
     execute = _read(child / state["execution_ref"])
     candidate_id = receipt["source_candidate"]["id"]
-    if (
-        wrapper.get("id") != run_id
-        or wrapper.get("candidate_id") != candidate_id
-        or wrapper.get("review") != review
-        or wrapper.get("execute") != execute
-        or receipt.get("run_id") != run_id
+    if receipt.get("run_id") != run_id or (
+        wrapper is not None
+        and (
+            wrapper.get("id") != run_id
+            or wrapper.get("candidate_id") != candidate_id
+            or wrapper.get("review") != review
+            or wrapper.get("execute") != execute
+        )
     ):
         raise ProTokError("Long checkpoint needs its independently published Review")
     reviews = review.get("observation_reviews")
-    if reviews is not None or receipt["status"] != "completed":
+    if manual or reviews is not None or receipt["status"] != "completed":
         if (
             not isinstance(reviews, list)
             or len(
@@ -989,8 +1183,13 @@ def resolve_checkpoint(root, run_id, step):
         frozen_context = child / Path(state["review_ref"]).with_name("context.json")
         if _read(frozen_context).get("long_training_observations") != receipt:
             raise ProTokError("Long observations changed after their frozen Review")
+    output_workspace = Path(metadata["workspace"]) if manual else child / "workspace"
+    if manual and output_workspace != child / "iterations/0001/workspace":
+        raise ProTokError(
+            "Manual checkpoint workspace differs from its child iteration"
+        )
     declared = {
-        "path": str(child / "workspace/result.json"),
+        "path": str(output_workspace / "result.json"),
         "version": receipt["source_identity"],
     }
     if (

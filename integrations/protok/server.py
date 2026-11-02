@@ -334,6 +334,12 @@ def final_summary(root, runner, backend, reason, *, first_error=None):
             "long_training_outstanding": status.get("long_training_outstanding", [])
             if status is not None
             else None,
+            "manual_training_gpu_seconds": status.get("manual_training_gpu_seconds", 0)
+            if status is not None
+            else None,
+            "manual_training_outstanding": status.get("manual_training_outstanding", [])
+            if status is not None
+            else None,
             "total_gpu_seconds": status.get("total_gpu_seconds", used)
             if status is not None
             else None,
@@ -375,9 +381,9 @@ def main():
         first_error = None
         long_training = None
         try:
-            from integrations.protok.long_training_loop import LongTrainingScheduler
+            from integrations.protok.tasks import ExperimentScheduler
 
-            long_training = LongTrainingScheduler(root, backend)
+            long_training = ExperimentScheduler(root, backend)
             long_training.start()
             study_config = root / "study/study.json"
             if study_config.exists() and read(study_config).get("exploration"):
