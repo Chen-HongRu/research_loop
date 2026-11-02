@@ -48,24 +48,29 @@ from integrations.protok.backend import (
 )
 from integrations.protok.research_execution import policy as research_policy
 
-PROJECT = Path(
-    os.environ.get(
-        "PROTOK_PROJECT",
-        "/Users/chenhongru/workspace/hkust/protein/autoresearch-se3-v2-20261101",
-    )
+# Site paths and historical candidate identity belong to the operator's environment.
+PROJECT = (
+    Path(os.environ["PROTOK_PROJECT"]) if os.environ.get("PROTOK_PROJECT") else None
 )
-BEST_COMMIT = os.environ.get(
-    "PROTOK_BASE_COMMIT", "0defd2127e60ce1ef8baf392f860d24dc6ee3fcf"
-)
-BEST_FINGERPRINT = os.environ.get(
-    "PROTOK_BASE_FINGERPRINT",
-    "b5db45ac63db923c9bbbe7fdfce6cc59a04913bb4e3defb800fe8ff34d5f84de",
-)
-BEST_VALUE = float(os.environ.get("PROTOK_BASE_VALUE", "2.6046197081836633"))
-CODEX = os.environ.get(
-    "PROTOK_CODEX",
-    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
-)
+BEST_COMMIT = os.environ.get("PROTOK_BASE_COMMIT", "")
+BEST_FINGERPRINT = os.environ.get("PROTOK_BASE_FINGERPRINT", "")
+BEST_VALUE = float(os.environ.get("PROTOK_BASE_VALUE", "nan"))
+CODEX = os.environ.get("PROTOK_CODEX", "codex")
+
+
+def require_baseline():
+    """Refuse historical import until the operator supplies the exact baseline."""
+    if (
+        not re.fullmatch(r"[0-9a-f]{40}", BEST_COMMIT)
+        or not re.fullmatch(r"[0-9a-f]{64}", BEST_FINGERPRINT)
+        or not math.isfinite(BEST_VALUE)
+    ):
+        raise ProTokError(
+            "Set PROTOK_BASE_COMMIT, PROTOK_BASE_FINGERPRINT and PROTOK_BASE_VALUE "
+            "from the acknowledged fixed-protocol baseline before initialization/import"
+        )
+
+
 SUBMISSION_EFFECT_FILES = INTERFACE_FILES - {LOCK}
 
 
@@ -244,6 +249,7 @@ def freeze_source(
 
 
 def import_best(backend, prepared):
+    require_baseline()
     if prepared["fingerprint"] != BEST_FINGERPRINT:
         raise ProTokError("First audit source is not the historical best fingerprint")
     row = next(
@@ -1318,7 +1324,7 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
 
 GOAL = f'''Minimize {METRIC} (Angstrom) under {PROTOCOL}; this is adaptive development evidence.
 Fixed: 449 proteins, seed42, 2000 updates, Euler100, H100 debug 30min, 8CPU/96G/2workers.
-Prefer improvements without increasing parameter count or inference work; scaling is not the primary route; retain the already-kept D4 best. Never change teacher/data/noise/scorer/fixed config,
+Prefer improvements without increasing parameter count or inference work; scaling is not the primary route; retain the acknowledged historical best. Never change teacher/data/noise/scorer/fixed config,
 canonical project, old journal, permissions, hardware, or protocol. No SSH/network/install,
 subagents, direct training or other launch paths. Read only relevant source and evidence.
 First iteration MUST audit/import historical best {BEST_FINGERPRINT}, {BEST_VALUE} A, without
@@ -1368,6 +1374,7 @@ failures, user STOP or exhausted authorization, not solely on a settled time lim
 
 
 def init_study(root, backend):
+    require_baseline()
     deadline = admission(root, backend)
     baseline = Path(root) / "baseline"
     if baseline.exists():
@@ -2034,6 +2041,8 @@ def main(argv=None):
         modes.add_argument("--" + mode, action="store_true")
     parser.add_argument("--long-run-id", help="Retained long run to reconcile")
     args = parser.parse_args(argv)
+    if args.project is None:
+        parser.error("--project or PROTOK_PROJECT is required")
     root = args.root.resolve()
     owner = read(root / "control/ownership.json")
     backend = ProTokBackend(args.project, root / "control", owner["owner_token"])

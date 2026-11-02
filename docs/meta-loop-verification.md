@@ -1,5 +1,7 @@
 # Meta Loop 实现与验证
 
+> 历史验证摘要：以下数值来自开发时保留的记录，本次公开整理未重跑训练。原始运行产物未随源码分发，读者无法仅凭此摘要独立复核这些数值。
+
 日期：2026-11-01。目标：在固定任务质量与资源条件下，减少路线选择和 Review 开销。本次只验证一个候选、一组真实开发对照及受限监督任务，不执行正式确认套件。
 
 ## 实现
@@ -19,7 +21,7 @@
 | 任务 | Aerial Cactus，固定 train/dev/private 划分，沿用已准备的真实数据 |
 | 模型、优化器、损失 | tiny-cnn、Adam、BCEWithLogitsLoss |
 | 配置 | epochs=1、lr=0.001、batch_size=128、seed=0、CPU threads=4 |
-| 计算 | AutoDL GPU 1；本机已登录 Codex 组织研究，不复制凭据 |
+| 计算 | 显式指定远端 GPU；本机已登录 Codex 组织研究，不复制凭据 |
 | Agent | 请求 `gpt-6.1-sol / medium`；请求记录不等于服务端身份独立核验 |
 | 配对 | 一个 S/C 配对，顺序在候选产生前固定；相同初始任务状态，无跨 run 研究记忆继承 |
 | 单个内层上限 | 12 次 CLI 调用、1800 秒、5,000,000 reported tokens，两个版本相同 |
@@ -33,14 +35,14 @@
 
 ## 执行
 
-需要已准备的 AutoDL Cactus 环境及一个支持目标模型的准确 Codex CLI 路径。Study 目录必须不存在。
+需要已准备的远端 Cactus 环境及一个支持目标模型的准确 Codex CLI 路径。Study 目录必须不存在。
 
 ```sh
 uv run python benchmarks/cactus/run_meta_smoke.py \
   --study studies/meta-cactus-unique \
   --codex /absolute/path/to/codex \
-  --host autodl \
-  --remote-base /root/autodl-tmp/research-loop-cactus-20261101 \
+  --host TASK_SSH_ALIAS \
+  --remote-base /path/to/task \
   --gpu 1
 
 uv run research-loop meta status studies/meta-cactus-unique
@@ -101,13 +103,13 @@ S/C 均通过受限监督 canary，分别使用 10/6 次角色调用，完整发
 
 训练启动额外验证为 0 秒、0 bytes；首 batch 前已知元数据与 CSV 读取为 442,829 bytes，另有一个 batch 的图像读取。压缩图像字节、解释器/import I/O 与 GPU 利用率未测，不用窗口空闲值推算训练利用率。数据没有被重新全量扫描或哈希。
 
-证据入口：[成功摘要](../studies/meta-cactus-real-20261101-03/smoke-summary.json)、[可信观测汇总](../studies/meta-cactus-real-20261101-03/observations.json)、[候选冻结](../studies/meta-cactus-real-20261101-03/research/iterations/0001/candidate.json)、[外层评审](../studies/meta-cactus-real-20261101-03/research/iterations/0001/review.md)、[全局研究记忆](../studies/meta-cactus-real-20261101-03/research/research.md)、[开发 Frontier](../studies/meta-cactus-real-20261101-03/research/frontiers.json)、[晋升判定](../studies/meta-cactus-real-20261101-03/decisions/decision-direct-concise-v1.json)。原始调用、固定 runner 和最终评分保留在同级受控目录。运行目录不随源码分发。
+证据入口：成功摘要（私有运行产物，未随源码分发）、可信观测汇总（私有运行产物，未随源码分发）、候选冻结（私有运行产物，未随源码分发）、外层评审（私有运行产物，未随源码分发）、全局研究记忆（私有运行产物，未随源码分发）、开发 Frontier（私有运行产物，未随源码分发）、晋升判定（私有运行产物，未随源码分发）。原始调用、固定 runner 和最终评分保留在同级受控目录。运行目录不随源码分发。
 
 ## 保留的失败
 
-`meta-cactus-real-20261101` 使用 PATH 中的 CLI 0.156.0，在首个角色调用返回 `model_not_found`，没有提交 GPU 训练，usage 不完整，完整预算预留保持占用。改用上次 Cactus 接线使用的桌面内置 CLI 0.166.0-alpha.5.1，模型请求仍为 `gpt-6.1-sol / medium`。[失败摘要](../studies/meta-cactus-real-20261101/smoke-summary.json)
+`meta-cactus-real-20261101` 使用 PATH 中的 CLI 0.156.0，在首个角色调用返回 `model_not_found`，没有提交 GPU 训练，usage 不完整，完整预算预留保持占用。改用上次 Cactus 接线使用的桌面内置 CLI 0.166.0-alpha.5.1，模型请求仍为 `gpt-6.1-sol / medium`。失败摘要（私有运行产物，未随源码分发）
 
-`meta-cactus-real-20261101-02` 完成了两个真实 GPU 闭环，随后 S canary 因空 measurement 对应了非空 `candidate_reviews` 而被严格控制器拒绝发布。外层如实返回 incomplete，未提交有效全局 measurement，没有 private 评分或晋升。[配对实测](../studies/meta-cactus-real-20261101-02/pair-observations.json)、[外层摘要](../studies/meta-cactus-real-20261101-02/smoke-summary.json)
+`meta-cactus-real-20261101-02` 完成了两个真实 GPU 闭环，随后 S canary 因空 measurement 对应了非空 `candidate_reviews` 而被严格控制器拒绝发布。外层如实返回 incomplete，未提交有效全局 measurement，没有 private 评分或晋升。配对实测（私有运行产物，未随源码分发）、外层摘要（私有运行产物，未随源码分发）
 
 | 该轮观测 | S | C |
 | --- | ---: | ---: |

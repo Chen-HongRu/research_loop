@@ -4,7 +4,7 @@ Controller preparation uses the prepared dataset in the [TIGER-Lab mirror](https
 
 Official public/private partition: `train_test_split(original_train, test_size=0.19, random_state=0)`, yielding 14,175 public and 3,325 private rows. Additional project train/dev partition: `train_test_split(public_train, test_size=0.20, random_state=0)` without stratification, yielding 11,340 fitting rows and 2,835 dev rows. The one-time contract check compares exact IDs and labels against the official partition under original sorted IDs, and checks dev isolation. It reads CSV metadata, never image contents. It is not part of training startup.
 
-Use `uv` for the task environment. On AutoDL the existing conda Python has PyTorch `2.8.0+cu128`; a task-local `uv venv --python /root/miniconda3/bin/python --system-site-packages .venv` reuses it. Install the other dependencies pinned in this directory's `pyproject.toml` using `uv pip install --python .venv/bin/python ...`. Training records actual installed package versions; the inherited base environment is not a fully locked environment.
+Use `uv` for the task environment. To reuse an operator-provisioned CUDA/PyTorch Python environment, create a task-local environment with `uv venv --python /path/to/python --system-site-packages .venv`. Choose a CUDA/PyTorch combination appropriate to the task host. Install the other dependencies pinned in this directory's `pyproject.toml` using `uv pip install --python .venv/bin/python ...`. Training records actual installed package versions; the inherited base environment is not a fully locked environment.
 
 Preparation, once, by the trusted controller:
 
