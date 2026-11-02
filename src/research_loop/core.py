@@ -992,6 +992,7 @@ class Study:
     ) -> dict:
         harness = harness or self.harness
         state["last_call_key"] = key
+        cached = False
         if key in state["calls"]:
             attempt = self.root / state["calls"][key]
             failure = attempt / "failure.json"
@@ -1006,6 +1007,7 @@ class Study:
                     record["error"], details=record["details"]
                 )
             result = completed_response(attempt)
+            cached = result is not None
             validate_completed = getattr(harness, "validate_completed", None)
             if (
                 result is not None
@@ -1125,7 +1127,32 @@ class Study:
                     )
                 raise
         if phase in {"proposal", "plan"}:
-            validate_response(phase, result, schema=self._agent_schema(phase, context))
+            schema = self._agent_schema(phase, context)
+            # Before controller-owned fields were omitted, calls persisted this
+            # complete schema. Only those completed calls may reuse full output.
+            legacy_schema = long_training_schema(
+                phase, context, stage_schema(phase, context, SCHEMAS)
+            )
+            if (
+                cached
+                and legacy_schema != schema
+                and (attempt / "schema.json").exists()
+                and _read(attempt / "schema.json") == legacy_schema
+            ):
+                frozen = _read(attempt / "context.json")
+                # Selection budgets change when earlier calls are replayed;
+                # every scientific input and controller choice stays frozen.
+                ignored = {"budget"} if phase == "proposal" else set()
+                if {k: v for k, v in frozen.items() if k not in ignored} != {
+                    k: v for k, v in context.items() if k not in ignored
+                }:
+                    raise StudyError("Completed legacy call context changed")
+                schema = self._response_schema(phase, context)
+                validate_response(phase, result, schema=schema)
+                if complete_output(phase, context, result) != result:
+                    raise StudyError("Completed legacy call changed controller fields")
+            else:
+                validate_response(phase, result, schema=schema)
             result = complete_output(phase, context, result)
         self._validate_result(phase, result, context)
         state.setdefault("accepted_calls", {})[key] = True

@@ -6,7 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from research_loop import Study, StudyError, initialize
-from research_loop.harness import HarnessError
+from research_loop.exploration import stage_schema
+from research_loop.harness import HarnessError, publish_completed_response
+from research_loop.long_training import stage_schema as long_training_schema
+from research_loop.protocol import SCHEMAS
 
 
 def read(path):
@@ -282,6 +285,130 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(harness.count("execute"), 0)
         call = next(c for c in harness.calls if c["phase"] == "plan")
         self.assertIn("base_experiment", read(call["run_dir"] / "response.json"))
+
+    def legacy_completed_call(self, phase, *, accepted=False):
+        study, harness = self.study()
+        harness.stop_after = 2
+        study.run()
+        harness.base = "0001"
+        response = harness.response
+
+        def legacy_response(phase, context, kwargs):
+            result = response(phase, context, kwargs)
+            if phase == "proposal":
+                result["route_id"] = context["route"]["id"]
+            return result
+
+        def target(call):
+            return call["phase"] == phase and (
+                phase != "proposal" or call["context"]["route"]["id"] != "new"
+            )
+
+        def completed(call):
+            if target(call):
+                publish_completed_response(
+                    call["run_dir"], read(call["run_dir"] / "response.json")
+                )
+                if not accepted:
+                    raise ProcessLost()
+
+        original_call = study._call
+
+        def call(*args, **kwargs):
+            result = original_call(*args, **kwargs)
+            if accepted and target({"phase": args[1], "context": args[3]}):
+                raise ProcessLost()
+            return result
+
+        def legacy_schema(phase, context):
+            return long_training_schema(
+                phase, context, stage_schema(phase, context, SCHEMAS)
+            )
+
+        harness.response = legacy_response
+        harness.after = completed
+        with (
+            patch.object(study, "_agent_schema", side_effect=legacy_schema),
+            patch.object(study, "_call", side_effect=call),
+            self.assertRaises(ProcessLost),
+        ):
+            study.run()
+        harness.after = None
+        state = study.status()
+        key = state["last_call_key"]
+        attempt = self.root / state["calls"][key]
+        return study, harness, state, key, attempt
+
+    def test_legacy_completed_plan_and_proposal_reuse_original_receipts(self):
+        for phase in ("plan", "proposal"):
+            for accepted in (False, True):
+                with self.subTest(phase=phase, accepted=accepted):
+                    self.root = self.root.parent / f"{phase}-{accepted}"
+                    study, harness, state, key, attempt = self.legacy_completed_call(
+                        phase, accepted=accepted
+                    )
+                    originals = {
+                        p: (attempt / p).read_bytes()
+                        for p in (
+                            "response.json",
+                            "completed.json",
+                            "schema.json",
+                            "context.json",
+                        )
+                    }
+                    calls = len(harness.calls)
+                    count = state["call_count"]
+                    resumed = Study(self.root, harness)
+                    if phase == "plan":
+                        resumed._step(state)
+                        self.assertEqual(state["phase"], "execute")
+                        self.assertEqual(
+                            read(self.root / state["plan_ref"])["base_experiment"],
+                            "0001",
+                        )
+                    else:
+                        context = read(attempt / "context.json")
+                        context["budget"] = {"calls_left": 0, "seconds_left": 0}
+                        result = resumed._call(
+                            state, phase, key, context, attempt.parent
+                        )
+                        self.assertEqual(result["route_id"], context["route"]["id"])
+                    self.assertEqual(len(harness.calls), calls)
+                    self.assertEqual(state["call_count"], count)
+                    self.assertTrue(state["accepted_calls"][key])
+                    self.assertEqual(harness.count("execute"), 1)
+                    for path, raw in originals.items():
+                        self.assertEqual((attempt / path).read_bytes(), raw)
+
+    def test_legacy_receipts_reject_changed_controller_fields_or_context(self):
+        for phase, change in (
+            ("plan", "base"),
+            ("proposal", "route"),
+            ("plan", "context"),
+            ("proposal", "context"),
+        ):
+            with self.subTest(phase=phase, change=change):
+                self.root = self.root.parent / f"{phase}-{change}"
+                study, harness, state, key, attempt = self.legacy_completed_call(phase)
+                context = read(attempt / "context.json")
+                receipt = read(attempt / "completed.json")
+                if change == "base":
+                    receipt["response"]["base_experiment"] = None
+                elif change == "route":
+                    receipt["response"]["route_id"] = "new"
+                else:
+                    context["goal"] = "A different frozen question"
+                (attempt / "completed.json").write_text(json.dumps(receipt))
+                raw = (attempt / "completed.json").read_bytes()
+                calls, count = len(harness.calls), state["call_count"]
+                with self.assertRaises((StudyError, ValueError)):
+                    Study(self.root, harness)._call(
+                        state, phase, key, context, attempt.parent
+                    )
+                self.assertEqual(len(harness.calls), calls)
+                self.assertEqual(state["call_count"], count)
+                self.assertEqual((attempt / "completed.json").read_bytes(), raw)
+                self.assertEqual(harness.count("execute"), 1)
 
     def test_readonly_retry_rejects_execute_under_state_lock(self):
         study, harness = self.study()
