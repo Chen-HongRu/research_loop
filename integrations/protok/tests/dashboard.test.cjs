@@ -181,7 +181,7 @@ test('Forks clear unrelated task circles and reverse edges approach the destinat
 
 test('Refreshing and inserting earlier records preserve the panned timeline anchor', () => {
   const prior=elements.get('graphWrap');
-  const wrap={clientWidth:600,clientHeight:400,scrollLeft:0,scrollTop:0};
+  const wrap={clientWidth:600,clientHeight:400,scrollLeft:0,scrollTop:0,scrollIntoView(){this.revealed=true;}};
   elements.set('graphWrap',wrap);
   context.timelineFixture=Array.from({length:8},(_,index)=>({id:String(index+1).padStart(4,'0'),source_id:'active',created_at:100+index}));
   try {
@@ -198,6 +198,9 @@ test('Refreshing and inserting earlier records preserve the panned timeline anch
     ui.drawGraph();
     assert.equal(wrap.scrollLeft,before+272,'same visible tasks stay at the same viewport offset');
     assert.equal(vm.runInContext('selected',context),'0008');
+    assert.equal(wrap.revealed,undefined,'ordinary refresh never scrolls the page to the tree');
+    document.getElementById('treeLocate').onclick();
+    assert.equal(wrap.revealed,true,'explicit locate also reveals the tree in the page viewport');
     ui.focusTreeTask('0001');
     assert.ok(wrap.scrollLeft<before);
     assert.match(elements.get('graph').innerHTML,/timeline-axis/);

@@ -621,7 +621,7 @@ $('rawToggle').onclick=()=>{rawVisible=!rawVisible;$('rawToggle').setAttribute('
 $('refs').onchange=drawGraph;
 $('treeEarlier').onclick=()=>panTree(-1);
 $('treeLater').onclick=()=>panTree(1);
-$('treeLocate').onclick=()=>focusTreeTask();
+$('treeLocate').onclick=()=>{focusTreeTask();$('graphWrap').scrollIntoView({block:'nearest',inline:'nearest'});};
 $('graphBtn').onclick=()=>{view='git';updateView();}; $('routesBtn').onclick=()=>{view='routes';updateView();};
 $('tabs').querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{tab=button.dataset.tab;globalView=false;renderDetailHeader();renderDetail();});
 $('follow').onclick=async()=>{following=true;globalView=false;detailSignature='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);focusTreeTask();};
