@@ -21,6 +21,11 @@ canonical data and an authorized resource lease. Private research inputs,
 experiment reports and deployment snapshots are not distributed here.
 See [Deployment configuration](deployment.md) for the required settings.
 
+The [read-only dashboard](dashboard.md#阅读方式) uses a horizontal task timeline
+with expanding branch tracks. Select a task to read its progress and evidence
+below the tree. Scrolling stays inside the tree; mobile filters and details stay
+within the page width.
+
 ## Tagged live observations
 
 Research scripts use `research_loop_events.emit` with optional `dashboard` tags.

@@ -1,0 +1,80 @@
+/* The timeline owns its overflow; filters and the task inspector stay in page flow. */
+.layout { grid-template-columns: minmax(0, 1fr); }
+.layout > .panel { overflow-wrap: anywhere; }
+.layout .detail-body { max-height: none; }
+.detail-heading > div:first-child { min-width: 0; }
+.detail-heading h2, .detail-meta, .context-box { overflow-wrap: anywhere; }
+.progress-title { flex-wrap: wrap; }
+.tree-filters { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; align-items: end; }
+.tree-filter { display: grid; gap: 4px; flex: 0 1 12rem; min-width: 0; max-width: 100%; font-size: 12px; color: var(--muted); }
+.tree-filter.route-filter { flex: 1 1 20rem; max-width: 34rem; }
+.tree-filter select { width: 100%; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+.tree-controls { justify-content: space-between; gap: 10px; margin: 10px 0; }
+.tree-controls button, .tree-controls a { font-size: 12px; }
+.tree-controls .caption { margin: 0; }
+.tree-controls .toolbar { min-width: 0; }
+.tree-controls a { text-decoration: none; }
+.git-scroll {
+  overflow: auto;
+  max-width: 100%;
+  max-height: min(68vh, 620px);
+  min-height: 240px;
+  scroll-padding: 80px 12px 12px;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #526884 var(--inset);
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.git-scroll:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.git-log { min-width: 0; position: relative; }
+.timeline-axis {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 54px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+}
+.timeline-tick { position: absolute; top: 5px; width: 232px; text-align: center; }
+.timeline-tick span { display: block; font-size: 10px; color: #788ca7; }
+.timeline-lane { position: absolute; left: 0; right: 0; height: 1px; border-top: 1px solid #243148; }
+.timeline-lane-label { position: absolute; left: 7px; top: 8px; font-size: 10px; color: var(--muted); }
+.git-rail { pointer-events: none; }
+.git-row {
+  position: absolute;
+  display: grid;
+  grid-template-rows: 36px 36px 24px 20px;
+  gap: 3px;
+  width: 232px;
+  height: 150px;
+  padding: 10px 12px;
+  border: 1px solid #354865;
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.git-row:hover { background: #1b2b42; border-color: var(--blue); }
+.git-row.selected { border-color: var(--green); box-shadow: inset 0 3px var(--green); }
+.git-row .row-top { display: block; min-width: 0; overflow: hidden; }
+.git-row .commit-id { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: 12px; line-height: 1.4; }
+.git-row .row-action { margin: 0; font-size: 12px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.git-row .row-meta { min-width: 0; gap: 5px; }
+.git-row .badge { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; font-size: 10px; }
+.git-row .badge.route { min-width: 0; flex-shrink: 1; }
+.git-row .row-result { display: flex; justify-content: space-between; align-items: center; gap: 5px; min-width: 0; }
+.git-row .score { overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+.git-row .graph-frontier { overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
+.git-row.other-route { opacity: .45; }
+.tree-totals { font-size: 11px; color: var(--muted); }
+@media (max-width: 620px) {
+  .tree-filter, .tree-filter.route-filter { flex: 1 1 100%; max-width: 100%; }
+  .tree-controls { align-items: start; }
+  .tree-controls .toolbar { gap: 5px; }
+  .tree-controls button { padding: 5px 8px; }
+  .git-scroll { max-height: min(62vh, 520px); }
+  .detail-heading .toolbar { flex-wrap: wrap; }
+}

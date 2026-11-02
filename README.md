@@ -24,7 +24,7 @@ Research Loop 把研究目标拆成有边界的调查：选择路线、冻结计
 | 文档与恢复 | 两层研究文档、阶段回执和发布记录；保留中断现场供核对 |
 | 可选扩展 | Scout、实时观测、人工任务队列、独立预算的长训练 |
 
-控制器和研究后端分离：`src/research_loop/` 保存通用协议；`benchmarks/` 与 `integrations/` 保存任务边界。现有 ProTok 看板属于任务适配器，可作为实现参考。
+控制器和研究后端分离：`src/research_loop/` 保存通用协议；`benchmarks/` 与 `integrations/` 保存任务边界。现有 ProTok 看板属于任务适配器，可作为实现参考；其[横向任务树与下方进展面板](integrations/protok/dashboard.md#阅读方式)统一展示正在进行和已完成的任务，并支持手机阅读。
 
 可选 [Scout](docs/scout.md) 独立阅读论文与实现，提供外部洞见、反证和新视角。Reviewer 综合本地证据与未解问题，研究选择阶段决定下一步。宿主接入 Scout 后，默认每推进一轮且间隔至少五分钟可调用；结果在下一轮边界进入主循环，不改变当前 Plan。
 

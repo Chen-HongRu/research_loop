@@ -18,6 +18,7 @@
 <style>
 .task-metrics{margin-top:15px;border-top:1px solid var(--line);padding-top:14px}.task-metrics h4{margin:0}.metric-tools{margin:8px 0}.metric-tools select{max-width:100%;width:100%;font-size:12px}.metric-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;max-height:550px;overflow:auto}.metric-card{min-width:0;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--inset);overflow-wrap:anywhere}.metric-card h4{font-size:12px}.metric-card .caption{font-size:10px;margin:5px 0}.metric-card .metric-value{font:550 19px/1.5 ui-monospace,SFMono-Regular,monospace;color:var(--amber);overflow-wrap:anywhere;margin-top:8px}.metric-plot{width:100%;display:block}.metric-plot circle{cursor:pointer}.metric-plot circle:focus{outline:none;stroke:var(--blue);stroke-width:3}.metric-latest{font-size:10px;padding:2px 5px}.metric-empty{padding:10px;color:var(--muted);font-size:12px;grid-column:1/-1}.tensorboard-link{font-size:12px;border:1px solid var(--line);border-radius:6px;padding:5px 9px;text-decoration:none;white-space:nowrap}.metric-card details .facts{grid-template-columns:1fr;font-size:11px;gap:3px}.metric-card summary{font-size:11px}@media(max-width:620px){.metric-cards{grid-template-columns:1fr}}
 </style>
+<link rel="stylesheet" href="/assets/work-tree.css">
 </head>
 <body>
 <header>
@@ -43,16 +44,17 @@
   </div>
   <div id="statusline" class="statusline" style="margin-bottom:16px"></div>
   <div class="layout">
-    <section class="panel" aria-labelledby="graphTitle">
+    <section class="panel" id="workTreePanel" aria-labelledby="graphTitle">
       <div class="toolbar between"><div><h2 id="graphTitle">Work tree · 研究任务</h2><small id="graphSubtitle">进行中与已完成任务共用节点，选择任务查看进展。</small></div><div class="toolbar"><button id="graphBtn" class="on" aria-pressed="true">任务树</button><button id="routesBtn" aria-pressed="false">研究路线</button></div></div>
       <div class="toolbar" style="margin-top:13px"><select id="taskFilter" aria-label="筛选任务状态"><option value="">全部任务</option><option value="running">进行中</option><option value="needs_attention">需要处理</option></select><span id="taskSummary" class="muted" aria-live="polite"></span></div>
-      <div class="toolbar" style="margin-top:13px"><select id="sourceFilter" aria-label="突出显示历史阶段"><option value="">所有阶段</option></select><select id="routeFilter" aria-label="突出显示研究路线"><option value="">所有路线</option></select><label class="muted" style="font-size:12px"><input type="checkbox" id="refs"> 显示证据引用</label></div>
+      <div class="tree-filters"><label class="tree-filter">历史阶段<select id="sourceFilter" aria-label="突出显示历史阶段"><option value="">所有阶段</option></select></label><label class="tree-filter route-filter">研究路线<select id="routeFilter" aria-label="突出显示研究路线"><option value="">所有路线</option></select></label><label class="muted" style="font-size:12px"><input type="checkbox" id="refs"> 显示证据引用</label></div>
       <div id="graphLegend" class="graph-note"><span><i class="legend-line"></i>代码起点 → 本轮</span><span style="color:var(--green)">┄ 同一研究的执行续跑</span><span style="color:#c4a0ef">┄ 长训验证</span><span><i class="legend-line dashed"></i>证据引用</span><span style="color:var(--amber)">┄ 同版本结果导入</span></div>
-      <div id="graphExplanation" class="caption">上新下旧，每行是一次调查；分支轨道只用于排线，同列不代表同一研究路线。路线由标签标明。</div>
-      <div class="git-scroll" id="graphWrap"><div id="graph" class="git-log" aria-label="研究任务与来源关系树"></div></div>
+      <div id="graphExplanation" class="caption">时间从左向右，任务等距排列；分叉在纵向轨道展开。可在树内滑动，选择任务后在下方阅读进展。</div>
+      <div id="treeControls" class="toolbar tree-controls"><div class="toolbar"><button id="treeEarlier" aria-label="向较早任务滑动">← 较早</button><button id="treeLocate">定位所选</button><button id="treeLater" aria-label="向较新任务滑动">较新 →</button></div><span id="treeTotals" class="tree-totals"></span><a href="#taskDetail">查看所选任务详情 ↓</a></div>
+      <div class="git-scroll" id="graphWrap" tabindex="0" role="region" aria-label="研究任务时间轴，可左右或上下滑动"><div id="graph" class="git-log" aria-label="研究任务与来源关系树"></div></div>
       <div id="routeWrap" class="route-cards" hidden></div>
     </section>
-    <section class="panel" aria-labelledby="detailTitle">
+    <section class="panel" id="taskDetail" aria-labelledby="detailTitle">
       <div class="detail-heading"><div><div class="eyebrow">任务进展 / 研究记录</div><h2 id="detailTitle">正在读取…</h2></div><div class="toolbar"><button id="follow" aria-pressed="true">跟随主循环</button><button id="researchBtn">全局研究</button></div></div>
       <div id="detailMeta" class="detail-meta"></div><div id="context" style="margin-top:12px"></div>
       <section id="taskProgress" aria-labelledby="now">
@@ -77,6 +79,7 @@
 <script src="/assets/vendor/katex/katex.min.js"></script>
 <script src="/assets/research-explanation.js"></script>
 <script src="/assets/task-metrics.js"></script>
+<script src="/assets/work-tree.js"></script>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
@@ -250,56 +253,11 @@ function graphOrigin(node) {
   const label=parent?nodeLabel(parent):'#'+graphParent(node);
   return node.validation_of?'验证 '+label:node.continuation_of?'续自 '+label:node.base?'起点 '+label:node.imported_from?'同版本导入':node.source_id==='ledger'?'早期账本，未经 Loop 评审':'独立基线';
 }
-function gitLayout(nodes) {
-  const ordered = [...nodes].sort((a,b) => nodeOrder(b)-nodeOrder(a)), lanes = [], positions = {};
-  for (const [row,node] of ordered.entries()) {
-    let lane = lanes.indexOf(node.id);
-    if (lane < 0) { lane = lanes.indexOf(null); if (lane < 0) lane = lanes.length; }
-    positions[node.id] = {lane, row, x:18+lane*23, y:row*102+51};
-    lanes[lane] = null;
-    const parent=graphParent(node);
-    if (parent && !lanes.includes(parent)) {
-      if(node.validation_of) {
-        let sourceLane=lanes.findIndex((entry,index)=>entry===null&&index!==lane);
-        if(sourceLane<0)sourceLane=lanes.length;
-        lanes[sourceLane]=parent;
-      } else lanes[lane] = parent;
-    }
-  }
-  return {ordered, positions, width:Math.max(56, ...Object.values(positions).map(position => position.x+38))};
-}
 function nodeTone(node) { return node.frontier_current===true ? 'green' : taskState(node) === 'needs_attention' ? 'red' : !node.published && node.source_id!=='ledger' ? 'amber' : ''; }
 function nodeResult(node) {
   if(node.task_kind==='long_training')return node.published?node.outcome==='failed'?'长训未完成 · 已评审':'长训已评审':taskStateLabel(node);
   if(node.execution_kind==='research_script' && node.value==null) return node.job_status==='failed'?'研究脚本失败'+(node.published?' · 已评审':''):node.job_status==='blocked'?'研究作业待核账':node.published?'研究证据已评审':node.job_status==='completed'?'研究脚本已完成':'研究脚本 · '+(STATUS[node.job_status] || STATUS[node.status] || '状态未确认');
   return node.source_id==='ledger' ? node.value!=null?'账本 '+score(node.value)+' Å':STATUS[node.status] || node.status || '无测量' : node.value != null ? score(node.value)+' Å' : node.provisional_value != null ? '待审 '+score(node.provisional_value) : node.imported ? '历史导入' : !node.published ? (STATUS[node.status] || phaseName(node.phase)) : '无质量测量';
-}
-function drawGraph() {
-  const {ordered, positions, width} = gitLayout(visibleTasks()), filter = $('routeFilter').value, sourceFilter=$('sourceFilter').value, height = ordered.length*102;
-  if (!ordered.length) { $('graph').innerHTML = '<div class="empty">当前筛选下没有任务。</div>'; return; }
-  let svg = '<defs><marker id="codeArrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6" fill="#8ab8ff"/></marker><marker id="refArrow" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0 0 L5 2.5 L0 5" fill="#a99bc9"/></marker></defs>';
-  for (const node of ordered) {
-    const child = positions[node.id], parentId=graphParent(node), parent = positions[node.validation_of || node.continuation_of || node.base];
-    if (parent) {
-      const active = node.id === selected || parentId === selected;
-      const path = parent.x === child.x ? `M${parent.x},${parent.y-8} V${child.y+8}` : `M${parent.x},${parent.y-8} C${parent.x},${parent.y-28} ${child.x},${parent.y-25} ${child.x},${parent.y-44} V${child.y+8}`;
-      svg += '<path d="'+path+'" fill="none" stroke="'+(node.validation_of?'#c4a0ef':node.continuation_of?'#72dfb3':COLORS[child.lane%COLORS.length])+'" '+(node.validation_of?'stroke-dasharray="8 4" ':node.continuation_of?'stroke-dasharray="2 4" ':'')+'stroke-width="'+(active?2.6:1.7)+'" opacity="'+(active?1:.65)+'" marker-end="url(#codeArrow)"><title>'+esc(node.validation_of?'长训验证：'+parentId+' → '+node.id+'；同源代码独立训练':node.continuation_of?'执行续跑：#'+parentId+' → #'+node.id+'；沿用研究 #'+node.research_iteration+' 的 Plan':'代码继承：#'+node.base+' → #'+node.id)+'</title></path>';
-    }
-    const origin=positions[node.imported_from];
-    if (origin && !parent) svg+=`<path d="M${origin.x},${origin.y-8} C${origin.x},${origin.y-28} ${child.x},${origin.y-25} ${child.x},${origin.y-44} V${child.y+8}" fill="none" stroke="#f2cb85" stroke-width="1.8" stroke-dasharray="7 4"><title>同版本结果导入：${esc(node.imported_from)} → ${esc(node.id)}；不增加新评价结果</title></path>`;
-    if ($('refs').checked) for (const ref of node.references || []) {
-      const reference = positions[ref]; if (!reference || ref === node.base) continue;
-      const edgeX = width-5;
-      svg += `<path d="M${reference.x+7},${reference.y} C${edgeX},${reference.y} ${edgeX},${child.y} ${child.x+8},${child.y}" fill="none" stroke="#a99bc9" stroke-dasharray="3 5" opacity=".75" marker-end="url(#refArrow)"><title>证据引用：#${esc(ref)} → #${esc(node.id)}；不继承代码</title></path>`;
-    }
-  }
-  for (const node of ordered) {
-    const point = positions[node.id], color = node.frontier_current===true ? '#72dfb3' : COLORS[point.lane%COLORS.length];
-    svg += '<circle cx="'+point.x+'" cy="'+point.y+'" r="'+(node.id === selected?7:5)+'" fill="'+(node.published?color:'#151f30')+'" stroke="'+color+'" stroke-width="2"><title>#'+esc(node.id)+'</title></circle>';
-    if(node.frontier_current===true)svg+=`<circle cx="${point.x}" cy="${point.y}" r="10" fill="none" stroke="#72dfb3" stroke-width="1.3"/>`;
-  }
-  $('graph').innerHTML = '<svg class="git-rail" width="'+width+'" height="'+height+'" aria-hidden="true">'+svg+'</svg><div style="margin-left:'+width+'px">'+ordered.map(node => '<button class="git-row '+(node.id===selected?'selected ':'')+((filter && node.route_id!==filter)||(sourceFilter && node.source_id!==sourceFilter)||($('taskFilter').value&&taskState(node)!==$('taskFilter').value)?'other-route':'')+'" data-node="'+esc(node.id)+'" aria-pressed="'+(node.id===selected)+'"><div class="row-top"><span class="commit-id">'+esc(nodeLabel(node))+'</span><span class="score '+nodeTone(node)+'">'+esc(nodeResult(node))+'</span></div><div class="row-action" title="'+esc(explanationEntry(node)?.question || node.action_summary || node.action || node.title || node.route)+'">'+esc(excerpt(explanationEntry(node)?.title || node.action_summary || node.action || node.title || node.route || '路线选择中',100))+'</div><div class="row-meta">'+badge(taskKind(node),node.task_kind==='long_training'?'amber':'')+badge(node.route || node.source_label || '待选择','route')+'<span>'+esc(graphOrigin(node))+'</span><span class="graph-frontier">'+(node.frontier_current===true?'◎ 当前 Frontier':node.frontier_reached===true?'◇ 曾进入 Frontier':'')+'</span><span>'+esc((node.frontier_exclusion_reason?'资格已排除 · ':'')+(node.imported?'历史导入 · ':'')+(node.archived?'归档 · ':'')+taskStateLabel(node))+'</span></div></button>').join('')+'</div>';
-  bindExperiments($('graph'));
 }
 function drawRoutes() {
   const filter = $('routeFilter').value,source=$('sourceFilter').value, routes = Object.entries(data.routes || {}).filter(([id]) => (!filter || id === filter) && (!source || id.startsWith(source+':')));
@@ -406,16 +364,20 @@ function showFrontierPoint(point){
   $('frontierChart').querySelectorAll('.plot-point').forEach(element=>element.classList.toggle('inspected',element.dataset.frontierId===pointKey(point)));
 }
 function pinFrontierIndex(index){const point=chartModel?.points[index];if(point){frontierPinned=pointKey(point);frontierHover=null;showFrontierPoint(point);}}
-function highlightSource(source){view='git';$('sourceFilter').value=source;$('routeFilter').value='';drawGraph();drawRoutes();updateView();const node=[...data.nodes].sort((a,b)=>nodeOrder(b)-nodeOrder(a)).find(item=>item.source_id===source);const row=node?[...$('graph').querySelectorAll('[data-node]')].find(item=>item.dataset.node===node.id):null;if(row)$('graphWrap').scrollTop=Math.max(0,row.offsetTop-30);}
+function highlightSource(source){
+  view='git';$('sourceFilter').value=source;$('routeFilter').value='';drawGraph();drawRoutes();updateView();
+  const node=treeLayout?.ordered.filter(item=>!source || item.source_id===source).at(-1);
+  if(node)focusTreeTask(node.id);
+}
 function updateView() {
   const git = view === 'git', filter = $('routeFilter').value;
-  $('graphWrap').hidden = !git; $('routeWrap').hidden = git;
+  $('graphWrap').hidden = !git; $('routeWrap').hidden = git; $('treeControls').hidden = !git;
   $('graphBtn').classList.toggle('on',git); $('routesBtn').classList.toggle('on',!git);
   $('graphBtn').setAttribute('aria-pressed',String(git)); $('routesBtn').setAttribute('aria-pressed',String(!git));
   $('refs').disabled = !git; $('graphLegend').hidden = !git;
   $('graphTitle').textContent = git ? 'Work tree · 研究任务' : '研究路线';
   $('graphSubtitle').textContent = git ? '进行中与已完成任务共用节点，选择任务查看进展。' : '同一研究问题下的调查与长训任务。';
-  $('graphExplanation').textContent = git ? '每行一项任务；长训按来源调查归组，位置不表示开始时间。蓝色实线表示代码继承，绿色点线表示执行续跑，紫色虚线表示长训验证；轨道只用于排线。'+($('taskFilter').value?' 筛选时保留来源与已选任务作为上下文。':filter || $('sourceFilter').value?' 当前突出选中范围，保留关系上下文。':'') : '按研究路线分组；状态标签显示各任务进展。长训使用独立协议，指标不进入短训 Frontier。';
+  $('graphExplanation').textContent = git ? '从左到右按创建时间等距排列，并非耗时比例；未记录时间的任务置于末尾并注明。分叉纵向展开，同轨道不等于同一路线；路线见标签，详情在树下方。'+($('taskFilter').value?' 筛选时保留来源与已选任务作为上下文。':filter || $('sourceFilter').value?' 当前突出选中范围，保留关系上下文。':'') : '按研究路线分组；状态标签显示各任务进展。长训使用独立协议，指标不进入短训 Frontier。';
 }
 function renderSnapshot() {
   const current = activeNode();
@@ -595,7 +557,7 @@ async function choose(id, preferredTab) {
     rawVisible=true;$('rawToggle').setAttribute('aria-expanded','true');$('rawToggle').textContent='收起原始记录';
   }
   following=false; globalView=false; selected=id; detailSignature=''; detail=null;
-  renderSnapshot(); renderDetail(); await Promise.all([loadDetail(true),loadTaskMetrics()]);
+  renderSnapshot(); renderDetail(); focusTreeTask(id); await Promise.all([loadDetail(true),loadTaskMetrics()]);
 }
 function longTrainingCurve(curve, metric, title) {
   const points=curve.filter(point=>Number.isFinite(point.step)&&Number.isFinite(point[metric])).sort((a,b)=>a.step-b.step);
@@ -657,9 +619,12 @@ $('frontierNext').onclick=()=>pinFrontierIndex(Math.min((chartModel?.points.leng
 $('frontierDetails').onclick=async()=>{const point=chartModel?.points.find(item=>pointKey(item)===frontierPinned);if(point){await choose(point.id,'explanation');$('detailTitle').scrollIntoView({behavior:'smooth',block:'start'});}};
 $('rawToggle').onclick=()=>{rawVisible=!rawVisible;$('rawToggle').setAttribute('aria-expanded',String(rawVisible));$('rawToggle').textContent=rawVisible?'收起原始记录':'核对原始记录';renderDetailHeader();if(!rawVisible && tab!=='explanation'){tab='explanation';renderDetail();}};
 $('refs').onchange=drawGraph;
+$('treeEarlier').onclick=()=>panTree(-1);
+$('treeLater').onclick=()=>panTree(1);
+$('treeLocate').onclick=()=>focusTreeTask();
 $('graphBtn').onclick=()=>{view='git';updateView();}; $('routesBtn').onclick=()=>{view='routes';updateView();};
 $('tabs').querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{tab=button.dataset.tab;globalView=false;renderDetailHeader();renderDetail();});
-$('follow').onclick=async()=>{following=true;globalView=false;detailSignature='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);const row=$('graph').querySelector('.selected');if(row)$('graphWrap').scrollTop=Math.max(0,row.offsetTop-102);};
+$('follow').onclick=async()=>{following=true;globalView=false;detailSignature='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);focusTreeTask();};
 $('researchBtn').onclick=async()=>{following=false;globalView=true;research='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);};
 async function refresh() {
   try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.backend_error?'● 研究目录已连接 · 后端核账不可用':snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className=snapshot.backend_error?'amber':'green';renderSnapshot();await Promise.all([loadDetail(),loadTaskMetrics()]); }
