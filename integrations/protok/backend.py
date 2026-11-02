@@ -179,6 +179,9 @@ class ProTokBackend:
         states = [(p.parent.name, _read(p)) for p in sorted(root.glob("*/state.json"))]
         receipts, outstanding, used = [], [], 0
         for name, state in states:
+            from .no_allocation import projection
+
+            state = projection(root / name, state)
             attempts = [
                 {
                     k: a[k]
@@ -310,6 +313,11 @@ class ProTokBackend:
                 *(["--recover"] if recover else []),
                 *(["--fresh-attempt", fresh_attempt] if fresh_attempt else []),
             ]
+        if any(
+            (self.control / name).exists()
+            for name in ("shared-gpu-budget-policy.json", "shared-gpu-budget.json")
+        ):
+            raise ProTokError("Shared GPU budget requires continuation control")
         if fresh_attempt is not None:
             raise ProTokError("Fresh formal allocations require continuation control")
         return command + [
@@ -470,6 +478,10 @@ class ProTokBackend:
                 )
             return
         bound = 1800 * len(config["seeds"])
+        if not recover:
+            from .shared_budget import check_shared_admission
+
+            check_shared_admission(self.control, bound)
         if control and control.get("schema") == 2:
             if not admitted_round and control["effective_deadline"] - now < bound:
                 raise ProTokBudgetError("Continuation wall deadline exhausted")

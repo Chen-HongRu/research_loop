@@ -681,6 +681,9 @@ def execute(
         )
         if manual:
             _manual_source(root, request, config, fixed)
+        from .shared_budget import install_shared_budget
+
+        install_shared_budget(fixed, control, channel="manual" if manual else "long")
         policy = _policy(control, task_id=task_id)
         owner = _read(control / "ownership.json")
         if (
@@ -787,6 +790,9 @@ def execute(
                 raise ProTokError(
                     "Long allocation does not fit settled authorization/deadline"
                 )
+            from .shared_budget import check_shared_admission
+
+            check_shared_admission(control, allocated)
             record.mkdir(parents=True)
             source, identity = _snapshot(backend, request, record, config, fixed)
             remote = config["remote_root"] + "/" + lane + "/" + request["id"]

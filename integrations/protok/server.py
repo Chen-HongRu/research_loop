@@ -191,6 +191,18 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
                 deadline = min(deadline, read(ownership)["expires_at"])
             state_path = root / "study/state.json"
             state = read(state_path) if state_path.exists() else None
+            from integrations.protok.shared_budget import (
+                SharedBudget,
+                shared_budget_enabled,
+            )
+
+            shared = (
+                SharedBudget(control).status()
+                if shared_budget_enabled(control)
+                else None
+            )
+            if shared and clock() >= shared["deadline"]:
+                return "deadline"
             if (control / "HANDOFF").exists() and state and state["phase"] == "done":
                 return "handoff"
             if clock() >= deadline and not active_round(
@@ -212,6 +224,16 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
             reserve = backend._config()["reserve_gpu_seconds"]
             fresh = state is None or state["phase"] == "done"
             minimum = 60 if (control / "research-policy.json").exists() else 1800
+            if (
+                fresh
+                and shared
+                and (
+                    shared["breached"]
+                    or shared["remaining_gpu_seconds"]
+                    < minimum + reserve + shared["overrun_reserve_seconds"]
+                )
+            ):
+                return "budget"
             if fresh and spent + minimum + reserve > lease["additional_gpu_seconds"]:
                 return "budget"
             if state and state.get("status") == "stopped":

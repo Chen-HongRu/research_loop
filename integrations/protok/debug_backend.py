@@ -491,6 +491,9 @@ def run_debug(
         if deadline > lease["effective_deadline"]:
             raise ValueError("Debug cannot extend the original owner/wall deadline")
         _live(control, owner_token, wall_deadline)
+    from integrations.protok.shared_budget import install_shared_budget
+
+    install_shared_budget(backend, control, channel="debug")
     formal = Path(config["records_root"]).resolve()
     workspace = Path(config["workspace"]).resolve()
     for protected in (formal, project):
@@ -539,6 +542,9 @@ def run_debug(
             )
             if seconds < 60:
                 raise ValueError("No whole Slurm minute remains in debug/wall budget")
+            from integrations.protok.shared_budget import check_shared_admission
+
+            check_shared_admission(control, seconds)
             bound = budget.reserve(attempt_id, requested_seconds=seconds)
             record.mkdir(parents=True)
             existing = {

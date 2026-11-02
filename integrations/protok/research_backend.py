@@ -656,6 +656,9 @@ def run_script(
                 raise ProTokError(
                     "Research allocation does not fit the original settled budget/deadline"
                 )
+            from .shared_budget import check_shared_admission
+
+            check_shared_admission(control, allocated)
             inputs = _inputs(root, config, execution, iteration)
             inputs = _input_metadata(fixed, config, inputs)
             environment_path = control / "research-environment.json"
@@ -741,6 +744,9 @@ def run_script(
             record / "command-diagnostics", secrets=(backend.owner_token,)
         )
         diagnostics.install(fixed)
+        from .shared_budget import install_shared_budget
+
+        install_shared_budget(fixed, control, channel="research")
         original_ssh = fixed.ssh
         watching = True
 

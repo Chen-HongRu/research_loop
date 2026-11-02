@@ -670,6 +670,34 @@ def completed_job(root, backend, workspace, iteration):
 
 def timed_out_job(root, backend, workspace, iteration):
     """Retain a settled formal time limit as an unmeasured investigation result."""
+    return _failed_formal_job(root, backend, workspace, iteration)
+
+
+def no_allocation_job(
+    root, backend, workspace, iteration, *, evidence_dir=None, authorization=None
+):
+    """Retain an operator-certified submission failure with no allocation or score."""
+    return _failed_formal_job(
+        root,
+        backend,
+        workspace,
+        iteration,
+        no_allocation=True,
+        evidence_dir=evidence_dir,
+        authorization=authorization,
+    )
+
+
+def _failed_formal_job(
+    root,
+    backend,
+    workspace,
+    iteration,
+    *,
+    no_allocation=False,
+    evidence_dir=None,
+    authorization=None,
+):
     root, workspace = Path(root), Path(workspace)
     job = job_path(root, iteration)
     record = read(job / "job.json")
@@ -700,13 +728,26 @@ def timed_out_job(root, backend, workspace, iteration):
         or (workspace / "evaluation-result.json").is_symlink()
     ):
         raise ProTokError("Timed-out submission has changed or pending effects")
-    receipt = backend.timed_out_receipt(
+    if no_allocation:
+        from integrations.protok.no_allocation import receipt as no_allocation_receipt
+
+        def receipt_reader(*args, **kwargs):
+            return no_allocation_receipt(
+                backend,
+                *args,
+                **kwargs,
+                evidence_dir=evidence_dir,
+                authorization=authorization,
+            )
+    else:
+        receipt_reader = backend.timed_out_receipt
+    receipt = receipt_reader(
         job / "source",
         job / "runtime-config.json",
         record["fingerprint"],
         **({"record_name": record["record_name"]} if record.get("record_name") else {}),
     )
-    marker = job / "timeout.json"
+    marker = job / ("no-allocation.json" if no_allocation else "timeout.json")
     if marker.exists():
         if read(marker).get("receipt") != receipt:
             raise ProTokError("Retained timeout evidence changed")
@@ -733,6 +774,22 @@ def settled_failure_response(trusted, *, agent_error=None):
     """An accounted failed allocation is evidence, without a quality measurement."""
     if trusted.get("status") != "failed":
         raise ProTokError("A settled failed execution receipt is required")
+    if trusted.get("failure_kind") == "operator_certified_no_allocation":
+        return {
+            "outcome": "incomplete",
+            "markdown": (
+                "Operator-certified submission failure with no allocation. Successful "
+                "empty scheduler account queries covering submission, a working known-job "
+                "control, and missing job-ID evidence support this certification; no "
+                "Slurm terminal state is asserted. Zero GPU seconds are charged under "
+                "this certification. Original failed submission, source, Plan and Agent "
+                "attempt remain evidence. No quality measurement exists. Independent "
+                "Review must assess this incomplete experiment and its limitations. "
+                "The candidate is not resubmitted."
+            ),
+            "artifacts": [trusted["artifact"]],
+            "measurements": [],
+        }
     return {
         "outcome": "incomplete",
         "markdown": (
@@ -836,6 +893,8 @@ class ProTokHarness:
             saved = read(job / "job.json")
             if saved["request"] != request or saved["source_signatures"] != before:
                 raise ProTokError("Existing job cannot be replaced or rewound")
+            if (job / "no-allocation.json").exists():
+                return no_allocation_job(self.root, self.backend, workspace, iteration)
             if (job / "timeout.json").exists():
                 return timed_out_job(self.root, self.backend, workspace, iteration)
             if saved["status"] != "completed" and not (job / "result.json").exists():
@@ -1294,6 +1353,19 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
                     read(self.root / "study/study.json")["baseline"],
                     allow_research=research_policy(self.root) is not None,
                 )
+                return result
+            if (job_path(self.root, iteration) / "no-allocation.json").exists():
+                trusted = no_allocation_job(
+                    self.root, self.backend, workspace, iteration
+                )
+                if (
+                    result["artifacts"] != [trusted["artifact"]]
+                    or result["measurements"]
+                    or read(workspace / "evaluation-result.json") != trusted
+                ):
+                    raise HarnessError(
+                        "Execute response differs from certified no-allocation evidence"
+                    )
                 return result
             if (job_path(self.root, iteration) / "timeout.json").exists():
                 trusted = timed_out_job(self.root, self.backend, workspace, iteration)
@@ -1831,11 +1903,34 @@ def reconcile_research_execute(root, backend, *, authorization):
     )
 
 
-def _reconcile_settled_execute(root, backend, *, authorization, research=False):
+def reconcile_no_allocation_execute(root, backend, *, authorization, evidence_dir=None):
+    """Close the retained failed submission for independent Review, without replay."""
+    return _reconcile_settled_execute(
+        root,
+        backend,
+        authorization=authorization,
+        no_allocation=True,
+        evidence_dir=evidence_dir,
+    )
+
+
+def _reconcile_settled_execute(
+    root,
+    backend,
+    *,
+    authorization,
+    research=False,
+    no_allocation=False,
+    evidence_dir=None,
+):
     action = (
-        "reconcile-settled-research-result"
-        if research
-        else "reconcile-settled-formal-timeout"
+        "reconcile-operator-certified-no-allocation"
+        if no_allocation
+        else (
+            "reconcile-settled-research-result"
+            if research
+            else "reconcile-settled-formal-timeout"
+        )
     )
     if not isinstance(authorization, str) or not authorization.strip():
         raise ProTokError("Explicit timeout reconciliation authorization required")
@@ -1890,13 +1985,30 @@ def _reconcile_settled_execute(root, backend, *, authorization, research=False):
                     root / "control/research-sources" / iteration / "result.json"
                 )
             else:
-                trusted = timed_out_job(root, backend, workspace, iteration)
+                trusted = (
+                    no_allocation_job(
+                        root,
+                        backend,
+                        workspace,
+                        iteration,
+                        evidence_dir=evidence_dir,
+                        authorization=authorization,
+                    )
+                    if no_allocation
+                    else timed_out_job(root, backend, workspace, iteration)
+                )
                 record_root = job_path(root, iteration)
                 backend_result = record_root / "result.json"
             effects = backend.inspect()
             if any(
                 effects.get(key)
-                for key in ("outstanding", "research_outstanding", "debug_outstanding")
+                for key in (
+                    "outstanding",
+                    "research_outstanding",
+                    "debug_outstanding",
+                    "long_training_outstanding",
+                    "manual_training_outstanding",
+                )
             ):
                 raise ProTokError(
                     "Unresolved effects prevent settled-result reconciliation"
@@ -2042,6 +2154,7 @@ def main(argv=None):
         "reconcile-local-incomplete",
         "reconcile-completed-execute",
         "reconcile-timed-out-execute",
+        "reconcile-no-allocation-execute",
         "reconcile-research-execute",
         "repair-completed-control",
         "begin-debug",
@@ -2051,6 +2164,11 @@ def main(argv=None):
         "recover-long-run",
     ):
         modes.add_argument("--" + mode, action="store_true")
+    parser.add_argument(
+        "--no-allocation-evidence",
+        type=Path,
+        help="Directory containing retained operator no-allocation audit",
+    )
     parser.add_argument("--long-run-id", help="Retained long run to reconcile")
     args = parser.parse_args(argv)
     if args.project is None:
@@ -2083,6 +2201,13 @@ def main(argv=None):
         result = reconcile_local_incomplete(root, backend)
     elif args.reconcile_completed_execute:
         result = reconcile_completed_execute(root, backend)
+    elif args.reconcile_no_allocation_execute:
+        result = reconcile_no_allocation_execute(
+            root,
+            backend,
+            authorization=args.authorization or "",
+            evidence_dir=args.no_allocation_evidence,
+        )
     elif args.reconcile_timed_out_execute:
         result = reconcile_timed_out_execute(
             root, backend, authorization=args.authorization or ""

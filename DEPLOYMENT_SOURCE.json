@@ -1,0 +1,21 @@
+{
+  "upstream_commit": "ef7c6b6c5654688de3d9fd30bc5336832da52e1f",
+  "preserved_runtime": "52fbf8519504b9702a5277ea83ac729f2ec73d92",
+  "preserved_features": [
+    "shared GPU budget and historical research accounting anchor",
+    "operator-certified no-allocation evidence and resubmission guard"
+  ],
+  "source_files": [
+    "integrations/protok/backend.py",
+    "integrations/protok/continuation.py",
+    "integrations/protok/debug_backend.py",
+    "integrations/protok/long_training.py",
+    "integrations/protok/no_allocation.py",
+    "integrations/protok/research_backend.py",
+    "integrations/protok/run.py",
+    "integrations/protok/server.py",
+    "integrations/protok/shared_budget.py",
+    "integrations/protok/tests/test_shared_budget.py"
+  ],
+  "budget_policy": "existing control policy/ledger and deadlines; no reset or extension"
+}

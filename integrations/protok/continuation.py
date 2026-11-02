@@ -64,6 +64,7 @@ def _validate_incremental_anchor(control, states):
     """Check small receipt metadata with the pinned backend's accounting rules."""
     anchor = control.get("initial_record_gpu_seconds")
     initial = control.get("initial_gpu_seconds")
+    research_initial = control.get("initial_research_gpu_seconds", 0)
     count = control.get("initial_scored_records")
     if (
         not isinstance(anchor, dict)
@@ -73,7 +74,9 @@ def _validate_incremental_anchor(control, states):
         or type(count) is not int
         or count < 0
         or any(not _finite_number(value) or value < 0 for value in anchor.values())
-        or sum(anchor.values()) != initial
+        or not _finite_number(research_initial)
+        or research_initial < 0
+        or sum(anchor.values()) + research_initial != initial
     ):
         raise ValueError("Continuation historical accounting anchor mismatch")
     by_name = {path.name: state for path, state in states}
@@ -159,6 +162,17 @@ def _load_backend(project, control):
     backend = ModuleType("_protok_fixed_backend")
     backend.__file__ = str(path)
     exec(compile(source, str(path), "exec"), backend.__dict__)
+    from integrations.protok.no_allocation import projection
+
+    original_records_state = backend.records_state
+
+    def records_state(records):
+        return [
+            (record, projection(record, state))
+            for record, state in original_records_state(records)
+        ]
+
+    backend.records_state = records_state
     return backend, canonical
 
 
@@ -426,6 +440,10 @@ def install_hooks(
                 "Continuation authorizes scored candidates, not separate smokes"
             )
         record = _record_path(records, identity, fresh_attempt)
+        from integrations.protok.no_allocation import CERTIFICATE
+
+        if (record / CERTIFICATE).exists():
+            raise ValueError("Certified no-allocation evidence cannot be resubmitted")
         if recover and not record.exists():
             raise ValueError("Receipt recovery cannot reserve a new candidate")
         states = backend.records_state(records)
@@ -460,6 +478,10 @@ def install_hooks(
             diagnostics.directory = diagnostic_root / record.name
             return result
         session = backend.session_state(current)
+        if control_dir is not None:
+            from integrations.protok.shared_budget import check_shared_admission
+
+            check_shared_admission(control_dir, backend.duration(current["time_limit"]))
         budget_check(current, session, records, 1)
         count = sum(state.get("mode") == "scored" for _, state in states)
         if fresh_attempt is not None:
@@ -618,6 +640,10 @@ def install_hooks(
     backend.wait_for_job = wait_for_job
     if incremental and control.get("relocation") is not None:
         backend.session_state = session_state
+    if control_dir is not None:
+        from integrations.protok.shared_budget import install_shared_budget
+
+        install_shared_budget(backend, control_dir, channel="formal")
 
 
 def launch(
