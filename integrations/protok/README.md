@@ -208,6 +208,22 @@ ownership and budget files and records the previous service configuration.
 
 ## Supervisor state
 
+An operator may certify the observed research submission rejection with
+`research_rejection.certify` only after retaining its complete account-lookup
+failure, unchanged source/Plan and raw submitting state, and two successful
+account-wide scheduler audits with a known-job control and empty remote startup
+markers. This publishes an incomplete, unscored research result without a Slurm
+job ID or terminal state. The shared ledger retains the original reservation key
+and fields; its certificate projects only this unused reservation out of totals.
+Unknown submissions remain blocking. The previous runtime conservatively ignores
+the certificate marker, so compute admission requires the compatible runtime and
+the existing all-channel deployment boundary. No expired allocation is replayed.
+
+Certificate checks read bounded controller JSON and retained diagnostic metadata
+at budget inspection/admission, without dataset or checkpoint reads. Full source
+scope/identity checks run once during explicit certification and during the
+existing completed-result verification path.
+
 Settled timeouts and failed research scripts enter independent Review as incomplete
 experiments with real resource charges and no invented measurement. The supervisor
 keeps admission/effect failures observable in `control/supervisor-status.json`,
