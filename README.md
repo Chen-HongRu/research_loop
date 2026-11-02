@@ -108,6 +108,7 @@ study/
 | [Cactus](benchmarks/cactus/README.md) / [ProTok](integrations/protok/README.md) | 任务适配器参考及外部依赖 |
 | [验证记录](docs/verification-v2.md) | 历史单次真实运行的设置、结果与限制 |
 | [公开分发说明](docs/public-release.md) | 脱敏范围、历史边界及源码快照导出 |
+| [PR Review](docs/pr-review.md) | Codex 自动评审设置、文档同步、脱敏与算法无关性规则 |
 
 ## 开发
 
