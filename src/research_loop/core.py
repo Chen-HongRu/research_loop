@@ -19,6 +19,8 @@ from .long_training import (
     completed_results as long_training_results,
     guidance as long_training_guidance,
     nominations as long_training_nominations,
+    observation_context as long_observation_context,
+    validate_observation_reviews,
     stage_schema as long_training_schema,
     validate_policy as validate_long_training,
 )
@@ -830,6 +832,8 @@ class Study:
             "frontiers": views,
             "routes": _read(folder / "context/routes.before.json"),
         }
+        if config.get("long_training_run") is not None:
+            context["long_training_run"] = config["long_training_run"]
         long_policy = validate_long_training(config.get("long_training"))
         if long_policy:
             context["long_training"] = long_policy
@@ -1533,10 +1537,13 @@ class Study:
             .get("proposal", {})
             .get("research_design"),
         }
+        if context.get("long_training_run"):
+            context["long_training_observations"] = long_observation_context(context)
         guidance = review_guidance(self.strategy)
         if guidance:
             context["review_guidance"] = guidance
         result = self._call(state, "review", "review", context, folder / "review")
+        validate_observation_reviews(context, result)
         execute = context["execute"]
         reviews = {r["candidate_id"]: r for r in result["candidate_reviews"]}
         if len(reviews) != len(result["candidate_reviews"]):

@@ -6,6 +6,7 @@ import copy
 import fcntl
 import hashlib
 import json
+import math
 from pathlib import Path
 import time
 import uuid
@@ -73,10 +74,31 @@ def validate_policy(value):
 
 
 def stage_schema(phase, context, schema):
-    if phase != "review" or not context.get("long_training"):
+    if phase != "review":
         return schema
-    result = copy.deepcopy(schema)
+    result = schema
     text = {"type": "string"}
+    if context.get("long_training_run"):
+        result = copy.deepcopy(result)
+        fields = {
+            "step": {"type": "integer"},
+            "valid": {"type": "boolean"},
+            "verified": {"type": "boolean"},
+            "reason": text,
+        }
+        result["properties"]["observation_reviews"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": fields,
+                "required": list(fields),
+                "additionalProperties": False,
+            },
+        }
+        result["required"].append("observation_reviews")
+    if not context.get("long_training"):
+        return result
+    result = copy.deepcopy(result)
     nomination = {
         "candidate_id": text,
         "comparison_candidate_id": text,
@@ -110,7 +132,10 @@ def stage_schema(phase, context, schema):
 
 
 def guidance(phase, context):
-    if not context.get("long_training") and not context.get("long_training_results"):
+    if not any(
+        context.get(key)
+        for key in ("long_training", "long_training_results", "long_training_run")
+    ):
         return ""
     result = """
 Long-training evidence has a separate fixed protocol. Incorporate independently
@@ -119,8 +144,23 @@ checkpoint steps, data scope, failures and limitations. Compare all metrics from
 the SAME checkpoint. Distinguish the final endpoint from a best-over-curve value.
 Full-development validation is search feedback, not independent final-test evidence.
 Long training and repeated summaries of it are not independent replications.
+Preserve partial full-validation measurements, exact checkpoint steps, missing endpoint
+and uncertainty in Review markdown and global research knowledge. A timeout is not
+proof that the candidate is ineffective. Do not compare different steps as the same
+10k endpoint, invent missing measurements, or promote partial observations to the
+endpoint Frontier. Reusable checkpoints require independent per-point acceptance.
 Do not rank long-training measurements in the short-training Frontier or infer
 causality/statistical significance from a single seed or numeric improvement.
+"""
+    if phase == "review" and context.get("long_training_run"):
+        result += """
+Fill observation_reviews with exactly one step/valid/verified/reason entry for every
+complete curve point in long_training_observations, including rejected observations.
+Do not add missing or unfinished validation steps. Give a concrete nonempty reason
+for each acceptance or rejection based on the artifact and checkpoint evidence.
+An incomplete Execute has no endpoint measurement: candidate_reviews remains empty.
+Record accepted and rejected partial observations, missing_validation_steps and
+endpoint_complete explicitly in markdown, global_research and knowledge_changes.
 """
     if phase == "review" and context.get("long_training"):
         result += """
@@ -138,6 +178,113 @@ Do not nominate unchanged candidates or use missing measurements as improvements
 Nominations authorize only the separately configured long-training lane and budget.
 """
     return result
+
+
+def observation_context(context):
+    """Read one declared bounded result artifact; backend owns metric/data semantics."""
+    request, execute = context["long_training_run"], context["execute"]
+    artifacts = [
+        item
+        for item in execute["artifacts"]
+        if Path(item["path"]).name == "result.json"
+    ]
+    if (
+        not artifacts
+        and execute["outcome"] == "incomplete"
+        and not execute["measurements"]
+    ):
+        return {
+            "curve": [],
+            "endpoint_complete": False,
+            "missing_validation_steps": list(
+                range(
+                    request["recipe"]["validation_interval"],
+                    request["recipe"]["total_steps"] + 1,
+                    request["recipe"]["validation_interval"],
+                )
+            ),
+        }
+    if len(artifacts) != 1:
+        raise ValueError("Long observations require one declared result.json artifact")
+    workspace = Path(context["experiment"]["workspace"]).resolve()
+    path = Path(artifacts[0]["path"])
+    path = path if path.is_absolute() else workspace / path
+    if (
+        any(
+            part.is_symlink()
+            for part in [path, *path.parents]
+            if part == workspace or workspace in part.parents
+        )
+        or not path.resolve().is_relative_to(workspace)
+        or not path.is_file()
+        or path.stat().st_size > 4 * 1024 * 1024
+    ):
+        raise ValueError(
+            "Long observation result must be a bounded regular workspace artifact"
+        )
+    result = _read(path)
+    if (
+        result.get("run_id") != request["id"]
+        or result.get("recipe") != request["recipe"]
+        or result.get("source_candidate") != request["candidate"]
+        or result.get("evaluation") != request["evaluation"]
+        or result.get("source_identity") != artifacts[0]["version"]
+    ):
+        raise ValueError("Long observation artifact differs from the frozen request")
+    recipe = request["recipe"]
+    expected = list(
+        range(
+            recipe["validation_interval"],
+            recipe["total_steps"] + 1,
+            recipe["validation_interval"],
+        )
+    )
+    points = result.get("curve")
+    if not isinstance(points, list) or len(points) > len(expected):
+        raise ValueError("Invalid bounded long observation curve")
+    steps = [point.get("step") for point in points if isinstance(point, dict)]
+    if (
+        len(steps) != len(points)
+        or any(type(step) is not int or step not in expected for step in steps)
+        or len(set(steps)) != len(steps)
+        or steps != sorted(steps)
+    ):
+        raise ValueError(
+            "Long observation steps must be unique scheduled complete points"
+        )
+    if any(
+        isinstance(value, float) and not math.isfinite(value)
+        for point in points
+        for value in point.values()
+    ):
+        raise ValueError("Long observation curve contains nonfinite values")
+    missing = [step for step in expected if step not in steps]
+    if (
+        result.get("missing_validation_steps") != missing
+        or type(result.get("endpoint_complete")) is not bool
+    ):
+        raise ValueError("Long observation endpoint/missing-step metadata differs")
+    if result["endpoint_complete"]:
+        if missing or execute["outcome"] != "completed":
+            raise ValueError("Complete endpoint requires all scheduled validations")
+    elif execute["outcome"] != "incomplete" or execute["measurements"]:
+        raise ValueError("Partial observations cannot publish endpoint measurements")
+    return result
+
+
+def validate_observation_reviews(context, review):
+    """Require independent acceptance/rejection of every available complete point."""
+    if not context.get("long_training_run"):
+        return
+    rows = review["observation_reviews"]
+    steps = [row["step"] for row in rows]
+    expected = [
+        point["step"] for point in context["long_training_observations"]["curve"]
+    ]
+    if len(steps) != len(set(steps)) or set(steps) != set(expected):
+        raise ValueError("Observation reviews must match complete curve steps exactly")
+    if any(not row["reason"].strip() for row in rows):
+        raise ValueError("Every observation review requires a concrete reason")
 
 
 def _published(root, folder):
@@ -611,6 +758,23 @@ class LongTrainingManager:
                     max_seconds=policy["max_seconds_per_run"],
                     strategy={"selection": "direct", "review": "full"},
                 )
+            child_config = _read(child / "study.json")
+            child_state = _read(child / "state.json")
+            if child_config.get("long_training_run") is not None:
+                if child_config["long_training_run"] != request:
+                    raise ValueError("Frozen long-training child request changed")
+            elif (
+                child_state.get("iteration") == 0
+                and child_state.get("phase") == "done"
+                and child_state.get("status") == "ready"
+                and child_state.get("call_count") == 0
+                and child_state.get("calls") == {}
+                and child_state.get("active_attempt") is None
+                and child_state.get("round_admission") is None
+            ):
+                _write(
+                    child / "study.json", child_config | {"long_training_run": request}
+                )
             harness = _LongHarness(
                 request,
                 self.delegate,
@@ -629,6 +793,13 @@ class LongTrainingManager:
             review = _read(child / state["review_ref"])
             execute = _read(child / state["execution_ref"])
             output = child / "workspace/result.json"
+            if _read(child / "study.json").get("long_training_run") is not None:
+                review_context = _read(
+                    (child / state["review_ref"]).parent / "context.json"
+                )
+                observed = review_context["long_training_observations"]
+            else:
+                observed = _read(output) if output.exists() else None
             result = {
                 "id": request["id"],
                 "source_iteration": request["source_iteration"],
@@ -637,7 +808,7 @@ class LongTrainingManager:
                 "evaluation": request["evaluation"],
                 "review": review,
                 "execute": execute,
-                "result": _read(output) if output.exists() else None,
+                "result": observed,
                 "publication_ref": str(iteration / "publication.json"),
             }
             _write(
