@@ -449,6 +449,7 @@ function concurrentTasks() {
 
 test('Work tree shows concurrent lifecycles and labels long validation as its own relationship', () => {
   const tasks=concurrentTasks();context.taskFixture={tasks,nodes:tasks.filter(task=>task.task_kind!=='long_training'),state:{iteration:2},active_node_id:'active:0002'};
+  tasks[0].frontier_exclusion_reason='invalidated';tasks[0].imported=true;
   vm.runInContext("data=taskFixture;selected='active:long:L0123456789abcdef';following=false;",context);
   elements.get('taskFilter').value='';
   const graph=ui.gitLayout(tasks);
@@ -461,6 +462,7 @@ test('Work tree shows concurrent lifecycles and labels long validation as its ow
   assert.match(markup,/data-node="active:0002"/);
   assert.match(markup,/● 进行中/);
   assert.match(markup,/归档 · ● 进行中/);
+  assert.match(markup,/资格已排除 · 历史导入 · 已完成/);
   assert.doesNotMatch(markup,/代码继承：#undefined → #active:long/);
   vm.runInContext('data=null;selected=null;',context);
 });
