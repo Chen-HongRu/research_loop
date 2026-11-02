@@ -8,7 +8,7 @@ const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const elements = new Map();
 const document = {getElementById(id) {
-  if (!elements.has(id)) elements.set(id, {querySelectorAll: () => [], setAttribute() {}});
+  if (!elements.has(id)) elements.set(id, {querySelectorAll: () => [], setAttribute() {}, style:{}});
   return elements.get(id);
 }};
 // Exercise actual rendering functions without a browser, network, or polling loop.
@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {telemetryGroups, telemetryPanel, longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, telemetryPanel, longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -501,6 +501,67 @@ test('Live telemetry stays unreviewed, escaped and split by metric unit and cond
   assert.match(ui.telemetryPanel([{stream_id:'empty',events:[]}]),/尚无 dashboard 标签观测/);
 });
 
+function concurrentTasks() {
+  return [
+    {id:'active:0001',label:'当前 #0001',task_sequence:1,task_kind:'investigation',task_status:'completed',published:true,phase:'done',source_id:'active'},
+    {id:'active:long:L0123456789abcdef',label:'当前 长训 L0123456789abcdef',task_sequence:2,task_kind:'long_training',validation_of:'active:0001',task_status:'running',status:'running',phase:'execute',source_id:'active',progress:{title:'Long task execution',message:'Waiting for its own job',stages:[]}},
+    {id:'active:0002',label:'当前 #0002',task_sequence:3,task_kind:'research_script',task_status:'running',status:'running',phase:'plan',source_id:'active'},
+    {id:'active:long:L1111111111111111',task_sequence:4,task_kind:'long_training',validation_of:'active:0001',task_status:'needs_attention',status:'needs_attention',phase:'execute',source_id:'active'},
+    {id:'history-1:long:L0123456789abcdef',task_sequence:5,task_kind:'long_training',task_status:'running',archived:true,source_id:'history-1'},
+  ];
+}
+
+test('Work tree shows concurrent lifecycles and labels long validation as its own relationship', () => {
+  const tasks=concurrentTasks();context.taskFixture={tasks,nodes:tasks.filter(task=>task.task_kind!=='long_training'),state:{iteration:2},active_node_id:'active:0002'};
+  tasks[0].frontier_exclusion_reason='invalidated';tasks[0].imported=true;
+  vm.runInContext("data=taskFixture;selected='active:long:L0123456789abcdef';following=false;",context);
+  elements.get('taskFilter').value='';
+  const graph=ui.gitLayout(tasks);
+  assert.notEqual(graph.positions[tasks[1].id].lane,graph.positions[tasks[0].id].lane);
+  assert.equal(ui.graphParent(tasks[1]),tasks[0].id);
+  ui.drawGraph();
+  const markup=elements.get('graph').innerHTML;
+  assert.match(markup,/长训验证：active:0001 → active:long:L0123456789abcdef/);
+  assert.match(markup,/data-node="active:long:L0123456789abcdef"/);
+  assert.match(markup,/data-node="active:0002"/);
+  assert.match(markup,/● 进行中/);
+  assert.match(markup,/归档 · ● 进行中/);
+  assert.match(markup,/资格已排除 · 历史导入 · 已完成/);
+  assert.doesNotMatch(markup,/代码继承：#undefined → #active:long/);
+  vm.runInContext('data=null;selected=null;',context);
+});
+
+test('Running-task filters retain source and selected completed task without counting archived activity', () => {
+  const tasks=concurrentTasks();context.taskFixture={tasks,nodes:tasks.filter(task=>task.task_kind!=='long_training'),state:{iteration:2},active_node_id:'active:0002'};
+  vm.runInContext("data=taskFixture;selected='active:long:L0123456789abcdef';following=false;",context);
+  elements.get('taskFilter').value='running';
+  assert.deepEqual(plain(ui.visibleTasks().map(task=>task.id)),tasks.slice(0,3).map(task=>task.id));
+  ui.renderProgress();
+  assert.equal(elements.get('current').textContent,'2 项进行中');
+  assert.equal(elements.get('now').textContent,'Long task execution');
+  assert.match(elements.get('intent').textContent,/Waiting for its own job/);
+  assert.doesNotMatch(elements.get('phases').innerHTML,/路线选择/);
+  tasks[1].task_status='completed';tasks[1].published=true;
+  assert.deepEqual(plain(ui.visibleTasks().map(task=>task.id)),tasks.slice(0,3).map(task=>task.id));
+  ui.renderProgress();
+  assert.equal(elements.get('current').textContent,'1 项进行中');
+  assert.equal(vm.runInContext('selected',context),tasks[1].id);
+  elements.get('taskFilter').value='needs_attention';
+  assert.ok(ui.visibleTasks().some(task=>task.id===tasks[3].id));
+  assert.ok(ui.visibleTasks().some(task=>task.id===tasks[0].id));
+  elements.get('taskFilter').value='';
+  vm.runInContext('data=null;selected=null;following=true;',context);
+});
+
+test('Unreviewed long observations keep their evidence state and do not invent the final endpoint', () => {
+  const rendered=ui.longTrainingRuns([{id:'L0123456789abcdef',status:'running',phase:'review',request:{source_iteration:'0001'},observations:{curve:[{step:2000,ca_rmsd:2.0123456789,tm_score:.5,lddt:.6,checkpoint:'checkpoint2k'}]}}]);
+  assert.match(rendered,/未评审观测/);
+  assert.match(rendered,/2.0123456789/);
+  assert.match(rendered,/尚无逐点评审/);
+  assert.doesNotMatch(rendered,/<svg |曲线最优 CA RMSD<\/th><td>2000/);
+  assert.doesNotMatch(rendered,/最终 10k<\/th><td>10000/);
+});
+
 test('Native telemetry groups scientific conditions independently of transport cursors', () => {
   const point={name:'native/training',value:.2,step:10,tags:['dashboard'],context:{scope:'training',source:'/train.csv',remote_start_offset:10,remote_end_offset:20}};
   const stream={source:{kind:'fixed-short'},events:[point,{...point,step:20,value:.1,context:{...point.context,remote_start_offset:20,remote_end_offset:30}}]};
@@ -508,4 +569,57 @@ test('Native telemetry groups scientific conditions independently of transport c
   assert.equal(ui.telemetryGroups(stream)[0].length,2);
   stream.events.push({...point,context:{...point.context,scope:'full'}});
   assert.equal(ui.telemetryGroups(stream).length,2);
+});
+
+test('A settled partial long task exposes progress and logs before review without accepted curves', () => {
+  const rendered=ui.longTrainingRuns([{id:'L0123456789abcdef',status:'running',phase:'review',observations:{status:'failed',terminal_state:'TIMEOUT',endpoint_complete:false,missing_validation_steps:[8000,10000],progress:{optimizer_step:6750},training_log_tail:'retained loss=.2',curve:[{step:2000,ca_rmsd:2,tm_score:.5,lddt:.6,checkpoint:'checkpoint2k'}]}}]);
+  for(const text of ['TIMEOUT','6750','8000, 10000','retained loss=.2','checkpoint2k','未完整完成 · 未评审','尚无逐点评审'])assert.ok(rendered.includes(text),text);
+  assert.doesNotMatch(rendered,/<svg |未完整完成 · 已评审/);
+});
+
+test('Selecting a long task loads its task URL instead of falling back to an iteration URL', async () => {
+  const task={...concurrentTasks()[1],detail_url:'/api/task/active/long/L0123456789abcdef'};
+  context.taskFixture={tasks:[task],nodes:[],state:{}};
+  context.requestedTaskPaths=[];
+  vm.runInContext(`data=taskFixture;selected=taskFixture.tasks[0].id;detail=null;globalView=false;
+    globalThis.savedTaskIO={api,renderDetailHeader,renderDetail};
+    api=async path=>{requestedTaskPaths.push(path);return {task_kind:'long_training',long_training:[]};};
+    renderDetailHeader=()=>{};renderDetail=()=>{};`,context);
+  try {
+    await ui.loadDetail(true);
+    assert.deepEqual(plain(context.requestedTaskPaths),[task.detail_url]);
+    assert.equal(vm.runInContext('detail.id',context),task.id);
+  } finally {
+    vm.runInContext('({api,renderDetailHeader,renderDetail}=savedTaskIO);delete globalThis.savedTaskIO;data=null;detail=null;selected=null;',context);
+  }
+});
+
+test('Task detail refresh and task switching retain each task reading position and disclosures', () => {
+  const prior=elements.get('detailBody');let markup='',folds=[];
+  const body={scrollTop:0,querySelectorAll:selector=>selector==='details'?folds:[],
+    get innerHTML(){return markup;},set innerHTML(value){markup=value;folds=[...value.matchAll(/<details data-disclosure="([^"]+)"([^>]*)>/g)].map(match=>({dataset:{disclosure:match[1]},open:/\sopen(?:\s|$)/.test(match[2])}));}};
+  elements.set('detailBody',body);
+  const tasks=concurrentTasks();
+  context.taskFixture={tasks,nodes:[],state:{}};
+  context.longDetail={id:tasks[1].id,task_kind:'long_training',long_training:[{id:'L0123456789abcdef',status:'reviewed',request:{source_iteration:'0001'},result:{review:{markdown:'Independent result'},result:{curve:[]}}}]};
+  try {
+    vm.runInContext("data=taskFixture;selected=longDetail.id;detail=longDetail;tab='explanation';globalView=false;",context);
+    ui.renderDetail();
+    let fold=folds.find(item=>item.dataset.disclosure==='long-review-L0123456789abcdef');
+    fold.open=true;body.scrollTop=173;
+    context.longDetail.long_training[0].result.review.markdown='Updated independent result';
+    ui.renderDetail();
+    assert.equal(folds.find(item=>item.dataset.disclosure===fold.dataset.disclosure).open,true);
+    assert.equal(body.scrollTop,173);
+    assert.match(markup,/Updated independent result/);
+    vm.runInContext("selected='active:0002';detail=null;",context);ui.renderDetail();
+    vm.runInContext("detail={id:selected,task_kind:'long_training',long_training:[]};",context);ui.renderDetail();
+    assert.equal(body.scrollTop,0,'a different task starts at its own reading position');
+    vm.runInContext('selected=longDetail.id;detail=longDetail;',context);ui.renderDetail();
+    assert.equal(body.scrollTop,173);
+    assert.equal(folds.find(item=>item.dataset.disclosure===fold.dataset.disclosure).open,true);
+  } finally {
+    elements.set('detailBody',prior);
+    vm.runInContext('data=null;detail=null;selected=null;renderedDetailKey=null;detailReading.clear();',context);
+  }
 });

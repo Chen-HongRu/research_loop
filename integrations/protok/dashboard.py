@@ -1334,6 +1334,234 @@ def execution_details(root, identity):
     return result
 
 
+def long_job_metadata(root, run_id):
+    """Expose small local job receipts, excluding ownership and authorization data."""
+    directory = Path(root) / "control/long-training-jobs" / run_id
+
+    def small(name, max_bytes=96_000):
+        path = directory / name
+        try:
+            if (
+                path.is_symlink()
+                or not path.resolve().is_relative_to(Path(root).resolve())
+                or path.stat().st_size > max_bytes
+            ):
+                return {}
+            value = json.loads(path.read_text())
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError, UnicodeError):
+            return {}
+
+    job = small("job.json")
+    if not job:
+        return {}
+    source = relative(directory / "job.json", root)
+    if job.get("run_id") != run_id or not job.get("source_identity"):
+        return {"status": "unknown", "error": "长训作业身份不可确认", "source": source}
+    state = small("state.json")
+    attempts = state.get("attempts", [])
+    if not isinstance(attempts, list):
+        attempts = []
+    native = attempts[0] if attempts and isinstance(attempts[0], dict) else {}
+    receipt_name = (
+        "receipt.json" if (directory / "receipt.json").exists() else "blocked.json"
+    )
+    # Completed observations include two bounded log tails as well as metrics.
+    receipt = small(receipt_name, max_bytes=4 * 1024 * 1024)
+    valid = (
+        bool(receipt)
+        and receipt.get("run_id") == run_id
+        and receipt.get("source_identity") == job["source_identity"]
+        and receipt.get("allocated_seconds") == job.get("allocated_seconds")
+        and (
+            receipt.get("status") == "blocked"
+            and receipt.get("gpu_seconds") is None
+            or receipt.get("status") in {"completed", "failed"}
+            and type(receipt.get("gpu_seconds")) is int
+            and receipt["gpu_seconds"] >= 0
+        )
+    )
+    invalid = (directory / receipt_name).exists() and not valid
+    observed = receipt if valid else native
+    return {
+        "status": "unknown" if invalid else observed.get("status", "unrecorded"),
+        **{
+            key: observed.get(key)
+            for key in ("owned_job_id", "terminal_state", "exit_code", "gpu_seconds")
+        },
+        "allocated_gpu_seconds": job.get("allocated_seconds"),
+        "source_identity": job["source_identity"],
+        "source_commit": job.get("request", {}).get("source_workspace_ref"),
+        "curve": receipt.get("curve", []) if valid else [],
+        **{
+            key: receipt[key]
+            for key in (
+                "endpoint_complete",
+                "missing_validation_steps",
+                "progress",
+                "training_log_tail",
+                "stdout_tail",
+                "log_evidence",
+                "evidence_errors",
+            )
+            if valid and key in receipt
+        },
+        "error": "长训回执与原作业身份或核账不匹配"
+        if invalid
+        else receipt.get("error"),
+        "source": relative(directory / receipt_name, root)
+        if valid or invalid
+        else relative(directory / "state.json", root),
+    }
+
+
+def long_task(root, run, source_id="active", source_label="当前"):
+    run_id = run["id"]
+    if not re.fullmatch(r"L[0-9a-f]{16}", run_id):
+        raise ValueError("Invalid long task ID")
+    lane = Path(root) / "study/long-runs" / run_id
+    folder = lane / "study/iterations/0001"
+    state = read(lane / "study/state.json", {})
+    metadata = read(folder / "iteration.json", {})
+    agents = agent_outputs(lane, folder)
+    job = long_job_metadata(root, run_id)
+    task_progress = progress(lane, state, {}, {}, agents)
+    task_progress["stages"] = [
+        row for row in task_progress["stages"] if row["key"] != "selection"
+    ]
+    for reason in task_progress["reasons"]:
+        reason["source"] = " · ".join(
+            relative(lane, root) + "/" + path for path in reason["source"].split(" · ")
+        )
+    if not state:
+        task_progress.update(
+            title="等待调度", message="长训提名已保留，尚未进入 Plan。"
+        )
+    if run.get("result"):
+        task_progress.update(
+            title="长训评审已发布",
+            message="结果保留在本任务，可作为后续调查的研究输入。",
+        )
+    if job.get("error"):
+        task_progress["reasons"].append(
+            {"title": "长训作业记录", "detail": job["error"], "source": job["source"]}
+        )
+    request = run.get("request", {})
+    return {
+        "id": source_id + ":long:" + run_id,
+        "local_id": run_id,
+        "source_id": source_id,
+        "source_label": source_label,
+        "label": source_label + " 长训 " + run_id,
+        "task_kind": "long_training",
+        "validation_of": source_id + ":" + str(run["source_iteration"]).zfill(4),
+        "status": run["status"],
+        "phase": run["phase"],
+        "published": bool(run.get("result")),
+        "action": request.get("nomination", {}).get("reason"),
+        "title": "10k 长训 · 完整开发集验证",
+        "created_at": metadata.get("created_at"),
+        "source_commit": request.get("source_workspace_ref"),
+        "job_status": job.get("status"),
+        "attempts": [job] if job else [],
+        "outcome": (run.get("result") or {}).get("result", {}).get("status")
+        if (run.get("result") or {}).get("result")
+        else job.get("status"),
+        "progress": task_progress,
+        "detail_url": "/api/task/" + source_id + "/long/" + run_id,
+        "value": None,
+        "frontier_current": False,
+        "frontier_eligible": False,
+    }
+
+
+def task_status(task):
+    if task.get("published") or task.get("source_id") == "ledger":
+        return "completed"
+    if task.get("status") == "withdrawn":
+        return "withdrawn"
+    if task.get("status") in {
+        "needs_attention",
+        "failed",
+        "interrupted",
+        "timed_out",
+    } or task.get("job_status") in {"blocked", "unknown"}:
+        return "needs_attention"
+    if task.get("status") in {"paused", "stopped"}:
+        return "stopped"
+    if task.get("status") == "running":
+        return "running"
+    return "queued" if task.get("status") == "queued" else "waiting"
+
+
+def task_nodes(nodes, long_tasks, *, snapshot_only=False):
+    """Keep quality nodes separate; the work tree contains every task lifecycle."""
+    tasks = []
+    parents = {node["id"]: node for node in nodes}
+    children = {}
+    for task in long_tasks:
+        parent = parents.get(task["validation_of"], {})
+        task.update(
+            route_id=parent.get("route_id"), route=parent.get("route", "长训验证")
+        )
+        children.setdefault(task["validation_of"], []).append(task)
+    for node in nodes:
+        tasks.append(
+            {
+                **node,
+                "task_kind": "ledger"
+                if node.get("source_id") == "ledger"
+                else "research_script"
+                if node.get("execution_kind") == "research_script"
+                else "investigation",
+            }
+        )
+        tasks.extend(children.pop(node["id"], []))
+    tasks.extend(task for group in children.values() for task in group)
+    for sequence, task in enumerate(tasks, 1):
+        task["task_sequence"] = sequence
+        task["task_status"] = task_status(task)
+        task["archived"] = snapshot_only or task["source_id"] != "active"
+    return tasks
+
+
+def long_task_details(root, run_id, source_id, source_label):
+    runs = long_training_snapshot(Path(root) / "study")
+    run = next((run for run in runs if run["id"] == run_id), None)
+    if run is None:
+        raise ValueError("Unknown configured long task")
+    task = long_task(root, run, source_id, source_label)
+    lane = Path(root) / "study/long-runs" / run_id
+    folder = lane / "study/iterations/0001"
+    agents = agent_outputs(lane, folder)
+    job = task["attempts"][0] if task["attempts"] else {}
+    feedback = [
+        source_id + ":" + path.parent.parent.name
+        for path in sorted(
+            (Path(root) / "study/iterations").glob(
+                "*/context/long_training_results.json"
+            )
+        )
+        if any(result.get("id") == run_id for result in read(path, []))
+    ]
+    for agent in agents:
+        agent["source"] = relative(lane, root) + "/" + agent["source"]
+    return {
+        "task_kind": "long_training",
+        "progress": task["progress"],
+        "agents": agents,
+        "plan": prose(folder / "plan.md"),
+        "review": prose(folder / "review.md"),
+        "long_training": [
+            {**run, "observations": job, "feedback_iterations": feedback}
+        ],
+        "execution": {"job": job, "formal_attempts": task["attempts"]},
+        "source_id": source_id,
+        "source_label": source_label,
+        "local_id": run_id,
+    }
+
+
 def details(root, identity):
     folder = root / "study/iterations" / identity
     selection = read(folder / "selection.json", {})
@@ -1591,7 +1819,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         )
         nodes.extend(ledger_nodes)
     active_frontier = active["frontier"]
-    history_frontiers, long_training = [], []
+    history_frontiers, long_training, long_tasks = [], [], []
     for definition in definitions:
         source_id, source_root, label = (
             definition["id"],
@@ -1605,6 +1833,10 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         )
         long_training.extend(
             {**run, "source_id": source_id, "source_label": label}
+            for run in local.get("long_training", [])
+        )
+        long_tasks.extend(
+            long_task(source_root, run, source_id, label)
             for run in local.get("long_training", [])
         )
         source_frontier = local["frontier"]
@@ -1797,6 +2029,10 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         for node in nodes
         if node.get("fingerprint") and node.get("value") is not None
     }
+    tasks = task_nodes(nodes, long_tasks, snapshot_only=snapshot_only)
+    for task in tasks:
+        if task["id"] == "active:" + f"{active['state'].get('iteration') or 0:04d}":
+            task["progress"] = active["progress"]
     return {
         **active,
         "nodes": nodes,
@@ -1808,6 +2044,12 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         "frontier": merged_frontier,
         "telemetry": telemetry_view(root, history_roots=history_roots),
         "long_training": long_training,
+        "tasks": tasks,
+        "active_task_ids": [
+            task["id"]
+            for task in tasks
+            if task["task_status"] == "running" and not task["archived"]
+        ],
         "coverage": {
             "study_count": len(definitions),
             "node_count": len(nodes),
@@ -2064,6 +2306,29 @@ def serve(root, port, *, snapshot_only=False, history_roots=(), records_root=Non
                         ),
                         ensure_ascii=False,
                     ).encode()
+                    mime = "application/json; charset=utf-8"
+                elif re.fullmatch(
+                    r"/api/task/(?:active|history-[1-9][0-9]*)/long/L[0-9a-f]{16}", path
+                ):
+                    source_id, run_id = path.split("/")[3], path.split("/")[5]
+                    definition = next(
+                        (
+                            source
+                            for source in study_sources(root, history_roots)
+                            if source["id"] == source_id
+                        ),
+                        None,
+                    )
+                    try:
+                        if definition is None:
+                            raise ValueError("Unknown configured task source")
+                        payload = long_task_details(
+                            definition["root"], run_id, source_id, definition["label"]
+                        )
+                    except ValueError:
+                        self.send_error(404)
+                        return
+                    body = json.dumps(payload, ensure_ascii=False).encode()
                     mime = "application/json; charset=utf-8"
                 elif re.fullmatch(
                     r"/api/node/(?:active|history-[1-9][0-9]*)/[0-9]{4,}|/api/node/ledger/(?:smoke-)?[0-9a-f]{64}",

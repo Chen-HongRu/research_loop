@@ -29,7 +29,7 @@ function briefStatement(statement,record,key,limit=120) {
 function operatorPlanPanel(plan,compact=false) {
   if(plan?.kind!=='operator_resume') return '';
   const key='operator-plan-'+plan.target_iteration;
-  let body='<p>本轮沿用 '+experimentLink(plan.source_iteration)+' 的既有候选，按操作员授权补做首次固定协议评测，没有新增 Planner 模型调用。原研究问题、设计依据及候选改动请核对 '+experimentLink(plan.source_iteration,'原始研究 Plan #'+plan.source_iteration)+'。</p>';
+  let body='<p>本轮沿用 '+experimentLink(plan.source_iteration)+' 的既有候选，按操作员授权补做首次固定协议评测，没有新增 Planner 模型调用。原研究问题、设计依据及候选改动请核对 '+experimentLink(plan.source_iteration,'原始研究 Plan #'+plan.source_iteration,'plan')+'。</p>';
   body+='<dl class="facts"><dt>本轮范围</dt><dd>候选源码保持冻结，提交评测、收集实际回执，再交给独立 Review。</dd><dt>计划来源</dt><dd>操作员授权的恢复计划</dd></dl>';
   if(compact) body+=disclosure(key+'-contract','查看本轮冻结的恢复合同',structured(plan.output?.contract || {}));
   else {
