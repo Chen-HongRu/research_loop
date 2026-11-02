@@ -12,6 +12,7 @@ from pathlib import Path
 from .core import Study, StudyError, initialize
 from .harness import HarnessConfig, HarnessError
 from .meta import MetaStudy
+from .tasks import TaskQueue
 
 
 def _interrupt(signum, frame):
@@ -21,6 +22,17 @@ def _interrupt(signum, frame):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="research-loop")
     commands = parser.add_subparsers(dest="command", required=True)
+    tasks = commands.add_parser("task", help="Manage durable operator requests")
+    task_commands = tasks.add_subparsers(dest="task_command", required=True)
+    for name in ("submit", "list", "status", "cancel", "priority"):
+        command = task_commands.add_parser(name)
+        command.add_argument("study", type=Path)
+        if name == "submit":
+            command.add_argument("--request", required=True, type=Path)
+        if name in {"status", "cancel", "priority"}:
+            command.add_argument("id")
+        if name == "priority":
+            command.add_argument("priority", type=int)
     meta = commands.add_parser("meta", help="Manage protected Meta Loop versions")
     meta_commands = meta.add_subparsers(dest="meta_command", required=True)
     meta_init = meta_commands.add_parser("init", help="Freeze a baseline and protocol")
@@ -88,7 +100,21 @@ def main(argv: list[str] | None = None) -> int:
     if handle_sigterm:
         previous_sigterm = signal.signal(signal.SIGTERM, _interrupt)
     try:
-        if args.command == "meta":
+        if args.command == "task":
+            queue = TaskQueue(args.study)
+            if args.task_command == "submit":
+                result = queue.submit(json.loads(args.request.read_text()))
+            elif args.task_command == "cancel":
+                result = queue.cancel(args.id)
+            elif args.task_command == "priority":
+                result = queue.set_priority(args.id, args.priority)
+            elif args.task_command == "status":
+                queue.request(args.id)
+                result = next(row for row in queue.snapshot() if row["id"] == args.id)
+            else:
+                result = queue.snapshot()
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        elif args.command == "meta":
             if args.meta_command == "init":
                 study = MetaStudy.initialize(
                     args.study,

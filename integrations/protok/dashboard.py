@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from itertools import islice
 import math
 import mimetypes
 import http.client
@@ -20,7 +21,9 @@ from integrations.protok.backend import METRIC, PROTOCOL, ProTokBackend, ProTokE
 from integrations.protok.explanation import explanation_coverage, explanation_status
 from integrations.protok.plan_provenance import execution_plan
 from integrations.protok.run import job_path
+from integrations.protok.task_telemetry import TASK_ID, manual_locations
 from research_loop import telemetry
+from research_loop.tasks import TaskQueue
 from research_loop.harness import completed_response
 from research_loop.long_training import snapshot as long_training_snapshot
 
@@ -1209,6 +1212,12 @@ def snapshot(root, *, snapshot_only=False):
         "long_training_gpu_seconds": backend.get("long_training_gpu_seconds", 0)
         if backend_error is None
         else None,
+        "manual_training_gpu_seconds": backend.get("manual_training_gpu_seconds", 0)
+        if backend_error is None
+        else None,
+        "manual_training_outstanding": backend.get("manual_training_outstanding", [])
+        if backend_error is None
+        else None,
         "long_training_outstanding": backend.get("long_training_outstanding", [])
         if backend_error is None
         else None,
@@ -1335,9 +1344,14 @@ def execution_details(root, identity):
     return result
 
 
-def long_job_metadata(root, run_id):
+def long_job_metadata(root, run_id, *, manual=False, manual_task_id=None):
     """Expose small local job receipts, excluding ownership and authorization data."""
-    directory = Path(root) / "control/long-training-jobs" / run_id
+    directory = (
+        Path(root)
+        / "control"
+        / ("manual-training-jobs" if manual else "long-training-jobs")
+        / run_id
+    )
 
     def small(name, max_bytes=96_000):
         path = directory / name
@@ -1357,7 +1371,16 @@ def long_job_metadata(root, run_id):
     if not job:
         return {}
     source = relative(directory / "job.json", root)
-    if job.get("run_id") != run_id or not job.get("source_identity"):
+    if (
+        job.get("run_id") != run_id
+        or not job.get("source_identity")
+        or manual
+        and (
+            job.get("manual_task_id") != manual_task_id
+            or job.get("budget_pool") != "manual"
+            or job.get("request", {}).get("manual_task_id") != manual_task_id
+        )
+    ):
         return {"status": "unknown", "error": "长训作业身份不可确认", "source": source}
     state = small("state.json")
     attempts = state.get("attempts", [])
@@ -1374,6 +1397,13 @@ def long_job_metadata(root, run_id):
         and receipt.get("run_id") == run_id
         and receipt.get("source_identity") == job["source_identity"]
         and receipt.get("allocated_seconds") == job.get("allocated_seconds")
+        and (
+            not manual
+            or (
+                receipt.get("manual_task_id") == manual_task_id
+                and receipt.get("budget_pool") == "manual"
+            )
+        )
         and (
             receipt.get("status") == "blocked"
             and receipt.get("gpu_seconds") is None
@@ -1476,9 +1506,233 @@ def long_task(root, run, source_id="active", source_label="当前"):
     }
 
 
+def manual_request(request):
+    """Only public request and source fields; never compute authorization."""
+    result = {
+        key: request.get(key)
+        for key in (
+            "version",
+            "id",
+            "kind",
+            "title",
+            "instruction",
+            "route_id",
+            "base_experiment",
+            "priority",
+            "allow_changes",
+            "submitted_at",
+        )
+    }
+    result["source"] = {
+        key: request.get("source", {}).get(key)
+        for key in (
+            "project",
+            "workspace",
+            "revision",
+            "experiment",
+        )
+    }
+    budget = request.get("budget")
+    result["budget"] = (
+        {
+            key: budget.get(key)
+            for key in (
+                "gpu_seconds_per_run",
+                "total_gpu_seconds",
+                "deadline",
+            )
+        }
+        if isinstance(budget, dict)
+        else None
+    )
+    return result
+
+
+def manual_rows(root):
+    return TaskQueue(Path(root) / "study").snapshot()
+
+
+def manual_task(root, row, source_id="active", source_label="当前"):
+    request = manual_request(row["request"])
+    identity = row["id"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", identity):
+        raise ValueError("Invalid manual task ID")
+    folder = Path(root) / "study/tasks" / identity / "study/iterations/0001"
+    run_id = read(folder / "context/manual-long-request.json", {}).get("id", "")
+    job = (
+        long_job_metadata(root, run_id, manual=True, manual_task_id=identity)
+        if re.fullmatch(r"L[0-9a-f]{16}", run_id)
+        else {}
+    )
+    binding = row.get("binding")
+    iteration = binding.get("iteration") if binding else None
+    main = request["kind"] == "investigation"
+    base = request["base_experiment"]
+    return {
+        "id": source_id + ":manual:" + identity,
+        "manual_task_id": identity,
+        "local_id": identity,
+        "source_id": source_id,
+        "source_label": source_label,
+        "task_kind": request["kind"],
+        "task_origin": "user",
+        "budget_pool": "manual" if not main else None,
+        "label": source_label + (" 人工调查 " if main else " 人工长训 ") + identity,
+        "title": request["title"],
+        "action": request["instruction"],
+        "manual_request": request,
+        "priority": row["priority"],
+        "status": row["status"],
+        "phase": row["phase"] or "pending",
+        "published": row["status"] == "reviewed",
+        "created_at": request["submitted_at"],
+        "source_commit": request["source"]["revision"],
+        "route_id": source_id + ":" + request["route_id"],
+        "route": request["route_id"],
+        "base": source_id + ":" + base if base else None,
+        "validation_of": source_id + ":" + base if not main and base else None,
+        "experiment_id": source_id + ":" + iteration if main and iteration else None,
+        "detail_url": "/api/node/" + source_id + "/" + iteration
+        if main and iteration
+        else "/api/task/" + source_id + "/manual/" + identity,
+        "attempts": [job] if job else [],
+        "job_status": job.get("status"),
+        "outcome": job.get("status"),
+        "frontier_current": False,
+        "frontier_eligible": False,
+        "value": None,
+    }
+
+
+def merge_manual_tasks(tasks, definitions, *, snapshot_only=False):
+    aliases = {}
+    for definition in definitions:
+        for row in manual_rows(definition["root"]):
+            task = manual_task(
+                definition["root"], row, definition["id"], definition["label"]
+            )
+            existing = next(
+                (node for node in tasks if node["id"] == task["experiment_id"]), None
+            )
+            if existing:
+                original = existing["id"]
+                existing.update(
+                    {
+                        key: value
+                        for key, value in task.items()
+                        if key
+                        in {
+                            "id",
+                            "manual_task_id",
+                            "task_origin",
+                            "manual_request",
+                            "experiment_id",
+                            "label",
+                            "title",
+                            "priority",
+                        }
+                    }
+                )
+                aliases[original] = existing["id"]
+            else:
+                tasks.append(task)
+    for sequence, task in enumerate(tasks, 1):
+        for key in (
+            "base",
+            "validation_of",
+            "continuation_of",
+            "research_iteration",
+            "plan_base",
+        ):
+            if task.get(key) in aliases:
+                task[key] = aliases[task[key]]
+        task["references"] = [
+            aliases.get(ref, ref) for ref in task.get("references", [])
+        ]
+        task.update(
+            task_sequence=sequence,
+            task_status=task_status(task),
+            archived=snapshot_only or task["source_id"] != "active",
+        )
+    return aliases
+
+
+def manual_task_details(root, identity, source_id, source_label):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", identity):
+        raise ValueError("Invalid manual task ID")
+    row = next((row for row in manual_rows(root) if row["id"] == identity), None)
+    if row is None:
+        raise ValueError("Unknown configured manual task")
+    task = manual_task(root, row, source_id, source_label)
+    if task["experiment_id"]:
+        return {
+            **details(Path(root), row["binding"]["iteration"]),
+            "manual_request": task["manual_request"],
+            "task_origin": "user",
+            "source_id": source_id,
+            "source_label": source_label,
+        }
+    lane = Path(root) / "study/tasks" / identity
+    folder = lane / "study/iterations/0001"
+    agents = agent_outputs(lane, folder)
+    for agent in agents:
+        agent["source"] = relative(lane, root) + "/" + agent["source"]
+    job = task["attempts"][0] if task["attempts"] else {}
+    request = read(folder / "context/manual-long-request.json", {})
+    public_wire = {
+        key: request.get(key) for key in ("id", "source_iteration", "candidate_id")
+    }
+    public_wire["candidate"] = {"id": request.get("candidate", {}).get("id")}
+    public_wire["recipe"] = {
+        key: request.get("recipe", {}).get(key)
+        for key in (
+            "total_steps",
+            "validation_interval",
+            "validation_split",
+            "initialization",
+            "seed",
+        )
+    }
+    public_wire["evaluation"] = {
+        key: request.get("evaluation", {}).get(key)
+        for key in ("id", "comparison_scope", "data_role")
+    }
+    run = {
+        "id": identity,
+        "request": public_wire,
+        "status": row["status"],
+        "phase": task["phase"],
+        "observations": job,
+    }
+    if row.get("result"):
+        result = row["result"]
+        run["result"] = {
+            "review": result.get("review", {}),
+            "execute": result.get("execute", {}),
+            "publication_ref": result.get("publication_ref"),
+            "result": job,
+        }
+    return {
+        "task_kind": task["task_kind"],
+        "task_origin": "user",
+        "budget_pool": task["budget_pool"],
+        "manual_request": task["manual_request"],
+        "source_id": source_id,
+        "source_label": source_label,
+        "local_id": identity,
+        "agents": agents,
+        "plan": prose(folder / "plan.md"),
+        "review": prose(folder / "review.md"),
+        "long_training": [run] if task["task_kind"] == "long_training" else [],
+        "execution": {"job": job, "formal_attempts": task["attempts"]},
+    }
+
+
 def task_status(task):
     if task.get("published") or task.get("source_id") == "ledger":
         return "completed"
+    if task.get("status") in {"cancelled", "expired"}:
+        return task["status"]
     if task.get("status") == "withdrawn":
         return "withdrawn"
     if task.get("status") in {
@@ -1492,7 +1746,9 @@ def task_status(task):
         return "stopped"
     if task.get("status") == "running":
         return "running"
-    return "queued" if task.get("status") == "queued" else "waiting"
+    return (
+        "queued" if task.get("status") in {"queued", "pending", "bound"} else "waiting"
+    )
 
 
 def task_nodes(nodes, long_tasks, *, snapshot_only=False):
@@ -2031,15 +2287,21 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         if node.get("fingerprint") and node.get("value") is not None
     }
     tasks = task_nodes(nodes, long_tasks, snapshot_only=snapshot_only)
+    aliases = merge_manual_tasks(tasks, definitions, snapshot_only=snapshot_only)
     for task in tasks:
-        if task["id"] == "active:" + f"{active['state'].get('iteration') or 0:04d}":
+        if (
+            task.get("experiment_id") or task["id"]
+        ) == "active:" + f"{active['state'].get('iteration') or 0:04d}":
             task["progress"] = active["progress"]
     return {
         **active,
         "nodes": nodes,
         "routes": routes,
         "sources": sources,
-        "active_node_id": "active:" + f"{active['state'].get('iteration') or 0:04d}"
+        "active_node_id": aliases.get(
+            "active:" + f"{active['state'].get('iteration') or 0:04d}",
+            "active:" + f"{active['state'].get('iteration') or 0:04d}",
+        )
         if active["nodes"]
         else None,
         "frontier": merged_frontier,
@@ -2125,7 +2387,23 @@ def source_details(root, source_id, local_id, *, history_roots=(), records_root=
         definition["root"] / "study/iterations" / local_id / "iteration.json"
     ).is_file():
         raise ValueError("Unknown configured iteration")
+    manual = next(
+        (
+            row
+            for row in manual_rows(definition["root"])
+            if row.get("binding")
+            and row["binding"].get("iteration") == local_id
+            and Path(row["binding"]["study"]).resolve()
+            == (definition["root"] / "study").resolve()
+        ),
+        None,
+    )
     return {
+        **(
+            {"manual_request": manual_request(manual["request"]), "task_origin": "user"}
+            if manual
+            else {}
+        ),
         **details(definition["root"], local_id),
         "source_id": source_id,
         "local_id": local_id,
@@ -2143,6 +2421,7 @@ def telemetry_view(
     stream_id=None,
     after=0,
     experiment_id=None,
+    manual_task_id=None,
 ):
     """Bounded local-only projection of dashboard-tagged observations."""
     streams = []
@@ -2150,8 +2429,10 @@ def telemetry_view(
         if source_id is not None and definition["id"] != source_id:
             continue
         study = definition["root"] / "study"
-        locations = [(None, study)] if run_id is None else []
-        if experiment_id is not None:
+        locations = (
+            [(None, study, None)] if run_id is None and manual_task_id is None else []
+        )
+        if experiment_id is not None or manual_task_id is not None:
             long_runs = []
         elif run_id is None:
             long_runs = sorted((study / "long-runs").glob("L*"))[:32]
@@ -2160,13 +2441,19 @@ def telemetry_view(
         else:
             long_runs = []
         locations.extend(
-            (folder.name, folder / "study")
+            (folder.name, folder / "study", None)
             for folder in long_runs
             if re.fullmatch(r"L[0-9a-f]{16}", folder.name)
             and folder.is_dir()
             and not folder.is_symlink()
         )
-        for lane, location in locations:
+        if run_id is None and experiment_id is None:
+            manual = manual_locations(study, manual_task_id)
+            locations.extend(
+                (None, location, identity)
+                for identity, _, location in islice(manual, 32)
+            )
+        for lane, location, task_identity in locations:
             if run_id is not None and lane != run_id:
                 continue
             try:
@@ -2211,6 +2498,11 @@ def telemetry_view(
                         "stream_id": identity,
                         "source_id": definition["id"],
                         "run_id": lane,
+                        **(
+                            {"manual_task_id": task_identity}
+                            if task_identity is not None
+                            else {}
+                        ),
                         "source": {
                             key: source[key]
                             for key in (
@@ -2441,9 +2733,19 @@ def serve(
                     lane = query.get("run", [None])[0]
                     stream = query.get("stream", [None])[0]
                     experiment = query.get("experiment", [None])[0]
+                    manual_task = query.get("task", [None])[0]
                     after = int(query.get("after", ["0"])[0])
                     if (
                         after < 0
+                        or (
+                            manual_task is not None
+                            and (
+                                not source
+                                or lane is not None
+                                or experiment is not None
+                                or not re.fullmatch(TASK_ID, manual_task)
+                            )
+                        )
                         or (
                             experiment is not None
                             and (
@@ -2481,6 +2783,7 @@ def serve(
                             stream_id=stream,
                             after=after,
                             experiment_id=experiment,
+                            manual_task_id=manual_task,
                         ),
                         ensure_ascii=False,
                     ).encode()
@@ -2501,7 +2804,8 @@ def serve(
                     body = json.dumps(payload, ensure_ascii=False).encode()
                     mime = "application/json; charset=utf-8"
                 elif re.fullmatch(
-                    r"/api/task/(?:active|history-[1-9][0-9]*)/long/L[0-9a-f]{16}", path
+                    r"/api/task/(?:active|history-[1-9][0-9]*)/(?:long/L[0-9a-f]{16}|manual/[A-Za-z0-9][A-Za-z0-9_-]{0,63})",
+                    path,
                 ):
                     source_id, run_id = path.split("/")[3], path.split("/")[5]
                     definition = next(
@@ -2515,9 +2819,11 @@ def serve(
                     try:
                         if definition is None:
                             raise ValueError("Unknown configured task source")
-                        payload = long_task_details(
-                            definition["root"], run_id, source_id, definition["label"]
-                        )
+                        payload = (
+                            manual_task_details
+                            if path.split("/")[4] == "manual"
+                            else long_task_details
+                        )(definition["root"], run_id, source_id, definition["label"])
                     except ValueError:
                         self.send_error(404)
                         return

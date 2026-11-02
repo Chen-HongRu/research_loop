@@ -495,7 +495,7 @@ class ProTokServerTests(unittest.TestCase):
             ),
             patch.object(SERVER, "ScoutScheduler", return_value=scout),
             patch(
-                "integrations.protok.long_training_loop.LongTrainingScheduler",
+                "integrations.protok.tasks.ExperimentScheduler",
                 return_value=long_training,
             ),
             patch.object(SERVER, "drive", side_effect=RuntimeError("first failure")),
@@ -523,7 +523,9 @@ class ProTokServerTests(unittest.TestCase):
         self.backend.inspect.return_value.update(
             long_training_gpu_seconds=80,
             long_training_outstanding=[],
-            total_gpu_seconds=180,
+            manual_training_gpu_seconds=40,
+            manual_training_outstanding=[],
+            total_gpu_seconds=220,
         )
         spec = SimpleNamespace(loader=SimpleNamespace(exec_module=Mock()))
         for reason in ("handoff", "budget"):
@@ -557,7 +559,7 @@ class ProTokServerTests(unittest.TestCase):
                         return_value=self.runner,
                     ),
                     patch(
-                        "integrations.protok.long_training_loop.LongTrainingScheduler",
+                        "integrations.protok.tasks.ExperimentScheduler",
                         return_value=scheduler,
                     ),
                     patch.object(SERVER, "drive", return_value=reason),
@@ -576,7 +578,9 @@ class ProTokServerTests(unittest.TestCase):
                 summary = SERVER.read(self.root / "control/final-summary.json")
                 self.assertEqual(summary["long_training_gpu_seconds"], 80)
                 self.assertEqual(summary["long_training_outstanding"], [])
-                self.assertEqual(summary["total_gpu_seconds"], 180)
+                self.assertEqual(summary["manual_training_gpu_seconds"], 40)
+                self.assertEqual(summary["manual_training_outstanding"], [])
+                self.assertEqual(summary["total_gpu_seconds"], 220)
 
     def test_long_training_continues_after_short_budget_and_honors_handoff(self):
         scheduler = Mock()

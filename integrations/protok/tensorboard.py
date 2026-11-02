@@ -21,9 +21,11 @@ import tempfile
 import time
 from urllib.parse import quote
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from research_loop import telemetry
+from integrations.protok.task_telemetry import manual_locations
 
 TRANSPORT_KEYS = {
     "remote_start_offset",
@@ -154,6 +156,10 @@ class Exporter:
                 if re.fullmatch(r"L[0-9a-f]{16}", folder.name)
                 and folder.is_dir()
                 and not folder.is_symlink()
+            )
+            locations.extend(
+                ("manual:" + task_id + ":" + iteration, location)
+                for task_id, iteration, location in manual_locations(study)
             )
             for lane, location in locations:
                 for folder in sorted((location / "telemetry").glob("*")):

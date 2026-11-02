@@ -480,11 +480,42 @@ def job_path(root, iteration):
     return target
 
 
+def check_fixed_candidate(root, workspace, iteration, *sources):
+    """Compare only the three candidate files with the submitted Git revision."""
+    manual_path = Path(root) / "study/iterations" / iteration / "context/task.json"
+    manual = read(manual_path) if manual_path.exists() else None
+    if not manual or manual["allow_changes"]:
+        return None
+    if (Path(root) / "control/jobs" / iteration / "recovery.json").exists():
+        raise ProTokError(
+            "Fixed-candidate task retained a replacement job; explicit reconciliation required"
+        )
+    frozen = {
+        name: subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(workspace),
+                "show",
+                manual["source"]["revision"] + ":" + name,
+            ]
+        )
+        for name in CANDIDATE_FILES
+    }
+    for source in (workspace, *sources):
+        if candidate_bytes(source) != frozen:
+            raise ProTokError(
+                "Fixed-candidate manual task changed source: " + str(source)
+            )
+    return signatures(frozen)
+
+
 def certify_candidate_failure(root, backend, workspace, iteration):
     """Persist the distinction between a settled code rejection and unknown effects."""
     root, workspace = Path(root), Path(workspace)
     job = job_path(root, iteration)
     record = read(job / "job.json")
+    check_fixed_candidate(root, workspace, iteration, job / "source")
     baseline = read(root / "study/study.json")["baseline"]
     for source in (workspace, job / "source"):
         check_scope(source, baseline, allow_research=research_policy(root) is not None)
@@ -554,6 +585,7 @@ def completed_job(root, backend, workspace, iteration):
     root, workspace = Path(root), Path(workspace)
     job = job_path(root, iteration)
     record = read(job / "job.json")
+    check_fixed_candidate(root, workspace, iteration, job / "source")
     expected_action = "import" if iteration == "0001" else "evaluate"
     if (
         record.get("iteration") != iteration
@@ -628,6 +660,7 @@ def timed_out_job(root, backend, workspace, iteration):
     root, workspace = Path(root), Path(workspace)
     job = job_path(root, iteration)
     record = read(job / "job.json")
+    check_fixed_candidate(root, workspace, iteration, job / "source")
     if (
         record.get("iteration") != iteration
         or record.get("request") != {"action": "evaluate"}
@@ -752,6 +785,7 @@ class ProTokHarness:
         return remaining
 
     def evaluate_request(self, workspace, iteration, request, stop, deadline):
+        check_fixed_candidate(self.root, workspace, iteration)
         if request == {"action": "research"}:
             from integrations.protok.research_execution import execute_script
 
@@ -816,6 +850,7 @@ class ProTokHarness:
             baseline,
             allow_research=research_enabled,
         )
+        check_fixed_candidate(self.root, workspace, iteration, job / "source")
         prepared = self.backend.prepare_config(
             job / "source", job / "runtime-config.json"
         )
@@ -838,6 +873,7 @@ class ProTokHarness:
             )
             receipt["provenance"] = "new-fixed-protocol-evaluation"
         check_scope(workspace, baseline, allow_research=research_enabled)
+        check_fixed_candidate(self.root, workspace, iteration, job / "source")
         if signatures(candidate_bytes(workspace)) != frozen:
             raise ProTokError("Agent candidate changed after source freeze")
         if (
@@ -980,6 +1016,22 @@ class ProTokHarness:
             raise HarnessError("Continuation deadline reached or control/STOP set")
         kwargs["timeout_seconds"] = min(kwargs["timeout_seconds"], remaining, 3600)
         kwargs["prompt"] += "\n\n" + submission_instructions()
+        context_path = (
+            Path(kwargs["run_dir"]) / "context.json" if kwargs.get("run_dir") else None
+        )
+        manual = (
+            read(context_path).get("manual_task")
+            if context_path is not None and context_path.exists()
+            else None
+        )
+        if manual:
+            kwargs["prompt"] += (
+                "\nThe user task fixes this investigation's question and exact source. "
+                "Its selected source replaces the automatic preference to start from the "
+                "current Frontier best. Preserve all protected evaluation/data/resource "
+                "rules. Do not change candidate source when allow_changes=false; the "
+                "evaluation transport is still permitted.\n"
+            )
         kwargs["prompt"] += """
 For a controller-certified formal result with status=failed and
 failure_kind=allocation_timeout, return outcome=incomplete, measurements=[],
@@ -1145,6 +1197,11 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
         validate_response("execute", result)
         workspace = Path(workspace)
         iteration = workspace.parent.name
+        fixed = check_fixed_candidate(self.root, workspace, iteration)
+        if fixed is not None:
+            job = job_path(self.root, iteration)
+            if (job / "job.json").exists():
+                check_fixed_candidate(self.root, workspace, iteration, job / "source")
         submission = workspace / RECEIPT
         if submission.exists() and read(submission) == {"action": "research"}:
             from integrations.protok.research_execution import completed_script
@@ -1169,6 +1226,14 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
 
                 saved = read(decision)
                 flow = read(decision.parent / "flow.json")
+                if fixed is not None:
+                    trusted_failure = certify_candidate_failure(
+                        self.root, self.backend, workspace, iteration
+                    )
+                    if saved.get("source_signatures") != fixed or saved.get(
+                        "failures"
+                    ) != [trusted_failure]:
+                        raise HarnessError("Fixed-candidate recovery evidence changed")
                 policy = (
                     debug_policy(self.root)
                     if (self.root / "control/debug-policy.json").exists()

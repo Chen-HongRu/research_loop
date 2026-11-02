@@ -12,13 +12,16 @@ function metricTask(node) {
   if(!node || node.source_id==='ledger')return null;
   const source=node.source_id || 'active', local=node.local_id || String(node.id).split(':').at(-1);
   const long=node.task_kind==='long_training';
+  if(long && node.manual_task_id)return {source,task:node.manual_task_id,run:null,experiment:null};
   if(!long && !/^\d{4,}$/.test(local))return null;
   return {source,run:long?local:null,experiment:long?null:local};
 }
 function metricMatches(stream, task) {
-  return !!task && stream.source_id===task.source && (task.run
+  return !!task && stream.source_id===task.source && (task.task
+    ? stream.manual_task_id===task.task
+    : !stream.manual_task_id && (task.run
     ? stream.run_id===task.run
-    : !stream.run_id && stream.source?.experiment_id===task.experiment);
+    : !stream.run_id && stream.source?.experiment_id===task.experiment));
 }
 function metricView(id) {
   if(!metricViews.has(id))metricViews.set(id,{filter:'',pinned:new Map(),error:null});
@@ -29,7 +32,7 @@ function mergeTaskMetrics(node, streams) {
   const task=metricTask(node);
   for(const stream of streams || []) {
     if(!metricMatches(stream,task))continue;
-    const key=metricJSON([stream.source_id,stream.run_id,stream.stream_id,stream.source?.source_identity,stream.source?.execution_identity].map(value=>value ?? null));
+    const key=metricJSON([stream.source_id,stream.manual_task_id,stream.run_id,stream.stream_id,stream.source?.source_identity,stream.source?.execution_identity].map(value=>value ?? null));
     const previous=metricCache.streams.get(key), events=new Map();
     for(const event of [...(previous?.events || []),...(stream.events || [])]) {
       if(!Array.isArray(event.tags) || !event.tags.includes('dashboard'))continue;
@@ -145,7 +148,7 @@ function renderTaskMetrics() {
 async function loadTaskMetrics() {
   const token=++metricRequest, id=selected, node=taskNodes().find(item=>item.id===id), task=metricTask(node);
   if(globalView || !task)return;
-  const query='source='+encodeURIComponent(task.source)+(task.run?'&run='+encodeURIComponent(task.run):'&experiment='+encodeURIComponent(task.experiment));
+  const query='source='+encodeURIComponent(task.source)+(task.task?'&task='+encodeURIComponent(task.task):task.run?'&run='+encodeURIComponent(task.run):'&experiment='+encodeURIComponent(task.experiment));
   try {
     const result=await api('/api/telemetry?'+query);
     if(token!==metricRequest || selected!==id || globalView)return;

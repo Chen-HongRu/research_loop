@@ -687,3 +687,37 @@ test('Task detail refresh and task switching retain each task reading position a
     vm.runInContext('data=null;detail=null;selected=null;renderedDetailKey=null;detailReading.clear();',context);
   }
 });
+
+test('Manual task aliases preserve experiment links and current follow identity', () => {
+  context.manualView={state:{iteration:1},nodes:[{id:'active:0001'}],active_node_id:'active:manual:operator-check',tasks:[{id:'active:manual:operator-check',experiment_id:'active:0001',task_origin:'user',task_kind:'investigation'}]};
+  vm.runInContext('data=manualView;',context);
+  assert.equal(ui.resolveReference('active:0001'),'active:manual:operator-check');
+  assert.equal(vm.runInContext('activeNode().id',context),'active:manual:operator-check');
+  assert.equal(vm.runInContext('taskKind(data.tasks[0])',context),'人工调查');
+  assert.equal(vm.runInContext('taskKind({...data.tasks[0],task_kind:"long_training"})',context),'人工长训');
+  assert.equal(vm.runInContext('taskStateLabel({task_status:"cancelled"})',context),'已取消');
+  assert.match(vm.runInContext('taskStateLabel({task_status:"expired"})',context),/过期/);
+  vm.runInContext('data=null;',context);
+});
+
+test('Manual long metrics use the stable task selector and isolate all other lanes', async () => {
+  const node={id:'active:manual:manual-check',source_id:'active',local_id:'manual-check',manual_task_id:'manual-check',task_kind:'long_training'};
+  const task=ui.metricTask(node),stream={source_id:'active',manual_task_id:'manual-check',run_id:null,source:{experiment_id:'0001'}};
+  assert.deepEqual(plain(task),{source:'active',task:'manual-check',run:null,experiment:null});
+  assert.equal(ui.metricMatches(stream,task),true);
+  assert.equal(ui.metricMatches({...stream,source_id:'history-1'},task),false);
+  assert.equal(ui.metricMatches({...stream,manual_task_id:'another-task'},task),false);
+  assert.equal(ui.metricMatches({...stream,manual_task_id:null,run_id:'L0123456789abcdef'},task),false);
+  assert.equal(ui.metricMatches(stream,ui.metricTask({source_id:'active',local_id:'0001'})),false);
+  context.manualMetricNode=node;context.manualMetricQueries=[];
+  vm.runInContext(`data={tasks:[manualMetricNode]};selected=manualMetricNode.id;globalView=false;
+    globalThis.savedManualMetricIO={api,renderTaskMetrics};
+    api=async path=>{manualMetricQueries.push(path);return {streams:[]};};renderTaskMetrics=()=>{};`,context);
+  try {
+    await ui.loadTaskMetrics();
+    assert.deepEqual(plain(context.manualMetricQueries),['/api/telemetry?source=active&task=manual-check']);
+    assert.equal(ui.metricTask({task_kind:'investigation',source_id:'active',local_id:'0001',manual_task_id:'investigate',experiment_id:'active:0001'}).experiment,'0001');
+  } finally {
+    vm.runInContext('({api,renderTaskMetrics}=savedManualMetricIO);delete globalThis.savedManualMetricIO;data=null;selected=null;',context);
+  }
+});

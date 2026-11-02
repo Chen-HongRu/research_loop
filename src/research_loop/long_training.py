@@ -449,7 +449,12 @@ def completed_results(study_root):
 def admission_path(folder):
     """Keep controller authorization outside Agent-visible Study artifacts."""
     folder = Path(folder).resolve()
-    return folder.parents[2] / "control/long-training-rounds" / (folder.name + ".json")
+    lane = (
+        "manual-task-rounds"
+        if folder.parent.name == "tasks"
+        else "long-training-rounds"
+    )
+    return folder.parents[2] / "control" / lane / (folder.name + ".json")
 
 
 def admitted_round(folder):

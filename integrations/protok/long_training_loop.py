@@ -36,12 +36,13 @@ def _write(path, value):
     temporary.replace(path)
 
 
-def study_policy(root):
+def study_policy(root, *, grant=None):
     """Freeze research scope from an explicit separate resource grant."""
     path = Path(root) / "control/long-training-policy.json"
-    if not path.exists():
-        return None
-    grant = _policy(path.parent)
+    if grant is None:
+        if not path.exists():
+            return None
+        grant = _policy(path.parent)
     return validate_policy(
         {
             "version": 1,

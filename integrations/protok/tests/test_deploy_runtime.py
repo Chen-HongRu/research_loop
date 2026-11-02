@@ -77,6 +77,13 @@ class RuntimeDeployTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Outstanding"):
             DEPLOY.check_boundary(self.root, self.backend)
 
+    def test_pending_manual_long_job_prevents_runtime_handoff(self):
+        self.backend.inspect.return_value["manual_training_outstanding"] = [
+            "retained manual allocation"
+        ]
+        with self.assertRaisesRegex(RuntimeError, "Outstanding"):
+            DEPLOY.check_boundary(self.root, self.backend)
+
     def test_debug_upgrade_requires_certified_preparation_and_unchanged_stop(self):
         failure = {
             "version": 1,

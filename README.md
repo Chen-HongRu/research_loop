@@ -37,6 +37,10 @@ Plan/Execute 可自定义结构化日志与标签。控制器按游标增量同�
 
 Study 可选启用长训策略。Review 为有实质 Frontier 改善或较大架构改变且取得改善的候选提出带对照和证据的提名；独立子 Study 复用 Plan → Execute → Review，与短训并行。已评审长训在下一轮边界冻结为知识输入，`research-loop knowledge STUDY` 也会包含最后一轮短训之后完成的长训知识。协议、授权、恢复和 ProTok 的 10k/全量验证接入见[并行长训练](docs/long-training.md)。
 
+## 人工实验队列
+
+Codex 可通过 `research-loop task submit STUDY --request FILE` 提交讨论确定的实验。人工主调查在轮次边界优先进入 Plan → Execute → Review；人工长训支持新改动直接训练及既有候选复验，通过独立子 Study 与自动探索、自动提名长训并行，费用计入每项人工任务的独立预算。结果照常评审归档，并在后续轮次回流知识。CLI、预算字段、调度和恢复语义见[人工实验与任务调度](docs/task-queue.md)。
+
 ## 运行
 
 要求 Python 3.11+、`uv`、已登录的 Codex 或 Pi。进程锁与取消机制面向 macOS/Linux。

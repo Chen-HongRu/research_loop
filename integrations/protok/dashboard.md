@@ -80,6 +80,7 @@ integrations/protok/dashboard.html
 integrations/protok/explanation.py
 integrations/protok/plan_provenance.py
 integrations/protok/tensorboard.py
+integrations/protok/task_telemetry.py
 integrations/protok/assets/**
 src/research_loop/*.py
 pyproject.toml
@@ -150,3 +151,5 @@ node --test integrations/protok/tests/dashboard.test.cjs
 ```
 
 另用实际研究目录检查 HTTP 快照、Agent 详情、Git 历史、路线视图、知识文档与自动刷新。测试证明展示和记录语义，不证明研究收益。
+
+人工长训练的实时指标按稳定任务 ID 查询（`/api/telemetry?source=active&task=TASK`），从请求绑定的 `study/tasks/TASK/study/iterations/ITERATION/telemetry` 读取。运行中和已评审任务使用同一位置；历史 Study、自动长训和各执行来源分别隔离。TensorBoard 增量导出同一批本地来源的全部标签，重启沿用游标。

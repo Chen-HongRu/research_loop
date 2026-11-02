@@ -104,6 +104,18 @@ copies without SSH, model calls, allocation or filesystem writes. Explicit strea
 paging works beyond the preview window. History Study IDs and long-run IDs remain
 separate, and curves group by source, observation name, unit and conditions.
 
+Manual long-training tasks retain telemetry in
+`study/tasks/TASK/study/iterations/ITERATION/telemetry`. Readers resolve the immutable
+request and canonical binding; queued tasks have no stream yet. Running and reviewed
+tasks share the same stable task identity. The selected-task API uses
+`/api/telemetry?source=active&task=TASK` (or a configured `history-N` source),
+optionally with `stream` and `after` for incremental paging. `task`, automatic
+`run`, and main-study `experiment` selectors are mutually exclusive; existing
+automatic/main queries keep their behavior. Manual responses include
+`manual_task_id`; their actual execution run ID stays in stream provenance.
+TensorBoard discovers the same bound locations and gives each manual task and
+iteration its own lane, preserving source, Study and execution separation.
+
 ## Task progress and TensorBoard
 
 Select a main investigation, research script or independent long-training task in

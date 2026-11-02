@@ -160,6 +160,7 @@ def execute_script(harness, workspace, iteration, stop, deadline):
         allow_research=True,
         include_research=True,
     )
+    run.check_fixed_candidate(root, workspace, iteration, folder / "source")
     receipt = run_script(
         harness.backend,
         root=root,
@@ -192,6 +193,7 @@ def completed_script(root, workspace, iteration):
 
     root, workspace = Path(root), Path(workspace)
     folder = root / "control/research-sources" / iteration
+    run.check_fixed_candidate(root, workspace, iteration, folder / "source")
     saved = read(folder / "record.json")
     result = read(folder / "result.json")
     receipt = read(root / "control/research-jobs" / iteration / "receipt.json")
