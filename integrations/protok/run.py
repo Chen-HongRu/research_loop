@@ -1819,29 +1819,65 @@ def reconcile_completed_execute(root, backend):
             iteration = f"{state['iteration']:04d}"
             metadata = read(study.root / "iterations" / iteration / "iteration.json")
             workspace = Path(metadata["workspace"])
-            trusted = completed_job(root, backend, workspace, iteration)
-            response = {
-                "outcome": "completed",
-                "markdown": (
-                    "Operator reconciliation of an interrupted Execute, using a verified "
-                    "completed fixed-backend receipt; no agent completion is asserted. "
-                    f"Observed {METRIC}={trusted['value']} under {PROTOCOL}; "
-                    f"candidate {trusted['fingerprint']}. No new evaluation or agent call. "
-                    "The original partial attempt is retained. Independent Review must "
-                    "assess source, evidence and limitations; mechanism remains unverified."
-                ),
-                "artifacts": [trusted["artifact"]],
-                "measurements": [
-                    {
-                        "candidate_id": trusted["fingerprint"],
-                        "artifact": trusted["artifact"],
-                        "evaluation_id": PROTOCOL,
-                        "comparison_scope": PROTOCOL,
-                        "metrics": [{"name": METRIC, "value": trusted["value"]}],
-                        "evidence": trusted["evidence"],
-                    }
-                ],
-            }
+            research_result = (
+                root / "control/research-sources" / iteration / "result.json"
+            )
+            if research_result.exists():
+                from integrations.protok.research_execution import completed_script
+
+                effects = backend.inspect()
+                if any(
+                    effects.get(key)
+                    for key in (
+                        "outstanding",
+                        "research_outstanding",
+                        "debug_outstanding",
+                        "long_training_outstanding",
+                        "manual_training_outstanding",
+                    )
+                ):
+                    raise ProTokError(
+                        "Unresolved effects prevent completed research reconciliation"
+                    )
+                trusted = completed_script(root, workspace, iteration)
+                if trusted["status"] != "completed":
+                    raise ProTokError("A completed research receipt is required")
+                response = receipt_response(
+                    trusted,
+                    (
+                        "Operator reconciliation using the unchanged frozen source and "
+                        "verified completed research receipt. No new Execute call or "
+                        "allocation. No quality measurement. The original Agent attempt "
+                        "is retained; independent Review must inspect the evidence and "
+                        "assess its scientific claims. Operator-retained source additions, "
+                        "if any, are evidence only at "
+                        + str(previous / "operator-retained-source-additions")
+                    ),
+                )
+            else:
+                trusted = completed_job(root, backend, workspace, iteration)
+                response = {
+                    "outcome": "completed",
+                    "markdown": (
+                        "Operator reconciliation of an interrupted Execute, using a verified "
+                        "completed fixed-backend receipt; no agent completion is asserted. "
+                        f"Observed {METRIC}={trusted['value']} under {PROTOCOL}; "
+                        f"candidate {trusted['fingerprint']}. No new evaluation or agent call. "
+                        "The original partial attempt is retained. Independent Review must "
+                        "assess source, evidence and limitations; mechanism remains unverified."
+                    ),
+                    "artifacts": [trusted["artifact"]],
+                    "measurements": [
+                        {
+                            "candidate_id": trusted["fingerprint"],
+                            "artifact": trusted["artifact"],
+                            "evaluation_id": PROTOCOL,
+                            "comparison_scope": PROTOCOL,
+                            "metrics": [{"name": METRIC, "value": trusted["value"]}],
+                            "evidence": trusted["evidence"],
+                        }
+                    ],
+                }
             ProTokHarness(backend, root, None, 0).validate_completed(
                 response, workspace=workspace, run_dir=previous
             )
@@ -1856,7 +1892,9 @@ def reconcile_completed_execute(root, backend):
                 "operator_action": "reconcile-completed-backend-without-replay",
                 "previous_attempt": relative,
                 "backend_result": str(
-                    root / "control/jobs" / iteration / "result.json"
+                    research_result
+                    if research_result.exists()
+                    else root / "control/jobs" / iteration / "result.json"
                 ),
                 "source_signatures": signatures(candidate_bytes(workspace)),
                 "call_count": state["call_count"],

@@ -22,6 +22,9 @@ The controller constructs those fields from independently verified receipts, inc
 the completed/incomplete outcome of a submitted job. Without a submitted job, report
 incomplete when the contract could not finish; the controller checks scope and effects.
 Reports and precheck files may be cited in markdown; they are not ranked candidates.
+For a submitted research script, the entire research/ source tree is immutable:
+do not add reports or other files there after submission. Put post-submission
+narrative in this final markdown response, not in a new workspace report file.
 """
 
 

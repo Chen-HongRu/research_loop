@@ -347,7 +347,8 @@ Protected data/scorer and the official ranking protocol remain fixed.
 Plan research_contract.execution chooses fixed_evaluation or script. Submit using
 the same controller API, --action evaluate or --action research respectively.
 The controller executes a frozen script and its imported research/candidate code;
-do not change those files after submission. One script may perform multiple paired
+do not change those files or add files under research/ after submission, including
+Markdown reports. Put post-submission narrative in the final response. One script may perform multiple paired
 computations within one shared allocation. Do not SSH, install dependencies or
 launch compute by another path. The Aliyun controller has no Torch.
 The verified library inventory is supplied by the operator execution-environment
