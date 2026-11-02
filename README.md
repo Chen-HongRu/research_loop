@@ -67,7 +67,7 @@ uv run research-loop status studies/proof
 
 默认只读。需要修改实验代码时，通过 `--workspace` 指定干净的 Git 基线，并显式加 `--allow-write`。每次调查使用独立工作区。仅有 `run` 权限不等于已授权远程计算；训练资源与受保护评价器由任务后端管理。
 
-详细参数、权限边界、评价 JSON、恢复及记录结构见[运行指南](docs/usage.md)。
+详细参数、权限边界、评价 JSON、恢复及记录结构见[运行指南](docs/usage.md)。 Pi 的配置、验证和能力边界见 [Pi Harness](docs/pi-harness.md)。
 
 ## 在 AeroArm 中使用
 

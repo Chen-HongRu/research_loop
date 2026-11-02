@@ -28,10 +28,12 @@ Codex 认证与非交互参数来自 [认证文档](https://learn.chatgpt.com/do
 
 ### 两个容易误接的协议细节
 
-1. **Pi 退出码 0 不足以判定成功。** 要取得最终 assistant 的 `message_end`，检查 `stopReason == stop`，且有 `agent_settled`、`aborted == false`。`agent_end` 后仍可能自动重试。答案 JSON 再交给核心校验。旧版缺少该事件的 Pi 会明确失败，首版不猜测兼容。[事件协议](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/json.md)、[print 实现](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/print-mode.ts)
+1. **Pi 退出码 0 不足以判定成功。** 要取得最终 run 的 assistant `message_end`，检查 `stopReason == stop`，且以 `agent_settled`、`aborted == false` 结束；不能复用之前 run 的答案。`agent_end` 后仍可能自动重试。JSONL 只按 LF 分帧，保留 JSON 字符串中的 Unicode 行/段分隔符。答案 JSON 再交给核心校验。旧版缺少该事件的 Pi 会明确失败。[事件协议](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/json.md)、[print 实现](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/print-mode.ts)
 2. **Pi 的型号字符串不是天然严格匹配。** 指定 provider 但型号未找到时，解析器还可能创建 custom model；所以本项目先用 `--offline --list-models` 检查精确 provider/model，再开始请求。目录包含型号仍不能证明订阅有权限。[型号解析](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/model-resolver.ts)、[列表实现](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/list-models.ts)
 
 Pi 适配禁用自动加载的扩展、skills、prompt templates、MCP 与审批扩展，使用无会话模式，保留项目上下文指令。Codex 使用 ephemeral 会话。两者都由核心提供研究文件位置，避免把隐藏会话历史变成唯一研究状态。
+
+2026-11-02 的实现更新使用 stdin 传递 Pi 完整提示词，并将目录预检和请求计入同一次调用超时。Pi 1.4.0 的有效 `thinkingLevel` 必须存在且匹配；provider 侧标签可能经过映射，只作记录。真实 CLI 的本地工具接线与剩余验证边界见 [Pi Harness](pi-harness.md)。
 
 ## 适合借鉴或改造的系统
 

@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -157,6 +158,7 @@ def _execute(
     run_dir: Path,
     config: HarnessConfig,
     record: dict,
+    deadline: float,
     prefix: str = "",
 ) -> None:
     record.update(
@@ -165,6 +167,11 @@ def _execute(
         pid=None,
         returncode=None,
     )
+    if time.monotonic() >= deadline:
+        record["status"] = "timed_out"
+        raise HarnessError(
+            f"{config.backend} invocation timed out before {record['phase']}"
+        )
     with (
         (run_dir / f"{prefix}stdout.jsonl").open("w") as stdout,
         (run_dir / f"{prefix}stderr.txt").open("w") as stderr,
@@ -181,7 +188,9 @@ def _execute(
         record.update(pid=process.pid, returncode=None)
         try:
             _write_json(run_dir / "process.json", record)
-            process.communicate(input=prompt, timeout=config.timeout_seconds)
+            process.communicate(
+                input=prompt, timeout=max(0, deadline - time.monotonic())
+            )
             # The invocation owns this session, including any children surviving
             # their leader. No agent CLI background process may outlive the run.
             _terminate_group(process)
@@ -261,7 +270,10 @@ class _Harness:
         (run_dir / "stderr.txt").touch()
         _write_json(run_dir / "process.json", record)
         try:
-            result = self._run(prompt, schema, workspace, run_dir, writable, record)
+            deadline = time.monotonic() + self.config.timeout_seconds
+            result = self._run(
+                prompt, schema, workspace, run_dir, writable, record, deadline
+            )
             publish_completed_response(run_dir, result)
             record["status"] = "succeeded"
             return result
@@ -327,7 +339,9 @@ class CodexHarness(_Harness):
         super().__init__(config)
         self.web_search = web_search
 
-    def _run(self, prompt, schema, workspace, run_dir, writable, record) -> dict:
+    def _run(
+        self, prompt, schema, workspace, run_dir, writable, record, deadline
+    ) -> dict:
         config = self.config
         argv = [
             config.executable or "codex",
@@ -364,6 +378,7 @@ class CodexHarness(_Harness):
             run_dir=run_dir,
             config=config,
             record=record,
+            deadline=deadline,
         )
         try:
             return _object((run_dir / "response.json").read_text())
@@ -371,10 +386,45 @@ class CodexHarness(_Harness):
             raise HarnessError("Codex exited without a final response") from exc
 
 
+def _pi_final_message(path: Path) -> dict:
+    """Accept only the last settled run, including any automatic retries."""
+    message = None
+    final_message = None
+    settled = False
+    # Pi frames records with LF only. str.splitlines() also splits U+2028/U+2029
+    # inside valid JSON strings; retaining all streaming deltas is unnecessary.
+    with path.open(encoding="utf-8", newline="\n") as stream:
+        for line in stream:
+            if not line.endswith("\n"):
+                raise HarnessError("Pi emitted unterminated JSONL")
+            try:
+                event = json.loads(line)
+            except (ValueError, UnicodeError) as exc:
+                raise HarnessError("Pi emitted invalid JSONL") from exc
+            if not isinstance(event, dict):
+                raise HarnessError("Pi JSONL events must be objects")
+            kind = event.get("type")
+            settled = kind == "agent_settled" and event.get("aborted") is False
+            if kind == "agent_settled":
+                final_message = message
+                message = None
+            elif kind in {"agent_start", "turn_start", "message_start"}:
+                message = None
+            elif kind == "message_end":
+                message = event.get("message")
+    if not settled:
+        raise HarnessError("Pi did not finish with agent_settled and aborted=false")
+    if not isinstance(final_message, dict) or final_message.get("role") != "assistant":
+        raise HarnessError("Pi emitted no final assistant message")
+    return final_message
+
+
 class PiHarness(_Harness):
     backend = "pi"
 
-    def _run(self, prompt, schema, workspace, run_dir, writable, record) -> dict:
+    def _run(
+        self, prompt, schema, workspace, run_dir, writable, record, deadline
+    ) -> dict:
         config = self.config
         common = [
             config.executable or "pi",
@@ -391,6 +441,7 @@ class PiHarness(_Harness):
             run_dir=run_dir,
             config=config,
             record=record,
+            deadline=deadline,
             prefix="preflight.",
         )
         rows = (run_dir / "preflight.stdout.jsonl").read_text().splitlines()
@@ -421,38 +472,15 @@ class PiHarness(_Harness):
                 "--no-session",
                 "--tools",
                 tools,
-                "--",
-                full_prompt,
             ],
-            prompt=None,
+            prompt=full_prompt,
             workspace=workspace,
             run_dir=run_dir,
             config=config,
             record=record,
+            deadline=deadline,
         )
-        try:
-            events = [
-                json.loads(line)
-                for line in (run_dir / "stdout.jsonl").read_text().splitlines()
-                if line.strip()
-            ]
-        except json.JSONDecodeError as exc:
-            raise HarnessError("Pi emitted invalid JSONL") from exc
-        if any(not isinstance(event, dict) for event in events):
-            raise HarnessError("Pi JSONL events must be objects")
-        settled = [event for event in events if event.get("type") == "agent_settled"]
-        if not settled or settled[-1].get("aborted") is not False:
-            raise HarnessError("Pi did not report agent_settled with aborted=false")
-        messages = [
-            event["message"]
-            for event in events
-            if event.get("type") == "message_end"
-            and isinstance(event.get("message"), dict)
-            and event["message"].get("role") == "assistant"
-        ]
-        if not messages:
-            raise HarnessError("Pi emitted no final assistant message")
-        message = messages[-1]
+        message = _pi_final_message(run_dir / "stdout.jsonl")
         if message.get("stopReason") != "stop" or message.get("errorMessage"):
             raise HarnessError(
                 f"Pi assistant failed: {message.get('errorMessage') or message.get('stopReason')}"
@@ -470,11 +498,12 @@ class PiHarness(_Harness):
             "provider": message["provider"],
             "model": message["model"],
         }
-        for field in ("thinkingLevel", "providerThinkingLevel"):
-            if field in message and message[field] != config.reasoning:
-                raise HarnessError(
-                    f"Pi {field} differs from requested reasoning effort"
-                )
+        if message.get("thinkingLevel") != config.reasoning:
+            raise HarnessError(
+                "Pi thinkingLevel differs from requested reasoning effort"
+            )
+        # thinkingLevel reports Pi's effective configuration after capability
+        # clamping. Provider-specific labels may differ and are not service proof.
         record["reasoning_verification"] = {
             field: message.get(field, "unverified")
             for field in ("thinkingLevel", "providerThinkingLevel")
