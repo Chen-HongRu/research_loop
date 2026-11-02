@@ -1747,6 +1747,46 @@ class ResearchScriptDashboardTests(unittest.TestCase):
                     / ("blocked.json" if status == "blocked" else "receipt.json")
                 ).unlink()
 
+    def test_timeout_overrun_retains_settled_metadata_and_node_evidence(self):
+        prefix = self.research(status="failed")
+        job = DASH.read(self.root / prefix / "job.json")
+        self.put(prefix + "job.json", {**job, "allocated_seconds": 1200})
+        receipt = {
+            **DASH.read(self.root / prefix / "receipt.json"),
+            "allocated_seconds": 1200,
+            "gpu_seconds": 1222,
+            "terminal_state": "TIMEOUT",
+            "exit_code": "0:15",
+            "error": "Research script failed: TIMEOUT",
+        }
+        self.put(prefix + "receipt.json", receipt)
+        metadata = DASH.research_metadata(self.root, "0001")
+        self.assertEqual(metadata["status"], "failed")
+        self.assertEqual(metadata["terminal_state"], "TIMEOUT")
+        self.assertEqual(metadata["gpu_seconds"], 1222)
+        self.assertEqual(metadata["allocated_gpu_seconds"], 1200)
+        self.assertEqual(metadata["outputs"], receipt["outputs"])
+        self.assertEqual(metadata["evidence"], receipt["evidence"])
+        self.assertEqual(metadata["error"], receipt["error"])
+        node = self.snapshot()["nodes"][0]
+        self.assertEqual(node["job_status"], "failed")
+        self.assertEqual(node["attempts"][0]["terminal_state"], "TIMEOUT")
+        self.assertEqual(node["attempts"][0]["gpu_seconds"], 1222)
+        self.assertFalse(node["eligible"])
+        self.assertIsNone(node["value"])
+        detail = DASH.execution_details(self.root, "0001")["research"]
+        self.assertEqual(detail["status"], "failed")
+        self.assertEqual(detail["outputs"], receipt["outputs"])
+        self.assertEqual(detail["evidence"], receipt["evidence"])
+        # Actual overrun is valid; negative charges and mismatched allocation are not.
+        for invalid in ({"gpu_seconds": -1}, {"allocated_seconds": 1201}):
+            with self.subTest(invalid=invalid):
+                self.put(prefix + "receipt.json", {**receipt, **invalid})
+                rejected = DASH.research_metadata(self.root, "0001")
+                self.assertEqual(rejected["status"], "unknown")
+                self.assertEqual(rejected["outputs"], [])
+                self.assertEqual(rejected["evidence"], [])
+
     def test_budget_counts_research_once_and_operator_job_creates_no_node(self):
         prefix = self.research("9001")
         self.backend["research_outstanding"] = [str(self.root / prefix)]

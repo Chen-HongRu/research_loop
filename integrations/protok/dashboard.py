@@ -139,7 +139,7 @@ def research_metadata(root, identity):
             and receipt.get("gpu_seconds") is None
             or receipt.get("status") in {"completed", "failed"}
             and type(receipt.get("gpu_seconds")) is int
-            and 0 <= receipt["gpu_seconds"] <= job["allocated_seconds"]
+            and receipt["gpu_seconds"] >= 0
         )
     )
     observed = receipt if valid_receipt else native
