@@ -90,7 +90,14 @@ accounting blocks subsequent work.
 
 The result distinguishes execution status from scientific support. A successful
 script returns its exact evidence artifact with `measurements=[]`; a settled
-failed script may return that artifact with `outcome=incomplete`. Review can retain
+failed script returns that artifact with `outcome=incomplete`. Slurm TIMEOUT is
+one such result. Actual allocated GPU seconds are charged in full even when they
+exceed the requested time limit during termination; the overrun is reported and
+subsequent allocations must still fit the original shared budget and reserve.
+A reporting Agent failure after a verified failed allocation does not resubmit
+compute: the controller preserves the Agent attempt and publishes the settled
+failure for Review. Unsettled effects or changed identity/source remain blocking.
+Review can retain
 negative or insufficient evidence without changing the official Frontier. Numerical
 observables and new benchmark definitions remain explicit local evidence in the
 artifact, not invented official RMSD measurements. The generic core still supports
@@ -102,3 +109,10 @@ prefix, trained radial encoder/projection weights, identical full/detach inputs 
 fixed random cotangents. It checks CUDA, read-only inputs, forward parity and gradient
 path removal. It does not measure an actual training-loss gradient or establish
 that the path improves reconstruction.
+
+For a failed script retained by an older runtime, use
+`run.py --reconcile-research-execute --authorization TEXT` to prepare a separate
+controller completion from the unchanged frozen Plan, source and settled receipt.
+It retains the original attempt and STOP, consumes no new Agent call or allocation,
+and preserves call/time counters. `deploy_runtime.py --resume-research` verifies
+that preparation and the unchanged system-attention STOP before restoring service.

@@ -743,8 +743,7 @@ class ProTokRunnerTests(unittest.TestCase):
         self.assertEqual(repaired["call_count"], before["call_count"])
         self.assertEqual(repaired["elapsed_seconds"], before["elapsed_seconds"])
         self.assertEqual(len(delegate.calls), calls)
-        self.assertTrue((self.control / "STOP").exists())
-        (self.control / "STOP").unlink()
+        self.assertFalse((self.control / "STOP").exists())
         with patch.object(RUNNER, "CodexHarness", return_value=delegate):
             after = RUNNER.run_one(self.root, self.backend)
         self.assertEqual(after["phase"], "done")
@@ -931,11 +930,10 @@ class ProTokRunnerTests(unittest.TestCase):
             self.assertEqual(interrupted.status()["phase"], "plan")
             self.assertEqual(delegate.count("execute"), 0)
             self.assertEqual(self.backend.evaluations, 0)
-            self.assertTrue((self.control / "STOP").exists())
+            self.assertFalse((self.control / "STOP").exists())
             # Operator reconciliation is explicit; the runner performs neither action.
             retried = interrupted.retry()
             self.assertEqual((retried["phase"], retried["status"]), ("plan", "ready"))
-            (self.control / "STOP").unlink()
             state = RUNNER.run_one(self.root, self.backend)
         self.assertEqual(delegate.count("proposal"), 2)
         self.assertEqual(delegate.count("judge"), 1)
@@ -1002,6 +1000,8 @@ class ProTokRunnerTests(unittest.TestCase):
                 RUNNER.run_one(self.root, self.backend)
         before = RUNNER.Study(self.root / "study").status()
         count = delegate.count("execute")
+        # Older supervisors latched STOP; reconciliation must preserve that evidence.
+        (self.control / "STOP").write_text("Supervisor stopped: attention\n")
         attempt = self.root / "study" / before["calls"]["execute"]
         process = RUNNER.read(attempt / "process.json")
         RUNNER.write(attempt / "process.json", {**process, "status": "failed"})
@@ -1150,7 +1150,6 @@ class ProTokRunnerTests(unittest.TestCase):
             retried = study.retry()
             self.assertEqual((retried["iteration"], retried["phase"]), (2, "execute"))
             self.assertNotIn("execute", retried["calls"])
-            (self.control / "STOP").unlink()
             completed = RUNNER.run_one(self.root, self.backend)
         self.assertEqual((completed["iteration"], completed["phase"]), (2, "done"))
         self.assertEqual(delegate.count("plan"), plan_count)

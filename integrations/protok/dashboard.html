@@ -154,7 +154,7 @@ function renderProgress() {
   const state = data.state || {}, progress = data.progress || {}, current = activeNode();
   $('current').textContent = state.iteration == null ? '—' : '#'+String(state.iteration).padStart(4,'0');
   $('currentSub').textContent = (current?.continuation_of?'执行续跑 · 沿用研究 #'+String(current.research_iteration).split(':').at(-1)+' · ':'')+(current?.route || '路线选择中')+' · '+phaseName(state.phase)+(current?.inquiry_kind?' · '+translated(current.inquiry_kind):'');
-  $('gpu').textContent = data.gpu_seconds == null ? '—' : (data.gpu_seconds/3600).toFixed(2)+' 小时';
+  $('gpu').textContent = data.gpu_seconds == null ? '未知' : (data.gpu_seconds/3600).toFixed(2)+' 小时';
   const effectiveDeadline = data.effective_deadline ?? data.deadline;
   const deadline = timestamp(effectiveDeadline), remaining = deadline == null ? null : Math.max(0, Math.floor((deadline-Date.now())/1000));
   $('remaining').textContent = remaining == null ? '未记录' : remaining === 0 ? '窗口已结束' : duration(remaining);
@@ -167,18 +167,19 @@ function renderProgress() {
   $('phases').innerHTML = PHASES.map((key,index) => {
     const row = stageRows.find(stage => stage.key === key) || {};
     const active = state.phase === key, complete = ['completed','succeeded','published','done','inherited'].includes(row.status) || (!row.status && index < PHASES.indexOf(state.phase));
-    const css = active && (data.stop || ['needs_attention','stopped'].includes(state.status)) ? 'blocked' : active ? 'active' : complete ? 'complete' : '';
+    const css = active && (data.backend_error || data.stop || ['needs_attention','stopped'].includes(state.status)) ? 'blocked' : active ? 'active' : complete ? 'complete' : '';
     const label = row.inherited_from ? '沿用 #'+row.inherited_from+' · 无新增调用' : row.duration_seconds != null ? duration(row.duration_seconds) : active ? (STATUS[state.status] || '当前阶段') : complete ? '已完成' : '尚未开始';
     return '<div class="phase-item '+css+'"><strong>'+esc(phaseName(key))+'</strong><small>'+esc(label)+(row.attempts ? ' · '+row.attempts+' 次调用' : '')+'</small></div>';
   }).join('');
   const reasons = progress.reasons || (state.error ? [{title:'当前错误', detail:state.error}] : []);
   $('reasons').innerHTML = reasons.map(reason => '<div class="reason"><strong>'+esc(reason.title)+'</strong><p>'+esc(reason.detail || reason.message || '')+'</p>'+(reason.source ? '<small>'+esc(reason.source)+'</small>' : '')+'</div>').join('');
   const jobs = (data.outstanding || []).flatMap(row => {const label=row.mode==='research'?'研究脚本作业 ':'正式评测作业 ';return row.attempts?.length?row.attempts.map(attempt=>label+(attempt.owned_job_id || '待绑定')+' · '+(attempt.terminal_state || attempt.status || '待核账')):[label+'状态待确认 · '+(row.status || '待核账')];});
-  const bits = [data.snapshot_only ? '归档快照 · 非实时 HPC · 核账时间 '+clock(data.backend_observed_at) : '读取本地控制记录与后端回执', jobs.length ? jobs.join(' / ') : '无待核账 GPU 作业', '角色调用 '+(state.call_count ?? '—')+' 次'];
+  const bits = [data.snapshot_only ? '归档快照 · 非实时 HPC · 核账时间 '+clock(data.backend_observed_at) : '读取本地控制记录与后端回执', data.accounting_available===false ? 'GPU 用量与待核账作业未知 · 后端读取失败' : jobs.length ? jobs.join(' / ') : '无待核账 GPU 作业', '角色调用 '+(state.call_count ?? '—')+' 次'];
   if (progress.active_role) bits.push((state.status==='running'?'当前角色 ':'最近调用角色 ')+progress.active_role);
   if (progress.elapsed_seconds != null) bits.push((state.status==='running'?'本次调用已用 ':'最近调用耗时 ')+duration(progress.elapsed_seconds));
   if (data.runner?.status) bits.push('Runner '+(STATUS[data.runner.status] || data.runner.status));
   if (data.formal_gpu_seconds != null) bits.push('正式评分 '+data.formal_gpu_seconds+' GPU 秒 · 研究脚本 '+(data.research_gpu_seconds || 0)+' GPU 秒 · 调试 '+(data.debug_gpu_seconds || 0)+' GPU 秒（独立记账）');
+  for (const overrun of data.research_overruns || []) bits.push('研究 #'+overrun.iteration+' 已按实际 '+overrun.gpu_seconds+' GPU 秒结算（申请 '+overrun.allocated_seconds+' 秒，超出 '+overrun.overrun_seconds+' 秒）');
   if (data.debug) bits.push('本调查调试 '+data.debug.used_gpu_seconds+'/'+data.debug.limit_gpu_seconds+' GPU 秒 · 已预留 '+data.debug.reserved_gpu_seconds+' GPU 秒');
   $('statusline').innerHTML = bits.map(bit => '<span>'+esc(bit)+'</span>').join('');
   $('updated').textContent = '记录读取于 '+clock(data.observed_at);
@@ -527,7 +528,7 @@ $('tabs').querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{tab
 $('follow').onclick=async()=>{following=true;globalView=false;detailSignature='';renderSnapshot();renderDetail();await loadDetail(true);const row=$('graph').querySelector('.selected');if(row)$('graphWrap').scrollTop=Math.max(0,row.offsetTop-102);};
 $('researchBtn').onclick=async()=>{following=false;globalView=true;research='';renderSnapshot();renderDetail();await loadDetail(true);};
 async function refresh() {
-  try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className='green';renderSnapshot();await loadDetail(); }
+  try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.backend_error?'● 研究目录已连接 · 后端核账不可用':snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className=snapshot.backend_error?'amber':'green';renderSnapshot();await loadDetail(); }
   catch(error){$('connection').textContent='读取失败 · '+error.message;$('connection').className='red';}
   finally{setTimeout(refresh,5000);}
 }

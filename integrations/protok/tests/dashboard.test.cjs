@@ -373,3 +373,42 @@ test('Proven continuation shows the original Planner contract and separates exec
   assert.match(pending,/阅读原始研究合同与 Planner 输出/);
   assert.match(pending,/Original controlled intervention/);
 });
+
+
+test('Degraded accounting is unknown while retained research and interaction state survive refresh', async () => {
+  vm.runInContext(`
+    data={state:{iteration:1,status:'needs_attention'},nodes:[{id:'0001',route:'Retained question'}],
+      accounting_available:false,backend_error:'ProTokError: Invalid research GPU charge',
+      gpu_seconds:null,formal_gpu_seconds:null,research_gpu_seconds:null,debug_gpu_seconds:null,
+      progress:{title:'后端核账不可用 · 需要处理',reasons:[{title:'后端读取失败',detail:'Invalid research GPU charge'}]}};
+    selected='0001';following=false;tab='plan';view='routes';globalView=false;
+  `, context);
+  // Run the actual polling/connection update with drawing and detail I/O isolated.
+  vm.runInContext(`globalThis.savedRefresh={api,renderSnapshot,loadDetail};
+    api=async()=>data;renderSnapshot=()=>renderProgress();loadDetail=async()=>{};`,context);
+  try { await vm.runInContext('refresh()',context); }
+  finally {vm.runInContext('({api,renderSnapshot,loadDetail}=savedRefresh);delete globalThis.savedRefresh;',context);}
+  assert.match(elements.get('connection').textContent,/已连接 · 后端核账不可用/);
+  assert.equal(elements.get('connection').className,'amber');
+  assert.equal(elements.get('gpu').textContent,'未知');
+  assert.match(elements.get('statusline').innerHTML,/GPU 用量与待核账作业未知/);
+  assert.doesNotMatch(elements.get('statusline').innerHTML,/无待核账 GPU 作业|正式评分 0/);
+  assert.match(elements.get('reasons').innerHTML,/Invalid research GPU charge/);
+  assert.match(elements.get('currentSub').textContent,/Retained question/);
+  assert.deepEqual(plain(vm.runInContext('({selected,following,tab,view,globalView})',context)),
+    {selected:'0001',following:false,tab:'plan',view:'routes',globalView:false});
+  vm.runInContext("data=null;selected=null;following=true;tab='explanation';view='git';",context);
+});
+
+
+test('Settled research overruns show actual accounting without marking it unknown', () => {
+  vm.runInContext(`data={state:{iteration:17,phase:'done',status:'ready'},nodes:[],
+    accounting_available:true,gpu_seconds:180,formal_gpu_seconds:100,research_gpu_seconds:75,debug_gpu_seconds:5,
+    research_overruns:[{iteration:'0017',allocated_seconds:60,gpu_seconds:75,overrun_seconds:15}]};`,context);
+  ui.renderProgress();
+  assert.equal(elements.get('gpu').textContent,'0.05 小时');
+  assert.match(elements.get('statusline').innerHTML,/研究脚本 75 GPU 秒/);
+  assert.match(elements.get('statusline').innerHTML,/研究 #0017 已按实际 75 GPU 秒结算（申请 60 秒，超出 15 秒）/);
+  assert.doesNotMatch(elements.get('statusline').innerHTML,/核账作业未知|后端读取失败/);
+  vm.runInContext('data=null;',context);
+});

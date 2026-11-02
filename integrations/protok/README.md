@@ -160,6 +160,19 @@ service, matching handoff request, fully published Review/control records, no
 outstanding effects, and exclusive supervisor/runner locks. It preserves the
 ownership and budget files and records the previous service configuration.
 
+## Supervisor state
+
+Settled timeouts and failed research scripts enter independent Review as incomplete
+experiments with real resource charges and no invented measurement. The supervisor
+keeps admission/effect failures observable in `control/supervisor-status.json`,
+with bounded polling and no automatic Execute replay. Only core-authorized read-only
+calls retry within persisted call/time budgets. User STOP, handoff, exhausted
+allowance and the original lease/ownership expiry still stop execution.
+
+Inspection and cleanup failures are recorded separately. Final summaries use
+`null` for unavailable accounting; the read-only dashboard retains study records
+and labels unavailable totals. Neither service substitutes zero or stale usage.
+
 ## Checks
 
 ```sh

@@ -188,7 +188,7 @@ class FormalTimeoutTests(unittest.TestCase):
             (state["phase"], state["status"]), ("execute", "needs_attention")
         )
         self.assertEqual(self.delegate.count("review"), 1)
-        self.assertTrue((self.control / "STOP").exists())
+        self.assertFalse((self.control / "STOP").exists())
         self.assertIsNone(
             completed_response(self.study.root / state["calls"]["execute"])
         )

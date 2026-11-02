@@ -249,6 +249,7 @@ class ProTokBackend:
             formal_gpu_seconds=used,
             research_gpu_seconds=research["gpu_seconds"],
             research_outstanding=research["outstanding"],
+            research_overruns=research["overruns"],
             used_gpu_seconds=used + research["gpu_seconds"],
             debug_gpu_seconds=debug_used,
             total_gpu_seconds=used + research["gpu_seconds"] + debug_used,

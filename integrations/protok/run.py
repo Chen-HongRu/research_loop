@@ -653,6 +653,35 @@ def timed_out_job(root, backend, workspace, iteration):
     return result
 
 
+def settled_failure_response(trusted, *, agent_error=None):
+    """An accounted failed allocation is evidence, without a quality measurement."""
+    if trusted.get("status") != "failed":
+        raise ProTokError("A settled failed execution receipt is required")
+    return {
+        "outcome": "incomplete",
+        "markdown": (
+            "Controller-recorded settled execution failure: "
+            + str(trusted.get("terminal_state") or trusted.get("error") or "failed")
+            + "; actual GPU allocation charge "
+            + str(trusted["gpu_seconds"])
+            + " seconds. Original source, Plan, Agent records and collected artifacts "
+            "remain evidence. No quality measurement was produced. Independent Review "
+            "must assess the incomplete experiment and decide the next investigation "
+            "within the remaining original budget; this allocation is not resubmitted."
+            + (
+                " Agent reporting ended with "
+                + type(agent_error).__name__
+                + ": "
+                + str(agent_error)
+                if agent_error is not None
+                else ""
+            )
+        ),
+        "artifacts": [trusted["artifact"]],
+        "measurements": [],
+    }
+
+
 class ProTokHarness:
     def __init__(self, backend, root, delegate, deadline):
         self.backend, self.root, self.delegate, self.deadline = (
@@ -880,8 +909,12 @@ identity/accounting failures, user STOP and the original deadline remain blockin
             target=self._watch, args=(workspace, iteration, stop, deadline)
         )
         thread.start()
+        delegate_error = None
         try:
             result = self.delegate.run(**kwargs)
+        except (HarnessError, OSError) as error:
+            delegate_error = error
+            result = None
         finally:
             stop.set()
             # evaluate has the same finite deadline; settle effects before returning.
@@ -895,6 +928,19 @@ identity/accounting failures, user STOP and the original deadline remain blockin
                     self.recoverable_failure["cause"], details=self.recoverable_failure
                 )
             raise HarnessError(self.errors[-1])
+        if self.trusted_result and self.trusted_result.get("status") == "failed":
+            # The controller result, not Agent availability, defines a settled failure.
+            if self.trusted_result.get("purpose") == "research":
+                from integrations.protok.research_execution import completed_script
+
+                trusted = completed_script(self.root, workspace, iteration)
+            else:
+                trusted = timed_out_job(self.root, self.backend, workspace, iteration)
+            if trusted != self.trusted_result or read(result_path) != trusted:
+                raise HarnessError("Settled failure interface differs from its receipt")
+            result = settled_failure_response(trusted, agent_error=delegate_error)
+        elif delegate_error is not None:
+            raise delegate_error
         if result.get("outcome") == "incomplete" and self.trusted_result is None:
             retain_local_incomplete(
                 self.root, self.backend, workspace, iteration, result, run_dir=outer
@@ -1295,9 +1341,6 @@ def _run_one(root, backend):
                 "at": time.time(),
             },
         )
-        (Path(root) / "control/STOP").write_text(
-            "Paused after real execution failure; reconcile effects before resuming.\n"
-        )
         raise
 
 
@@ -1330,9 +1373,6 @@ def run_one(root, backend):
         except Exception as error:
             record.update(status="paused", error=f"{type(error).__name__}: {error}")
             write(control / "status.json", record)
-            (control / "STOP").write_text(
-                "Paused; reconcile retained effects before resuming.\n"
-            )
             raise
         finally:
             record["ended_at"] = time.time()
@@ -1516,7 +1556,23 @@ def reconcile_completed_execute(root, backend):
 
 
 def reconcile_timed_out_execute(root, backend, *, authorization):
-    """Record a settled failed allocation without repeating its Execute or Plan."""
+    """Record a settled formal timeout without repeating its Execute or Plan."""
+    return _reconcile_settled_execute(root, backend, authorization=authorization)
+
+
+def reconcile_research_execute(root, backend, *, authorization):
+    """Accept the retained settled research failure without resubmitting compute."""
+    return _reconcile_settled_execute(
+        root, backend, authorization=authorization, research=True
+    )
+
+
+def _reconcile_settled_execute(root, backend, *, authorization, research=False):
+    action = (
+        "reconcile-settled-research-result"
+        if research
+        else "reconcile-settled-formal-timeout"
+    )
     if not isinstance(authorization, str) or not authorization.strip():
         raise ProTokError("Explicit timeout reconciliation authorization required")
     root = Path(root)
@@ -1532,7 +1588,7 @@ def reconcile_timed_out_execute(root, backend, *, authorization):
             replay = previous / "reconciliation.json"
             if state["status"] == "ready" and replay.exists():
                 saved = read(replay)
-                if saved.get("operator_action") != "reconcile-settled-formal-timeout":
+                if saved.get("operator_action") != action:
                     raise ProTokError("Execute belongs to another reconciliation")
                 if saved.get("prepared_state") != state or any(
                     (root / name).read_text() != value
@@ -1557,7 +1613,30 @@ def reconcile_timed_out_execute(root, backend, *, authorization):
             iteration = f"{state['iteration']:04d}"
             metadata = read(study.root / "iterations" / iteration / "iteration.json")
             workspace = Path(metadata["workspace"])
-            trusted = timed_out_job(root, backend, workspace, iteration)
+            if research:
+                from integrations.protok.research_execution import completed_script
+
+                trusted = completed_script(root, workspace, iteration)
+                if trusted["status"] != "failed":
+                    raise ProTokError(
+                        "Only a settled research failure may be reconciled"
+                    )
+                record_root = root / "control/research-jobs" / iteration
+                backend_result = (
+                    root / "control/research-sources" / iteration / "result.json"
+                )
+            else:
+                trusted = timed_out_job(root, backend, workspace, iteration)
+                record_root = job_path(root, iteration)
+                backend_result = record_root / "result.json"
+            effects = backend.inspect()
+            if any(
+                effects.get(key)
+                for key in ("outstanding", "research_outstanding", "debug_outstanding")
+            ):
+                raise ProTokError(
+                    "Unresolved effects prevent settled-result reconciliation"
+                )
             result_path = workspace / "evaluation-result.json"
             if result_path.exists() and read(result_path) != trusted:
                 old = read(result_path)
@@ -1567,32 +1646,14 @@ def reconcile_timed_out_execute(root, backend, *, authorization):
                     raise ProTokError(
                         "Existing evaluation interface is not the retained failure"
                     )
-                immutable_record(
-                    job_path(root, iteration) / "timeout.previous-interface.json", old
-                )
+                immutable_record(record_root / "recovery.previous-interface.json", old)
             write(result_path, trusted)
-            raw = completed_response(previous / "agent")
-            response = {
-                "outcome": "incomplete",
-                "markdown": (
-                    "Controller reconciliation of a settled formal TIMEOUT; no new "
-                    "evaluation or Execute call. The original Plan, candidate and Agent "
-                    "records are retained. Job "
-                    + str(trusted["job_id"])
-                    + " ended TIMEOUT; actual charge "
-                    + str(trusted["gpu_seconds"])
-                    + " GPU seconds. No official measurement was produced. Independent "
-                    "Review must assess cost and fixed-budget feasibility; model quality "
-                    "and mechanism remain unmeasured.\n\n"
-                    + (
-                        "Retained completed Agent report:\n" + raw["markdown"]
-                        if raw
-                        else "The partial Agent attempt remains evidence, not a completed response."
-                    )
-                ),
-                "artifacts": [trusted["artifact"]],
-                "measurements": [],
-            }
+            response = settled_failure_response(trusted)
+            response["markdown"] = (
+                "Controller reconciliation of a retained settled result; no new "
+                "Execute call or allocation. Original Agent attempt retained.\n\n"
+                + response["markdown"]
+            )
             ProTokHarness(backend, root, None, 0).validate_completed(
                 response, workspace=workspace, run_dir=previous
             )
@@ -1618,11 +1679,11 @@ def reconcile_timed_out_execute(root, backend, *, authorization):
             if plan.is_absolute() or ".." in plan.parts:
                 raise ProTokError("Frozen Plan reference leaves the Study")
             record = {
-                "operator_action": "reconcile-settled-formal-timeout",
+                "operator_action": action,
                 "authorization": authorization,
                 "previous_attempt": relative,
                 "workspace": str(workspace),
-                "backend_result": str(job_path(root, iteration) / "result.json"),
+                "backend_result": str(backend_result),
                 "source_signatures": signatures(candidate_bytes(workspace)),
                 "stop_before": stop.read_text() if stop.exists() else None,
                 "call_count": state["call_count"],
@@ -1717,6 +1778,7 @@ def main(argv=None):
         "reconcile-local-incomplete",
         "reconcile-completed-execute",
         "reconcile-timed-out-execute",
+        "reconcile-research-execute",
         "repair-completed-control",
         "begin-debug",
         "resume-unsubmitted",
@@ -1742,6 +1804,10 @@ def main(argv=None):
         result = reconcile_completed_execute(root, backend)
     elif args.reconcile_timed_out_execute:
         result = reconcile_timed_out_execute(
+            root, backend, authorization=args.authorization or ""
+        )
+    elif args.reconcile_research_execute:
+        result = reconcile_research_execute(
             root, backend, authorization=args.authorization or ""
         )
     elif args.repair_completed_control:

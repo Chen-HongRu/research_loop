@@ -83,7 +83,7 @@ def check_boundary(root, backend):
     return state
 
 
-def check_timeout_boundary(root, backend):
+def check_timeout_boundary(root, backend, *, research=False):
     """Resume only the explicitly reconciled, settled failed allocation."""
     state = read(root / "study/state.json")
     iteration = f"{state['iteration']:04d}"
@@ -102,7 +102,12 @@ def check_timeout_boundary(root, backend):
     stop = root / "control/STOP"
     stop_text = stop.read_text() if stop.exists() else None
     if (
-        record.get("operator_action") != "reconcile-settled-formal-timeout"
+        record.get("operator_action")
+        != (
+            "reconcile-settled-research-result"
+            if research
+            else "reconcile-settled-formal-timeout"
+        )
         or not isinstance(record.get("authorization"), str)
         or not record["authorization"].strip()
         or record.get("stop_before") != "Supervisor stopped: attention\n"
@@ -162,9 +167,15 @@ def check_debug_boundary(root, backend):
 
 
 def deploy(
-    root, runtime, *, resume_debug=False, resume_submission=False, resume_timeout=False
+    root,
+    runtime,
+    *,
+    resume_debug=False,
+    resume_submission=False,
+    resume_timeout=False,
+    resume_research=False,
 ):
-    if sum((resume_debug, resume_submission, resume_timeout)) > 1:
+    if sum((resume_debug, resume_submission, resume_timeout, resume_research)) > 1:
         raise ValueError("Choose one explicit recovery mode")
     root, runtime = root.resolve(), runtime.resolve()
     commit = (runtime / "SOURCE_COMMIT").read_text().strip()
@@ -195,8 +206,8 @@ def deploy(
             from integrations.protok.resume_submission import validate_prepared
 
             state = validate_prepared(root, backend)
-        elif resume_timeout:
-            state = check_timeout_boundary(root, backend)
+        elif resume_timeout or resume_research:
+            state = check_timeout_boundary(root, backend, research=resume_research)
         else:
             state = (
                 check_debug_boundary(root, backend)
@@ -237,12 +248,19 @@ def deploy(
             or (stop.read_text() if stop.exists() else None) != stop_before
             or (
                 stop.exists()
-                and not (resume_debug or resume_submission or resume_timeout)
+                and not (
+                    resume_debug
+                    or resume_submission
+                    or resume_timeout
+                    or resume_research
+                )
             )
         ):
             raise RuntimeError("Operator state changed during handoff")
         marker.unlink()
-        if (resume_debug or resume_submission or resume_timeout) and stop.exists():
+        if (
+            resume_debug or resume_submission or resume_timeout or resume_research
+        ) and stop.exists():
             stop.unlink()
         write(
             backup / "deployment.json",
@@ -254,6 +272,7 @@ def deploy(
                 "resume_debug": resume_debug,
                 "resume_submission": resume_submission,
                 "resume_timeout": resume_timeout,
+                "resume_research": resume_research,
                 "at": time.time(),
             },
         )
@@ -269,6 +288,7 @@ def deploy(
             "resume_debug": resume_debug,
             "resume_submission": resume_submission,
             "resume_timeout": resume_timeout,
+            "resume_research": resume_research,
             "at": time.time(),
         },
     )
@@ -283,6 +303,7 @@ def main():
     recovery.add_argument("--resume-debug", action="store_true")
     recovery.add_argument("--resume-submission", action="store_true")
     recovery.add_argument("--resume-timeout", action="store_true")
+    recovery.add_argument("--resume-research", action="store_true")
     args = parser.parse_args()
     print(
         json.dumps(
@@ -292,6 +313,7 @@ def main():
                 resume_debug=args.resume_debug,
                 resume_submission=args.resume_submission,
                 resume_timeout=args.resume_timeout,
+                resume_research=args.resume_research,
             )
         )
     )

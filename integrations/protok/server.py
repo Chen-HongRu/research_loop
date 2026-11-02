@@ -45,9 +45,17 @@ class ScoutScheduler:
     def _run(self):
         while not self.stopped.is_set():
             try:
+                supervisor = self.root / "control/supervisor-status.json"
                 state = read(self.root / "study/state.json")
                 job = job_path(self.root, f"{state['iteration']:04d}") / "job.json"
-                if job.exists() and read(job).get("status") == "submitted":
+                if (
+                    (
+                        not supervisor.exists()
+                        or read(supervisor).get("status") == "running"
+                    )
+                    and job.exists()
+                    and read(job).get("status") == "submitted"
+                ):
                     self.manager.launch_if_due()
             except (OSError, ValueError, KeyError, TypeError) as error:
                 write(
@@ -138,45 +146,176 @@ def recover_owned(root, runner, backend):
         raise RuntimeError("Unreconciled job remains; no further work allowed")
 
 
-def drive(root, runner, backend, *, clock=time.time):
+def readonly_resume(root, state):
+    """Request the core's locked retry for a settled read-only attempt."""
+    if state.get("status") != "needs_attention" or state.get("debugging"):
+        return False
+    if state.get("phase") not in {"selection", "plan", "review"}:
+        return False
+    from research_loop.core import Study
+
+    Study(root / "study").retry(readonly=True)
+    return True
+
+
+def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
     control = root / "control"
     lease = read(control / "continuation.json")
     if lease.get("schema") != 2 or lease.get("seconds") != 86400:
         raise ValueError("Server requires an activated schema2 lease")
-    if (root / "study/state.json").exists():
-        runner.repair_completed_control(root, backend)
+    if (control / "STOP").exists():
+        return "user_stop"
+    # Waiting cannot extend this invocation's authorization.
+    deadline = lease["deadline"]
+    supervisor_path = control / "supervisor-status.json"
+    previous = read(supervisor_path) if supervisor_path.exists() else {}
+    first_error = previous.get("first_error")
+    failed_state = previous.get("failed_state")
+    delay = 5
+    repaired = False
     while not (control / "STOP").exists():
-        state_path = root / "study/state.json"
-        state = read(state_path) if state_path.exists() else None
-        # This marker is checked only between complete, published iterations.
-        if (control / "HANDOFF").exists() and state and state["phase"] == "done":
-            return "handoff"
-        status = backend.inspect()
-        if status.get("research_outstanding") or (
-            status["outstanding"] and not (state and state.get("debugging"))
-        ):
-            raise RuntimeError("Outstanding job requires explicit reconciliation")
-        remaining = lease["deadline"] - clock()
-        spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
-        if spent < 0:
-            raise RuntimeError("Historical GPU accounting decreased")
-        reserve = backend._config()["reserve_gpu_seconds"]
-        fresh = state is None or state["phase"] == "done"
-        minimum = 60 if (control / "research-policy.json").exists() else 1800
-        if fresh and (
-            remaining < minimum
-            or spent + minimum + reserve > lease["additional_gpu_seconds"]
-        ):
-            return "budget"
-        if not (root / "study/study.json").exists():
-            runner.init_study(root, backend)
-        state = runner.read(root / "study/state.json")
-        if state["status"] == "stopped":
-            return "attention"
-        state = runner.run_one(root, backend)
-        if state["status"] != "ready":
-            return "review_stop"
+        if clock() >= deadline:
+            return "deadline"
+        stage = "inspection"
+        state = None
+        try:
+            ownership = control / "ownership.json"
+            if ownership.exists():
+                deadline = min(deadline, read(ownership)["expires_at"])
+            if clock() >= deadline:
+                return "deadline"
+            state_path = root / "study/state.json"
+            state = read(state_path) if state_path.exists() else None
+            if (control / "HANDOFF").exists() and state and state["phase"] == "done":
+                return "handoff"
+            if state and not repaired:
+                runner.repair_completed_control(root, backend)
+                repaired = True
+                state = read(state_path)
+            status = backend.inspect()
+            if status.get("research_outstanding") or (
+                status["outstanding"] and not (state and state.get("debugging"))
+            ):
+                raise RuntimeError("Outstanding job requires explicit reconciliation")
+            remaining = deadline - clock()
+            spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
+            if spent < 0:
+                raise RuntimeError("Historical GPU accounting decreased")
+            reserve = backend._config()["reserve_gpu_seconds"]
+            fresh = state is None or state["phase"] == "done"
+            minimum = 60 if (control / "research-policy.json").exists() else 1800
+            if fresh and (
+                remaining < minimum
+                or spent + minimum + reserve > lease["additional_gpu_seconds"]
+            ):
+                return "budget"
+            if state and state.get("status") == "stopped":
+                return "attention"
+            if state and (
+                state.get("status") == "needs_attention" or state == failed_state
+            ):
+                if readonly_resume(root, state):
+                    # Review publication may have completed the iteration. Re-read
+                    # state and admission before starting any subsequent agent call.
+                    failed_state = None
+                    continue
+                raise RuntimeError("Retained effects require explicit reconciliation")
+            if not (root / "study/study.json").exists():
+                stage = "initialization"
+                runner.init_study(root, backend)
+            write(
+                supervisor_path,
+                {"status": "running", "at": clock(), "first_error": first_error},
+            )
+            stage = "iteration"
+            state = runner.run_one(root, backend)
+            failed_state = None
+            delay = 5
+            if state["status"] == "needs_attention":
+                raise RuntimeError("Iteration requires attention")
+            if state["status"] != "ready":
+                return "review_stop"
+        except Exception as error:
+            message = f"{type(error).__name__}: {error}"
+            first_error = first_error or message
+            if stage in {"iteration", "initialization"}:
+                path = root / "study/state.json"
+                failed_state = state
+                try:
+                    failed_state = read(path) if path.exists() else state
+                except (OSError, ValueError) as state_error:
+                    message += f"; state unavailable: {state_error}"
+            write(
+                supervisor_path,
+                {
+                    "status": "blocked",
+                    "at": clock(),
+                    "stage": stage,
+                    "first_error": first_error,
+                    "error": message,
+                    "failed_state": failed_state,
+                },
+            )
+            # Polling only reads receipts. Execute remains blocked until explicit
+            # reconciliation changes its retained state; core budgets bound retries.
+            wait(min(delay, max(0, deadline - clock())))
+            delay = min(delay * 2, 60)
     return "user_stop"
+
+
+def final_summary(root, runner, backend, reason, *, first_error=None):
+    """Publish unknown accounting rather than lose the summary on inspect failure."""
+    control = root / "control"
+    errors = []
+
+    def attempt(label, action):
+        try:
+            return action()
+        except Exception as error:
+            errors.append(f"{label}: {type(error).__name__}: {error}")
+            return None
+
+    status = attempt("inspection", backend.inspect)
+    lease = attempt("lease", lambda: read(control / "continuation.json"))
+    supervisor = attempt(
+        "supervisor status",
+        lambda: (
+            read(control / "supervisor-status.json")
+            if (control / "supervisor-status.json").exists()
+            else {}
+        ),
+    )
+    best = attempt(
+        "best",
+        lambda: (
+            runner.read(control / "active-best.json")
+            if (control / "active-best.json").exists()
+            else None
+        ),
+    )
+    used = status.get("used_gpu_seconds") if status is not None else None
+    additional = (
+        attempt("additional accounting", lambda: used - lease["initial_gpu_seconds"])
+        if used is not None and lease is not None
+        else None
+    )
+    write(
+        control / "final-summary.json",
+        {
+            "at": time.time(),
+            "reason": reason,
+            "first_error": (supervisor or {}).get("first_error") or first_error,
+            "used_gpu_seconds": used,
+            "additional_gpu_seconds_used": additional,
+            "outstanding": status.get("outstanding") if status is not None else None,
+            "research_outstanding": status.get("research_outstanding")
+            if status is not None
+            else None,
+            "accounting_status": "known" if status is not None else "unknown",
+            "cleanup_errors": errors,
+            "best": best,
+        },
+    )
 
 
 def main():
@@ -207,6 +346,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         reason = "attention"
         scout = None
+        first_error = None
         try:
             study_config = root / "study/study.json"
             if study_config.exists() and read(study_config).get("exploration"):
@@ -214,41 +354,39 @@ def main():
                 scout.start()
             reason = drive(root, runner, backend)
         except BaseException as error:
+            first_error = f"{type(error).__name__}: {error}"
             write(
                 control / "supervisor-error.json",
                 {"error": f"{type(error).__name__}: {error}", "at": time.time()},
             )
             (control / "STOP").write_text("Stopped; preserve and reconcile effects.\n")
-            try:
-                recover_owned(root, runner, backend)
-            except Exception as recovery_error:
-                write(
-                    control / "recovery-error.json",
-                    {"error": str(recovery_error), "at": time.time()},
-                )
             if isinstance(error, KeyboardInterrupt):
                 reason = "user_stop"
         finally:
-            if scout is not None:
-                scout.shutdown()
+            try:
+                if scout is not None:
+                    scout.shutdown()
+            except Exception as error:
+                first_error = first_error or f"{type(error).__name__}: {error}"
+                write(
+                    control / "scout-shutdown-error.json",
+                    {"error": f"{type(error).__name__}: {error}", "at": time.time()},
+                )
             if reason != "handoff":
                 (control / "STOP").write_text(f"Supervisor stopped: {reason}\n")
-            status = backend.inspect()
-            lease = read(control / "continuation.json")
-            write(
-                control / "final-summary.json",
-                {
-                    "at": time.time(),
-                    "reason": reason,
-                    "used_gpu_seconds": status["used_gpu_seconds"],
-                    "additional_gpu_seconds_used": status["used_gpu_seconds"]
-                    - lease["initial_gpu_seconds"],
-                    "outstanding": status["outstanding"],
-                    "best": runner.read(control / "active-best.json")
-                    if (control / "active-best.json").exists()
-                    else None,
-                },
-            )
+                try:
+                    # Terminal admission blocking can leave owned allocations even
+                    # when drive returns normally. Recovery cannot submit new work.
+                    recover_owned(root, runner, backend)
+                except Exception as recovery_error:
+                    first_error = first_error or (
+                        f"{type(recovery_error).__name__}: {recovery_error}"
+                    )
+                    write(
+                        control / "recovery-error.json",
+                        {"error": str(recovery_error), "at": time.time()},
+                    )
+            final_summary(root, runner, backend, reason, first_error=first_error)
 
 
 if __name__ == "__main__":

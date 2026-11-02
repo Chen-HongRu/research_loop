@@ -48,6 +48,88 @@ class DashboardTests(unittest.TestCase):
                 handler(connection, ("127.0.0.1", 1), Mock())
                 self.assertIn(expected, response, path)
 
+    def test_live_backend_failure_keeps_http_history_readable_with_unknown_accounting(
+        self,
+    ):
+        from io import BytesIO
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "active"
+            history = Path(temporary) / "history"
+
+            def put(base, name, value):
+                path = base / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(value))
+
+            put(
+                root,
+                "control/ownership.json",
+                {"project": str(Path(temporary) / "project")},
+            )
+            put(root, "study/state.json", {"iteration": 1, "status": "needs_attention"})
+            for base in (root, history):
+                put(base, "study/iterations/0001/iteration.json", {"id": "0001"})
+                folder = base / "study/iterations/0001"
+                (folder / "plan.md").write_text("Retained research question")
+                put(
+                    base,
+                    "control/backend-snapshot.json",
+                    {
+                        "observed_at": 123,
+                        "records": [],
+                        "used_gpu_seconds": 999,
+                        "scored_records": 3,
+                        "outstanding": [],
+                    },
+                )
+            with patch.object(DASH, "ThreadingHTTPServer") as factory:
+                factory.return_value.server_port = 0
+                DASH.serve(root, 0, history_roots=[history])
+                handler = factory.call_args.args[1]
+            for error in (
+                DASH.ProTokError("Invalid research GPU charge"),
+                ValueError("bad record"),
+            ):
+                connection = Mock()
+                connection.makefile.return_value = BytesIO(
+                    b"GET /api/snapshot HTTP/1.0\r\n\r\n"
+                )
+                response = bytearray()
+                connection.sendall.side_effect = response.extend
+                with patch.object(DASH.ProTokBackend, "inspect", side_effect=error):
+                    handler(connection, ("127.0.0.1", 1), Mock())
+                header, body = bytes(response).split(b"\r\n\r\n", 1)
+                self.assertIn(b"200 OK", header)
+                payload = json.loads(body)
+                self.assertFalse(payload["accounting_available"])
+                self.assertIn(str(error), payload["backend_error"])
+                for key in (
+                    "gpu_seconds",
+                    "formal_gpu_seconds",
+                    "research_gpu_seconds",
+                    "debug_gpu_seconds",
+                    "scored_records",
+                ):
+                    self.assertIsNone(payload[key], key)
+                self.assertEqual(
+                    {n["id"] for n in payload["nodes"]},
+                    {"active:0001", "history-1:0001"},
+                )
+                self.assertTrue(
+                    all(
+                        n["title"] == "Retained research question"
+                        for n in payload["nodes"]
+                    )
+                )
+                self.assertIn(str(error), payload["progress"]["reasons"][-1]["detail"])
+                self.assertTrue(
+                    any(
+                        str(error) in item
+                        for item in payload["coverage"]["limitations"]
+                    )
+                )
+
     def test_offline_snapshot_needs_neither_owner_token_nor_canonical_project(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -72,6 +154,44 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(result["study_root"], str(root))
             self.assertEqual(result["backend_observed_at"], 123)
             self.assertEqual(result["gpu_seconds"], 19084)
+
+    def test_research_overrun_keeps_actual_accounting_available(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "control").mkdir()
+            overrun = {
+                "iteration": "0017",
+                "allocated_seconds": 60,
+                "gpu_seconds": 75,
+                "overrun_seconds": 15,
+            }
+            (root / "control/backend-snapshot.json").write_text(
+                json.dumps(
+                    {
+                        "records": [],
+                        "used_gpu_seconds": 175,
+                        "total_gpu_seconds": 180,
+                        "research_gpu_seconds": 75,
+                        "debug_gpu_seconds": 5,
+                        "scored_records": 1,
+                        "outstanding": [],
+                        "research_overruns": [overrun],
+                    }
+                )
+            )
+            result = DASH.view_snapshot(root, snapshot_only=True)
+            self.assertTrue(result["accounting_available"])
+            self.assertIsNone(result["backend_error"])
+            self.assertEqual(result["research_overruns"], [overrun])
+            self.assertEqual(result["gpu_seconds"], 180)
+            self.assertEqual(result["formal_gpu_seconds"], 100)
+            self.assertEqual(result["research_gpu_seconds"], 75)
+            self.assertTrue(
+                any(
+                    "实际 75 GPU 秒结算（申请 60 秒，超出 15 秒）" in item
+                    for item in result["coverage"]["limitations"]
+                )
+            )
 
     def test_only_published_matching_verified_measurement_is_plotted(self):
         with tempfile.TemporaryDirectory() as temporary:
