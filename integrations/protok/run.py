@@ -775,6 +775,21 @@ def settled_failure_response(trusted, *, agent_error=None):
     """An accounted failed allocation is evidence, without a quality measurement."""
     if trusted.get("status") != "failed":
         raise ProTokError("A settled failed execution receipt is required")
+    if trusted.get("failure_kind") == "pre_backend_transport":
+        return {
+            "outcome": "incomplete",
+            "markdown": (
+                "Operator-certified research preparation failed before a native execution identity, "
+                "reservation or submission existed. No allocation occurred and "
+                "no scientific result or quality measurement exists. The requested "
+                "duration, original source, Plan, error and Agent attempt are retained. "
+                "The retained interface reports an input metadata SSH transport failure. "
+                "The expired request is not replayed; independent Review assesses "
+                "this incomplete prerequisite failure."
+            ),
+            "artifacts": [trusted["artifact"]],
+            "measurements": [],
+        }
     if trusted.get("failure_kind") == "preflight_rejected":
         return {
             "outcome": "incomplete",
@@ -1082,6 +1097,7 @@ class ProTokHarness:
                 else:
                     self.errors.append(result["error"])
             if result.get("diagnostics"):
+                self.pipeline_diagnostics = result["diagnostics"]
                 job = job_path(self.root, iteration)
                 if job.is_dir():
                     write(job / "failure-diagnostics.json", result["diagnostics"])

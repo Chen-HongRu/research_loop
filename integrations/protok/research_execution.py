@@ -203,6 +203,13 @@ def completed_script(root, workspace, iteration):
             raise ProTokError("Preflight rejection differs from its retained evidence")
         return result
     receipt = read(root / "control/research-jobs" / iteration / "receipt.json")
+    if receipt.get("failure_kind") == "pre_backend_transport":
+        from integrations.protok.preparation_failure import validate
+
+        if result != validate(root, workspace, iteration):
+            raise ProTokError(
+                "Preparation failure differs from its operator certificate"
+            )
     if receipt.get("failure_kind") == "operator_certified_no_allocation":
         from integrations.protok.research_rejection import validate_budget_certificate
 

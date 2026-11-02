@@ -211,6 +211,20 @@ ownership and budget files and records the previous service configuration.
 
 ## Supervisor state
 
+For a retained SSH failure in the read-only input metadata probe, before native
+job creation or reservation, `preparation_failure.certify` can explicitly record
+the failed preparation after its original execution window expires. It preserves
+the error, frozen Plan/source and requested duration. The atomically published
+controller record uses a `preparation:` certificate identity and zero allocation;
+it contains no native execution metadata, attempts or Slurm job/state. Independent
+Review receives no scientific measurement. Native effects, changed source, STOP
+or a different failure stage prevent certification; the request is never replayed.
+Certificates bind controller-owned failure diagnostics. The pinned legacy runtime
+with a missing server traceback instead requires its exact controller provenance
+and absence of mandatory pre-submission records and reservation; writable interface
+frames alone do not establish allocation absence. Subsequent watcher errors retain
+their server diagnostics in the controller's outer failure record.
+
 An operator may certify the observed research submission rejection with
 `research_rejection.certify` only after retaining its complete account-lookup
 failure, unchanged source/Plan and raw submitting state, and two successful
