@@ -47,7 +47,7 @@ train.py, run.json and timing.json into results/<job_id> and publishes dev-score
 and result.json. No labels are copied. Read these local files for actual evidence.
 result.json gives the development AUC, exact artifact path/version, source_sha256,
 request, and evidence references. Keep test predictions unchanged and unscored.
-Use only the reported checkpoint version and dev score for a global measurement.
+The controller constructs the checkpoint artifact and development measurement from its receipt.
 No fabricated measurements or claims of success are permitted on bridge errors.
 """
 
@@ -65,14 +65,11 @@ Plan 可以不设置 local_evaluation，input_artifacts 只引用实际存在的
 预算内，应足以等待真实训练（建议至多 900 秒）。不要求机制假设。
 
 Execute 通过 train-request.json 提交一次配置，等待本地结果，并核对 run.json、
-timing.json、dev-score.json 与 checkpoint。成功时必须输出恰好一个候选产物，
-其 path 是 result.json 给出的准确 checkpoint.pt 本地绝对路径，version 原样采用。
-必须至少输出一项全局 measurement：candidate_id 自定且唯一，artifact 与该产物
-完全相同，evaluation_id=global-development-v1，comparison_scope=development-v1，
-metrics=[{"name":"auc","value":真实开发 AUC}]，evidence 引用实际结果文件。
+timing.json、dev-score.json 与 checkpoint。最终仅返回所给 schema 的 markdown。
+控制器根据可信收据构造 checkpoint 路径/版本、候选 ID、开发评估范围、AUC 和证据。
 报告说明 split=dev、source_sha256、配置、初始化和首 batch 延迟、吞吐和显存；
 未测项目明确标注。不得用测试预测作开发数据，不得自行评分测试预测。
-错误或缺失结果须如实返回 incomplete，不能强造 measurement。
+错误或缺失结果须如实说明；不能编造测量或成功。
 
 Review 核查真实开发指标、产物和来源，更新两层研究文档及候选核查记录。
 目标只要求真实训练与完整开发结果和限制报告，不要求任意 AUC 阈值或机制解释。

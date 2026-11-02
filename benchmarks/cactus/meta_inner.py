@@ -94,13 +94,17 @@ def run_review_recovery(study):
 
     try:
         return study.run(iterations=1)
-    except StudyError:
+    except (StudyError, ValueError) as error:
+        structural_error = (
+            "Candidate reviews must match unique current measurements exactly"
+            in str(error)
+            or str(error) == "review.candidate_reviews: exceeds maximum item count"
+        )
         state = study.status()
         if (
             state.get("phase") == "review"
             and state.get("status") == "needs_attention"
-            and "Candidate reviews must match unique current measurements exactly"
-            in state.get("error", "")
+            and structural_error
             and state["call_count"] < study.config["max_calls"]
         ):
             receipt = study.root / state["calls"]["review"] / "process.json"

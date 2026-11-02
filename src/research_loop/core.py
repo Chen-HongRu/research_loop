@@ -26,7 +26,9 @@ from .long_training import (
     validate_policy as validate_long_training,
 )
 from .exploration import (
+    agent_schema,
     allocation,
+    complete_output,
     guidance,
     route_candidates,
     stage_schema,
@@ -42,7 +44,7 @@ from .harness import (
     make_harness,
     publish_completed_response,
 )
-from .protocol import SCHEMAS, prompt, validate_response
+from .protocol import SCHEMAS, context_schema, prompt, validate_response
 from .research_contract import validate_research_execution
 from .strategy import debate_rounds, review_guidance, validate_strategy
 from .tasks import TaskQueue, completed_results as task_results
@@ -760,7 +762,11 @@ class Study:
             key
             for key, call in owner_state["calls"].items()
             if key.startswith("plan-")
-            and str(Path(call) / "response.json") == plan_ref
+            and plan_ref
+            in {
+                str(Path(call) / "response.json"),
+                str(Path(call) / "canonical-response.json"),
+            }
             and owner_state.get("accepted_calls", {}).get(key)
         ]
         if (
@@ -986,6 +992,7 @@ class Study:
     ) -> dict:
         harness = harness or self.harness
         state["last_call_key"] = key
+        cached = False
         if key in state["calls"]:
             attempt = self.root / state["calls"][key]
             failure = attempt / "failure.json"
@@ -1000,6 +1007,7 @@ class Study:
                     record["error"], details=record["details"]
                 )
             result = completed_response(attempt)
+            cached = result is not None
             validate_completed = getattr(harness, "validate_completed", None)
             if (
                 result is not None
@@ -1040,6 +1048,7 @@ class Study:
             )
             attempt.mkdir(parents=True)
             _write(attempt / "context.json", context)
+            _write(attempt / "schema.json", self._agent_schema(phase, context))
             relative = str(attempt.relative_to(self.root))
             state["calls"][key] = relative
             state.update(
@@ -1071,9 +1080,7 @@ class Study:
                         if phase == "review" and review_guidance(self.strategy)
                         else ""
                     ),
-                    schema=long_training_schema(
-                        phase, context, stage_schema(phase, context, SCHEMAS)
-                    ),
+                    schema=self._agent_schema(phase, context),
                     workspace=workspace or self.workspace,
                     run_dir=attempt,
                     writable=phase == "execute" and self.config["allow_write"],
@@ -1119,19 +1126,55 @@ class Study:
                         },
                     )
                 raise
+        if phase in {"proposal", "plan"}:
+            schema = self._agent_schema(phase, context)
+            # Before controller-owned fields were omitted, calls persisted this
+            # complete schema. Only those completed calls may reuse full output.
+            legacy_schema = long_training_schema(
+                phase, context, stage_schema(phase, context, SCHEMAS)
+            )
+            if (
+                cached
+                and legacy_schema != schema
+                and (attempt / "schema.json").exists()
+                and _read(attempt / "schema.json") == legacy_schema
+            ):
+                frozen = _read(attempt / "context.json")
+                # Selection budgets change when earlier calls are replayed;
+                # every scientific input and controller choice stays frozen.
+                ignored = {"budget"} if phase == "proposal" else set()
+                if {k: v for k, v in frozen.items() if k not in ignored} != {
+                    k: v for k, v in context.items() if k not in ignored
+                }:
+                    raise StudyError("Completed legacy call context changed")
+                schema = self._response_schema(phase, context)
+                validate_response(phase, result, schema=schema)
+                if complete_output(phase, context, result) != result:
+                    raise StudyError("Completed legacy call changed controller fields")
+            else:
+                validate_response(phase, result, schema=schema)
+            result = complete_output(phase, context, result)
         self._validate_result(phase, result, context)
         state.setdefault("accepted_calls", {})[key] = True
         state.update(status="ready", active_attempt=None)
         self._save(state)
         return result
 
+    def _response_schema(self, phase, context):
+        return context_schema(
+            phase,
+            context,
+            long_training_schema(phase, context, stage_schema(phase, context, SCHEMAS)),
+        )
+
+    def _agent_schema(self, phase, context):
+        return agent_schema(phase, context, self._response_schema(phase, context))
+
     def _validate_result(self, phase: str, result: dict, context: dict) -> None:
         validate_response(
             phase,
             result,
-            schema=long_training_schema(
-                phase, context, stage_schema(phase, context, SCHEMAS)
-            ),
+            schema=self._response_schema(phase, context),
         )
         validate_design(phase, result, context)
         if not result["markdown"].strip():
@@ -1609,13 +1652,15 @@ class Study:
             route_title=proposal["route_title"],
         )
         _write(folder / "iteration.json", metadata)
+        canonical = (
+            Path(state["calls"][f"plan-{state['selection_round']}"])
+            / "canonical-response.json"
+        )
+        _write(self.root / canonical, result)
         state.update(
             route_id=route_id,
             phase="execute",
-            plan_ref=str(
-                Path(state["calls"][f"plan-{state['selection_round']}"])
-                / "response.json"
-            ),
+            plan_ref=str(canonical),
         )
         self._save(state)
 

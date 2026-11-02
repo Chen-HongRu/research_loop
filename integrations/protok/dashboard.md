@@ -63,6 +63,10 @@ uv run --extra dashboard python -m integrations.protok.tensorboard \
 
 看板原启动命令增加 `--tensorboard-port 6006` 后显示按钮。TensorBoard 仅监听本机，由看板在 `/tensorboard/` 转发，沿用现有认证与访问路径；不对外开放 6006 端口。服务未配置或暂不可用时，任务进展仍可读取回传数据。
 
+按钮默认打开 Scalars 并过滤到所选任务。Run 使用面板编号，例如 `active/#0026`；同一执行的指标和条件分别作为曲线，不再生成数百个 run。其他执行使用 `(attempt N)` 区分。TensorBoard 2.21.0 在匹配 run 超过 40 个时默认全不选，任务过滤避免历史增长再次造成空图，并保留用户的显式选择。没有保留遥测的旧实验不能仅凭最终分数补出训练曲线。
+
+升级导出器与看板时需一起更新 `tensorboard.py` 与 `assets/task-metrics.js`。原 logdir 可继续使用；新版在 `events-v2/` 与 `.export-state-v2/` 增量重建派生视图，保留旧目录供回退，TensorBoard 只观察新版目录。切换来源目录时使用新的 logdir。只需重启两个展示服务，无需重启研究 Runner。
+
 导出器每五秒增量读取各来源的一页本地 JSONL，并只向派生目录写入 TensorBoard event 文件与续传游标；重启后继续补传，不重复写点，不读取训练数据或 checkpoint。TensorBoard 网页首次打开默认开启原生自动刷新，周期 30 秒；保留用户已有的显式偏好。依赖固定为 TensorBoard 2.21.0，更新版本时须重新核对首次访问的设置接口。详细数据映射及读取边界见 [telemetry.md](../../docs/telemetry.md#task-progress-and-tensorboard)。
 
 ## 与冻结控制器独立部署

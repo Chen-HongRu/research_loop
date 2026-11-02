@@ -2,7 +2,7 @@ import copy
 import json
 import unittest
 
-from research_loop.protocol import SCHEMAS, prompt, validate_response
+from research_loop.protocol import SCHEMAS, context_schema, prompt, validate_response
 
 
 def plan():
@@ -233,3 +233,57 @@ class ProtocolTests(unittest.TestCase):
             prompt("plan", [])
         with self.assertRaises(ValueError):
             prompt("plan", {"metric": float("nan")})
+
+
+class FrozenContractTests(unittest.TestCase):
+    def test_execution_evaluation_and_scope_are_a_pair(self):
+        local = plan()["local_evaluation"]
+        global_eval = {**local, "id": "global-v1", "comparison_scope": "global-scope"}
+        schema = context_schema(
+            "execute",
+            {"plan": plan(), "global_evaluation": global_eval},
+            SCHEMAS["execute"],
+        )
+        value = execution()
+        validate_response("execute", value, schema=schema)
+        value["measurements"][0]["comparison_scope"] = "global-scope"
+        with self.assertRaises(ValueError):
+            validate_response("execute", value, schema=schema)
+        self.assertNotIn(
+            "anyOf", SCHEMAS["execute"]["properties"]["measurements"]["items"]
+        )
+
+    def test_no_measurements_without_feedback_evaluation(self):
+        schema = context_schema(
+            "execute", {"plan": {"local_evaluation": None}}, SCHEMAS["execute"]
+        )
+        with self.assertRaises(ValueError):
+            validate_response("execute", execution(), schema=schema)
+        value = execution()
+        value["measurements"] = []
+        validate_response("execute", value, schema=schema)
+
+    def test_review_ids_are_bound_to_current_measurements(self):
+        schema = context_schema("review", {"execute": execution()}, SCHEMAS["review"])
+        self.assertEqual(
+            schema["properties"]["candidate_reviews"]["items"]["properties"][
+                "candidate_id"
+            ]["enum"],
+            ["candidate-2"],
+        )
+        empty = context_schema(
+            "review", {"execute": {"measurements": []}}, SCHEMAS["review"]
+        )
+        self.assertEqual(empty["properties"]["candidate_reviews"]["maxItems"], 0)
+
+    def test_judge_selection_requires_choice(self):
+        value = dict(
+            decision="select",
+            choice=None,
+            action="Measure",
+            markdown="Report",
+            goal_status="undetermined",
+            stop_reason=None,
+        )
+        with self.assertRaisesRegex(ValueError, "choice"):
+            validate_response("judge", value)

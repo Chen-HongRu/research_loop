@@ -123,6 +123,25 @@ class ExplanationTests(unittest.TestCase):
             },
         }
 
+    def test_suggestion_markers_are_controller_owned(self):
+        response = self.content()
+        response["next_tests"] = [copy.deepcopy(response["overview"])]
+        original = copy.deepcopy(response)
+        harness = Mock()
+        harness.run.return_value = response
+        record = ex.generate_one(self.root, "0001", harness=harness)
+        self.assertEqual(record["status"], "ready")
+        self.assertEqual(response, original)
+        self.assertEqual(
+            record["content"]["next_tests"],
+            [{**original["next_tests"][0], "proposed": True, "not_run": True}],
+        )
+        self.assertEqual(harness.run.call_args.kwargs["schema"], ex.AGENT_SCHEMA)
+        ex.validate_content(record["content"], ex.collect_material(self.root, "0001"))
+        response["next_tests"][0]["not_run"] = False
+        with self.assertRaises(ValueError):
+            ex.published_content(response)
+
     def test_exact_refs_ignore_later_attempt_and_partial(self):
         self.put(
             self.prefix + "review/attempt-002/response.json", {"markdown": "later"}
@@ -258,6 +277,78 @@ class ExplanationTests(unittest.TestCase):
             {"metadata": metadata, "state_after": target_state},
         )
         return original
+
+    def canonical_continuation(self):
+        raw = self.continuation()
+        path = self.root / (self.prefix + "publication.json")
+        source = json.loads(path.read_text())
+        ref = source["state_after"]["plan_ref"].replace(
+            "/response.json", "/canonical-response.json"
+        )
+        source["state_after"]["plan_ref"] = ref
+        source["state_after"]["selected"] = {"proposal": {"base_experiment": None}}
+        self.put(self.prefix + "publication.json", source)
+        canonical = {**raw, "base_experiment": None}
+        self.put("study/" + ref, canonical)
+        target_path = self.root / "study/iterations/0002/publication.json"
+        target = json.loads(target_path.read_text())
+        target["state_after"]["plan_ref"] = ref
+        target["metadata"]["continuation"]["plan_ref"] = ref
+        self.put("study/iterations/0002/iteration.json", target["metadata"])
+        self.put("study/iterations/0002/publication.json", target)
+        return raw, canonical, ref
+
+    def test_canonical_plan_continuation_preserves_raw_agent_view(self):
+        from integrations.protok import dashboard
+        from integrations.protok.plan_provenance import execution_plan
+
+        raw, canonical, ref = self.canonical_continuation()
+        record = execution_plan(self.root, "0002")
+        self.assertEqual(record["output"], canonical)
+        self.assertEqual(record["output_owner"], "controller")
+        self.assertEqual(record["plan_ref"], "study/" + ref)
+        for identity in ("0001", "0002"):
+            material = ex.collect_material(self.root, identity)
+            plans = [item for item in material["sources"] if item["kind"] == "plan_ref"]
+            self.assertEqual(json.loads(plans[0]["text"]), canonical)
+            self.assertEqual(plans[0]["output_owner"], "controller")
+        agents = dashboard.agent_outputs(self.root, self.root / "study/iterations/0001")
+        planner = next(agent for agent in agents if agent["phase"] == "plan")
+        self.assertEqual(planner["output"], raw)
+        self.assertNotIn("base_experiment", planner["output"])
+        self.assertTrue(planner["published"])
+        self.assertIsNotNone(
+            dashboard.continuation_plan_record(
+                self.root, self.root / "study/iterations/0002"
+            )["planner"]
+        )
+
+    def test_canonical_plan_requires_exact_raw_and_selected_reconstruction(self):
+        from integrations.protok.plan_provenance import execution_plan
+
+        for tamper in ("canonical", "selected", "raw"):
+            with self.subTest(tamper=tamper):
+                raw, canonical, ref = self.canonical_continuation()
+                if tamper == "canonical":
+                    self.put("study/" + ref, {**canonical, "base_experiment": "0999"})
+                elif tamper == "selected":
+                    path = self.root / (self.prefix + "publication.json")
+                    saved = json.loads(path.read_text())
+                    saved["state_after"]["selected"]["proposal"]["base_experiment"] = (
+                        "0999"
+                    )
+                    self.put(self.prefix + "publication.json", saved)
+                else:
+                    self.put(
+                        "study/" + ref.replace("canonical-response", "response"),
+                        {**raw, "base_experiment": None},
+                    )
+                self.assertIsNone(execution_plan(self.root, "0002"))
+                material = ex.collect_material(self.root, "0002")
+                self.assertIsNone(material["facts"]["continuation"])
+                self.assertNotIn(
+                    "plan_ref", {item["kind"] for item in material["sources"]}
+                )
 
     def test_inherited_plan_new_and_legacy_are_original_completed_evidence(self):
         for legacy in (False, True):

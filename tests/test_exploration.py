@@ -2,11 +2,19 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from research_loop import Study, initialize
-from research_loop.exploration import allocation, route_candidates, validate_exploration
+from research_loop.exploration import (
+    allocation,
+    route_candidates,
+    stage_schema,
+    validate_exploration,
+)
+from research_loop.harness import publish_completed_response
+from research_loop.long_training import stage_schema as long_training_schema
 from research_loop.protocol import SCHEMAS, validate_response
-from test_core import RecordedHarness, read
+from test_core import ProcessLost, RecordedHarness, read
 
 
 POLICY = {
@@ -27,7 +35,7 @@ class ExplorationHarness(RecordedHarness):
     def run(self, **kwargs):
         phase = next(p for p in SCHEMAS if f"Stage: {p}\n" in kwargs["prompt"])
         schema = kwargs["schema"]
-        result = super().run(**{**kwargs, "schema": SCHEMAS[phase]})
+        result = super().run(**kwargs)
         validate_response(phase, result, schema=schema)
         return result
 
@@ -36,7 +44,6 @@ class ExplorationHarness(RecordedHarness):
         slot = context.get("exploration")
         if slot and phase == "proposal":
             result["research_design"] = {
-                "kind": slot["kind"],
                 "question": "Is condition information lost?",
                 "structural_change": "Inject the unchanged condition at each layer",
                 "prior_attempts": ["Historical architecture comparison"],
@@ -140,7 +147,7 @@ class ExplorationTests(unittest.TestCase):
         self.assertEqual(s.graph()[0]["status"], "reviewed")
         self.assertIn("unavailable", h.calls[0]["context"]["scout_inputs"])
 
-    def test_refinement_cannot_satisfy_architecture_envelope(self):
+    def test_model_cannot_supply_controller_allocation_label(self):
         s, h = self.study()
         response = h.response
 
@@ -154,6 +161,75 @@ class ExplorationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.run()
         self.assertEqual(h.count("execute"), 0)
+
+    def test_allocation_is_constructed_without_mutating_raw_proposal(self):
+        s, h = self.study()
+        s.run()
+        call = next(c for c in h.calls if c["phase"] == "proposal")
+        raw = read(call["run_dir"] / "response.json")
+        self.assertNotIn("kind", raw["research_design"])
+        self.assertNotIn(
+            "kind", call["schema"]["properties"]["research_design"]["properties"]
+        )
+        selected = read(s.root / "iterations/0001/selection.json")
+        self.assertEqual(
+            selected["rounds"]["0"]["proposals"]["a"]["research_design"]["kind"],
+            "architecture",
+        )
+
+    def test_legacy_completed_allocation_requires_original_kind(self):
+        for kind in ("architecture", "refinement"):
+            with self.subTest(kind=kind):
+                self.root = self.root.parent / kind
+                s, h = self.study()
+                response = h.response
+
+                def legacy_response(phase, context, kwargs):
+                    result = response(phase, context, kwargs)
+                    if phase == "proposal":
+                        result["research_design"]["kind"] = context["exploration"][
+                            "kind"
+                        ]
+                    return result
+
+                def crash(call):
+                    publish_completed_response(
+                        call["run_dir"], read(call["run_dir"] / "response.json")
+                    )
+                    raise ProcessLost()
+
+                def legacy_schema(phase, context):
+                    return long_training_schema(
+                        phase, context, stage_schema(phase, context, SCHEMAS)
+                    )
+
+                h.response, h.after = legacy_response, crash
+                with (
+                    patch.object(s, "_agent_schema", side_effect=legacy_schema),
+                    self.assertRaises(ProcessLost),
+                ):
+                    s.run()
+                state = s.status()
+                key = state["last_call_key"]
+                attempt = self.root / state["calls"][key]
+                receipt = read(attempt / "completed.json")
+                receipt["response"]["research_design"]["kind"] = kind
+                (attempt / "completed.json").write_text(json.dumps(receipt))
+                raw = (attempt / "completed.json").read_bytes()
+                context = read(attempt / "context.json")
+                resumed = Study(self.root, h)
+                if kind == "architecture":
+                    result = resumed._call(
+                        state, "proposal", key, context, attempt.parent
+                    )
+                    self.assertEqual(result["research_design"]["kind"], kind)
+                else:
+                    with self.assertRaises(ValueError):
+                        resumed._call(state, "proposal", key, context, attempt.parent)
+                self.assertEqual((attempt / "completed.json").read_bytes(), raw)
+                self.assertEqual(state["call_count"], 1)
+                self.assertEqual(len(h.calls), 1)
+                self.assertEqual(h.count("execute"), 0)
 
     def test_policy_validation(self):
         for policy in ({}, {**POLICY, "cycle": []}, {**POLICY, "version": 9}):

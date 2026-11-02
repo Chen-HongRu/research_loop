@@ -47,6 +47,12 @@ from integrations.protok.backend import (
     ProTokError,
 )
 from integrations.protok.research_execution import policy as research_policy
+from integrations.protok.agent_output import (
+    REPORT_INSTRUCTIONS,
+    REPORT_SCHEMA,
+    receipt_response,
+    report_response,
+)
 
 # Site paths and historical candidate identity belong to the operator's environment.
 PROJECT = (
@@ -90,7 +96,8 @@ retry the API once only if status confirms not_submitted. pending means publishe
 accepted means the controller claimed it, not that GPU execution has started. For
 pending/accepted wait quietly for evaluation-result.json within the frozen timeout.
 completed/failed return the original result. An unknown state requires reconciliation,
-not a new submission. Return only the actual trusted artifact/measurement as before.
+not a new submission. The controller constructs structured artifacts and measurements
+from its verified result; your final response is the execution report described below.
 """
 
 
@@ -1040,8 +1047,8 @@ class ProTokHarness:
             )
         kwargs["prompt"] += """
 For a controller-certified formal result with status=failed and
-failure_kind=allocation_timeout, return outcome=incomplete, measurements=[],
-and artifacts=[the exact returned artifact]. Preserve the time limit and actual
+failure_kind=allocation_timeout, report the settled incomplete execution. The
+controller attaches its exact artifact and no measurements. Preserve the time limit and actual
 GPU charge; do not invent a score, shorten the evaluation, or submit again.
 A settled time limit ends this investigation's execution and enters independent
 Review. It does not establish model quality or mechanism, but is evidence of
@@ -1065,6 +1072,8 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
             )
         if not kwargs["writable"]:
             return self.delegate.run(**kwargs)
+        kwargs["schema"] = REPORT_SCHEMA
+        kwargs["prompt"] += REPORT_INSTRUCTIONS
         self.trusted_result = None
         self.errors = []
         self.recoverable_failure = None
@@ -1092,7 +1101,7 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
         thread.start()
         delegate_error = None
         try:
-            result = self.delegate.run(**kwargs)
+            result = report_response(self.delegate.run(**kwargs))
         except (HarnessError, OSError) as error:
             delegate_error = error
             result = None
@@ -1151,6 +1160,9 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
         trusted = self.trusted_result
         if trusted is None or read(result_path) != trusted:
             raise HarnessError("Agent altered the trusted evaluation interface result")
+        # Model prose is evidence/interpretation; candidate identity and measurements
+        # are constructed by the controller and then independently revalidated below.
+        result = receipt_response(trusted, result["markdown"])
         result = self.validate_completed(result, workspace=workspace, run_dir=outer)
         if outer is not None:
             publish_completed_response(outer, result)
@@ -1322,7 +1334,7 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
         return result
 
 
-GOAL = f'''Minimize {METRIC} (Angstrom) under {PROTOCOL}; this is adaptive development evidence.
+GOAL = f"""Minimize {METRIC} (Angstrom) under {PROTOCOL}; this is adaptive development evidence.
 Fixed: 449 proteins, seed42, 2000 updates, Euler100, H100 debug 30min, 8CPU/96G/2workers.
 Prefer improvements without increasing parameter count or inference work; scaling is not the primary route; retain the acknowledged historical best. Never change teacher/data/noise/scorer/fixed config,
 canonical project, old journal, permissions, hardware, or protocol. No SSH/network/install,
@@ -1339,9 +1351,9 @@ Use a bounded polling loop up to 3600s or the remaining window; timeout_seconds 
 allow this, at most 3600 seconds. Repeated API calls observe the same submission.
 The API's temporary file, lock and receipt are permitted transport files; never hand-write
 or delete interface files. The fixed bridge freezes and verifies source and returns actual
-receipt, fingerprint, metric/value, evidence and provenance. Return exactly its artifact and one measurement:
-candidate_id=fingerprint, evaluation_id={PROTOCOL}, comparison_scope={PROTOCOL},
-metrics=[{{"name":"{METRIC}","value":actual value}}], evidence=all returned evidence paths.
+receipt, fingerprint, metric/value, evidence and provenance. Return only the execution
+report requested by the adapter; it constructs the artifact and measurement from the
+verified receipt, including candidate identity, protocol, metric and evidence paths.
 Local prechecks should be minimal and relevant to the changed computation on ordinary,
 nondegenerate inputs and padding. The fixed backend already checks actual initialization,
 training gradients and final model invariants; do not duplicate an exhaustive CPU suite.
@@ -1370,7 +1382,7 @@ evidence, not a reason to stop. A controller-certified, fully accounted formal
 TIMEOUT is an incomplete investigation, with no score; Review records the limitation
 and may continue. Stop dependent work on unresolved effects, identity/accounting
 failures, user STOP or exhausted authorization, not solely on a settled time limit.
-'''
+"""
 
 
 def init_study(root, backend):

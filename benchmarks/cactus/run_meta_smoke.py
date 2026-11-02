@@ -347,15 +347,23 @@ class MetaRequestHarness:
     def run(self, **kwargs):
         if not kwargs["writable"]:
             return self.delegate.run(**kwargs)
+        from bridge import publish_execution, report_arguments
+
         stop = threading.Event()
         self.args.stop_event = stop
         self.args.deadline = time.monotonic() + kwargs["timeout_seconds"]
-        thread = threading.Thread(
-            target=self._watch, args=(Path(kwargs["workspace"]), stop), daemon=True
-        )
+        worker_errors = []
+
+        def watch():
+            try:
+                self._watch(Path(kwargs["workspace"]), stop)
+            except BaseException as error:
+                worker_errors.append(error)
+
+        thread = threading.Thread(target=watch, daemon=True)
         thread.start()
         try:
-            return self.delegate.run(**kwargs)
+            report = self.delegate.run(**report_arguments(kwargs))
         finally:
             stop.set()
             thread.join(timeout=30)
@@ -363,6 +371,57 @@ class MetaRequestHarness:
                 self.errors.append(
                     "Evaluation worker still running; no promotion or replay"
                 )
+
+        if worker_errors:
+            from research_loop.harness import HarnessError
+
+            raise HarnessError(
+                "Evaluation worker failed; effects require reconciliation"
+            ) from worker_errors[0]
+        if (
+            thread.is_alive()
+            or self.errors
+            or (getattr(self, "started", False) and self.result is None)
+        ):
+            from research_loop.harness import HarnessError
+
+            raise HarnessError(
+                "Evaluation effects are unresolved; reconciliation required"
+            )
+        artifacts, measurements = [], []
+        success = self.result is not None and not thread.is_alive() and not self.errors
+        if success:
+            candidate = self.result["candidate"]
+            artifact = {
+                "path": str(Path(kwargs["workspace"]).resolve() / "strategy.json"),
+                "version": candidate["ref"],
+            }
+            by_arm = {row["arm"]: row for row in self.result["report"]["rows"]}
+            artifacts = [artifact]
+            measurements = [
+                {
+                    "candidate_id": CANDIDATE_ID,
+                    "artifact": artifact,
+                    "evaluation_id": "meta-development-v1",
+                    "comparison_scope": candidate["parent_ref"],
+                    "metrics": [
+                        {
+                            "name": "mean_rO",
+                            "value": by_arm["C"]["overhead_seconds"]
+                            / by_arm["S"]["overhead_seconds"],
+                        }
+                    ],
+                    "evidence": [
+                        str(
+                            Path(kwargs["workspace"]).resolve()
+                            / "evaluation-result.json"
+                        )
+                    ],
+                }
+            ]
+        return publish_execution(
+            kwargs["run_dir"], report, artifacts, measurements, success
+        )
 
 
 def verify_outer(root: Path, state: dict, paired: dict) -> None:
@@ -446,12 +505,10 @@ HEAD. Plan action creates the exact allowed policy and submits one request. Set
 timeout_seconds=2700 for the long evaluation. The future iteration workspace need
 not exist during Plan; use the actual path supplied during Execute.
 Execute must await evaluation-result.json and inspect report. On completed report
-return exactly one artifact strategy.json in current workspace, version equal to
-evaluation-result.json candidate.ref. Return one global measurement for this policy:
-evaluation_id=meta-development-v1, comparison_scope equals candidate.parent_ref,
-candidate_id=direct-concise-v1, metrics=[{name:mean_rO,value:actual C/S overhead ratio}],
-evidence contains actual evaluation-result.json. If failed, return incomplete and
-no measurements; never fabricate a ratio. Review inspect policy and report, qualify
+return ONLY markdown under the supplied JSON schema. The controller
+constructs the policy artifact/version, candidate ID, evaluation scope, overhead
+ratio and evidence from the trusted pair. Describe evidence and limitations; never
+fabricate a ratio. Review inspect policy and report, qualify
 evidence, update both route/global research, and stop. No production promotion claim.
 """
     config = HarnessConfig(executable=args.codex, timeout_seconds=2700)

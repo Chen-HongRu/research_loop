@@ -279,7 +279,7 @@ class ProTokRunnerTests(unittest.TestCase):
                     "existing scope, frozen contract and protected evaluation checks remain unchanged",
                     forwarded,
                 )
-                self.assertTrue(forwarded.endswith(path.read_text()))
+                self.assertIn(path.read_text(), forwarded)
                 self.assertEqual(self.backend.evaluations, 0)
                 self.assertFalse((self.control / "jobs").exists())
 
@@ -575,22 +575,7 @@ class ProTokRunnerTests(unittest.TestCase):
                 if time.monotonic() >= until:
                     raise AssertionError("No evaluation result")
                 time.sleep(0.01)
-            receipt = submit(workspace)["result"]
-            return {
-                "outcome": "completed",
-                "markdown": "Measured using reusable API.",
-                "artifacts": [receipt["artifact"]],
-                "measurements": [
-                    {
-                        "candidate_id": receipt["fingerprint"],
-                        "artifact": receipt["artifact"],
-                        "evaluation_id": PROTOCOL,
-                        "comparison_scope": PROTOCOL,
-                        "metrics": [{"name": METRIC, "value": receipt["value"]}],
-                        "evidence": receipt["evidence"],
-                    }
-                ],
-            }
+            return {"outcome": "completed", "markdown": "Measured using reusable API."}
 
         harness = RUNNER.ProTokHarness(
             self.backend, self.root, Mock(run=execute), self.deadline
@@ -686,7 +671,7 @@ class ProTokRunnerTests(unittest.TestCase):
             RUNNER.completed_job(self.root, self.backend, self.workspace, "0002")
         self.assertEqual(self.backend.evaluations, 1)
 
-    def test_delegate_success_is_not_wrapper_completion_when_metric_check_fails(self):
+    def test_controller_constructs_measurement_and_preserves_raw_report(self):
         from research_loop.harness import completed_response
 
         workspace = self.root / "study/iterations/0001/workspace"
@@ -698,51 +683,49 @@ class ProTokRunnerTests(unittest.TestCase):
         outer.mkdir()
 
         def delegate_run(**kwargs):
-            agent = kwargs["run_dir"]
+            self.assertEqual(
+                set(kwargs["schema"]["properties"]), {"outcome", "markdown"}
+            )
+            self.assertIn("return ONLY outcome and markdown", kwargs["prompt"])
             RUNNER.write(workspace / "evaluation-request.json", {"action": "import"})
             until = time.monotonic() + 5
             while not (workspace / "evaluation-result.json").exists():
                 if time.monotonic() >= until:
                     raise AssertionError("No backend result")
                 time.sleep(0.01)
-            receipt = RUNNER.read(workspace / "evaluation-result.json")
-            result = {
-                "outcome": "completed",
-                "markdown": "Incorrect agent claim.",
-                "artifacts": [receipt["artifact"]],
-                "measurements": [
-                    {
-                        "candidate_id": receipt["fingerprint"],
-                        "artifact": receipt["artifact"],
-                        "evaluation_id": PROTOCOL,
-                        "comparison_scope": PROTOCOL,
-                        "metrics": [{"name": METRIC, "value": 0.001}],
-                        "evidence": receipt["evidence"],
-                    }
-                ],
+            report = {
+                "outcome": "incomplete",
+                "markdown": "Model interpretation; identity and score are controller-owned.",
             }
-            RUNNER.write(agent / "response.json", result)
-            RUNNER.write(agent / "process.json", {"status": "succeeded"})
-            return result
+            RUNNER.write(kwargs["run_dir"] / "response.json", report)
+            RUNNER.write(kwargs["run_dir"] / "process.json", {"status": "succeeded"})
+            return report
 
-        delegate = Mock()
-        delegate.run.side_effect = delegate_run
-        harness = RUNNER.ProTokHarness(self.backend, self.root, delegate, self.deadline)
-        with self.assertRaisesRegex(HarnessError, "does not match"):
-            harness.run(
-                prompt="Execute",
-                writable=True,
-                workspace=workspace,
-                run_dir=outer,
-                timeout_seconds=60,
-            )
-        self.assertIsNone(completed_response(outer))
+        harness = RUNNER.ProTokHarness(
+            self.backend, self.root, Mock(run=delegate_run), self.deadline
+        )
+        result = harness.run(
+            prompt="Execute",
+            writable=True,
+            workspace=workspace,
+            run_dir=outer,
+            timeout_seconds=60,
+        )
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(
+            result["measurements"][0]["candidate_id"], RUNNER.BEST_FINGERPRINT
+        )
+        self.assertEqual(
+            result["measurements"][0]["metrics"][0]["value"], RUNNER.BEST_VALUE
+        )
+        self.assertEqual(len(result["artifacts"]), 1)
         raw = completed_response(outer / "agent")
-        self.assertIsNotNone(raw)
+        self.assertEqual(set(raw), {"outcome", "markdown"})
+        self.assertEqual(raw["outcome"], "incomplete")
+        self.assertEqual(completed_response(outer), result)
+        result["measurements"][0]["candidate_id"] = "0001:" + RUNNER.BEST_FINGERPRINT
         with self.assertRaisesRegex(HarnessError, "does not match"):
-            harness.validate_completed(
-                raw, workspace=workspace, run_dir=outer / "agent"
-            )
+            harness.validate_completed(result, workspace=workspace, run_dir=outer)
         self.assertEqual(self.backend.evaluations, 0)
 
     def test_scope_rejects_tracked_untracked_and_ignored_extra_files(self):

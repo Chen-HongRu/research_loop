@@ -9,7 +9,6 @@ from unittest.mock import patch
 from integrations.protok import deploy_runtime
 from integrations.protok.research_execution import research_usage
 from research_loop.harness import HarnessError, completed_response
-from research_loop.protocol import SCHEMAS, validate_response
 from research_loop.submission import submit
 from test_core import RecordedHarness
 from test_research_contract import contract
@@ -20,12 +19,6 @@ RUNNER = formal.RUNNER
 
 class ScriptDelegate(RecordedHarness):
     fail_reporting = False
-
-    def run(self, **kwargs):
-        phase = next(p for p in SCHEMAS if f"Stage: {p}\n" in kwargs["prompt"])
-        result = super().run(**{**kwargs, "schema": SCHEMAS[phase]})
-        validate_response(phase, result, schema=kwargs["schema"])
-        return result
 
     def response(self, phase, context, kwargs):
         if phase == "execute":

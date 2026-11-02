@@ -132,8 +132,11 @@ their source timestamp. Arrays, strings and booleans are not inferred to be scal
 metrics. Each selected stream retains at most 256 recent dashboard events in the
 browser; this is a live preview, not the complete evidence history.
 
-The panel's **TensorBoard · 全量指标** button opens a real TensorBoard at
-`/tensorboard/`. Install the optional CPU-only dependency and start its separate
+The panel's **TensorBoard · 全量指标** button opens Scalars filtered to the selected
+task at `/tensorboard/`. TensorBoard 2.21.0 selects no runs by default when more
+than 40 match its run filter; the task filter keeps an experiment discoverable as
+the total history grows. Existing explicit selections remain authoritative.
+Install the optional CPU-only dependency and start its separate
 service with the same active and history roots as the dashboard:
 
 ```sh
@@ -150,13 +153,24 @@ The exporter reads only retained local telemetry. Each poll reads at most one
 128 KiB / 200-event page per stream, including non-dashboard tags. It publishes
 finite scalar/object fields to TensorBoard Scalars and each original JSON record
 to Text. Arrays remain text; no histogram or image semantics are invented. Runs
-identify configured source, Study, investigation/long run, execution, metric, unit
-and conditions. Without a recorded step, a separate `event-order` run uses the
+use dashboard task identifiers: `active/#0026`, `history-1/#0001`,
+`active/long/L…`, or `active/manual/TASK/#0001`. Additional executions of a task
+have stable `(attempt N)` suffixes; training and evaluation streams from the same
+execution share a run. Metrics, units, conditions, streams and axes remain
+separate series, with readable display names and full provenance in descriptions
+and Text evidence. Without a recorded step, a separate `event-order` series uses
 retained event order; the original timestamp remains TensorBoard's wall time.
+Experiments without retained telemetry cannot acquire historical training curves
+from final scores alone.
 
 The derived logdir must be outside the source Study. Only that directory receives
-event files and incremental cursor journals. Restart completes a partially
-published page without duplicate points, then catches up over successive polls.
+event files and incremental cursor journals. Layout v2 uses `events-v2/` and
+`.export-state-v2/`; the previous `events/` and `.export-state/` remain intact.
+The first v2 start incrementally replays retained telemetry into the new layout.
+The derived layout is bound to its configured source roots; choose a new logdir
+when changing roots. Restart completes an unfinished publication before newer
+pages, without duplicate points, then catches up over successive polls. Published
+filenames increase across streams so TensorBoard's existing reader sees appends.
 `--once` exports one bounded page per stream and exits. No source log, control
 state, data, cache or checkpoint is modified or read for validation.
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -124,6 +125,49 @@ SCHEMAS = {
 }
 
 
+def context_schema(phase: str, context: dict, schema: dict) -> dict:
+    """Bind choices to the frozen call without changing controller fields."""
+    result = copy.deepcopy(schema)
+    fields = result["properties"]
+    if phase == "proposal" and "route" in context:
+        route = context["route"]["id"]
+        allowed = [route] if route != "new" else ["new", *context["routes"]]
+        fields["route_id"] = _enum(*allowed)
+    if phase == "review" and "execute" in context:
+        ids = list(
+            dict.fromkeys(m["candidate_id"] for m in context["execute"]["measurements"])
+        )
+        reviews = fields["candidate_reviews"]
+        if ids:
+            reviews["items"]["properties"]["candidate_id"] = _enum(*ids)
+        else:
+            reviews["maxItems"] = 0
+    if phase == "execute" and "plan" in context:
+        definitions = [
+            context.get("global_evaluation"),
+            context["plan"]["local_evaluation"],
+        ]
+        definitions = [
+            d
+            for d in definitions
+            if d and d["allow_feedback"] and d["data_role"] == "development"
+        ]
+        measurements = fields["measurements"]
+        if not definitions:
+            measurements["maxItems"] = 0
+        else:
+            branches = []
+            for definition in definitions:
+                item = copy.deepcopy(measurements["items"])
+                item["properties"]["evaluation_id"] = _enum(definition["id"])
+                item["properties"]["comparison_scope"] = _enum(
+                    definition["comparison_scope"]
+                )
+                branches.append(item)
+            measurements["items"] = {"anyOf": branches}
+    return result
+
+
 def _validate(schema: dict, value: object, path: str) -> None:
     if "anyOf" in schema:
         for branch in schema["anyOf"]:
@@ -156,6 +200,8 @@ def _validate(schema: dict, value: object, path: str) -> None:
         for name, field in fields.items():
             _validate(field, value[name], f"{path}.{name}")
     elif kind == "array":
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            raise ValueError(f"{path}: exceeds maximum item count")
         for index, item in enumerate(value):
             _validate(schema["items"], item, f"{path}[{index}]")
 
@@ -173,6 +219,18 @@ def validate_response(phase: str, value: object, *, schema: dict | None = None) 
         raise ValueError(
             "review: historical corrections require knowledge_changes with evidence sources"
         )
+    if phase == "judge":
+        selected = value["decision"] == "select"
+        if selected != (value["choice"] is not None):
+            raise ValueError("judge: choice must be set exactly when selecting")
+        if selected and not value["action"].strip():
+            raise ValueError("judge: selection requires a concrete action")
+        if value["decision"] == "stop" and not (value["stop_reason"] or "").strip():
+            raise ValueError("judge: stopping requires a reason")
+    if phase == "review":
+        ids = [r["candidate_id"] for r in value["candidate_reviews"]]
+        if len(ids) != len(set(ids)):
+            raise ValueError("review: duplicate candidate review")
     return value
 
 
@@ -229,7 +287,7 @@ Read only; do not write files or run new experiments.
     "judge": """Select one final concrete action, resample, or stop. Compare value to
 the Study goal, potential improvement or uncertainty reduction, evidence, feasibility,
 cost, prior attempts and remaining budget. Address the unselected proposal's gaps.
-For select, choice is 'a' or 'b' and action binds that proposal plus its explicit
+For stop, stop_reason must be nonempty. For select, choice is 'a' or 'b' and action binds that proposal plus its explicit
 revisions, route, starting point and evidence. Otherwise choice is null. Do not rank
 different Local Frontiers numerically. Rejecting two proposals does not exhaust all
 routes. Budget exhaustion is not goal completion. Record a stop reason when stopping.
@@ -272,8 +330,15 @@ job. Reading diagnostic logs does not grant evaluation or retry authority.
 Stop dependent actions when a key premise fails or changing evaluation rules, intent
 or permissions would be necessary. Additional observations are exploratory.
 completed/incomplete describes contract execution, not method validity or goal success.
+Only feedback-enabled development evaluations frozen in Plan may be measured;
+evaluation_id and comparison_scope must match the same supplied definition exactly.
 Each measurement binds one candidate and artifact version to an evaluation ID and
 comparison scope, with named finite numeric metrics and raw evidence references.
+Use unique candidate_id values within this response. Declare every measured
+artifact in artifacts, with the exact same path/version object in its measurement.
+Include every objective and constraint metric required by that frozen evaluation
+exactly once; do not add unknown or duplicate metric names. Report partial results
+as attributed observations in evidence/report rather than a complete measurement.
 Describe units, steps/checkpoints, configuration, data/split, seeds and aggregation
 in the report/evidence. Never combine best metrics from different checkpoints.
 Missing global measurements remain missing; local evidence may still be useful.

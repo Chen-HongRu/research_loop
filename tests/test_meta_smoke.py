@@ -24,6 +24,113 @@ RUNNER_SPEC.loader.exec_module(RUNNER)
 
 
 class MetaSmokeTests(unittest.TestCase):
+    def test_meta_bridge_constructs_ratio_from_pair_without_author_copying(self):
+        from benchmarks.cactus import bridge
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness = RUNNER.MetaRequestHarness.__new__(RUNNER.MetaRequestHarness)
+            harness.args = SimpleNamespace()
+            harness.errors = []
+            harness.result = {
+                "candidate": {"ref": "actual-version", "parent_ref": "actual-parent"},
+                "report": {
+                    "rows": [
+                        {"arm": "S", "overhead_seconds": 4},
+                        {"arm": "C", "overhead_seconds": 3},
+                    ]
+                },
+            }
+            harness._watch = lambda workspace, stop: stop.wait()
+            harness.delegate = Mock()
+            raw = {"markdown": "Measured pair evidence."}
+            harness.delegate.run.return_value = raw
+            with patch.dict(sys.modules, {"bridge": bridge}):
+                result = harness.run(
+                    prompt="execute",
+                    writable=True,
+                    workspace=root,
+                    run_dir=root,
+                    timeout_seconds=2,
+                )
+            self.assertEqual(result["outcome"], "completed")
+            self.assertEqual(result["artifacts"][0]["version"], "actual-version")
+            measurement = result["measurements"][0]
+            self.assertEqual(measurement["comparison_scope"], "actual-parent")
+            self.assertEqual(
+                measurement["metrics"], [{"name": "mean_rO", "value": 0.75}]
+            )
+            self.assertEqual(read(root / "agent-report.json"), raw)
+            self.assertEqual(
+                harness.delegate.run.call_args.kwargs["schema"], bridge.REPORT_SCHEMA
+            )
+            harness.delegate.run.assert_called_once()
+
+    def test_meta_worker_crash_blocks_retained_completed_pair(self):
+        from benchmarks.cactus import bridge
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness = RUNNER.MetaRequestHarness.__new__(RUNNER.MetaRequestHarness)
+            harness.args = SimpleNamespace()
+            harness.errors = []
+            harness.result = {"retained": "completed pair"}
+
+            def watch(workspace, stop):
+                stop.wait()
+                raise RuntimeError("unexpected evaluation worker failure")
+
+            harness._watch = watch
+            harness.delegate = Mock()
+            harness.delegate.run.return_value = {
+                "markdown": "report",
+            }
+            with patch.dict(sys.modules, {"bridge": bridge}):
+                with self.assertRaisesRegex(
+                    Exception, "effects require reconciliation"
+                ):
+                    harness.run(
+                        prompt="execute",
+                        writable=True,
+                        workspace=root,
+                        run_dir=root,
+                        timeout_seconds=2,
+                    )
+            self.assertFalse((root / "completed.json").exists())
+            harness.delegate.run.assert_called_once()
+
+    def test_meta_live_worker_or_remote_error_blocks_completion(self):
+        from benchmarks.cactus import bridge
+
+        for alive, errors in [(True, []), (False, ["remote effects unknown"])]:
+            with (
+                self.subTest(alive=alive, errors=errors),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                harness = RUNNER.MetaRequestHarness.__new__(RUNNER.MetaRequestHarness)
+                harness.args = SimpleNamespace()
+                harness.errors = list(errors)
+                harness.result = {"retained": "completed pair"}
+                harness.delegate = Mock()
+                harness.delegate.run.return_value = {"markdown": "report"}
+                worker = Mock()
+                worker.is_alive.return_value = alive
+                with (
+                    patch.dict(sys.modules, {"bridge": bridge}),
+                    patch.object(RUNNER.threading, "Thread", return_value=worker),
+                ):
+                    with self.assertRaisesRegex(Exception, "reconciliation required"):
+                        harness.run(
+                            prompt="execute",
+                            writable=True,
+                            workspace=root,
+                            run_dir=root,
+                            timeout_seconds=1,
+                        )
+                self.assertFalse((root / "completed.json").exists())
+                harness.delegate.run.assert_called_once()
+
     def recovery_fixture(self, receipt_status="succeeded", malformed_reviews=1):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -97,14 +204,14 @@ class MetaSmokeTests(unittest.TestCase):
                 study, harness = self.recovery_fixture(receipt_status)
                 try:
                     state = INNER.run_review_recovery(study)
-                except (StudyError, OSError):
+                except (StudyError, ValueError, OSError):
                     state = study.status()
                 self.assertEqual(harness.count("execute"), 1)
                 self.assertEqual(harness.count("review"), 1)
                 self.assertEqual(study.status()["call_count"], 6)
                 self.assertEqual(state["status"], "needs_attention")
                 self.assertIn(
-                    "Candidate reviews must match unique current measurements exactly",
+                    "review.candidate_reviews",
                     state["error"],
                 )
                 self.assertFalse(
@@ -114,8 +221,8 @@ class MetaSmokeTests(unittest.TestCase):
     def test_review_recovery_retries_at_most_once(self):
         study, harness = self.recovery_fixture(malformed_reviews=2)
         with self.assertRaisesRegex(
-            StudyError,
-            "Candidate reviews must match unique current measurements exactly",
+            (StudyError, ValueError),
+            "review.candidate_reviews|Candidate reviews must match unique current measurements exactly",
         ):
             INNER.run_review_recovery(study)
         self.assertEqual(harness.count("execute"), 1)

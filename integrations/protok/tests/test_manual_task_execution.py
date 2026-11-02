@@ -32,14 +32,12 @@ class Author(RecordedHarness):
             return {
                 "outcome": "completed",
                 "markdown": "Candidate authored; no score invented.",
-                "artifacts": [],
-                "measurements": [],
             }
         result = super().response(phase, context, kwargs)
         if phase == "plan":
-            result["contract"]["timeout_seconds"] = context["manual_task"]["budget"][
-                "gpu_seconds_per_run"
-            ]
+            result.pop("local_evaluation")
+            result.pop("references")
+            result["contract"].pop("timeout_seconds")
         if phase == "review" and context.get("long_training_run"):
             result["observation_reviews"] = [
                 {
@@ -174,6 +172,23 @@ class ManualExecutionTests(unittest.TestCase):
         self.assertEqual(
             [call["phase"] for call in author.calls], ["plan", "execute", "review"]
         )
+        plan_call = author.calls[0]
+        self.assertNotIn("base_experiment", plan_call["schema"]["properties"])
+        self.assertNotIn("local_evaluation", plan_call["schema"]["properties"])
+        self.assertNotIn("references", plan_call["schema"]["properties"])
+        self.assertNotIn(
+            "timeout_seconds",
+            plan_call["schema"]["properties"]["contract"]["properties"],
+        )
+        raw_plan = tasks._read(plan_call["run_dir"] / "response.json")
+        self.assertNotIn("base_experiment", raw_plan)
+        self.assertNotIn("timeout_seconds", raw_plan["contract"])
+        authored = author.calls[1]
+        self.assertEqual(set(authored["schema"]["properties"]), {"outcome", "markdown"})
+        self.assertEqual(
+            set(tasks._read(authored["run_dir"] / "response.json")),
+            {"outcome", "markdown"},
+        )
         self.assertEqual(len(self.allocations), 1)
         actual = self.allocations[0]
         self.assertEqual(actual["manual_task_id"], request["id"])
@@ -189,6 +204,28 @@ class ManualExecutionTests(unittest.TestCase):
         )
         self.assertEqual(boundary[0]["id"], request["id"])
         self.assertEqual(parent.frontiers()["global"]["short"]["candidate_ids"], [])
+
+    def test_author_cannot_supply_measurements_or_allocate_after_rejection(self):
+        class InvalidAuthor(Author):
+            def run(self, **kwargs):
+                result = super().run(**kwargs)
+                if kwargs["run_dir"].parent.parent.name == "execute":
+                    result["measurements"] = []
+                    tasks._write(kwargs["run_dir"] / "response.json", result)
+                return result
+
+        self.submit()
+        author = InvalidAuthor()
+        manager = tasks.ManualTrainingManager(self.root, self.backend, delegate=author)
+        with (
+            patch.object(tasks, "_load_backend", return_value=(self.fixed, None)),
+            patch.object(tasks, "execute", side_effect=self.allocate),
+            self.assertRaisesRegex(ValueError, "must contain exactly"),
+        ):
+            manager.run_one()
+        self.assertEqual(self.allocations, [])
+        call = next(c for c in author.calls if c["phase"] == "execute")
+        self.assertIn("measurements", tasks._read(call["run_dir"] / "response.json"))
 
     def test_unchanged_candidate_needs_no_authoring_or_nomination(self):
         request = self.submit(allow_changes=False)

@@ -23,6 +23,13 @@ function metricMatches(stream, task) {
     ? stream.run_id===task.run
     : !stream.run_id && stream.source?.experiment_id===task.experiment));
 }
+function tensorboardTaskURL(task) {
+  const escape=value=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  const name=task.source+'/'+(task.task?'manual/'+task.task+'/':task.run?'long/'+task.run:'#'+task.experiment);
+  // Filter before TensorBoard's 40-run default-selection limit is applied.
+  const boundary=task.task?'':'(?:$| \\(attempt [0-9]+\\)|/)';
+  return '/tensorboard/#scalars&runFilter='+encodeURIComponent('^'+escape(name)+boundary);
+}
 function metricView(id) {
   if(!metricViews.has(id))metricViews.set(id,{filter:'',pinned:new Map(),error:null});
   return metricViews.get(id);
@@ -118,7 +125,7 @@ function renderTaskMetrics() {
   const chosen=filter.value?series.filter(item=>item.key===filter.value):series.slice(0,6);
   const enabled=data.tensorboard?.enabled===true;
   $('tensorboardLink').hidden=!enabled;$('tensorboardDisabled').hidden=enabled;
-  $('tensorboardLink').href=enabled?'/tensorboard/':'#';
+  $('tensorboardLink').href=enabled?tensorboardTaskURL(task):'#';
   const statuses=[...new Set(streams.map(stream=>({live:'持续回传',running:'回传中',synced:'已同步',waiting:'等待回传',error:'同步异常',integrity_error:'来源待核对',sync_incomplete:'回传未完成'}[stream.status] || stream.status || '状态未记录')))];
   $('taskMetricStatus').textContent=view.error || (streams.length?streams.length+' 条来源 · '+statuses.join(' / ')+(streams.some(stream=>stream.sync_error||stream.error_count)?' · 部分记录缺失或异常，保留已有观测':''):'所选任务尚未回传 dashboard 标签观测');
   $('taskMetricStatus').className='caption '+(view.error||streams.some(stream=>stream.sync_error)?'amber':'');

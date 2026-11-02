@@ -130,10 +130,54 @@ def validate_design(phase, value, context):
             )
 
 
+def agent_schema(phase, context, schema):
+    """Omit allocation and sampled route labels fixed by the controller."""
+    if phase == "plan":
+        result = copy.deepcopy(schema)
+        del result["properties"]["base_experiment"]
+        result["required"].remove("base_experiment")
+        return result
+    if phase != "proposal":
+        return schema
+    result = copy.deepcopy(schema)
+    if context.get("route", {}).get("id", "new") != "new":
+        del result["properties"]["route_id"]
+        result["required"].remove("route_id")
+    if context.get("exploration"):
+        design = result["properties"]["research_design"]
+        del design["properties"]["kind"]
+        design["required"].remove("kind")
+    return result
+
+
+def complete_output(phase, context, result):
+    if phase == "plan":
+        return {
+            **result,
+            "base_experiment": context["selected"]["proposal"]["base_experiment"],
+        }
+    if phase != "proposal":
+        return result
+    result = dict(result)
+    route = context.get("route", {}).get("id", "new")
+    if route != "new":
+        result["route_id"] = route
+    if context.get("exploration"):
+        result["research_design"] = {
+            **result["research_design"],
+            "kind": context["exploration"]["kind"],
+        }
+    return result
+
+
 def guidance(phase, context):
     research = (
         research_contract.guidance(phase) if context.get("research_execution") else ""
     )
+    if phase == "plan":
+        research += "\nThe controller supplies base_experiment from selected.proposal.base_experiment. Omit base_experiment from output and preserve that starting point.\n"
+    if phase == "proposal" and context.get("route", {}).get("id", "new") != "new":
+        research += "\nThe controller fixes route_id to the sampled route in context.route.id. Omit route_id from output; preserve that route's intent.\n"
     slot = context.get("exploration")
     if not slot:
         return research
@@ -169,6 +213,8 @@ test. Repeating a historical approach needs an explicit unresolved comparison or
 a materially different controlled intervention.
 List any out-of-scope requirements; do not execute them. Cite a scout idea ID when
 using it, otherwise use an empty list. Keep proposal prose near 600 words.
+Omit research_design.kind from your output; the controller supplies the frozen
+allocation label. Judge and Review independently assess the actual research kind.
 """
     elif phase == "judge":
         common += """
