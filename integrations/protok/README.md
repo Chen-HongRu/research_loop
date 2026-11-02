@@ -146,6 +146,9 @@ Neither command clears STOP, resets costs or extends the lease.
 
 After research submission, do not add a Markdown report under `research/`:
 the complete source file set is frozen. Put narrative in the final Agent response.
+Check Python syntax with in-memory `compile(source_text, filename, "exec")`;
+`py_compile`/`compileall` create disallowed bytecode caches. Do not import an
+authored script merely to check syntax.
 If an extra report already blocks receipt validation, an operator may preserve it
 outside the source tree, restore exact frozen source identity, then use
 `--reconcile-completed-execute`. Do not change original code, loosen source checks
