@@ -1,5 +1,7 @@
 # v2 实现与 Cactus 真实验证
 
+> 历史验证摘要：以下数值来自开发时保留的记录，本次公开整理未重跑训练。原始运行产物未随源码分发，读者无法仅凭此摘要独立复核这些数值。
+
 日期：2026-11-01。新框架已完成一轮真实模型调用、GPU 训练、证据评审与冻结后的独立评分。没有运行三任务 27-run 对照，没有验证相对普通 Agent 或线性循环的研究收益。
 
 ## 已实现的协议
@@ -24,13 +26,13 @@ uvx ruff check src tests benchmarks/cactus
 uv run python -m unittest discover -s tests -v
 ```
 
-Ruff 检查通过，44 项测试通过，最终一次完整测试约 4.15 秒。本机执行时通过 `UV_CACHE_DIR` 与 `UV_TOOL_DIR` 使用 `/private/tmp/` 中的任务缓存。
+Ruff 检查通过，44 项测试通过，最终一次完整测试约 4.15 秒。本机执行时通过 `UV_CACHE_DIR` 与 `UV_TOOL_DIR` 使用 `/tmp/` 中的任务缓存。
 
 测试包含真实临时 Git 仓库、阶段协议、CLI 适配、受限训练请求解析，以及成功执行后 checkpoint 失败、普通发布写入错误、进程丢失和人工编辑冲突的故障注入。它们检验控制与数学关系，不将固定回复当作研究成绩。仅供最终验收的测量在 Execute 接纳边界拒绝，评分须由循环外的可信组件完成。
 
 ## 真实执行设置
 
-研究控制器和已登录的 Codex CLI 在本机运行，训练在 `autodl` 的选定 RTX 4090 上执行。未复制登录凭据。模型请求为 `gpt-6.1-sol / medium`；CLI 返回的 usage 与请求记录不等于独立核验服务端型号或计费。
+研究控制器和已登录的 Codex CLI 在本机运行，训练在 任务主机 的选定 RTX 4090 上执行。未复制登录凭据。模型请求为 `gpt-6.1-sol / medium`；CLI 返回的 usage 与请求记录不等于独立核验服务端型号或计费。
 
 成功运行目录为 `studies/cactus-real-20261101-02/`，使用 1 个 iteration、最多 12 次 CLI 调用和 1800 秒预算。实际完成 10 次 CLI 角色调用：两次提案、两次质疑、两次回应、Judge、Plan、Execute、Review。它不是 10 次模型推理量的计费统计。
 
@@ -71,16 +73,16 @@ Review 将候选标为 `valid=true / verified=true`，控制器发布唯一 Glob
 
 证据入口：
 
-- [成功运行摘要](../studies/cactus-real-20261101-02/smoke-summary.json)、[调用与 GPU 观测](../studies/cactus-real-20261101-02/observations.json)。
-- [实验节点与 Git 版本](../studies/cactus-real-20261101-02/iterations/0001/iteration.json)、[路线选择记录](../studies/cactus-real-20261101-02/iterations/0001/selection.json)。
-- [执行报告](../studies/cactus-real-20261101-02/iterations/0001/execute.md)、[评审报告](../studies/cactus-real-20261101-02/iterations/0001/review.md)。
-- [当前研究理解](../studies/cactus-real-20261101-02/research.md)、[Frontier](../studies/cactus-real-20261101-02/frontiers.json)。
-- [运行与配置](../studies/cactus-real-20261101-02/iterations/0001/workspace/results/tiny-001/run.json)、[性能记录](../studies/cactus-real-20261101-02/iterations/0001/workspace/results/tiny-001/timing.json)、[独立 private 评分](../studies/cactus-real-20261101-02/private-score.json)。
+- 成功运行摘要（私有运行产物，未随源码分发）、调用与 GPU 观测（私有运行产物，未随源码分发）。
+- 实验节点与 Git 版本（私有运行产物，未随源码分发）、路线选择记录（私有运行产物，未随源码分发）。
+- 执行报告（私有运行产物，未随源码分发）、评审报告（私有运行产物，未随源码分发）。
+- 当前研究理解（私有运行产物，未随源码分发）、Frontier（私有运行产物，未随源码分发）。
+- 运行与配置（私有运行产物，未随源码分发）、性能记录（私有运行产物，未随源码分发）、独立 private 评分（私有运行产物，未随源码分发）。
 
-精确训练产物仍在远端任务的 `runs/smoke-fa8088c014e74d348bb1-tiny-001/`；本机保留 checkpoint、预测、实际源码、配置和报告。`implementation/` 保存本轮使用的小型实现源码快照。运行目录由 `.gitignore` 排除，不随源码分发。
+精确训练产物仍在远端任务的 `runs/<run-id>/`；本机保留 checkpoint、预测、实际源码、配置和报告。`implementation/` 保存本轮使用的小型实现源码快照。运行目录由 `.gitignore` 排除，不随源码分发。
 
 ## 已保留的失败与限制
 
-首轮 `studies/cactus-real-20261101/` 在实际训练开始前失败：`reset_peak_memory_stats` 先于 CUDA 初始化，触发 `Invalid device argument`。已复现并修正为先初始化 CUDA；模型、损失、数据划分和评价协议未改变。原轮返回 incomplete、未产生候选，也没有进行 private 评分；[失败摘要](../studies/cactus-real-20261101/smoke-summary.json)保持原样。成功轮在新 Study 中执行唯一一次实际训练。
+首轮 `studies/cactus-real-20261101/` 在实际训练开始前失败：`reset_peak_memory_stats` 先于 CUDA 初始化，触发 `Invalid device argument`。已复现并修正为先初始化 CUDA；模型、损失、数据划分和评价协议未改变。原轮返回 incomplete、未产生候选，也没有进行 private 评分；失败摘要（私有运行产物，未随源码分发）保持原样。成功轮在新 Study 中执行唯一一次实际训练。
 
 本次固定 tiny-cnn，只验证一个配置的真实通路，没有架构搜索、跨路线真实实验对比或多目标真实优化。Pi 仍未做真实调用；多路线恢复、Local Frontier 和 Pareto 行为的证据来自确定性合同测试。服务器与继承的 PyTorch 环境并非独占、完整锁定的镜像；实际包版本已记录。关于研究收益的结论须等待[同预算对照](benchmark-plan.md)，不能由这次单次 AUC 推出。

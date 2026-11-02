@@ -151,7 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--study", type=Path, required=True)
     parser.add_argument("--remote-base", required=True)
-    parser.add_argument("--host", default="autodl")
+    parser.add_argument(
+        "--host", required=True, help="Operator-configured SSH host alias"
+    )
     parser.add_argument(
         "--gpu", required=True, help="Numeric GPU index already confirmed idle"
     )

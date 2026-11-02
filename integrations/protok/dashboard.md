@@ -31,7 +31,7 @@
 
 ```sh
 uv run python integrations/protok/dashboard.py \
-  --root studies/protok-se3-takeover-20261101 --port 8765
+  --root runs/example-study --port 8765
 ```
 
 归档目录需要 `control/backend-snapshot.json`，并显式传入 `--snapshot-only`。活动 Study 使用其实际目录，不加该参数。两种模式均只监听 `127.0.0.1`，不查询 HPC、不调用模型、不修改研究状态。
@@ -40,9 +40,9 @@ uv run python integrations/protok/dashboard.py \
 
 ```sh
 uv run python integrations/protok/dashboard.py \
-  --root /root/research-loop/runs/protok-resume-20261101 \
-  --history-root /root/research-loop/deployments/protok-se3-20261101/archive \
-  --records-root /root/research-loop/deployments/protok-se3-20261101/external-records \
+  --root /path/to/run \
+  --history-root /path/to/archive \
+  --records-root /path/to/external-records \
   --port 8767
 ```
 
@@ -55,9 +55,9 @@ uv run python integrations/protok/dashboard.py \
 ```sh
 uv sync --extra dashboard
 uv run --extra dashboard python -m integrations.protok.tensorboard \
-  --root /root/research-loop/runs/protok-resume-20261101 \
-  --history-root /root/research-loop/deployments/protok-se3-20261101/archive \
-  --logdir /root/research-loop/dashboard-runtimes/tensorboard-data/protok-resume-20261101 \
+  --root /path/to/run \
+  --history-root /path/to/archive \
+  --logdir /path/to/tensorboard-data \
   --port 6006
 ```
 
@@ -91,20 +91,20 @@ uv.lock
 
 启用 TensorBoard 时在新版本目录用 `uv sync --extra dashboard` 创建独立环境，不向研究服务共用的环境安装依赖。TensorBoard 单独管理进程；看板与它分别重启，均无需重启研究 Runner。
 
-阿里云活动目录和归档目录必须分别绑定。例如活动 Study 的独立看板启动命令为：
+部署时活动目录和归档目录必须分别绑定。例如活动 Study 的独立看板启动命令为：
 
 ```sh
-/root/research-loop/.venv/bin/python \
-  /root/research-loop/dashboard-runtimes/<version>/integrations/protok/dashboard.py \
-  --root /root/research-loop/runs/protok-resume-20261101 \
-  --history-root /root/research-loop/deployments/protok-se3-20261101/archive \
-  --records-root /root/research-loop/deployments/protok-se3-20261101/external-records \
+/path/to/dashboard/.venv/bin/python \
+  /path/to/dashboard-runtime/integrations/protok/dashboard.py \
+  --root /path/to/run \
+  --history-root /path/to/archive \
+  --records-root /path/to/external-records \
   --port 8767
 ```
 
 该命令只启动看板；服务管理和受保护的访问链路由部署端配置。历史归档看板继续使用其归档目录和 `--snapshot-only`。
 
-同步看板时只切换 `research-loop-live-dashboard-v2.service` 的独立版本目录，保持 Nginx、认证、端口转发和研究服务不变。部署包可沿用已验证看板版本的只读依赖，再替换看板入口和页面，避免将其他聊天尚未完成的研究运行时改动一并部署。
+同步看板时只切换其独立版本目录，保留研究服务与控制记录。受保护的访问入口由部署端单独配置。
 
 ## 独立说明缓存
 
@@ -136,7 +136,7 @@ uv run python -m integrations.protok.explanation /path/to/archive \
 
 配置路径、实际路径及覆盖选项均保存在说明执行凭证中；模型仍为 GPT-6.1 Sol / medium，不更换供应方或凭据。
 
-本次历史归档另补回了 7 轮、21 个原始冻结候选源码文件：恢复前核对原作业 fingerprint 与归档候选 artifact.version，一共 126248 字节，不含数据集、检查点或新测量。恢复清单位于归档 `presentation/restored-source-metadata.json`。历史 0002 / 0003 仍没有可确认的实际冻结源码，保留材料缺失，不从其基线推定失败候选。
+归档缺少可确认的实际冻结源码时，保留材料缺失；不能从基线推定失败候选的源码。
 
 云端说明 CLI 若发生网络超时，可保留失败回执，以同一冻结材料包完成只读协作复核。此类缓存明确保存 `assisted_review`、原材料身份、原缓存和审阅结果，并由页面提供“说明来源与复核记录”；不能伪造原调用成功凭证。发布前仍须通过结构、来源、数字及当前输入身份校验。说明整理和验证建议均不改写研究结论或执行实验。
 

@@ -185,7 +185,8 @@ def deploy(
     commit = (runtime / "SOURCE_COMMIT").read_text().strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("Runtime must name its committed source revision")
-    if any(c.isspace() for c in str(root) + str(runtime)):
+    python = Path(sys.executable).absolute()
+    if any(c.isspace() for c in str(root) + str(runtime) + str(python)):
         raise ValueError("Systemd runtime paths must not contain whitespace")
     service = "research-loop-protok.service"
     if (
@@ -237,7 +238,7 @@ def deploy(
         temporary = dropin.with_suffix(".tmp")
         temporary.write_text(
             "[Service]\nExecStart=\n"
-            f"ExecStart=/root/research-loop/.venv/bin/python {runtime}/integrations/protok/server.py "
+            f"ExecStart={python} {runtime}/integrations/protok/server.py "
             f"--root {root} --runner {runtime}/integrations/protok/run.py\n"
         )
         temporary.replace(dropin)
