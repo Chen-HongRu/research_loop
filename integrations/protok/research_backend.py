@@ -380,6 +380,7 @@ def _launcher(config, remote, execution, inputs, environment=None):
             (remote + "/environment.json", "/environment.json"),
         ]
         pythonpath += ":/research-libs"
+    # Compiler caches query getpass.getuser(); the empty root has no passwd entry.
     script = f"""import ctypes,json,os,re,subprocess,sys,xml.etree.ElementTree as ET
 visible=os.environ.get("CUDA_VISIBLE_DEVICES", "")
 resources={{"CUDA_VISIBLE_DEVICES":visible,"SLURM_JOB_GPUS":os.environ.get("SLURM_JOB_GPUS"),"host_libcuda_paths":[]}}
@@ -417,7 +418,7 @@ if os.path.isfile("/etc/ld.so.cache"): args += ["--ro-bind","/etc/ld.so.cache","
 args += ["--bind",{remote + "/output"!r},"/output"]
 for dev in ["/dev/nvidiactl","/dev/nvidia"+minor,"/dev/nvidia-uvm","/dev/nvidia-uvm-tools"]:
  if os.path.exists(dev): args += ["--dev-bind",dev,dev]
-for key,value in {{"HOME":"/tmp/home","PATH":"/usr/bin:/bin","TMPDIR":"/tmp","PYTHONPATH":{pythonpath!r},"PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1","OMP_NUM_THREADS":"1","CUDA_VISIBLE_DEVICES":uuid,"TORCHINDUCTOR_CACHE_DIR":"/tmp/torch","TRITON_CACHE_DIR":"/tmp/triton","MPLBACKEND":"Agg","MPLCONFIGDIR":"/tmp/matplotlib","NUMBA_CACHE_DIR":"/tmp/numba","JOBLIB_TEMP_FOLDER":"/tmp/joblib","RESEARCH_LOOP_EVENT_FILE":"/output/events.jsonl"}}.items(): args += ["--setenv",key,value]
+for key,value in {{"USER":"research","LOGNAME":"research","HOME":"/tmp/home","PATH":"/usr/bin:/bin","TMPDIR":"/tmp","PYTHONPATH":{pythonpath!r},"PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1","OMP_NUM_THREADS":"1","CUDA_VISIBLE_DEVICES":uuid,"TORCHINDUCTOR_CACHE_DIR":"/tmp/torch","TRITON_CACHE_DIR":"/tmp/triton","MPLBACKEND":"Agg","MPLCONFIGDIR":"/tmp/matplotlib","NUMBA_CACHE_DIR":"/tmp/numba","JOBLIB_TEMP_FOLDER":"/tmp/joblib","RESEARCH_LOOP_EVENT_FILE":"/output/events.jsonl"}}.items(): args += ["--setenv",key,value]
 args += ["--chdir","/output",{config["remote_python"]!r},"-B",{str(PurePosixPath("/workspace") / execution["entrypoint"])!r}]
 os.execve(args[0],args,{{"PATH":"/usr/bin:/bin"}})
 """

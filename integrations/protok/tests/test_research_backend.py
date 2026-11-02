@@ -1,4 +1,5 @@
 import copy
+import getpass
 import hashlib
 import io
 from pathlib import Path
@@ -596,6 +597,20 @@ class ResearchBackendTests(unittest.TestCase):
         self.assertIn("--unshare-net", args)
         self.assertIn("--unshare-pid", args)
         self.assertEqual(args[args.index("--cap-drop") + 1], "ALL")
+        environment = dict(execute.call_args.args[2])
+        for index, argument in enumerate(args):
+            if argument == "--setenv":
+                environment[args[index + 1]] = args[index + 2]
+        # Reproduce UID 14432 without a passwd entry: compiler cache naming must
+        # resolve the sandbox identity without consulting the host user database.
+        with (
+            patch.dict("os.environ", environment, clear=True),
+            patch(
+                "pwd.getpwuid", side_effect=KeyError("uid not found: 14432")
+            ) as lookup,
+        ):
+            self.assertEqual(getpass.getuser(), "research")
+            lookup.assert_not_called()
         self.assertIn("/dev/nvidia4", args)
         self.assertNotIn("/dev/nvidia0", args)
         text = output.getvalue()
