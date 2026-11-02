@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from research_loop import Study, StudyError, initialize
-from research_loop.harness import publish_completed_response
+from research_loop.harness import HarnessError, publish_completed_response
 from research_loop.tasks import TaskQueue, completed_results
 from test_core import ProcessLost, RecordedHarness
 
@@ -553,3 +553,88 @@ class TaskTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "frozen Git source revision"):
             self.submit(base_experiment="0001", allow_changes=False)
+
+
+class FixedTaskBoundaryTests(unittest.TestCase):
+    """Controller checks adapters even when Execute was previously accepted."""
+
+    setUp = TaskTests.setUp
+    git = TaskTests.git
+    commit_source = TaskTests.commit_source
+    submit = TaskTests.submit
+
+    def prepare(self):
+        self.commit_source("version = 1\n")
+        self.submit(allow_changes=False)
+        harness = RecordedHarness()
+        harness.validations = []
+        harness.identity_valid = True
+
+        def validate(result, *, workspace, run_dir):
+            harness.validations.append(run_dir)
+            if not harness.identity_valid:
+                raise HarnessError("Actual evaluated candidate differs from frozen A")
+            return result
+
+        harness.validate_completed = validate
+        return Study(self.root, harness), harness
+
+    def test_fixed_task_validates_fresh_execute_review_and_publication(self):
+        study, harness = self.prepare()
+        study.run()
+        self.assertEqual(len(harness.validations), 3)
+        self.assertEqual(harness.count("execute"), 1)
+        self.assertEqual(harness.count("review"), 1)
+
+    def test_accepted_completed_receipt_does_not_skip_fixed_identity(self):
+        study, harness = self.prepare()
+        step = study._step
+
+        def interrupt(state):
+            if state["phase"] == "execute":
+                original_save = study._save
+
+                def lose_controller(saved):
+                    original_save(saved)
+                    if saved.get("accepted_calls", {}).get("execute"):
+                        raise ProcessLost()
+
+                with patch.object(study, "_save", side_effect=lose_controller):
+                    step(state)
+            else:
+                step(state)
+
+        with patch.object(study, "_step", side_effect=interrupt):
+            with self.assertRaises(ProcessLost):
+                study.run()
+        self.assertTrue(study.status()["accepted_calls"]["execute"])
+        harness.identity_valid = False
+        with self.assertRaisesRegex(HarnessError, "frozen A"):
+            Study(self.root, harness).run()
+        self.assertEqual(harness.count("execute"), 1)
+        self.assertEqual(harness.count("review"), 0)
+
+    def test_review_restart_checks_actual_candidate_before_review_call(self):
+        study, harness = self.prepare()
+        state = study.status()
+        study._begin(state)
+        study._step(state)  # Plan.
+        study._step(state)  # Execute accepted.
+        self.assertEqual(state["phase"], "review")
+        harness.identity_valid = False
+        with self.assertRaisesRegex(HarnessError, "frozen A"):
+            Study(self.root, harness).run()
+        self.assertEqual(harness.count("review"), 0)
+        self.assertFalse((self.root / "iterations/0001/publication.json").exists())
+
+    def test_pending_publication_replay_checks_actual_candidate(self):
+        study, harness = self.prepare()
+        with patch.object(study, "_publish", side_effect=ProcessLost):
+            with self.assertRaises(ProcessLost):
+                study.run()
+        self.assertTrue((self.root / "iterations/0001/publication.json").exists())
+        harness.identity_valid = False
+        with self.assertRaisesRegex(HarnessError, "frozen A"):
+            Study(self.root, harness).run()
+        self.assertEqual(harness.count("review"), 1)
+        self.assertEqual(self.queue.snapshot()[0]["status"], "needs_attention")

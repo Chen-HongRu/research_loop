@@ -92,6 +92,8 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
     # Local import avoids coupling the generic controller to this adapter.
     from .run import (
         candidate_bytes,
+        check_fixed_candidate,
+        certify_candidate_failure,
         check_scope,
         freeze_source,
         git,
@@ -116,6 +118,11 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         raise HarnessError(
             "Debug requires an explicitly certified investigation failure"
         )
+    fixed = check_fixed_candidate(root, workspace, iteration)
+    if fixed is not None:
+        trusted = certify_candidate_failure(root, harness.backend, workspace, iteration)
+        if failure != trusted or failure["source_signatures"] != fixed:
+            raise HarnessError("Fixed-candidate failure differs from its original job")
     from .run import debug_policy
 
     policy = (
@@ -177,9 +184,25 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
         }
         write(flow_path, state)
 
+    if fixed is not None:
+        if (
+            state["failed_signatures"] != fixed
+            or state.get("source_signatures", fixed) != fixed
+            or state["failures"] != [failure]
+        ):
+            raise HarnessError("Fixed-candidate recovery retained a modified candidate")
+        for attempt in run_dir.glob("repairs/*/attempt-*"):
+            _stopped(attempt, read)
+            if completed_response(attempt) is None:
+                raise HarnessError(
+                    "Interrupted repair requires explicit reconciliation"
+                )
+
     from .round_admission import execution_deadline
 
-    if policy is None:
+    if fixed is not None:
+        wall_deadline = 0  # No repair or new allocation is authorized for this task.
+    elif policy is None:
         original_deadline = failure.get("execution_deadline")
         if type(original_deadline) not in (int, float) or not math.isfinite(
             original_deadline
@@ -290,6 +313,16 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
             state["phase"] = "done"
             save()
             return decision["response"]
+        if fixed is not None:
+            return finish(
+                "fixed candidate failed: "
+                + failure["cause"]
+                + "; actual GPU allocation charge "
+                + str(failure["gpu_seconds"])
+                + " seconds; allow_changes=false forbids repair or a new evaluation. "
+                "Independent Review must assess this incomplete experiment. "
+                "Any repair requires a separate task that allows changes"
+            )
         if state["phase"] == "repair":
             if budget_status()["active_attempt"] is not None:
                 raise HarnessError("Unresolved debug accounting blocks a new repair")

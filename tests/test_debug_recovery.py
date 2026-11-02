@@ -240,7 +240,25 @@ class DebugRecoveryTests(unittest.TestCase):
         Study(self.root, harness).run()
         self.assert_completed(study, harness)
         self.assertEqual(len(harness.recoveries), 1)
-        self.assertEqual(len(harness.validations), 1)
+        self.assertEqual(len(harness.validations), 2)
+
+    def test_cached_recovery_revalidates_before_review(self):
+        study, harness = self.study()
+        save = study._save
+
+        def interrupt(state):
+            if state["calls"].get("execute", "").endswith("/recovery"):
+                raise ProcessLost()
+            save(state)
+
+        with patch.object(study, "_save", side_effect=interrupt):
+            with self.assertRaises(ProcessLost):
+                study.run()
+        (self.root / "iterations/0001/workspace/result.json").unlink()
+        with self.assertRaisesRegex(HarnessError, "Missing formal result"):
+            Study(self.root, harness).run()
+        self.assertEqual(harness.count("review"), 0)
+        self.assertEqual(len(harness.recoveries), 1)
 
     def test_failure_receipt_recovers_before_debug_state_binding(self):
         study, harness = self.study()

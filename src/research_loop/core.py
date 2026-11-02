@@ -1160,6 +1160,7 @@ class Study:
         run_dir = folder / "execute/recovery"
         run_dir.mkdir(parents=True, exist_ok=True)
         result = completed_response(run_dir)
+        cached = result is not None
         if result is None:
             returned = run_dir / "returned.json"
             if returned.exists():
@@ -1205,15 +1206,13 @@ class Study:
                         "response": result,
                     },
                 )
-            validate_completed = getattr(self.harness, "validate_completed", None)
-            if validate_completed is not None:
-                result = validate_completed(
-                    result, workspace=workspace, run_dir=run_dir
-                )
-            self._validate_result("execute", result, context)
+        validate_completed = getattr(self.harness, "validate_completed", None)
+        if validate_completed is not None:
+            result = validate_completed(result, workspace=workspace, run_dir=run_dir)
+        self._validate_result("execute", result, context)
+        if not cached:
             _write(run_dir / "response.json", result)
             publish_completed_response(run_dir, result)
-        self._validate_result("execute", result, context)
         state["calls"]["execute"] = str(run_dir.relative_to(self.root))
         state.setdefault("accepted_calls", {})["execute"] = True
         state.update(
@@ -1450,6 +1449,7 @@ class Study:
                     self._save(state)
             if state.get("debugging"):
                 result = self._recover_execution(state, folder, context)
+            self._validate_fixed_task_execution(state, folder, result=result)
             definition = self.config["global_evaluation"]
             if (
                 definition
@@ -1510,6 +1510,20 @@ class Study:
                 raise StudyError(error)
         except (OSError, ValueError, StudyError) as exc:
             raise StudyError(error) from exc
+
+    def _validate_fixed_task_execution(
+        self, state: dict, folder: Path, *, result=None
+    ) -> None:
+        task_path = folder / "context/task.json"
+        manual = _read(task_path) if task_path.exists() else None
+        validate = getattr(self.harness, "validate_completed", None)
+        if not manual or manual["allow_changes"] or validate is None:
+            return
+        metadata = _read(folder / "iteration.json")
+        run_dir = self.root / state["calls"]["execute"]
+        if result is None:
+            result = _read(run_dir / "response.json")
+        validate(result, workspace=Path(metadata["workspace"]), run_dir=run_dir)
 
     def _accept_plan(self, state: dict, folder: Path, result: dict) -> None:
         proposal = state["selected"]["proposal"]
@@ -1715,6 +1729,7 @@ class Study:
         )
 
     def _review(self, state: dict, folder: Path) -> None:
+        self._validate_fixed_task_execution(state, folder)
         publication = folder / "publication.json"
         if publication.exists():
             self._publish(state, folder, _read(publication))
@@ -1915,6 +1930,7 @@ class Study:
                 )
 
     def _publish(self, state: dict, folder: Path, bundle: dict) -> None:
+        self._validate_fixed_task_execution(state, folder)
         self._check_publication(bundle)
         for relative, value in bundle["writes"].items():
             _atomic_text(self.root / relative, value)
