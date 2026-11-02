@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import stat
@@ -196,6 +197,11 @@ def completed_script(root, workspace, iteration):
     run.check_fixed_candidate(root, workspace, iteration, folder / "source")
     saved = read(folder / "record.json")
     result = read(folder / "result.json")
+    if (folder / "preflight-rejection.json").exists():
+        record = read(folder / "preflight-rejection.json")
+        if result != preflight_result(root, workspace, iteration, record):
+            raise ProTokError("Preflight rejection differs from its retained evidence")
+        return result
     receipt = read(root / "control/research-jobs" / iteration / "receipt.json")
     if (
         result.get("status") not in {"completed", "failed"}
@@ -229,6 +235,103 @@ def completed_script(root, workspace, iteration):
     return result
 
 
+def preflight_result(root, workspace, iteration, record):
+    """Verify an invalid envelope, without inventing a scheduler/job receipt."""
+    from integrations.protok import run
+    from integrations.protok.research_backend import _execution
+
+    root, workspace = Path(root), Path(workspace)
+    folder = root / "control/research-sources" / iteration
+    saved = read(folder / "record.json")
+    admitted = policy(root)
+    if (
+        not isinstance(record.get("authorization"), str)
+        or not record["authorization"].strip()
+        or record.get("policy") != admitted
+        or admitted is None
+        or record.get("frozen_record") != saved
+        or saved["contract"] != frozen_contract(root, iteration)
+        or any(
+            (root / "control" / namespace / iteration).exists()
+            for namespace in ("research-jobs", "jobs", "debug")
+        )
+        or read(workspace / "evaluation-submission.json") != {"action": "research"}
+    ):
+        raise ProTokError("Cannot certify an unchanged pre-allocation rejection")
+    try:
+        _execution(saved["contract"]["execution"], admitted)
+    except ProTokError as error:
+        message = str(error)
+    else:
+        raise ProTokError("A valid envelope cannot be rejected without execution")
+    if message != record.get("error"):
+        raise ProTokError("Preflight failure no longer matches the original envelope")
+    for source in (workspace, folder / "source"):
+        run.check_scope(
+            source, read(root / "study/study.json")["baseline"], allow_research=True
+        )
+        if (
+            run.signatures({**run.candidate_bytes(source), **research_files(source)})
+            != saved["source_signatures"]
+        ):
+            raise ProTokError("Preflight-rejected research source changed")
+    commit = run.git(folder / "source", "rev-parse", "HEAD")
+    if commit != record.get("source_commit"):
+        raise ProTokError("Preflight-rejected source commit changed")
+    identity = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
+    return {
+        "status": "failed",
+        "failure_kind": "preflight_rejected",
+        "purpose": "research",
+        "quality_score_eligible": False,
+        "allocated_seconds": 0,
+        "gpu_seconds": 0,
+        "outputs": [],
+        "error": message,
+        "execution_identity": identity,
+        "source_commit": commit,
+        "frozen_source": str(folder / "source"),
+        "contract": saved["contract"],
+        "evidence": [str(folder / "preflight-rejection.json")],
+        "artifact": {"path": str(folder / "result.json"), "version": identity},
+    }
+
+
+def reject_preflight(root, workspace, iteration, *, authorization):
+    """Explicit operator certification of a frozen envelope rejected before any job."""
+    from integrations.protok import run
+    from integrations.protok.research_backend import _execution
+
+    root, workspace = Path(root), Path(workspace)
+    folder = root / "control/research-sources" / iteration
+    saved = read(folder / "record.json")
+    existing = read(workspace / "evaluation-result.json")
+    admitted = policy(root)
+    if admitted is None or existing.get("status") != "error":
+        raise ProTokError("A retained controller preflight error is required")
+    try:
+        _execution(saved["contract"]["execution"], admitted)
+    except ProTokError as error:
+        message = str(error)
+    else:
+        raise ProTokError("The research envelope did not fail preflight")
+    if existing.get("error") != message or any(
+        key in existing for key in ("measurements", "value", "metric")
+    ):
+        raise ProTokError("Retained interface is not this preflight failure")
+    record = {
+        "authorization": authorization,
+        "policy": admitted,
+        "frozen_record": saved,
+        "error": message,
+        "source_commit": run.git(folder / "source", "rev-parse", "HEAD"),
+    }
+    result = preflight_result(root, workspace, iteration, record)
+    run.immutable_record(folder / "preflight-rejection.json", record)
+    run.immutable_record(folder / "result.json", result)
+    return result
+
+
 def instructions(root):
     if policy(root) is None:
         return ""
@@ -256,7 +359,10 @@ The available compute profile is the existing H100 debug allocation, gpu=true,
 8 CPU / 96 GiB, 60..1800 seconds in whole minutes. Even CPU calculations in this
 profile consume and report GPU allocation seconds from the original shared budget.
 Request the smallest useful limit and leave polling/queue time within Plan timeout.
-Script inputs must be declared by name/source/role: sources hidden_cache, targets,
+Script inputs must be declared by name/source/role. role is an exact enum, never
+explanatory prose: development or exploratory; teacher/checkpoint inputs may also
+use model or reference. Put descriptions in research observables instead.
+Available sources are hidden_cache, targets,
 teacher, checkpoint:<published iteration>:<step>, or independently reviewed
 long-checkpoint:<run ID>:<2000|4000|6000|8000|10000>. Long checkpoints retain their
 separate full-validation protocol; inspect their published Review and exact source.

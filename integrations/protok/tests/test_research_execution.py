@@ -9,7 +9,11 @@ from unittest.mock import Mock, patch
 
 from integrations.protok.backend import CANDIDATE_FILES, ProTokBackend, ProTokError
 from integrations.protok.continuation import install_hooks
-from integrations.protok.research_execution import research_usage
+from integrations.protok.research_execution import (
+    completed_script,
+    reject_preflight,
+    research_usage,
+)
 from research_loop.harness import HarnessError
 from research_loop.submission import claim_request, submit
 import test_protok_runner as runner_tests
@@ -137,6 +141,76 @@ class ResearchExecutionTests(unittest.TestCase):
         return self.harness.validate_completed(
             response, workspace=self.workspace, run_dir=self.directory / "attempt"
         )
+
+    def preflight_failure(self):
+        self.contract["execution"]["inputs"] = [
+            {"name": "hidden", "source": "hidden_cache", "role": "development; prose"}
+        ]
+        self.write_plan()
+        submit(self.workspace, "research")
+        claim_request(self.workspace)
+        from integrations.protok.research_backend import _execution
+
+        def rejected(*args, **kwargs):
+            return _execution(
+                self.contract["execution"],
+                RUNNER.read(self.control / "research-policy.json"),
+            )
+
+        self.run_script.side_effect = rejected
+        with self.assertRaisesRegex(ProTokError, "input role") as raised:
+            self.evaluate()
+        RUNNER.write(
+            self.workspace / "evaluation-result.json",
+            {"status": "error", "error": str(raised.exception)},
+        )
+
+    def test_preflight_rejection_retains_contract_source_and_has_no_job(self):
+        self.preflight_failure()
+        original = self.plan_path.read_bytes()
+        result = reject_preflight(
+            self.root,
+            self.workspace,
+            self.iteration,
+            authorization="Operator authorized reconciliation",
+        )
+        self.assertEqual(result["failure_kind"], "preflight_rejected")
+        self.assertEqual(result["gpu_seconds"], 0)
+        self.assertEqual(result["allocated_seconds"], 0)
+        self.assertFalse((self.control / "research-jobs" / self.iteration).exists())
+        self.assertEqual(self.plan_path.read_bytes(), original)
+        self.assertEqual(
+            completed_script(self.root, self.workspace, self.iteration), result
+        )
+        self.assertEqual(self.backend_runs, 0)
+        RUNNER.write(self.workspace / "evaluation-result.json", result)
+        self.validate(RUNNER.settled_failure_response(result))
+        (self.workspace / "research/main.py").write_text('print("changed")\n')
+        with self.assertRaisesRegex(ProTokError, "source changed"):
+            completed_script(self.root, self.workspace, self.iteration)
+
+    def test_preflight_certificate_refuses_a_backend_job_or_changed_error(self):
+        self.preflight_failure()
+        job = self.control / "research-jobs" / self.iteration
+        job.mkdir(parents=True)
+        with self.assertRaises(ProTokError):
+            reject_preflight(
+                self.root, self.workspace, self.iteration, authorization="test"
+            )
+        self.assertFalse(
+            (
+                self.control / "research-sources" / self.iteration / "result.json"
+            ).exists()
+        )
+        job.rmdir()
+        RUNNER.write(
+            self.workspace / "evaluation-result.json",
+            {"status": "error", "error": "transport failed"},
+        )
+        with self.assertRaisesRegex(ProTokError, "not this preflight"):
+            reject_preflight(
+                self.root, self.workspace, self.iteration, authorization="test"
+            )
 
     def test_freezes_exact_source_and_accepts_only_unscored_artifact(self):
         with patch.object(
