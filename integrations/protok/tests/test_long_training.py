@@ -289,6 +289,28 @@ class LongTrainingTests(unittest.TestCase):
         assert "GPU-" in text
         assert "/remote/train" in text and "/output" in text
 
+    def test_failure_public_receipt_omits_subprocess_argv_and_owner(self):
+        import subprocess
+
+        root, control, req, config, backend = setup(self.tmp_path)
+        transport = Transport()
+        failure = subprocess.CalledProcessError(
+            8, ["private-prompt", "test"], stderr="token=secret"
+        )
+        with (
+            patch.object(lane, "_load_backend", return_value=(transport, config)),
+            patch.object(lane, "_snapshot", side_effect=fake_snapshot),
+            patch.object(transport, "run", side_effect=failure),
+            patch.object(lane.time, "time", return_value=100.0),
+        ):
+            lane.execute(backend, root, req, root / "workspace", deadline=100000.0)
+        receipt = lane._read(
+            control / "long-training-jobs" / req["id"] / "receipt.json"
+        )
+        self.assertNotIn("private-prompt", receipt["error"])
+        self.assertNotIn("test", receipt["error"])
+        self.assertEqual(transport.submissions, 0)
+
     def test_execution_binds_final_metrics_and_separate_accounting(self):
         tmp_path = self.tmp_path
         root, control, req, config, backend = setup(tmp_path)
@@ -319,6 +341,11 @@ class LongTrainingTests(unittest.TestCase):
             assert measurement["comparison_scope"] == "long-full"
             assert [row["value"] for row in measurement["metrics"]] == [2.0, 0.7, 0.8]
             assert lane.usage(control) == {"gpu_seconds": 3000, "outstanding": []}
+            diagnostics = lane._read(
+                control / "long-training-jobs" / req["id"] / "receipt.json"
+            )["diagnostics"]
+            assert Path(diagnostics["manifest"]).is_file()
+            assert diagnostics["log_count"] >= 2
             repeated = lane.execute(
                 backend, root, req, root / "repeated", deadline=100000.0, recover=True
             )

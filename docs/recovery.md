@@ -1,5 +1,8 @@
 # Interruption and recovery
 
+See [Failure diagnostics and recovery](failure-diagnostics.md) for workspace versus
+pipeline responsibility, Agent-readable server logs and operator blocking records.
+
 Every Agent attempt has its own directory. CLI stdout/stderr stream directly to
 files during generation. A successful parsed response is atomically published in
 `response.json` and an authoritative `completed.json` before the harness returns.

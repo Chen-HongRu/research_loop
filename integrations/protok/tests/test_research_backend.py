@@ -228,6 +228,45 @@ class ResearchBackendTests(unittest.TestCase):
             ],
         }
 
+    def test_complete_server_log_is_registered_beyond_existing_tail(self):
+        from research_loop.diagnostics import read_log_page
+
+        receipt = self.run_job()
+        capture = receipt["diagnostics"]
+        self.assertTrue(Path(capture["manifest"]).is_file())
+        self.assertEqual(
+            capture["directory"],
+            str((self.control / "research-jobs/0002/command-diagnostics").resolve()),
+        )
+        for log in capture["logs"]:
+            page = read_log_page(capture["directory"], log["log_id"])
+            self.assertIsInstance(page["text"], str)
+        complete = next(log for log in capture["logs"] if log["bytes"] == 100000)
+        first = read_log_page(capture["directory"], complete["log_id"], limit=65536)
+        second = read_log_page(
+            capture["directory"],
+            complete["log_id"],
+            offset=first["next_offset"],
+            limit=65536,
+        )
+        self.assertEqual(first["text"] + second["text"], "x" * 100000)
+        self.assertTrue(second["eof"])
+        self.assertEqual(self.fixed.submissions, 1)
+
+    def test_failure_public_receipt_omits_subprocess_argv_and_owner(self):
+        failure = subprocess.CalledProcessError(
+            8, ["private-prompt", "owner"], stderr="token=secret"
+        )
+        with patch.object(self.fixed, "run", side_effect=failure):
+            receipt = self.run_job()
+        self.assertNotIn("private-prompt", receipt["error"])
+        self.assertNotIn("owner", receipt["error"])
+        raw = Path(receipt["diagnostics"]["directory"]) / "raw"
+        self.assertTrue(
+            any("private-prompt" in path.read_text() for path in raw.glob("*.error"))
+        )
+        self.assertEqual(self.fixed.submissions, 0)
+
     def test_environment_is_snapshotted_mounted_and_bound_to_identity(self):
         environment = self.environment()
         research._write(self.control / "research-environment.json", environment)

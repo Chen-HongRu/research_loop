@@ -178,11 +178,31 @@ class ResearchExecutionTests(unittest.TestCase):
                 "authorization": "test",
             },
         )
+        from research_loop.debug_budget import DebugBudget
+
+        debug = self.root / "control/debug" / self.iteration
+        budget = DebugBudget(debug, scope_id=self.iteration, limit_gpu_seconds=1800)
+        RUNNER.write(
+            debug / "flow.json",
+            {
+                "schema": 1,
+                "iteration": self.iteration,
+                "policy": RUNNER.read(self.root / "control/debug-policy.json"),
+                "deadline": self.deadline,
+                "phase": "done",
+                "revision": 1,
+                "repair_try": 1,
+                "formal": 0,
+                "failures": [],
+            },
+        )
         RUNNER.write(
             self.root / "control/debug" / self.iteration / "decision.json",
             {
+                "schema": 1,
                 "status": "failed",
                 "response": response,
+                "budget": budget.status(),
                 "source_signatures": RUNNER.signatures(
                     RUNNER.candidate_bytes(self.workspace)
                 ),

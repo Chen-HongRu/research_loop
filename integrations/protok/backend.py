@@ -13,6 +13,12 @@ import subprocess
 import time
 import uuid
 
+from research_loop.diagnostics import (
+    CommandDiagnostics,
+    diagnostic_secrets,
+    diagnostic_view,
+)
+
 
 CANDIDATE_FILES = (
     "protok/model/autoresearch_se3.py",
@@ -747,6 +753,11 @@ class ProTokBackend:
         name, record, state = self._settled_failure_state(
             workspace, config_path, fingerprint, record_name=record_name
         )
+        effects = self.inspect()
+        if effects.get("debug_outstanding") or effects.get("research_outstanding"):
+            raise ProTokError(
+                "Candidate failure has unresolved debug or research effects"
+            )
         attempt = state["attempts"][-1]
         if attempt.get("terminal_state") not in {"FAILED", "OUT_OF_MEMORY"}:
             raise ProTokError("Failure is not a settled candidate execution rejection")
@@ -756,14 +767,36 @@ class ProTokBackend:
         log = record / directory / "run.log.tail"
         from .debug_backend import failure_detail
 
-        detail = failure_detail(log, attempt, state.get("error"))
+        detail = failure_detail(
+            log,
+            attempt,
+            state.get("error"),
+            stage="formal",
+            secrets=diagnostic_secrets((self.owner_token,)),
+        )
         if detail["failure_kind"] != "candidate":
             raise ProTokError(
                 "Failure cause is not certified as a candidate-code error"
             )
         cause = detail["cause"]
+        native = CommandDiagnostics(
+            self.control / "command-diagnostics" / name,
+            secrets=diagnostic_secrets((self.owner_token,)),
+        )
+        diagnostics = native.view(owner="workspace")
+        if not diagnostics["logs"]:
+            capture = CommandDiagnostics(
+                record / directory / "diagnostics",
+                secrets=diagnostic_secrets((self.owner_token,)),
+            )
+            diagnostics = capture.view(owner="workspace")
+            if not diagnostics["logs"]:
+                diagnostics = capture.record_files(
+                    {"server": log}, stage="formal", owner="workspace"
+                )
         return {
             "kind": "candidate_rejected",
+            "diagnostics": diagnostics,
             "cause": cause,
             "fingerprint": fingerprint,
             "record_name": name,
@@ -778,7 +811,7 @@ class ProTokBackend:
             "quality_score_eligible": False,
             "purpose": "formal",
             "evidence": [str(record / n) for n in ("state.json", "run-config.json")]
-            + [str(log)],
+            + [diagnostics["manifest"]],
         }
 
     def completed_receipt(
@@ -1110,7 +1143,37 @@ class ProTokBackend:
                 )
             except (ValueError, OSError, ProTokError) as error:
                 receipt["error"] = str(error)
+                diagnostics = diagnostic_view(
+                    error,
+                    owner="unknown",
+                    stage="formal",
+                    returncode=process.returncode,
+                    secrets=diagnostic_secrets((self.owner_token,)),
+                )
+                try:
+                    capture = CommandDiagnostics(
+                        run / "diagnostics",
+                        secrets=diagnostic_secrets((self.owner_token,)),
+                    )
+                    streams = capture.record_files(
+                        {"stdout": run / "stdout.log", "stderr": run / "stderr.log"},
+                        stage="formal",
+                        owner="unknown",
+                    )
+                    diagnostics = {**streams, **diagnostics, "logs": streams["logs"]}
+                except (OSError, ValueError) as capture_error:
+                    diagnostics["capture_errors"] = [
+                        diagnostic_view(
+                            capture_error,
+                            owner="pipeline",
+                            stage="diagnostic_capture",
+                            secrets=diagnostic_secrets((self.owner_token,)),
+                        )
+                    ]
+                receipt["diagnostics"] = diagnostics
                 _write(run / "receipt.json", receipt)
-                raise ProTokError(f"{error}; receipt={receipt['receipt']}") from error
+                failure = ProTokError(f"{error}; receipt={receipt['receipt']}")
+                failure.diagnostics = diagnostics
+                raise failure from error
             _write(run / "receipt.json", receipt)
             return receipt

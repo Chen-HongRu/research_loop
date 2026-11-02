@@ -14,6 +14,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .diagnostics import diagnostic_view
 from .evaluation import build_frontier, validate_evaluation
 from .long_training import (
     completed_results as long_training_results,
@@ -482,6 +483,30 @@ class Study:
             ):
                 state["active_attempt"] = state["calls"][state["last_call_key"]]
             state.update(status="needs_attention", error=f"{type(exc).__name__}: {exc}")
+            diagnostic = self.root / "diagnostics" / f"failure-{uuid.uuid4().hex}.json"
+            try:
+                _write(
+                    diagnostic,
+                    {
+                        **diagnostic_view(
+                            exc,
+                            owner="pipeline",
+                            stage=state["phase"],
+                            secrets=getattr(self.harness, "diagnostic_secrets", ()),
+                        ),
+                        "recorded_at": _now(),
+                        "iteration": state["iteration"],
+                        "attempt": state.get("active_attempt"),
+                        "effects": "unknown"
+                        if state["phase"] == "execute"
+                        else "read_only",
+                    },
+                )
+                state["diagnostic_ref"] = str(diagnostic.relative_to(self.root))
+            except (OSError, ValueError) as diagnostic_error:
+                state["diagnostic_error"] = diagnostic_view(diagnostic_error)[
+                    "cause_chain"
+                ]
             self._save(state)
             raise
         finally:
@@ -983,6 +1008,39 @@ class Study:
                         attempt / "failure.json",
                         {"version": 1, "error": str(exc), "details": exc.details},
                     )
+                    _write(
+                        attempt / "failure-diagnostics.json",
+                        {
+                            **diagnostic_view(
+                                exc,
+                                owner="workspace",
+                                stage="execute",
+                                secrets=getattr(self.harness, "diagnostic_secrets", ()),
+                            ),
+                            "effects": "reconciled",
+                            "server": exc.details.get("diagnostics"),
+                        },
+                    )
+                raise
+            except (HarnessError, OSError, ValueError, KeyboardInterrupt) as exc:
+                # Adapters alone can certify recoverable workspace effects.
+                # Preserve diagnosis for every other call failure without retrying
+                # an Execute merely because its local CLI has stopped.
+                target = attempt / "failure-diagnostics.json"
+                if not target.exists():
+                    _write(
+                        target,
+                        {
+                            **diagnostic_view(
+                                exc,
+                                owner="pipeline",
+                                stage=phase,
+                                secrets=getattr(self.harness, "diagnostic_secrets", ()),
+                            ),
+                            "effects": "unknown" if phase == "execute" else "read_only",
+                            "server": getattr(exc, "diagnostics", None),
+                        },
+                    )
                 raise
         self._validate_result(phase, result, context)
         state.setdefault("accepted_calls", {})[key] = True
@@ -1014,6 +1072,7 @@ class Study:
         self._save(state)
         context = {
             **context,
+            "diagnostics": self._execution_diagnostics(folder),
             "budget": {
                 "calls_left": self.config["max_calls"] - state["call_count"]
                 if self.config["max_calls"] is not None
@@ -1084,6 +1143,24 @@ class Study:
             debugging=None, status="ready", active_attempt=None, last_call_key="execute"
         )
         self._save(state)
+        return result
+
+    def _execution_diagnostics(self, folder: Path) -> dict:
+        """Freeze references to this investigation's public failure records only."""
+        attempts = []
+        for path in sorted((folder / "execute").glob("**/failure-diagnostics.json")):
+            if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+                raise StudyError("Invalid execution diagnostic record")
+            attempts.append(
+                {
+                    "attempt": str(path.parent.relative_to(self.root)),
+                    "record": _read(path),
+                }
+            )
+        result = {"attempts": attempts}
+        adapter_context = getattr(self.harness, "diagnostic_context", None)
+        if adapter_context is not None:
+            result["server"] = adapter_context(folder.name)
         return result
 
     def _sample(self, state: dict, folder: Path, round_id: int) -> list[str]:
@@ -1544,6 +1621,7 @@ class Study:
         telemetry = folder / "context/telemetry.json"
         if telemetry.exists():
             context["telemetry"] = _read(telemetry)
+        context["diagnostics"] = self._execution_diagnostics(folder)
         if context.get("long_training_run"):
             context["long_training_observations"] = long_observation_context(context)
         guidance = review_guidance(self.strategy)
