@@ -67,7 +67,9 @@ if __name__ == '__main__':
         raise SystemExit(0)
     print('METRIC '+metric+'='+('nan' if mode == 'nonfinite' else '2.5'))
     if mode == 'duplicate': print('METRIC '+metric+'=2.5')
-    if mode == 'nonzero': raise SystemExit(7)
+    if mode == 'nonzero':
+        print('server diagnostic owner '+('z'*20000), file=sys.stderr)
+        raise SystemExit(7)
 """ % (CANDIDATE_FILES,)
 
 
@@ -285,6 +287,43 @@ class ProTokTests(unittest.TestCase):
                 off.unlink(missing_ok=True)
                 self.write(lease_path, lease)
                 self.write(self.project / "autoresearch-run.json", self.config)
+
+    def test_nonzero_evaluator_exposes_full_redacted_stdout_and_stderr(self):
+        from research_loop.diagnostics import read_log_page
+
+        (self.root / "mode").write_text("nonzero")
+        with self.assertRaises(ProTokError) as rejected:
+            self.backend.evaluate(self.workspace, self.output, 10)
+        diagnostics = rejected.exception.diagnostics
+        self.assertEqual(diagnostics["returncode"], 7)
+        self.assertEqual(
+            {row["stream"] for row in diagnostics["logs"]}, {"stdout", "stderr"}
+        )
+        stderr = next(row for row in diagnostics["logs"] if row["stream"] == "stderr")
+        page = read_log_page(diagnostics["directory"], stderr["log_id"], limit=65536)
+        self.assertIn("server diagnostic [REDACTED]", page["text"])
+        self.assertGreater(len(page["text"]), 20000)
+        self.assertTrue(page["eof"])
+        raw = Path(diagnostics["directory"]) / "raw" / (stderr["log_id"] + ".log")
+        self.assertIn("server diagnostic owner", raw.read_text())
+
+    def test_capture_failure_preserves_original_evaluator_failure_and_stderr(self):
+        (self.root / "mode").write_text("nonzero")
+        with patch(
+            "integrations.protok.backend.CommandDiagnostics.record_files",
+            side_effect=PermissionError("diagnostic directory unavailable"),
+        ):
+            with self.assertRaisesRegex(
+                ProTokError, "Protected evaluator failed"
+            ) as rejected:
+                self.backend.evaluate(self.workspace, self.output, 10)
+        self.assertEqual(rejected.exception.diagnostics["returncode"], 7)
+        self.assertEqual(
+            rejected.exception.diagnostics["capture_errors"][0]["owner"], "pipeline"
+        )
+        receipts = list(self.control.glob("evaluation-*/receipt.json"))
+        receipt = json.loads(receipts[0].read_text())
+        self.assertIn("server diagnostic owner", Path(receipt["stderr"]).read_text())
 
     def test_success_receipt_binds_evidence_and_real_exit(self):
         receipt = self.backend.evaluate(self.workspace, self.output, 10)

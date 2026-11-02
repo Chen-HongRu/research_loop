@@ -30,6 +30,7 @@ from research_loop.harness import (
     completed_response,
     publish_completed_response,
 )
+from research_loop.diagnostics import diagnostic_secrets, diagnostic_view
 from research_loop.protocol import validate_response
 from research_loop.submission import (
     INTERFACE_FILES,
@@ -348,8 +349,10 @@ def static_candidate_fault(contents):
     return None
 
 
-def local_incomplete(root, backend, workspace, iteration, result, *, run_dir=None):
-    """Separate a demonstrated static source fault from an unsubmitted interruption."""
+def local_incomplete(
+    root, backend, workspace, iteration, result, *, run_dir=None, completed=False
+):
+    """Check a completed local response against scope and absence of effects."""
     validate_response("execute", result)
     if (
         result["outcome"] != "incomplete"
@@ -392,30 +395,51 @@ def local_incomplete(root, backend, workspace, iteration, result, *, run_dir=Non
             fault = static_candidate_fault(contents)
         except (UnicodeError, ValueError) as error:
             source_error = f"{type(error).__name__}: {error}"
+    if not completed and run_dir is not None:
+        completed = any(
+            completed_response(directory) == result
+            for directory in (Path(run_dir), Path(run_dir) / "agent")
+        )
     return {
         "iteration": iteration,
         "attempt": str(Path(run_dir).resolve()) if run_dir is not None else None,
+        "completed_response": completed,
         "source_signatures": signatures(contents) if contents is not None else None,
         "source_error": source_error,
         "candidate_fault": fault,
-        "classification": "candidate-fault" if fault else "unsubmitted-interruption",
+        "classification": "candidate-fault"
+        if fault
+        else ("completed-incomplete" if completed else "unsubmitted-interruption"),
         "response": result,
-        "provenance": "local-static-check-no-evaluation",
+        "provenance": "local-scope-and-effects-check-no-evaluation",
     }
 
 
-def retain_local_incomplete(root, backend, workspace, iteration, result, *, run_dir):
+def retain_local_incomplete(
+    root, backend, workspace, iteration, result, *, run_dir, completed=False
+):
     diagnostic = local_incomplete(
-        root, backend, workspace, iteration, result, run_dir=run_dir
+        root,
+        backend,
+        workspace,
+        iteration,
+        result,
+        run_dir=run_dir,
+        completed=completed,
     )
     attempt = Path(run_dir).name if run_dir is not None else "unbound"
     immutable_record(
         Path(root) / "control/diagnostics" / iteration / (attempt + ".json"),
         diagnostic,
     )
-    if diagnostic["classification"] != "candidate-fault":
+    if (
+        diagnostic["source_error"] is not None
+        or diagnostic["source_signatures"] is None
+    ):
+        raise HarnessError("Local incomplete violates the frozen candidate scope")
+    if not diagnostic["completed_response"]:
         raise HarnessError(
-            "Execute interrupted before submission; no candidate fault was established. "
+            "Execute interrupted before submission; no successful completion receipt. "
             "Preserve this Execute and Plan for explicit reconciliation and retry"
         )
     return diagnostic
@@ -459,7 +483,6 @@ def job_path(root, iteration):
 def certify_candidate_failure(root, backend, workspace, iteration):
     """Persist the distinction between a settled code rejection and unknown effects."""
     root, workspace = Path(root), Path(workspace)
-    debug_policy(root)
     job = job_path(root, iteration)
     record = read(job / "job.json")
     baseline = read(root / "study/study.json")["baseline"]
@@ -480,6 +503,7 @@ def certify_candidate_failure(root, backend, workspace, iteration):
         job_directory=str(job.resolve()),
         source_signatures=record["source_signatures"],
         source_commit=record["source_commit"],
+        execution_deadline=record.get("execution_deadline"),
     )
     submission = Path(workspace) / RECEIPT
     if submission.is_symlink() or (
@@ -696,9 +720,18 @@ class ProTokHarness:
             delegate,
             deadline,
         )
+        existing_secrets = getattr(delegate, "diagnostic_secrets", ())
+        if not isinstance(existing_secrets, (tuple, list)):
+            existing_secrets = ()
+        self.diagnostic_secrets = diagnostic_secrets(
+            (getattr(backend, "owner_token", None), *existing_secrets)
+        )
+        if hasattr(delegate, "diagnostic_secrets"):
+            delegate.diagnostic_secrets = self.diagnostic_secrets
         self.errors = []
         self.trusted_result = None
         self.recoverable_failure = None
+        self.pipeline_diagnostics = None
 
     def admit_iteration(self, iteration):
         from integrations.protok.round_admission import admit
@@ -773,6 +806,7 @@ class ProTokHarness:
             "source_signatures": before,
             "iteration": iteration,
             "created_at": time.time(),
+            "execution_deadline": deadline,
         }
         write(job / "job.json", record)
         commit, frozen = freeze_source(
@@ -833,6 +867,38 @@ class ProTokHarness:
         return result
 
     def _watch(self, workspace, iteration, stop, deadline):
+        try:
+            self._watch_request(workspace, iteration, stop, deadline)
+        except Exception as error:
+            # A controller defect is a pipeline failure, never evidence for
+            # candidate recovery or an allocation timeout. Report it to both
+            # the waiting Agent and the main thread before ending this watcher.
+            diagnostics = diagnostic_view(
+                error,
+                owner="pipeline",
+                stage="evaluation_controller",
+                secrets=self.diagnostic_secrets,
+            )
+            message = diagnostics["cause_chain"][0]["message"]
+            self.recoverable_failure = None
+            self.pipeline_diagnostics = diagnostics
+            self.errors.append(message)
+            try:
+                write(
+                    workspace / "evaluation-result.json",
+                    {
+                        "status": "error",
+                        "error": message,
+                        "diagnostics": diagnostics,
+                        "retry": False,
+                    },
+                )
+            except (OSError, ValueError):
+                # The main thread still surfaces the original pipeline failure
+                # if the workspace itself cannot accept a diagnostic result.
+                pass
+
+    def _watch_request(self, workspace, iteration, stop, deadline):
         request_path = workspace / "evaluation-request.json"
         while not stop.wait(0.1):
             if not request_path.exists():
@@ -846,24 +912,41 @@ class ProTokHarness:
                 )
                 self.trusted_result = result
             except Exception as error:
+                diagnostics = getattr(error, "diagnostics", None) or diagnostic_view(
+                    error,
+                    stage="formal",
+                    secrets=self.diagnostic_secrets,
+                )
                 result = {
                     "status": "error",
-                    "error": f"{type(error).__name__}: {error}",
+                    "error": diagnostics["cause_chain"][0]["message"],
+                    "diagnostics": diagnostics,
                     "retry": False,
                 }
-                if (self.root / "control/debug-policy.json").exists():
-                    try:
-                        self.recoverable_failure = certify_candidate_failure(
-                            self.root, self.backend, workspace, iteration
-                        )
-                    except (ProTokError, OSError, ValueError, KeyError):
-                        pass
-                    else:
-                        result.update(
-                            status="candidate_failed",
-                            error=self.recoverable_failure["cause"],
-                            debug_available=True,
-                        )
+                try:
+                    self.recoverable_failure = certify_candidate_failure(
+                        self.root, self.backend, workspace, iteration
+                    )
+                except (ProTokError, OSError, ValueError, KeyError):
+                    pass
+                else:
+                    if self.recoverable_failure.get("diagnostics"):
+                        result["diagnostics"] = {
+                            **self.recoverable_failure["diagnostics"],
+                            "cause_chain": diagnostics["cause_chain"],
+                            "sources": [
+                                diagnostics,
+                                self.recoverable_failure["diagnostics"],
+                            ],
+                            "owner": "workspace",
+                        }
+                    result.update(
+                        status="candidate_failed",
+                        error=self.recoverable_failure["cause"],
+                        debug_available=(
+                            self.root / "control/debug-policy.json"
+                        ).exists(),
+                    )
                 if self.recoverable_failure is None:
                     try:
                         trusted = timed_out_job(
@@ -875,6 +958,10 @@ class ProTokHarness:
                         result = self.trusted_result = trusted
                 else:
                     self.errors.append(result["error"])
+            if result.get("diagnostics"):
+                job = job_path(self.root, iteration)
+                if job.is_dir():
+                    write(job / "failure-diagnostics.json", result["diagnostics"])
             write(workspace / "evaluation-result.json", result)
             return
 
@@ -923,6 +1010,7 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
         self.trusted_result = None
         self.errors = []
         self.recoverable_failure = None
+        self.pipeline_diagnostics = None
         workspace = Path(kwargs["workspace"])
         outer = Path(kwargs["run_dir"]) if "run_dir" in kwargs else None
         if outer is not None:
@@ -962,7 +1050,9 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
                 raise RecoverableExecutionError(
                     self.recoverable_failure["cause"], details=self.recoverable_failure
                 )
-            raise HarnessError(self.errors[-1])
+            failure = HarnessError(self.errors[-1])
+            failure.diagnostics = self.pipeline_diagnostics
+            raise failure
         if self.trusted_result and self.trusted_result.get("status") == "failed":
             # The controller result, not Agent availability, defines a settled failure.
             if self.trusted_result.get("purpose") == "research":
@@ -978,7 +1068,13 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
             raise delegate_error
         if result.get("outcome") == "incomplete" and self.trusted_result is None:
             retain_local_incomplete(
-                self.root, self.backend, workspace, iteration, result, run_dir=outer
+                self.root,
+                self.backend,
+                workspace,
+                iteration,
+                result,
+                run_dir=outer,
+                completed=True,
             )
             if outer is not None:
                 publish_completed_response(outer, result)
@@ -1001,6 +1097,36 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
         if outer is not None:
             publish_completed_response(outer, result)
         return result
+
+    def diagnostic_context(self, iteration):
+        """Return retained public diagnostics for this iteration, without execution."""
+        if not isinstance(iteration, str) or not re.fullmatch(r"[0-9]{4,}", iteration):
+            raise ProTokError("Invalid diagnostic iteration")
+        views = []
+        job = job_path(self.root, iteration)
+        original = self.root / "control/jobs" / iteration
+        for directory in dict.fromkeys((original, job)):
+            public = directory / "failure-diagnostics.json"
+            if public.is_file() and not public.is_symlink():
+                views.append(read(public))
+            failure = directory / "failure.json"
+            if failure.is_file() and not failure.is_symlink():
+                view = read(failure).get("details", {}).get("diagnostics")
+                if view:
+                    views.append(view)
+        research = self.root / "control/research-jobs" / iteration
+        for name in ("receipt.json", "blocked.json"):
+            receipt = research / name
+            if receipt.is_file() and not receipt.is_symlink():
+                view = read(receipt).get("diagnostics")
+                if view:
+                    views.append(view)
+        debug = self.root / "control/debug" / iteration
+        if (debug / "flow.json").is_file():
+            for failure in read(debug / "flow.json").get("failures", []):
+                if failure.get("diagnostics"):
+                    views.append(failure["diagnostics"])
+        return views
 
     def recover_execution(self, failure, *, workspace, run_dir, context, invoke):
         from integrations.protok.debug_flow import recover_execution
@@ -1041,11 +1167,28 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
             if decision.exists():
                 from research_loop.debug_budget import DebugBudget
 
-                debug_policy(self.root)
                 saved = read(decision)
-                budget = DebugBudget(
-                    decision.parent, scope_id=iteration, limit_gpu_seconds=1800
-                ).status()
+                flow = read(decision.parent / "flow.json")
+                policy = (
+                    debug_policy(self.root)
+                    if (self.root / "control/debug-policy.json").exists()
+                    else None
+                )
+                if flow["policy"] != policy:
+                    raise HarnessError("Recovery authorization changed after decision")
+                budget = (
+                    DebugBudget(
+                        decision.parent, scope_id=iteration, limit_gpu_seconds=1800
+                    ).status()
+                    if policy is not None
+                    else saved["budget"]
+                )
+                if policy is None and (
+                    budget.get("limit_gpu_seconds") != 0
+                    or budget.get("used_gpu_seconds") != 0
+                    or (decision.parent / "debug-budget.json").exists()
+                ):
+                    raise HarnessError("Unapproved recovery retained GPU effects")
                 effects = self.backend.inspect()
                 if (
                     saved.get("status") != "failed"
@@ -1420,7 +1563,6 @@ def run_one(root, backend):
 def begin_debug(root, backend):
     """Opt a retained, certified rejection into authorized bounded recovery."""
     root = Path(root)
-    debug_policy(root)
     study = Study(root / "study")
     with (root / "control/runner.lock").open("a") as lock, study._lock():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

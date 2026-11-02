@@ -18,6 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.continuation import _load_backend, validate_continuation
 from research_loop.debug_budget import DebugBudget
+from research_loop.diagnostics import (
+    CommandDiagnostics,
+    diagnostic_secrets,
+    fetch_remote_log,
+    diagnostic_view,
+)
 
 
 def read(path):
@@ -216,11 +222,88 @@ def _last_exception(text):
     return lines[-1] if lines else None
 
 
-def candidate_cause(text):
-    """Certify only a known native gate failure or an editable-source traceback."""
+def candidate_cause(text, *, workspace=None, stage=None):
+    """Bind the final exception to this attempt's frozen editable source.
+
+    A frame in candidate code does not establish ownership of a missing shared
+    dependency, dataset, permission or driver. Those failures remain blocking.
+    """
     cause = _last_exception(text)
     if not cause:
         return None
+    if any(
+        marker in cause
+        for marker in (
+            "ConnectionError:",
+            "ConnectionRefusedError:",
+            "ConnectionResetError:",
+            "TimeoutError:",
+            "CUDA driver",
+            "NVIDIA driver",
+            "driver version is insufficient",
+            "Input/output error",
+        )
+    ):
+        return None
+    traceback = text.rsplit("Traceback (most recent call last):", 1)[-1]
+    frames = re.findall(r'File "([^"\n]+)", line \d+', traceback)
+    from .backend import CANDIDATE_FILES
+
+    # No inferred root from arbitrary log text: the caller supplies the exact
+    # remote /code root recorded for this owned, already settled allocation.
+    paths = (
+        {str(Path(workspace) / name) for name in CANDIDATE_FILES}
+        if workspace
+        else set()
+    )
+    candidate_leaf = bool(
+        frames and frames[-1] in paths and stage in {"formal", "smoke"}
+    )
+    if any(marker in cause for marker in ("ModuleNotFoundError:", "ImportError:")):
+        # A misspelled candidate import can be fixed in the allowed file. An
+        # earlier candidate caller does not own a shared library's failed import.
+        last_frame = list(re.finditer(r'File "[^"\n]+", line \d+[^\n]*\n', traceback))
+        statements = (
+            traceback[last_frame[-1].end() :].splitlines() if last_frame else []
+        )
+        statement = statements[0].strip() if statements else ""
+        return (
+            cause
+            if candidate_leaf and statement.startswith(("import ", "from "))
+            else None
+        )
+    if any(marker in cause for marker in ("FileNotFoundError:", "PermissionError:")):
+        # A concrete editable target is in scope; shared data or environment
+        # permissions are not made reparable by an earlier candidate caller.
+        targets = re.findall(r"['\"]([^'\"]+)['\"]", cause)
+        return (
+            cause
+            if candidate_leaf and any(target in paths for target in targets)
+            else None
+        )
+    if candidate_leaf:
+        return cause
+    candidate_calls = [index for index, path in enumerate(frames) if path in paths]
+    if candidate_calls and stage in {"formal", "smoke"}:
+        callees = frames[candidate_calls[-1] + 1 :]
+        # Tensor/argument errors often end inside torch or the Python runtime.
+        # Attribute those calls to the exact candidate callsite, while retaining
+        # the boundary around protected project/data/scorer callbacks and
+        # arbitrary shared-environment scripts. No library edits are authorized.
+        library_calls = bool(callees) and all(
+            ".." not in Path(path).parts
+            and re.search(r"/(?:lib|lib64)/python[0-9]+\.[0-9]+/[^\n]+\.py$", path)
+            for path in callees
+        )
+        operational_failure = re.search(
+            r"driver|permission denied|no such file|input/output|"
+            r"(?:could not|cannot|failed to) (?:load|open)|transport|"
+            r"shared (?:data|dependency)|CUDA initialization",
+            cause,
+            re.IGNORECASE,
+        )
+        if library_calls and not operational_failure:
+            return cause
     known_gate = any(
         marker in cause
         for marker in (
@@ -235,19 +318,40 @@ def candidate_cause(text):
             "Compiled parity failed",
         )
     )
-    # Earlier handled exceptions are not evidence for the final failure's origin.
-    traceback = text.rsplit("Traceback (most recent call last):", 1)[-1]
-    editable_trace = (
-        re.search(
-            r'File "[^"\n]*/protok/model/autoresearch_se3(?:_loss)?\.py", line \d+',
-            traceback,
+    candidate_config_gate = any(
+        marker in cause
+        for marker in (
+            "Candidate config may contain only architecture/loss fields",
+            "Candidate architecture must be a nonempty string",
+            "loss_chunk_size must be a positive integer",
+            "Candidate loss must be scalar",
+            "Candidate clean must have shape [B,L,3]",
         )
-        is not None
     )
-    return cause if known_gate or editable_trace else None
+    native_training = (
+        workspace
+        and frames
+        and str(Path(workspace) / "scripts/train_autoresearch_se3.py") == frames[-1]
+    )
+    native_gate = bool(
+        workspace
+        and frames
+        and stage in {"formal", "smoke"}
+        and frames[-1]
+        in {
+            str(Path(workspace) / "scripts/train_autoresearch_se3.py"),
+            str(Path(workspace) / "scripts/check_autoresearch_se3.py"),
+        }
+    )
+    return (
+        cause
+        if (known_gate and native_gate)
+        or (candidate_config_gate and native_training and stage in {"formal", "smoke"})
+        else None
+    )
 
 
-def failure_detail(log, attempt, error):
+def failure_detail(log, attempt, error, *, stage="smoke", secrets=()):
     """Read at most 32 KiB from this attempt's exact native log tail."""
     detail = ""
     try:
@@ -266,7 +370,12 @@ def failure_detail(log, attempt, error):
         or error
         or "No exception detail was captured"
     )
-    certified = candidate_cause(detail)
+    remote = attempt.get("remote")
+    certified = candidate_cause(
+        detail,
+        workspace=remote + "/code" if isinstance(remote, str) else None,
+        stage=stage,
+    )
     terminal = attempt.get("terminal_state")
     accounted = all(
         name in attempt for name in ("gpu_seconds", "terminal_state", "exit_code")
@@ -308,7 +417,13 @@ def failure_detail(log, attempt, error):
         kind = "infrastructure"
     else:
         kind = "unknown"
-    return {"failure_kind": kind, "cause": cause, "failure_detail": detail}
+    public = diagnostic_view(RuntimeError(detail), secrets=secrets)
+    public_cause = diagnostic_view(RuntimeError(cause), secrets=secrets)
+    return {
+        "failure_kind": kind,
+        "cause": public_cause["cause_chain"][0]["message"],
+        "failure_detail": public["cause_chain"][0]["message"],
+    }
 
 
 def run_debug(
@@ -462,6 +577,9 @@ def run_debug(
             bound = existing["allocated_gpu_seconds"]
             state = read(record / "state.json")
             attempt = state["attempts"][0]
+        capture = CommandDiagnostics(
+            record / "command-diagnostics", secrets=diagnostic_secrets((owner_token,))
+        ).install(backend)
         operational = config | {
             "records_root": str(debug_root / "attempts"),
             "remote_root": config["remote_root"] + "/research-loop-debug/" + scope,
@@ -571,6 +689,13 @@ def run_debug(
             "settled",
             "released",
         }
+        if (
+            settled
+            and attempt.get("owned_job_id")
+            and attempt.get("gpu_seconds") is not None
+            and attempt.get("terminal_state")
+        ):
+            fetch_remote_log(backend, operational, attempt["remote"])
         if budget.status()["breached"]:
             error = (
                 error + "; " if error else ""
@@ -591,16 +716,35 @@ def run_debug(
             "terminal_state": attempt.get("terminal_state"),
             "exit_code": attempt.get("exit_code"),
             "owned_job_id": attempt.get("owned_job_id"),
-            "error": error,
+            "error": diagnostic_view(RuntimeError(error), secrets=capture.secrets)[
+                "cause_chain"
+            ][0]["message"]
+            if error is not None
+            else None,
+            "diagnostics": capture.view(),
             "summary": summary,
             "budget": budget.status(),
             "evidence": [str(record / "state.json"), str(record / "debug.json")],
         }
         log = record / attempt["directory"] / "run.log.tail"
-        if log.exists():
-            receipt["evidence"].append(str(log))
+        if capture.view()["logs"]:
+            receipt["evidence"].append(
+                str(capture.directory / "diagnostic-manifest.json")
+            )
         if receipt["status"] != "completed":
-            receipt.update(failure_detail(log, attempt, error))
+            receipt.update(
+                failure_detail(
+                    log, attempt, error, secrets=diagnostic_secrets((owner_token,))
+                )
+            )
+            if "diagnostics" in receipt:
+                receipt["diagnostics"]["owner"] = (
+                    "workspace"
+                    if receipt["failure_kind"] == "candidate"
+                    else "pipeline"
+                    if receipt["failure_kind"] == "infrastructure"
+                    else "unknown"
+                )
             if receipt["cause"] not in (receipt["error"] or ""):
                 receipt["error"] = (
                     receipt["error"] + "; " if receipt["error"] else ""

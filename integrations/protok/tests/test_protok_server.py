@@ -205,6 +205,36 @@ class ProTokServerTests(unittest.TestCase):
         self.assertEqual(status["status"], "running")
         self.assertIn("receipt temporarily unavailable", status["first_error"])
 
+    def test_pipeline_failure_keeps_trace_and_deduplicates_polling_diagnostics(self):
+        secret = "operator-owner-value"
+        self.backend.owner_token = secret
+        self.backend.inspect.side_effect = RuntimeError(
+            "pipeline failed while using " + secret
+        )
+        waits = []
+
+        def finish_polling(seconds):
+            waits.append(seconds)
+            if len(waits) == 3:
+                (self.root / "control/STOP").touch()
+
+        SERVER.drive(
+            self.root,
+            self.runner,
+            self.backend,
+            clock=lambda: 0,
+            wait=finish_polling,
+        )
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        diagnostic = status["diagnostics"]
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual(diagnostic["owner"], "pipeline")
+        self.assertEqual(diagnostic["failure_count"], 1)
+        self.assertNotIn(secret, json.dumps(diagnostic))
+        self.assertTrue(diagnostic["cause_chain"][0]["frames"])
+        self.assertEqual(len(waits), 3)
+        self.runner.run_one.assert_not_called()
+
     def test_rejected_readonly_response_uses_locked_core_retry(self):
         for phase in ("selection", "plan", "review"):
             with self.subTest(phase=phase):

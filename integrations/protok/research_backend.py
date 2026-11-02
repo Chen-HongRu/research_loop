@@ -735,6 +735,12 @@ def run_script(
             owner_token=backend.owner_token,
             attempt=f"research/{iteration}",
         )
+        from research_loop.diagnostics import CommandDiagnostics, redact_text
+
+        diagnostics = CommandDiagnostics(
+            record / "command-diagnostics", secrets=(backend.owner_token,)
+        )
+        diagnostics.install(fixed)
         original_ssh = fixed.ssh
         watching = True
 
@@ -852,7 +858,7 @@ def run_script(
             if attempt["status"] not in {"finished", "complete"}:
                 raise ProTokError("Research allocation did not complete successfully")
         except BaseException as failure:
-            error = f"{type(failure).__name__}: {failure}"
+            error = diagnostics.record_error(failure)
             watching = False
             if attempt["status"] in {"submitting", "running"}:
                 fixed.cancel_interrupted(config, record, state)
@@ -861,7 +867,9 @@ def run_script(
                         config, {"deadline": time.time()}, record, state, attempt
                     )
                 except BaseException as reconciliation:
-                    error += f"; reconciliation: {type(reconciliation).__name__}: {reconciliation}"
+                    error += "; reconciliation: " + diagnostics.record_error(
+                        reconciliation, stage="reconciliation"
+                    )
         finally:
             fixed.ssh = original_ssh
             if relay is not None:
@@ -897,8 +905,10 @@ def run_script(
                 cpu_seconds = int(rows[0][1])
             except Exception as cpu_accounting:
                 error = (
-                    error + "; " if error else ""
-                ) + f"CPU accounting: {cpu_accounting}"
+                    (error + "; " if error else "")
+                    + "CPU accounting: "
+                    + diagnostics.record_error(cpu_accounting, stage="accounting")
+                )
             try:
                 outputs, problems = _collect(
                     fixed, config, existing["remote"], execution["outputs"], record
@@ -907,8 +917,14 @@ def run_script(
                     error = (error + "; " if error else "") + "; ".join(problems)
             except Exception as collection:
                 error = (
-                    error + "; " if error else ""
-                ) + f"output collection: {collection}"
+                    (error + "; " if error else "")
+                    + "output collection: "
+                    + diagnostics.record_error(collection, stage="collection")
+                )
+        if settled:
+            from research_loop.diagnostics import fetch_remote_log
+
+            fetch_remote_log(fixed, config, existing["remote"])
         seconds = attempt.get("gpu_seconds", 0 if unsubmitted else None)
         if seconds is not None and (
             type(seconds) not in (int, float)
@@ -956,7 +972,10 @@ def run_script(
                     else []
                 ),
             ],
-            "error": error,
+            "error": redact_text(error, secrets=(backend.owner_token,))
+            if error
+            else None,
+            "diagnostics": diagnostics.view(),
         }
         existing["status"] = receipt["status"]
         _write(record / "job.json", existing)

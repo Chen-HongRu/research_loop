@@ -20,6 +20,7 @@ from integrations.protok.backend import (
 )
 from integrations.protok.debug_flow import REPAIR, _RepairDelegate, recover_execution
 from research_loop import Study, initialize
+from research_loop.core import BudgetExhausted
 from research_loop.debug_budget import DebugBudget
 from research_loop.harness import (
     HarnessError,
@@ -270,15 +271,88 @@ class DebugFlowTests(unittest.TestCase):
         publish_completed_response(attempt, result)
         return result
 
-    def recover(self):
+    def recover(self, *, budget=None):
         return recover_execution(
             self.harness,
             self.failure,
             workspace=self.workspace,
             run_dir=self.workspace.parent / "execute/recovery",
-            context={"plan": {"scientific_action": "unchanged"}},
+            context={
+                "plan": {"scientific_action": "unchanged"},
+                **({"budget": budget} if budget is not None else {}),
+            },
             invoke=self.invoke,
         )
+
+    def test_no_grant_repairs_once_with_original_deadline_then_reviews_incomplete(self):
+        (self.root / "control/debug-policy.json").unlink()
+        self.failure["execution_deadline"] = time.time() + 120
+        result = self.recover()
+        self.assertEqual(
+            (result["outcome"], result["measurements"]), ("incomplete", [])
+        )
+        self.assertEqual(len(self.invocations), 1)
+        self.assertEqual(self.backend.smoke_calls, [])
+        self.assertEqual(self.backend.formal_calls, [])
+        self.assertFalse((self.root / "control/debug/0009/debug-budget.json").exists())
+        self.assertEqual(self.recover(), result)
+        self.assertEqual(len(self.invocations), 1)
+        validator = run.ProTokHarness(self.backend, self.root, self.delegate, 0)
+        self.assertEqual(
+            validator.validate_completed(
+                result, workspace=self.workspace, run_dir=None
+            ),
+            result,
+        )
+        # Publishing settled evidence after expiry/STOP creates no call or allocation.
+        (self.root / "control/STOP").write_text("stop")
+        with patch(
+            "integrations.protok.debug_flow.time.time",
+            return_value=self.failure["execution_deadline"] + 1,
+        ):
+            self.assertEqual(self.recover(), result)
+
+    def test_no_grant_without_retained_deadline_finishes_without_new_call(self):
+        (self.root / "control/debug-policy.json").unlink()
+        self.assertEqual(self.recover()["outcome"], "incomplete")
+        self.assertEqual(self.invocations, [])
+        self.assertEqual(self.backend.smoke_calls, [])
+
+    def test_no_grant_without_remaining_original_time_finishes_without_new_call(self):
+        (self.root / "control/debug-policy.json").unlink()
+        self.failure["execution_deadline"] = time.time() - 1
+        self.assertEqual(self.recover()["outcome"], "incomplete")
+        self.assertEqual(self.invocations, [])
+        self.assertEqual(self.backend.smoke_calls, [])
+
+    def test_original_call_time_exhaustion_finishes_for_review(self):
+        for budget in (
+            {"calls_left": 1, "seconds_left": 100},
+            {"calls_left": 4, "seconds_left": 0},
+        ):
+            with self.subTest(budget=budget):
+                result = self.recover(budget=budget)
+                self.assertEqual(result["outcome"], "incomplete")
+                self.assertEqual(self.invocations, [])
+                self.assertEqual(self.backend.smoke_calls, [])
+
+    def test_repair_cli_failure_is_blocking_without_completed_response(self):
+        def failed(**kwargs):
+            raise HarnessError("repair CLI transport interrupted")
+
+        self.delegate.run = failed
+        with self.assertRaisesRegex(HarnessError, "CLI transport interrupted"):
+            self.recover()
+        self.assertEqual(self.backend.smoke_calls, [])
+        self.assertFalse((self.root / "control/debug/0009/decision.json").exists())
+
+    def test_budget_exhausted_during_invoke_is_incomplete_not_pipeline_error(self):
+        def exhausted(*args, **kwargs):
+            raise BudgetExhausted("call_budget")
+
+        self.invoke = exhausted
+        self.assertEqual(self.recover()["outcome"], "incomplete")
+        self.assertEqual(self.backend.smoke_calls, [])
 
     def test_failed_smoke_then_repair_success_uses_new_full_formal(self):
         result = self.recover()
@@ -465,7 +539,7 @@ class DebugFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(HarnessError, "cannot change or reset"):
             self.recover()
 
-    def test_partial_repair_restarts_only_after_stopped_cli_and_no_interfaces(self):
+    def test_stopped_partial_repair_requires_explicit_reconciliation(self):
         self.backend.smokes = ["completed"]
         invoke = self.invoke
 
@@ -481,8 +555,12 @@ class DebugFlowTests(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             self.recover()
         self.invoke = invoke
-        self.assertEqual(self.recover()["outcome"], "completed")
-        self.assertEqual(self.invocations, ["repair-001-try-001", "repair-001-try-002"])
+        with self.assertRaisesRegex(
+            HarnessError, "Interrupted repair requires explicit reconciliation"
+        ):
+            self.recover()
+        self.assertEqual(self.invocations, ["repair-001-try-001"])
+        self.assertEqual(self.backend.smoke_calls, [])
         self.assertTrue(
             (
                 self.root
@@ -598,6 +676,12 @@ class DebugFlowTests(unittest.TestCase):
                 wrapper.run(prompt="repair", timeout_seconds=600)
 
     def test_real_study_and_protok_harness_complete_repair_and_review(self):
+        self._real_study_review()
+
+    def test_real_study_without_debug_grant_repairs_same_plan_then_reviews(self):
+        self._real_study_review(no_grant=True)
+
+    def _real_study_review(self, *, no_grant=False):
         spec = importlib.util.spec_from_file_location(
             "debug_flow_core_fixture",
             Path(__file__).resolve().parents[3] / "tests/test_core.py",
@@ -634,10 +718,11 @@ class DebugFlowTests(unittest.TestCase):
         state = run.read(live / "study/state.json")
         state["iteration"] = 8
         run.write(live / "study/state.json", state)
-        run.write(
-            live / "control/debug-policy.json",
-            run.read(self.root / "control/debug-policy.json"),
-        )
+        if not no_grant:
+            run.write(
+                live / "control/debug-policy.json",
+                run.read(self.root / "control/debug-policy.json"),
+            )
         backend = self.backend
         backend.smokes = ["completed"]
         evaluate, settled = backend.evaluate, backend.settled_failure
@@ -732,15 +817,33 @@ class DebugFlowTests(unittest.TestCase):
         self.assertEqual(result["call_count"], 7)
         self.assertEqual(agent.count("execute"), 2)
         self.assertEqual(agent.count("review"), 1)
-        self.assertEqual(backend.formal_calls, [("debug-0009-formal-001", False)])
+        self.assertEqual(
+            backend.formal_calls, [] if no_grant else [("debug-0009-formal-001", False)]
+        )
+        if no_grant:
+            self.assertEqual(backend.smoke_calls, [])
         repair = next(call for call in agent.calls if call["prompt"].startswith(REPAIR))
         self.assertTrue(repair["run_dir"].is_relative_to(live / "study"))
         self.assertTrue((repair["run_dir"] / "process.json").exists())
         self.assertTrue((live / "control/debug/0009/decision.json").exists())
         self.assertTrue((live / "study/iterations/0009/publication.json").exists())
-        measurement = run.read(live / "study" / result["execution_ref"])[
-            "measurements"
-        ][0]
+        execution = run.read(live / "study" / result["execution_ref"])
+        if no_grant:
+            self.assertEqual(
+                (execution["outcome"], execution["measurements"]), ("incomplete", [])
+            )
+            self.assertEqual(study.frontiers()["global"][PROTOCOL]["candidate_ids"], [])
+            original = next(
+                call
+                for call in agent.calls
+                if call["writable"] and not call["prompt"].startswith(REPAIR)
+            )
+            self.assertEqual(
+                run.read(repair["run_dir"] / "context.json")["plan"],
+                run.read(original["run_dir"] / "context.json")["plan"],
+            )
+            return
+        measurement = execution["measurements"][0]
         self.assertEqual(
             study.frontiers()["global"][PROTOCOL]["candidate_ids"],
             ["0009:" + measurement["candidate_id"]],
