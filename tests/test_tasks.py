@@ -7,9 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from research_loop import Study, initialize
+from research_loop import Study, StudyError, initialize
+from research_loop.harness import publish_completed_response
 from research_loop.tasks import TaskQueue, completed_results
-from test_core import RecordedHarness
+from test_core import ProcessLost, RecordedHarness
 
 
 def read(path):
@@ -402,6 +403,146 @@ class TaskTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "no recoverable Git version"):
             Study(self.root, harness).run()
         self.assertEqual(harness.count("execute"), 0)
+
+    def test_legacy_planned_readonly_task_is_blocked_without_repeating_effects(self):
+        self.commit_source("version = 1\n")
+        request = self.submit(allow_changes=False)
+        study = Study(self.root, RecordedHarness())
+        state = study.status()
+        study._begin(state)
+        study._step(state)
+        folder = self.root / "iterations/0001"
+        self.git("worktree", "remove", str(folder / "workspace"))
+        # Retain the pre-freezing Plan boundary: old requests had no revision,
+        # and their planned iteration pointed directly at the original workspace.
+        request["source"]["revision"] = None
+        for path in (
+            self.root / "tasks/manual/request.json",
+            folder / "context/task.json",
+        ):
+            path.write_text(json.dumps(request))
+        metadata = read(folder / "iteration.json") | {
+            "workspace": str(self.workspace),
+            "workspace_ref": None,
+        }
+        (folder / "iteration.json").write_text(json.dumps(metadata))
+        self.commit_source("version = 2\n")
+        attempt = folder / "execute/attempt-001"
+        attempt.mkdir(parents=True)
+        for retained in ("unstarted", "unknown", "completed"):
+            with self.subTest(retained=retained):
+                restored = json.loads(json.dumps(state))
+                if retained != "unstarted":
+                    restored["calls"]["execute"] = str(attempt.relative_to(self.root))
+                    restored["active_attempt"] = restored["calls"]["execute"]
+                    (attempt / "process.json").write_text(
+                        json.dumps({"status": "running", "run_id": "retained-job"})
+                    )
+                if retained == "completed":
+                    publish_completed_response(
+                        attempt,
+                        {
+                            "outcome": "completed",
+                            "markdown": "retained result",
+                            "artifacts": [],
+                            "measurements": [],
+                        },
+                    )
+                (self.root / "state.json").write_text(json.dumps(restored))
+                preserved = {
+                    path: path.read_bytes()
+                    for path in (
+                        folder / "iteration.json",
+                        folder / "context/task.json",
+                        self.root / "tasks/manual/request.json",
+                        *attempt.iterdir(),
+                    )
+                }
+                harness = RecordedHarness()
+                with self.assertRaisesRegex(StudyError, "no verifiable frozen source"):
+                    Study(self.root, harness).run()
+                self.assertEqual(harness.calls, [])
+                self.assertEqual(Study(self.root).status()["phase"], "execute")
+                self.assertFalse((folder / "publication.json").exists())
+                self.assertFalse((folder / "workspace").exists())
+                self.assertEqual(
+                    (self.workspace / "model.py").read_text(), "version = 2\n"
+                )
+                for path, content in preserved.items():
+                    self.assertEqual(path.read_bytes(), content)
+
+    def test_readonly_resume_checks_request_metadata_and_worktree_revision(self):
+        revision = self.commit_source("version = 1\n")
+        self.submit(allow_changes=False)
+        study = Study(self.root, RecordedHarness())
+        state = study.status()
+        study._begin(state)
+        study._step(state)
+        folder = self.root / "iterations/0001"
+        metadata = read(folder / "iteration.json")
+        later = self.commit_source("version = 2\n")
+        request_path = self.root / "tasks/manual/request.json"
+        request = read(request_path)
+        for mismatch in ("request", "metadata", "workspace", "head"):
+            with self.subTest(mismatch=mismatch):
+                request_path.write_text(json.dumps(request))
+                changed = dict(metadata)
+                if mismatch == "request":
+                    request_path.write_text(
+                        json.dumps(
+                            request
+                            | {"source": request["source"] | {"revision": later}}
+                        )
+                    )
+                elif mismatch == "metadata":
+                    changed["workspace_ref"] = later
+                elif mismatch == "workspace":
+                    changed["workspace"] = str(self.workspace)
+                elif mismatch == "head":
+                    subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(folder / "workspace"),
+                            "checkout",
+                            "--detach",
+                            later,
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                (folder / "iteration.json").write_text(json.dumps(changed))
+                (self.root / "state.json").write_text(json.dumps(state))
+                harness = RecordedHarness()
+                with self.assertRaisesRegex(StudyError, "no verifiable frozen source"):
+                    Study(self.root, harness).run()
+                self.assertEqual(harness.calls, [])
+                self.assertFalse((folder / "publication.json").exists())
+        self.assertNotEqual(revision, later)
+
+    def test_readonly_completed_execute_receipt_resumes_without_reexecution(self):
+        revision = self.commit_source("version = 1\n")
+        self.submit(allow_changes=False)
+        first = RecordedHarness()
+
+        def lose_controller(call):
+            if call["phase"] == "execute":
+                attempt = call["run_dir"]
+                publish_completed_response(attempt, read(attempt / "response.json"))
+                raise ProcessLost()
+
+        first.after = lose_controller
+        with self.assertRaises(ProcessLost):
+            Study(self.root, first).run()
+        self.assertEqual(first.execute_inputs, ["version = 1\n"])
+        self.assertEqual(Study(self.root).status()["phase"], "execute")
+        self.commit_source("version = 2\n")
+        resumed = RecordedHarness()
+        Study(self.root, resumed).run()
+        self.assertEqual([call["phase"] for call in resumed.calls], ["review"])
+        metadata = read(self.root / "iterations/0001/publication.json")["metadata"]
+        self.assertEqual(metadata["workspace_ref"], revision)
+        self.assertEqual(metadata["status"], "reviewed")
 
     def test_published_readonly_base_without_revision_is_rejected(self):
         harness = RecordedHarness()

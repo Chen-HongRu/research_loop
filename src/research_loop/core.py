@@ -1351,6 +1351,9 @@ class Study:
                 "workspace": metadata["workspace"],
                 "execution_writes_enabled": self.config["allow_write"],
             }
+            self._check_readonly_task_source(
+                folder, metadata, context.get("manual_task")
+            )
             # Execution receives relevant global context but no debate transcript.
             if not state.get("debugging"):
                 try:
@@ -1400,6 +1403,36 @@ class Study:
             return
         if state["phase"] == "review":
             self._review(state, folder)
+
+    def _check_readonly_task_source(
+        self, folder: Path, metadata: dict, manual: dict | None
+    ) -> None:
+        if (
+            self.config["allow_write"]
+            or not manual
+            or manual["kind"] != "investigation"
+        ):
+            return
+        error = (
+            "Read-only manual task has no verifiable frozen source; "
+            "inspect retained state before resuming Execute"
+        )
+        version = manual.get("source", {}).get("revision")
+        workdir = folder / "workspace"
+        if (
+            not version
+            or metadata.get("task_id") != manual["id"]
+            or metadata.get("workspace_ref") != version
+            or metadata.get("workspace") != str(workdir)
+            or workdir.resolve() != workdir
+        ):
+            raise StudyError(error)
+        try:
+            request = TaskQueue(self.root).request(manual["id"])
+            if request != manual or _git(workdir, "rev-parse", "HEAD") != version:
+                raise StudyError(error)
+        except (OSError, ValueError, StudyError) as exc:
+            raise StudyError(error) from exc
 
     def _accept_plan(self, state: dict, folder: Path, result: dict) -> None:
         proposal = state["selected"]["proposal"]
