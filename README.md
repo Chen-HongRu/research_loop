@@ -26,6 +26,8 @@ Research Loop 把研究目标拆成有边界的调查：选择路线、冻结计
 
 控制器和研究后端分离：`src/research_loop/` 保存通用协议；`benchmarks/` 与 `integrations/` 保存任务边界。现有 ProTok 看板属于任务适配器，可作为实现参考。
 
+可选 [Scout](docs/scout.md) 独立阅读论文与实现，提供外部洞见、反证和新视角。Reviewer 综合本地证据与未解问题，研究选择阶段决定下一步。宿主接入 Scout 后，默认每推进一轮且间隔至少五分钟可调用；结果在下一轮边界进入主循环，不改变当前 Plan。
+
 ## 快速体验
 
 要求 Python 3.11+、[uv](https://docs.astral.sh/uv/) 和 Git，运行环境为 macOS/Linux。
@@ -108,6 +110,7 @@ study/
 | [Cactus](benchmarks/cactus/README.md) / [ProTok](integrations/protok/README.md) | 任务适配器参考及外部依赖 |
 | [验证记录](docs/verification-v2.md) | 历史单次真实运行的设置、结果与限制 |
 | [公开分发说明](docs/public-release.md) | 脱敏范围、历史边界及源码快照导出 |
+| [PR Review](docs/pr-review.md) | Codex 自动评审设置、文档同步、脱敏与算法无关性规则 |
 
 ## 开发
 

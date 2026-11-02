@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from research_loop.harness import HarnessConfig
 from research_loop.scout import (
+    REPORT_MAX_BYTES,
     ScoutManager,
     retrieval_events,
     snapshot,
@@ -35,24 +36,26 @@ def result():
                 "accessed": "full_text",
             }
         ],
-        "candidates": [
+        "insights": [
             {
-                "title": "Condition injection",
+                "title": "Condition information and changing state distributions",
+                "kind": "explanation",
                 "question": "Is condition information lost?",
-                "observations": ["H readout regressed at longer training."],
-                "hypothesis": "A conditioning bottleneck causes the regression.",
-                "prior_attempts": ["Earlier conditional baseline"],
-                "difference_from_prior": "Intervene on repeated conditioning, not the readout.",
-                "minimal_experiment": "One matched-budget conditioning ablation.",
-                "expected_outcomes": [
-                    "Gain supports the bottleneck",
-                    "No gain weakens it",
+                "local_observations": ["Readout regressed at longer training."],
+                "external_findings": [
+                    "A paper distinguishes two conditioning mechanisms."
                 ],
+                "interpretation": "A conditioning bottleneck is one possible explanation.",
+                "applicability": "The paper studies a different model; local cause is unresolved.",
+                "relation_to_goal": "Preserve conditional generation quality and diversity.",
+                "implications": "Reconsider a readout-only explanation.",
                 "source_ids": ["paper"],
+                "follow_up": "",
+                "execution_conditions": [],
                 "scope_requirements": [],
-                "ready_to_test": True,
             }
         ],
+        "open_questions": ["Which conditions distinguish these explanations?"],
     }
 
 
@@ -126,6 +129,11 @@ class ScoutTests(unittest.TestCase):
         for number in (1, 2, 3):
             folder = self.root / "study/iterations" / f"{number:04d}"
             write(folder / "iteration.json", {"status": "reviewed"})
+            write(folder / "publication.json", {"status": "published"})
+            write(
+                folder / "insight.json",
+                {"observed": f"Observation {number}", "unresolved": "Mechanism"},
+            )
             (folder / "review.md").write_text(f"Review {number}")
             write(folder / "candidates.json", {"iteration": number, "score": 2.0})
 
@@ -169,7 +177,7 @@ class ScoutTests(unittest.TestCase):
         self.assertEqual(report["published_through"], 3)
         self.assertEqual(report["web_tool_events"], 1)
         self.assertFalse(report["source_claims_verified"])
-        self.assertEqual(report["result"]["candidates"][0]["id"], report["id"] + ":C1")
+        self.assertEqual(report["result"]["insights"][0]["id"], report["id"] + ":I1")
         call = harness.calls[0]
         self.assertFalse(call["writable"])
         self.assertEqual(call["workspace"], call["run_dir"])
@@ -177,6 +185,8 @@ class ScoutTests(unittest.TestCase):
         context = read(call["run_dir"] / "context.json")
         self.assertEqual(len(context["recent_reviews"]), 3)
         self.assertEqual(len(context["recent_candidates"]), 3)
+        self.assertEqual(len(context["recent_insights"]), 3)
+        self.assertEqual(report["version"], 2)
         self.assertIn("Readout bottleneck", context["inputs"]["text"])
         self.assertEqual(
             before,
@@ -203,8 +213,8 @@ class ScoutTests(unittest.TestCase):
             release.set()
             self.complete(manager)
 
-    def test_new_work_needs_three_publications_and_thirty_minutes(self):
-        manager = self.manager()
+    def test_custom_cadence_needs_three_publications_and_thirty_minutes(self):
+        manager = self.manager(every_iterations=3, min_interval_seconds=1800)
         self.assertTrue(manager.launch_if_due())
         self.complete(manager)
         self.activate(7)
@@ -217,15 +227,38 @@ class ScoutTests(unittest.TestCase):
         self.assertTrue(manager.launch_if_due())
         self.complete(manager)
 
-    def test_only_active_execute_stage_and_stop_gate_admission(self):
+    def test_default_cadence_needs_one_publication_and_five_minutes(self):
         manager = self.manager()
-        self.activate(4, phase="review")
-        self.assertFalse(manager.launch_if_due())
-        self.activate(4, job_status="complete")
         self.assertTrue(manager.launch_if_due())
         self.complete(manager)
-        self.activate(7)
-        self.now = 3000
+        self.activate(5)
+        self.now = 1299
+        self.assertFalse(manager.launch_if_due())
+        self.now = 1300
+        self.activate(4)
+        self.assertFalse(manager.launch_if_due())
+        self.activate(5)
+        self.assertTrue(manager.launch_if_due())
+        self.complete(manager)
+
+    def test_running_research_phases_do_not_require_submitted_jobs(self):
+        manager = self.manager(min_interval_seconds=0)
+        for iteration, phase in enumerate(
+            ("selection", "plan", "execute", "review"), 4
+        ):
+            self.activate(iteration, phase=phase, job_status="complete")
+            self.assertTrue(manager.launch_if_due(), phase)
+            self.complete(manager)
+        for phase, status in (("done", "running"), ("execute", "needs_attention")):
+            write(
+                self.root / "study/state.json",
+                {"iteration": 8, "phase": phase, "status": status},
+            )
+            self.assertFalse(manager.launch_if_due())
+        self.activate(8)
+        (self.root / "control/HANDOFF").touch()
+        self.assertFalse(manager.launch_if_due())
+        (self.root / "control/HANDOFF").unlink()
         (self.root / "control/STOP").touch()
         self.assertFalse(manager.launch_if_due())
 
@@ -405,7 +438,7 @@ class ScoutTests(unittest.TestCase):
             search_status="unavailable",
             search_notes="No web capability",
             sources=[],
-            candidates=[],
+            insights=[],
         )
         manager = self.manager(FakeHarness(response=response, web=False))
         previous = {"id": "earlier-useful-report"}
@@ -480,30 +513,170 @@ class ScoutTests(unittest.TestCase):
             snapshot(self.root, read(self.root / "study/state.json"))["best_source"], []
         )
 
-    def test_result_requires_sources_differences_and_explicit_scope_labels(self):
+    def test_insights_allow_non_executable_findings_and_separate_prerequisites(self):
         valid = result()
-        valid["candidates"][0].update(
-            scope_requirements=["Changing the sampling protocol"], ready_to_test=False
+        valid["insights"][0].update(
+            execution_conditions=[
+                "Independent Plan/Review",
+                "Confirm named input exists",
+            ],
+            scope_requirements=["A different sampling protocol needs authorization"],
         )
         self.assertIs(validate_result(valid), valid)
         for mutate in (
-            lambda r: r["candidates"].extend(copy.deepcopy(r["candidates"]) * 3),
+            lambda r: r["insights"].extend(copy.deepcopy(r["insights"]) * 3),
             lambda r: r["sources"][0].update(url="file:///etc/passwd"),
             lambda r: r["sources"][0].update(
                 url="https://secret:password@example.com/paper"
             ),
-            lambda r: r["candidates"][0].update(source_ids=["unknown"]),
-            lambda r: r["candidates"][0].update(difference_from_prior=""),
-            lambda r: r["candidates"][0].update(expected_outcomes=[]),
-            lambda r: r["candidates"][0].update(
-                scope_requirements=["New dataset"], ready_to_test=True
-            ),
+            lambda r: r["insights"][0].update(source_ids=["unknown"]),
+            lambda r: r["insights"][0].update(interpretation=""),
+            lambda r: r["insights"][0].update(source_ids=[]),
+            lambda r: r.update(summary="x" * 2001),
+            lambda r: r.update(open_questions=["x"] * 9),
         ):
             with self.subTest(mutation=mutate):
                 response = result()
                 mutate(response)
                 with self.assertRaises(ValueError):
                     validate_result(response)
+        valid["sources"][0]["kind"] = "community_code"
+        valid["sources"][0]["accessed"] = "code"
+        validate_result(valid)
+
+    def test_oversize_utf8_report_is_observable_and_keeps_previous_advice(self):
+        previous = {"id": "earlier-useful-report"}
+        write(self.root / "control/scout/latest.json", previous)
+        response = result()
+        insight = response["insights"][0]
+        insight["local_observations"] = ["中" * 2000] * 8
+        insight["external_findings"] = ["中" * 2000] * 8
+        response["insights"] = [copy.deepcopy(insight) for _ in range(3)]
+        self.assertGreater(
+            len(json.dumps(response, ensure_ascii=False).encode()), REPORT_MAX_BYTES
+        )
+        validate_result(response)
+        manager = self.manager(FakeHarness(response=response))
+        self.assertTrue(manager.launch_if_due())
+        status = self.complete(manager)
+        self.assertEqual(status["status"], "failed")
+        self.assertIn("UTF-8 bytes", status["error"])
+        self.assertEqual(read(self.root / "control/scout/latest.json"), previous)
+
+    def test_empty_completed_search_does_not_erase_prior_insights(self):
+        previous = {"id": "earlier-useful-report"}
+        write(self.root / "control/scout/latest.json", previous)
+        response = result()
+        response["insights"] = []
+        manager = self.manager(FakeHarness(response=response))
+        self.assertTrue(manager.launch_if_due())
+        self.assertEqual(self.complete(manager)["status"], "completed")
+        self.assertEqual(read(self.root / "control/scout/latest.json"), previous)
+        context = snapshot(self.root, {"iteration": 5})
+        self.assertIn(response["open_questions"][0], context["previous_scout"]["text"])
+        self.assertTrue(context["previous_scout"]["path"].endswith("/report.json"))
+
+    def test_context_covers_all_routes_rotates_details_and_continues_questions(self):
+        routes = {
+            f"R{i:04d}": {"title": f"Question {i}", "status": "active"}
+            for i in range(1, 21)
+        }
+        write(self.root / "study/routes/index.json", routes)
+        write(
+            self.root / "study/iterations/0003/iteration.json",
+            {"status": "reviewed", "route_id": "R0020"},
+        )
+        write(
+            self.root / "control/scout/latest.json",
+            {
+                "id": "previous",
+                "result": {"open_questions": ["An unresolved external contradiction"]},
+            },
+        )
+        state = read(self.root / "study/state.json")
+        first = snapshot(self.root, state)
+        self.assertEqual(set(first["route_index"]), set(routes))
+        self.assertIn("R0020", [r["id"] for r in first["routes"]])
+        self.assertEqual(len(first["routes"]), 8)
+        self.assertIn(
+            "unresolved external contradiction", first["previous_scout"]["text"]
+        )
+        self.assertNotIn(
+            str(self.root / "control/scout/latest.json"), first["local_evidence"]
+        )
+        later = snapshot(self.root, {**state, "iteration": 13})
+        self.assertNotEqual(
+            [r["id"] for r in first["routes"]], [r["id"] for r in later["routes"]]
+        )
+        (self.root / "study/iterations/0003/publication.json").unlink()
+        self.assertNotIn("Observation 3", json.dumps(snapshot(self.root, state)))
+
+    def test_snapshot_prefers_frozen_goal_and_published_route_reference(self):
+        frozen = self.root / "study/iterations/0004/context"
+        frozen.mkdir(parents=True)
+        (frozen / "global.before.md").write_text(
+            "Frozen observation; interpretation unresolved"
+        )
+        write(
+            frozen / "routes.before.json",
+            {"R0001": {"research_ref": "iterations/0003/route.after.md"}},
+        )
+        (self.root / "study/iterations/0003/route.after.md").write_text(
+            "Immutable route knowledge"
+        )
+        context = snapshot(self.root, read(self.root / "study/state.json"))
+        self.assertEqual(
+            context["research"]["text"], "Frozen observation; interpretation unresolved"
+        )
+        self.assertEqual(
+            context["routes"][0]["research"]["text"], "Immutable route knowledge"
+        )
+
+    def test_previous_scout_citations_remain_bound_to_the_immutable_report(self):
+        harness = FakeHarness()
+        manager = self.manager(harness)
+        self.assertTrue(manager.launch_if_due())
+        status = self.complete(manager)
+        original = Path(status["run_dir"]) / "report.json"
+        original_id = read(original)["id"]
+        response = result()
+        response["sources"].append(
+            {
+                "id": "previous",
+                "title": "Earlier external interpretation",
+                "url": str(original),
+                "kind": "prior_record",
+                "accessed": "context_only",
+            }
+        )
+        response["insights"][0]["source_ids"].append("previous")
+        harness.response = response
+        self.activate(5)
+        self.now = 1300
+        self.assertTrue(manager.launch_if_due())
+        self.assertEqual(self.complete(manager)["status"], "completed")
+        current = read(self.root / "control/scout/latest.json")
+        self.assertNotEqual(current["id"], original_id)
+        self.assertEqual(current["result"]["sources"][-1]["url"], str(original))
+        self.assertEqual(read(original)["id"], original_id)
+
+    def test_unavailable_empty_search_preserves_the_reading_continuation(self):
+        harness = FakeHarness()
+        manager = self.manager(harness)
+        self.assertTrue(manager.launch_if_due())
+        original = Path(self.complete(manager)["run_dir"]) / "report.json"
+        response = result()
+        response.update(
+            search_status="unavailable", sources=[], insights=[], open_questions=[]
+        )
+        harness.response, harness.web = response, False
+        self.activate(5)
+        self.now = 1300
+        self.assertTrue(manager.launch_if_due())
+        self.assertEqual(self.complete(manager)["status"], "degraded")
+        context = snapshot(self.root, {"iteration": 6})
+        self.assertEqual(context["previous_scout"]["path"], str(original))
+        self.assertIn(result()["open_questions"][0], context["previous_scout"]["text"])
 
     def test_frozen_local_citations_preserve_useful_external_sources_and_provenance(
         self,
@@ -520,7 +693,7 @@ class ScoutTests(unittest.TestCase):
                 "accessed": "context_only",
             },
         )
-        response["candidates"][0]["source_ids"].append("local")
+        response["insights"][0]["source_ids"].append("local")
         manager = self.manager(FakeHarness(response=response))
         self.assertTrue(manager.launch_if_due())
         self.assertEqual(self.complete(manager)["status"], "completed")

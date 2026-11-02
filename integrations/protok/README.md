@@ -9,7 +9,10 @@ imports, paths, metrics or scientific prompts.
 - `continuation.py` runs the protected evaluator with the existing lease and
   accounting; it also executes directly under Python isolated mode.
 - `run.py` bridges one investigation and publishes the reviewed best candidate.
-- `server.py` drives the bounded lease and admits Scout only during submitted work.
+- `server.py` drives the bounded lease and admits asynchronous Scout during normal
+  research phases, including script investigations and work without a submitted
+  GPU job. Scout defaults to one publication and five minutes between attempts;
+  its independent lock, deadline, STOP and HANDOFF gates remain enforced.
 - `deploy_runtime.py` switches a separate committed runtime at a published HANDOFF.
 
 This is a task-specific adapter reference, not a self-contained benchmark.

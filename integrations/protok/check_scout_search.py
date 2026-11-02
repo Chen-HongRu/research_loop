@@ -23,7 +23,7 @@ def main():
             "paper AlphaFold Meets Flow Matching for Generating Protein Ensembles "
             "and its authors' implementation. Return the supplied research scout "
             "schema with a concise factual summary, correctly labelled sources, "
-            "search_status and search_notes. Return candidates=[]. Do not use shell "
+            "search_status and search_notes. Return insights=[] and open_questions=[]. Do not use shell "
             "commands, read local files, write files, or run experiments. If search "
             "is unavailable, report that honestly. This is a capability check only."
         ),
