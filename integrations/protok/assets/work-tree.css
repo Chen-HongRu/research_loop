@@ -17,7 +17,7 @@
 .tree-view { min-width: 0; }
 .tree-section-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin: 8px 0; font-size: 12px; }
 .tree-section-heading span { color: var(--muted); font-size: 11px; }
-.git-scroll, .tree-cards-scroll {
+.git-scroll {
   max-width: 100%;
   overscroll-behavior-x: contain;
   scrollbar-width: thin;
@@ -27,10 +27,16 @@
   border-radius: 8px;
 }
 .git-scroll { overflow: auto; height: clamp(260px, 44vh, 380px); max-height: none; min-height: 260px; scroll-padding: 58px 12px 28px; }
-.tree-cards-scroll { overflow-x: auto; overflow-y: hidden; }
-.git-scroll:focus-visible, .tree-cards-scroll:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.git-scroll:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 .git-log { min-width: 0; position: relative; }
-.tree-cards { min-width: 0; position: relative; height: 166px; }
+.tree-stage { position: relative; min-width: 0; }
+.tree-popover { position: absolute; z-index: 5; width: 280px; max-width: calc(100% - 16px); max-height: calc(100% - 16px); overflow: auto; padding: 12px; border: 1px solid #4d8e7b; border-radius: 9px; background: #17283a; box-shadow: 0 8px 26px #0008; overflow-wrap: anywhere; font-size: 12px; }
+.tree-popover .eyebrow { margin: 0; }
+.tree-popover #treeCardClose { padding: 0 8px; font-size: 18px; }
+.tree-popover .popup-action { margin: 7px 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.tree-popover .popup-result { margin: 7px 0; }
+.tree-popover small { display: block; }
+.tree-popover #treeCardOpen { margin-top: 9px; width: 100%; color: var(--green); }
 .timeline-axis {
   position: sticky;
   top: 0;
@@ -52,35 +58,10 @@
 .tree-node.selected { color: var(--green); }
 .tree-node.selected .tree-node-label { font-weight: 700; }
 .tree-node.other-route { opacity: .45; }
-.git-row {
-  position: absolute;
-  top: 8px;
-  display: grid;
-  grid-template-rows: 36px 36px 24px 20px;
-  gap: 3px;
-  width: 232px;
-  height: 150px;
-  padding: 10px 12px;
-  border: 1px solid #354865;
-  border-radius: 8px;
-  background: var(--panel);
-  overflow: hidden;
-}
-.git-row:hover { background: #1b2b42; border-color: var(--blue); }
-.git-row.selected { border-color: var(--green); box-shadow: inset 0 3px var(--green); }
-.git-row .row-top { display: block; min-width: 0; overflow: hidden; }
-.git-row .commit-id { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: 12px; line-height: 1.4; }
-.git-row .row-action { margin: 0; font-size: 12px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.git-row .row-meta { min-width: 0; gap: 5px; }
-.git-row .badge { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; font-size: 10px; }
-.git-row .badge.route { min-width: 0; flex-shrink: 1; }
-.git-row .row-result { display: flex; justify-content: space-between; align-items: center; gap: 5px; min-width: 0; }
-.git-row .score { overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
-.git-row .graph-frontier { overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
-.git-row.other-route { opacity: .45; }
 .tree-totals { font-size: 11px; color: var(--muted); }
 .tree-selection { margin: 7px 0; font-size: 11px; color: var(--green); overflow-wrap: anywhere; }
 @media (max-width: 620px) {
+  .tree-popover { position: relative; left: auto !important; top: auto !important; width: 100%; max-width: 100%; max-height: none; margin-top: 8px; }
   .tree-filter, .tree-filter.route-filter { flex: 1 1 100%; max-width: 100%; }
   .tree-controls { align-items: start; }
   .tree-controls .toolbar { gap: 5px; }

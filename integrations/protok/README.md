@@ -21,13 +21,12 @@ canonical data and an authorized resource lease. Private research inputs,
 experiment reports and deployment snapshots are not distributed here.
 See [Deployment configuration](deployment.md) for the required settings.
 
-The [read-only dashboard](dashboard.md#阅读方式) uses a horizontal task timeline
-with expanding branch tracks above a separate experiment-card strip. The tree
-defaults to a fitted global overview, with a compact local view and zoom controls;
-its spacing is independent of card width. Both regions scroll independently.
-Select a node or card to locate the same task and read its progress and evidence
-below. Scrolling stays inside the tree and card regions; mobile filters and details
-stay within the page width.
+The [read-only dashboard](dashboard.md#阅读方式) places the current Frontier's code
+ancestry on a horizontal mainline and branches other tasks from their actual
+parents. It offers a fitted overview and zoomable local view. Hover or focus a
+node to preview its task card; select it to update the progress and evidence
+panel below. Touch users tap a node, then use the card's details button to jump
+to the panel. Non-overlapping side branches reuse tracks without implying ancestry.
 
 ## Tagged live observations
 

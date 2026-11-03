@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, tensorboardTaskURL, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, treeEdge, graphParent, drawGraph, focusTreeTask, panTree, setTreeZoom, zoomTree, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, tensorboardTaskURL, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, treeEdge, graphParent, drawGraph, focusTreeTask, frontierSpine, previewTreeTask, renderTreePopover, setTreeZoom, zoomTree, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -150,39 +150,67 @@ test('Eight sibling branches expand past two compact tracks and keep nodes disti
   assert.ok(model.height<700,'relationship tracks do not reserve experiment-card height');
 });
 
-test('Relationship nodes and cards have independent widths with the same selected identity', () => {
-  context.separateFixture=[{id:'active:0001',local_id:'0001',source_id:'active',created_at:1,action_summary:'A card-only research summary'},
-    {id:'active:0002',local_id:'0002',source_id:'active',created_at:2,base:'active:0001',action_summary:'Another experiment'}];
-  try {
-    vm.runInContext("data={nodes:separateFixture};selected='active:0002';following=false;treeLayout=null;treeZoom=1;",context);
-    elements.get('routeFilter').value='';elements.get('sourceFilter').value='';elements.get('taskFilter').value='';
-    ui.drawGraph();
-    const graph=elements.get('graph').innerHTML,cards=elements.get('treeCards').innerHTML;
-    assert.match(graph,/class="tree-node selected /);
-    assert.doesNotMatch(graph,/class="git-row|A card-only research summary/);
-    assert.match(cards,/class="git-row selected /);
-    assert.match(cards,/A card-only research summary/);
-    assert.doesNotMatch(cards,/<svg|class="tree-node/);
-    assert.notEqual(elements.get('graph').style.width,elements.get('treeCards').style.width);
-    const model=ui.gitLayout(context.separateFixture);
-    for(const node of context.separateFixture) {
-      assert.equal(graph.split('data-node="'+node.id+'"').length,2);
-      assert.equal(cards.split('data-node="'+node.id+'"').length,2);
-      const card=cards.match(new RegExp('data-node="'+node.id+'"[^>]*'))[0];
-      assert.match(card,new RegExp('left:'+model.positions[node.id].left+'px'));
-      assert.match(graph,new RegExp('left:'+(model.positions[node.id].x-22)+'px'));
-    }
-  } finally {vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeZoom=null;',context);}
+test('Frontier ancestry stays horizontal even when earlier children explored other routes', () => {
+  const nodes=[{id:'root',created_at:1},{id:'first',base:'root',created_at:2},
+    {id:'main',base:'root',created_at:3},{id:'side',base:'main',created_at:4},
+    {id:'tip',continuation_of:'main',created_at:5,frontier_current:true},
+    {id:'long',validation_of:'tip',created_at:6},{id:'later',base:'tip',created_at:7}];
+  const model=ui.gitLayout(nodes);
+  for(const id of ['root','main','tip']) {
+    assert.equal(model.positions[id].lane,0);
+    assert.equal(model.positions[id].y,model.positions.root.y);
+    assert.equal(model.positions[id].mainline,true);
+  }
+  for(const id of ['first','side','long','later'])assert.notEqual(model.positions[id].lane,0);
+  assert.doesNotMatch(ui.treeEdge(model.positions.root,model.positions.main),/V/,'mainline edges are horizontal');
+  assert.equal(ui.frontierSpine(nodes.map(n=>({...n,frontier_current:false}))).tip,undefined);
+  const tied=ui.frontierSpine([...nodes,{id:'tie',base:'root',created_at:8,frontier_current:true}]);
+  assert.equal(tied.tip.id,'tie');assert.equal(tied.members.length,2);
 });
 
-test('Browsing earlier cards does not move the relationship graph', () => {
-  const graph=document.getElementById('graphWrap'),cards=document.getElementById('treeCardsWrap');
-  graph.scrollTop=90;graph.scrollLeft=600;
-  cards.scrollLeft=950;
-  ui.panTree(-1);
-  assert.ok(cards.scrollLeft<950);
-  assert.equal(graph.scrollLeft,600);
-  assert.equal(graph.scrollTop,90);
+test('Disjoint branch intervals reuse tracks without creating inheritance', () => {
+  const nodes=[{id:'root',created_at:1},{id:'a',base:'root',created_at:2},
+    {id:'tip',base:'root',created_at:3,frontier_current:true},
+    {id:'b',base:'tip',created_at:4}];
+  const model=ui.gitLayout(nodes);
+  assert.equal(model.positions.a.lane,model.positions.b.lane);
+  assert.equal(nodes[3].base,'tip');
+  assert.equal(model.lanes,2);
+});
+
+test('Running filters keep the canonical Frontier mainline as context', () => {
+  context.spineFilter=[{id:'root',created_at:1,task_status:'completed'},
+    {id:'tip',created_at:2,base:'root',task_status:'completed',frontier_current:true},
+    {id:'running',created_at:3,task_status:'running'}];
+  try {
+    vm.runInContext("data={tasks:spineFilter,nodes:spineFilter};selected='running';following=false;treeLayout=null;",context);
+    elements.get('taskFilter').value='running';ui.drawGraph();
+    assert.match(elements.get('graph').innerHTML,/data-node="tip" data-mainline="true"/);
+    assert.match(elements.get('graph').innerHTML,/data-node="root" data-mainline="true"/);
+    assert.match(elements.get('treeMainline').textContent,/#tip/);
+  } finally {elements.get('taskFilter').value='';vm.runInContext('data=null;selected=null;following=true;treeLayout=null;',context);}
+});
+
+test('Hover previews one card without changing the selected task and dismissal survives refresh', () => {
+  context.popupFixture=[{id:'active:0001',created_at:1,action_summary:'First task summary'},
+    {id:'active:0002',created_at:2,base:'active:0001',action_summary:'Selected task summary'}];
+  try {
+    vm.runInContext("data={nodes:popupFixture};selected='active:0002';following=false;treeLayout=null;treeHovered=null;treeCardDismissed=null;",context);
+    elements.get('taskFilter').value='';ui.drawGraph();
+    const popup=elements.get('treePopover');
+    assert.match(popup.innerHTML,/Selected task summary/);
+    assert.doesNotMatch(elements.get('graph').innerHTML,/First task summary/);
+    ui.previewTreeTask('active:0001');
+    assert.match(popup.innerHTML,/First task summary/);
+    assert.match(popup.innerHTML,/任务预览/);
+    assert.equal(vm.runInContext('selected',context),'active:0002');
+    elements.get('treeCardClose').onclick();ui.drawGraph();
+    assert.equal(popup.hidden,true);
+    ui.previewTreeTask('active:0002');
+    assert.equal(popup.hidden,false);
+    assert.match(popup.innerHTML,/data-task="active:0002"/);
+    ui.drawGraph();assert.match(popup.innerHTML,/Selected task summary/);
+  } finally {vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeHovered=null;treeCardDismissed=null;',context);}
 });
 
 test('Overview fits 120 tasks and all fork tracks inside a phone viewport', () => {
@@ -195,7 +223,6 @@ test('Overview fits 120 tasks and all fork tracks inside a phone viewport', () =
     assert.ok(point.x>=5 && point.x<=330,'node is horizontally outside the overview');
     assert.ok(point.y>=40 && point.y<=295,'branch is vertically outside the overview');
   }
-  assert.ok(model.cardWidth>335*50,'card width does not determine overview width');
   const detail=ui.gitLayout(nodes);
   assert.ok(detail.columnWidth<252/4,'local view can show several tasks per card-width slot');
   assert.deepEqual(plain(model.ordered.map(node=>node.id)),plain(detail.ordered.map(node=>node.id)));
@@ -213,10 +240,8 @@ test('Zooming focuses the selection, retains mode on refresh and returns to the 
     ui.setTreeZoom(1);
     assert.equal(elements.get('treeScale').textContent,'100%');
     assert.ok(elements.get('graphWrap').scrollLeft>0);
-    const cardPosition=elements.get('treeCardsWrap').scrollLeft;
     ui.zoomTree(1);ui.drawGraph();
     assert.equal(elements.get('treeScale').textContent,'160%');
-    assert.equal(elements.get('treeCardsWrap').scrollLeft,cardPosition);
     ui.setTreeZoom(null);
     assert.equal(elements.get('treeScale').textContent,'全局概览');
     assert.equal(elements.get('graphWrap').scrollLeft,0);
@@ -268,19 +293,17 @@ test('Refreshing and inserting earlier records preserve the panned timeline anch
     elements.get('routeFilter').value='';elements.get('sourceFilter').value='';elements.get('taskFilter').value='';
     ui.drawGraph();
     assert.ok(wrap.scrollLeft>0,'initial view locates the selected task');
-    ui.panTree(-1);wrap.scrollTop=40;
-    const before=wrap.scrollLeft,cardBefore=elements.get('treeCardsWrap').scrollLeft;
+    wrap.scrollTop=40;
+    const before=wrap.scrollLeft;
     ui.drawGraph();
     assert.equal(wrap.scrollLeft,before);
     assert.equal(wrap.scrollTop,40);
     vm.runInContext("timelineFixture.push({id:'earlier',source_id:'active',created_at:1});",context);
     ui.drawGraph();
     assert.equal(wrap.scrollLeft,before+56,'tree preserves its compact timeline anchor');
-    assert.equal(elements.get('treeCardsWrap').scrollLeft,cardBefore+252,'cards preserve their own anchor');
     vm.runInContext("timelineFixture.push({id:'middle',source_id:'active',created_at:115.5});",context);
     ui.drawGraph();
     assert.equal(wrap.scrollLeft,before+56,'insertion after the tree anchor does not pan the tree');
-    assert.equal(elements.get('treeCardsWrap').scrollLeft,cardBefore+504,'an independent card anchor survives a middle insertion');
     assert.equal(vm.runInContext('selected',context),'0020');
     assert.equal(treeView.revealed,undefined,'ordinary refresh never scrolls the page to the tree');
     document.getElementById('treeLocate').onclick();
@@ -759,8 +782,8 @@ test('Work tree shows concurrent lifecycles and labels long validation as its ow
   assert.match(markup,/data-node="active:long:L0123456789abcdef"/);
   assert.match(markup,/data-node="active:0002"/);
   assert.match(markup,/● 进行中/);
-  assert.match(elements.get('treeCards').innerHTML,/归档 · ● 进行中/);
-  assert.match(elements.get('treeCards').innerHTML,/资格已排除 · 历史导入 · 已完成/);
+  ui.previewTreeTask(tasks[4].id);assert.match(elements.get('treePopover').innerHTML,/归档 · ● 进行中/);
+  ui.previewTreeTask(tasks[0].id);assert.match(elements.get('treePopover').innerHTML,/资格已排除 · 历史导入 · 已完成/);
   assert.doesNotMatch(markup,/代码继承：#undefined → #active:long/);
   vm.runInContext('data=null;selected=null;',context);
 });
