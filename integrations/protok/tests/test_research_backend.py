@@ -508,6 +508,28 @@ class ResearchBackendTests(unittest.TestCase):
             self.run_job(recover=True)
         self.assertEqual(self.fixed.submissions, 1)
 
+    def test_submit_hook_failure_before_status_update_stays_unresolved(self):
+        def fail_before_status(config, record, state, attempt):
+            self.fixed.submissions += 1
+            self.assertIs(
+                research._read(record / "job.json")["submission_intent"], True
+            )
+            raise subprocess.CalledProcessError(
+                1, ["ssh", "sbatch"], output="", stderr="No owned submission response"
+            )
+
+        with patch.object(self.fixed, "submit", side_effect=fail_before_status):
+            receipt = self.run_job()
+        self.assertEqual(receipt["status"], "blocked")
+        self.assertIsNone(receipt["gpu_seconds"])
+        self.assertIsNone(receipt["owned_job_id"])
+        self.assertFalse((self.control / "research-jobs/0002/receipt.json").exists())
+        with self.assertRaises(ProTokError):
+            self.run_job()
+        with self.assertRaisesRegex(ProTokError, "prepared"):
+            self.run_job(recover=True)
+        self.assertEqual(self.fixed.submissions, 1)
+
     def test_pre_submission_failure_is_settled_zero_cost(self):
         self.fixed.behavior = "stage-failure"
         receipt = self.run_job()

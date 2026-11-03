@@ -91,12 +91,16 @@ def _environment(value):
     return value
 
 
-def _relative(value):
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_./-]+", value):
-        raise ProTokError("Script paths must be bounded relative paths")
+SCRIPT_PATH_PATTERN = r"^[A-Za-z0-9_./-]+$"
+ScriptPath = Annotated[str, Field(pattern=SCRIPT_PATH_PATTERN)]
+
+
+def _relative(value, *, error_type=ProTokError):
+    if not isinstance(value, str) or not re.fullmatch(SCRIPT_PATH_PATTERN, value):
+        raise error_type("Script paths must be bounded relative paths")
     path = PurePosixPath(value)
     if path.is_absolute() or any(p in {".", ".."} for p in value.split("/")):
-        raise ProTokError("Script paths must not traverse directories")
+        raise error_type("Script paths must not traverse directories")
     return value
 
 
@@ -105,11 +109,12 @@ class ScriptInput(ResearchInput):
 
 
 ScriptInputs = Annotated[list[ScriptInput], Field(max_length=16)]
-ScriptOutputs = Annotated[list[str], Field(max_length=64)]
+ScriptOutputs = Annotated[list[ScriptPath], Field(max_length=64)]
 
 
 class ScriptExecution(ExecutionEnvelope):
     mode: Literal["script"]
+    entrypoint: ScriptPath
     gpu: choices(True)
     time_limit_seconds: Annotated[int, Field(ge=1, le=1800)]
     inputs: ScriptInputs
@@ -117,6 +122,7 @@ class ScriptExecution(ExecutionEnvelope):
 
 
 class ProTokPlanExecution(ResearchExecution):
+    entrypoint: ScriptPath | None
     gpu: choices(True)
     inputs: ScriptInputs
     outputs: ScriptOutputs
@@ -125,27 +131,29 @@ class ProTokPlanExecution(ResearchExecution):
 SCRIPT_EXECUTION = OutputSchema(ScriptExecution)
 
 
-def _execution(value, policy):
+def _execution(value, policy, *, parameter_error=ProTokError):
     try:
         SCRIPT_EXECUTION.validate(value)
     except ValidationError as error:
-        raise ProTokError(str(error)) from error
+        raise parameter_error(str(error)) from error
     limit = value["time_limit_seconds"]
     if limit > policy["max_time_limit_seconds"]:
-        raise ProTokError("Research time exceeds the authorized debug-partition limit")
+        raise parameter_error(
+            "Research time exceeds the authorized debug-partition limit"
+        )
     allocated = math.ceil(limit / 60) * 60
     if allocated > policy["max_time_limit_seconds"]:
-        raise ProTokError("Rounded Slurm allocation exceeds the research policy")
-    entry = _relative(value["entrypoint"])
+        raise parameter_error("Rounded Slurm allocation exceeds the research policy")
+    entry = _relative(value["entrypoint"], error_type=parameter_error)
     if not entry.startswith("research/") or not entry.endswith(".py"):
-        raise ProTokError("Research entrypoint must be research/*.py")
+        raise parameter_error("Research entrypoint must be research/*.py")
     for name in value["outputs"]:
-        _relative(name)
+        _relative(name, error_type=parameter_error)
     if len(set(value["outputs"])) != len(value["outputs"]):
-        raise ProTokError("Duplicate research outputs")
+        raise parameter_error("Duplicate research outputs")
     names = [item["name"] for item in value["inputs"]]
     if len(set(names)) != len(names):
-        raise ProTokError("Duplicate research input name")
+        raise parameter_error("Duplicate research input name")
     return allocated
 
 
@@ -881,6 +889,7 @@ def run_script(
                 "gpu": True,
                 "allocated_seconds": allocated,
                 "status": "prepared",
+                "submission_intent": False,
                 "remote": remote,
                 "deadline": deadline,
                 "inputs": inputs,
@@ -1013,6 +1022,13 @@ def run_script(
                     raise ProTokError(
                         "Staging exhausted the original allocation window"
                     )
+                from .research_settlement import mark_script_submission
+
+                # Publish intent before the hook: even a hook that fails before
+                # updating attempt.status may already have sent sbatch.
+                mark_script_submission(root, iteration, execution, deadline)
+                existing["submission_intent"] = True
+                _write(record / "job.json", existing)
                 fixed.submit(config, record, state, attempt)
             if attempt["status"] in {"submitting", "running"}:
                 watching = not recover or bool(
@@ -1053,7 +1069,10 @@ def run_script(
             key in attempt
             for key in ("gpu_seconds", "terminal_state", "exit_code", "owned_job_id")
         )
-        unsubmitted = attempt["status"] == "prepared"
+        unsubmitted = (
+            attempt["status"] == "prepared"
+            and existing.get("submission_intent") is False
+        )
         cpu_seconds = None
         if settled:
             try:

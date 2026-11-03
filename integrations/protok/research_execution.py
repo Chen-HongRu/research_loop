@@ -10,6 +10,12 @@ import time
 
 from integrations.protok.backend import ProTokError
 from research_loop.correction import ParameterError
+from integrations.protok.research_settlement import (
+    ScriptSettlement as ScriptSettlement,
+    begin_script_execution as begin_script_execution,
+    close_script_execution as close_script_execution,
+    settle_script_execution as settle_script_execution,
+)
 
 
 def read(path):
@@ -43,10 +49,16 @@ def research_usage(control):
             continue
         settled = read(receipt)
         seconds = settled.get("gpu_seconds")
+        if settled.get("status") == "not_started":
+            from integrations.protok.research_settlement import (
+                verify_not_started_receipt,
+            )
+
+            verify_not_started_receipt(Path(control).parent, path.parent.name, settled)
         if (
             settled.get("purpose") != "research"
             or settled.get("quality_score_eligible") is not False
-            or settled.get("status") not in {"completed", "failed"}
+            or settled.get("status") not in {"completed", "failed", "not_started"}
             or type(seconds) is not int
             or seconds < 0
             or type(job.get("allocated_seconds")) is not int
@@ -295,15 +307,29 @@ def execute_script(harness, workspace, iteration, stop, deadline, *, prepared=No
     return completed_script(root, workspace, iteration)
 
 
-def completed_script(root, workspace, iteration):
+def settled_script(root, workspace, iteration):
     from integrations.protok import run
 
     root, workspace = Path(root), Path(workspace)
     folder = root / "control/research-sources" / iteration
-    run.check_fixed_candidate(root, workspace, iteration, folder / "source")
     saved = read(folder / "record.json")
-    result = read(folder / "result.json")
+    run.check_fixed_candidate(root, workspace, iteration, folder / "source")
     receipt = read(root / "control/research-jobs" / iteration / "receipt.json")
+    result_path = folder / "result.json"
+    result = (
+        read(result_path)
+        if result_path.exists()
+        else {
+            **receipt,
+            "source_commit": run.git(folder / "source", "rev-parse", "HEAD"),
+            "frozen_source": str(folder / "source"),
+            "contract": saved["contract"],
+            "artifact": {
+                "path": str(result_path),
+                "version": receipt["execution_identity"],
+            },
+        }
+    )
     if (
         result.get("status") not in {"completed", "failed"}
         or result.get("purpose") != "research"
@@ -320,7 +346,7 @@ def completed_script(root, workspace, iteration):
         or run.git(folder / "source", "rev-parse", "HEAD") != result["source_commit"]
     ):
         raise ProTokError("Research result differs from its frozen, settled execution")
-    for path in (workspace, folder / "source"):
+    for path in (folder / "source",):
         run.check_scope(
             path, read(root / "study/study.json")["baseline"], allow_research=True
         )
@@ -329,6 +355,56 @@ def completed_script(root, workspace, iteration):
             != saved["source_signatures"]
         ):
             raise ProTokError("Research code changed after submission")
+    # Added local reports do not change the executed source identity. Original
+    # authored files and protected scope must still match before ordinary Review
+    # can retain this workspace as a downstream source checkpoint.
+    run.check_scope(
+        workspace,
+        read(root / "study/study.json")["baseline"],
+        allow_research=True,
+        check_research_files=False,
+    )
+    contents = run.candidate_bytes(workspace)
+    for name in saved["source_signatures"].keys() - contents.keys():
+        path = workspace / name
+        if (
+            not name.startswith("research/")
+            or ".." in Path(name).parts
+            or not path.is_file()
+            or path.is_symlink()
+            or path.stat().st_size > 1024 * 1024
+            or any(
+                parent.is_symlink()
+                for parent in path.parents
+                if parent != workspace and parent.is_relative_to(workspace)
+            )
+        ):
+            raise ProTokError("Research code changed after submission")
+        contents[name] = path.read_bytes()
+    if run.signatures(contents) != saved["source_signatures"]:
+        raise ProTokError("Research code changed after submission")
+    if not result_path.exists():
+        run.write(result_path, result)
+    return result
+
+
+def completed_script(root, workspace, iteration):
+    """Normal acceptance additionally checks the live submission workspace."""
+    from integrations.protok import run
+
+    root, workspace = Path(root), Path(workspace)
+    result = settled_script(root, workspace, iteration)
+    folder = root / "control/research-sources" / iteration
+    run.check_fixed_candidate(root, workspace, iteration, folder / "source")
+    run.check_scope(
+        workspace, read(root / "study/study.json")["baseline"], allow_research=True
+    )
+    saved = read(folder / "record.json")
+    if (
+        run.signatures({**run.candidate_bytes(workspace), **research_files(workspace)})
+        != saved["source_signatures"]
+    ):
+        raise ProTokError("Research code changed after submission")
     if (workspace / "evaluation-submission.json").exists() and read(
         workspace / "evaluation-submission.json"
     ) != {"action": "research"}:

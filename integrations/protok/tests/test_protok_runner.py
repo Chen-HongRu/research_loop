@@ -925,7 +925,7 @@ class ProTokRunnerTests(unittest.TestCase):
             RUNNER.read(self.control / "jobs/0002/job.json")["status"], "submitted"
         )
 
-    def test_interrupted_execute_reconciles_as_new_operator_attempt_then_independent_review(
+    def test_interrupted_execute_reconciles_original_attempt_then_independent_review(
         self,
     ):
         from research_loop import initialize
@@ -984,11 +984,13 @@ class ProTokRunnerTests(unittest.TestCase):
         (partial / "agent/partial.json").write_text('{"partial":')
         partial_bytes = (partial / "agent/partial.json").read_bytes()
         calls = len(delegate.calls)
-        repaired = RUNNER.reconcile_completed_execute(self.root, self.backend)
+        repaired = RUNNER.reconcile_execute(
+            self.root, self.backend, authorization="Restore settled Execute"
+        )
         replacement = study.root / repaired["calls"]["execute"]
-        self.assertNotEqual(partial, replacement)
+        self.assertEqual(partial, replacement)
         self.assertIn(
-            "Operator reconciliation", completed_response(replacement)["markdown"]
+            "Controller reconciliation", completed_response(replacement)["markdown"]
         )
         self.assertFalse((partial / "process.json").exists())
         self.assertEqual((partial / "agent/partial.json").read_bytes(), partial_bytes)
@@ -1226,64 +1228,6 @@ class ProTokRunnerTests(unittest.TestCase):
             RUNNER.read(self.control / "active-best.json")["id"], best["id"]
         )
         self.assertEqual(self.backend.evaluations, 0)
-
-        # Reproduce the old wrapper rejection, then accept only its known local receipt.
-        current_run = RUNNER.ProTokHarness.run
-
-        def legacy_run(harness, **kwargs):
-            if not kwargs["writable"]:
-                return current_run(harness, **kwargs)
-            for name in RUNNER.INTERFACE_FILES:
-                (Path(kwargs["workspace"]) / name).unlink(missing_ok=True)
-            harness.delegate.run(**kwargs)
-            raise HarnessError("Execute ended without a completed trusted evaluation")
-
-        with (
-            patch.object(RUNNER, "CodexHarness", return_value=delegate),
-            patch.object(RUNNER.ProTokHarness, "run", legacy_run),
-        ):
-            with self.assertRaisesRegex(HarnessError, "without a completed trusted"):
-                RUNNER.run_one(self.root, self.backend)
-        before = RUNNER.Study(self.root / "study").status()
-        count = delegate.count("execute")
-        # Older supervisors latched STOP; reconciliation must preserve that evidence.
-        (self.control / "STOP").write_text("Supervisor stopped: attention\n")
-        attempt = self.root / "study" / before["calls"]["execute"]
-        process = RUNNER.read(attempt / "process.json")
-        RUNNER.write(attempt / "process.json", {**process, "status": "failed"})
-        with self.assertRaisesRegex(ProTokError, "successful process receipt"):
-            RUNNER.reconcile_local_incomplete(self.root, self.backend)
-        RUNNER.write(attempt / "process.json", process)
-        with patch.object(
-            self.backend,
-            "inspect",
-            return_value={"outstanding": [{"record": "unknown"}]},
-        ):
-            with self.assertRaisesRegex(ProTokError, "Outstanding backend effects"):
-                RUNNER.reconcile_local_incomplete(self.root, self.backend)
-        resumed = RUNNER.reconcile_local_incomplete(self.root, self.backend)
-        self.assertEqual((resumed["phase"], resumed["status"]), ("execute", "ready"))
-        self.assertEqual(resumed["call_count"], before["call_count"])
-        self.assertEqual(resumed["elapsed_seconds"], before["elapsed_seconds"])
-        self.assertEqual(resumed["calls"]["execute"], before["calls"]["execute"])
-        self.assertTrue((self.control / "STOP").exists())
-        self.assertTrue(list((self.control / "reconciliations").glob("*.json")))
-        (
-            self.control / "STOP"
-        ).unlink()  # Explicit operator action in this fixture only.
-        with patch.object(RUNNER, "CodexHarness", return_value=delegate):
-            third = RUNNER.run_one(self.root, self.backend)
-        self.assertEqual(third["iteration"], 3)
-        self.assertEqual(delegate.count("execute"), count)
-        self.assertEqual(delegate.count("review"), 3)
-        self.assertEqual(self.backend.evaluations, 0)
-        self.assertEqual(
-            RUNNER.read(self.control / "active-best.json")["id"], best["id"]
-        )
-        self.assertEqual(
-            [node["status"] for node in RUNNER.Study(self.root / "study").graph()],
-            ["reviewed"] * 3,
-        )
 
     def test_unsubmitted_interruption_preserves_plan_then_retries_one_evaluation(self):
         from research_loop.harness import completed_response

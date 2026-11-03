@@ -94,3 +94,12 @@ Collection errors are retained separately from the failure being investigated.
 They neither erase the original cause nor change settled costs or certify unknown
 work as complete. Logging and reading inspect command streams and small control
 metadata; they do not scan datasets, caches or checkpoints.
+
+Fresh script executions have a controller-owned submission journal. An explicit
+`run.py --reconcile-execute --authorization TEXT` may close a stopped execution
+with proof of no submission, or publish its verified settled receipt on the same
+Execute attempt. It does not rerun the Agent, clear STOP or renew budgets.
+Submission intent without authoritative terminal evidence remains unknown,
+including a failed SSH/sbatch call with no returned job ID. A pipeline fault is
+not a scientific rejection; a not-started closure has no measurements. See the
+[backend settlement contract](execution-backends.md#execution-settlement).

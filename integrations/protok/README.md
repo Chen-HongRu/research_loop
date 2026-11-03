@@ -84,9 +84,10 @@ prepare/start/inspect contract and native dry-run API.
 The controller clears unchanged parent-checkpoint interfaces once before Execute,
 and retains all current-iteration submission evidence on reentry.
 
-An unsubmitted infrastructure interruption preserves the current investigation,
+For fixed evaluation, an unsubmitted infrastructure interruption preserves the current investigation,
 accepted scientific Plan and candidate workspace. It does not enter Review as a
-scientific rejection. After explicit authorization and reconciliation:
+scientific rejection. Script executions use the settlement command below and
+cannot use this replay path. After explicit authorization and reconciliation:
 
 ```sh
 uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --resume-unsubmitted --authorization 'User authorized repair and continuation'
@@ -101,19 +102,23 @@ repairs the candidate nor resubmits the timed-out job. Unknown effects, incomple
 accounting, other uncertified failures, user STOP and exhausted authorization
 remain blocking.
 
-For an older runtime stopped on this settled timeout, retain the existing failed
-Agent attempt and prepare a separate controller reconciliation:
+An interrupted Execute can be closed from its trusted execution evidence with
+one controller command:
 
 ```sh
-uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --reconcile-timed-out-execute --authorization 'User authorized failure Review and continuation'
-uv run python integrations/protok/deploy_runtime.py --root RUN_ROOT --runtime RUNTIME --resume-timeout
+uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --reconcile-execute --authorization 'User authorized execution reconciliation'
+uv run python integrations/protok/deploy_runtime.py --root RUN_ROOT --runtime RUNTIME --resume-execution
 ```
 
-Preparation preserves STOP, the accepted Plan, candidate and original invocation
-and charges. Deployment requires the matching committed-runtime HANDOFF and
-unchanged prepared state, Plan, ownership, Study configuration and lease. Only the
-retained system attention STOP may be cleared; a newer or user STOP blocks resume.
-The original absolute deadline and all counters continue to apply.
+Reconciliation preserves the original Execute attempt and Agent files, accepted
+Plan, usage and STOP. It publishes a controller receipt without another Agent
+call or allocation. Completed and settled failed work reuse their verified
+receipts; a fresh script execution may close without a job only when its durable
+execution journal proves submission was never reached. Unknown effects block.
+Closure is not permission to retry compute or extend any deadline. Deployment
+requires the matching HANDOFF, unchanged contract and system-attention STOP, and
+all runtime lanes idle. A user STOP remains blocking. Old incident-specific
+reconciliation commands and historical-state migration are not supported.
 
 Preparation retains STOP and immutable per-attempt evidence. Deployment checks
 the matching preparation and HANDOFF. An unpublished Execute continues in the
@@ -143,20 +148,16 @@ A writable Agent delegates into `attempt/agent/`; the outer completion receipt
 is published only after fixed-result/source validation. Replaying an older raw
 Agent receipt revalidates the same trusted job. Partial Execute remains stopped.
 
-After confirming there is no running local CLI or unknown backend effect,
-operators can use retained evidence without launching another evaluation:
+After independent Review, an interrupted control publication can be completed
+without repeating evaluation:
 
 ```sh
-uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --reconcile-completed-execute
 uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --repair-completed-control
 ```
 
-The first command requires a fully completed, eligible, candidate-bound backend
-record and creates a separately labeled operator attempt. It preserves the
-interrupted Agent output and proceeds through independent Review. Known failed
-wrapper receipts, changed source/configuration, unsettled accounting and unknown
-effects block repair. The second finishes retained Review/control publication.
-Neither command clears STOP, resets costs or extends the lease.
+This command finishes retained Review/control publication. It does not clear STOP,
+reset costs or extend the lease. Execution reconciliation above likewise preserves
+partial Agent evidence and requires authoritative backend evidence.
 
 ## Bounded candidate debugging
 

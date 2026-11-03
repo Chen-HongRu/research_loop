@@ -193,10 +193,12 @@ class FormalTimeoutTests(unittest.TestCase):
             completed_response(self.study.root / state["calls"]["execute"])
         )
 
-    def test_reconcile_old_failure_preserves_agent_plan_stop_and_usage(self):
+    def test_reconciliation_preserves_agent_plan_stop_and_usage(self):
         self.initialize()
         with patch.object(
-            RUNNER, "timed_out_job", side_effect=ProTokError("old wrapper")
+            RUNNER,
+            "timed_out_job",
+            side_effect=ProTokError("controller publication fault"),
         ):
             with self.assertRaises(HarnessError):
                 self.run_one()
@@ -206,11 +208,30 @@ class FormalTimeoutTests(unittest.TestCase):
         plan = (self.study.root / before["plan_ref"]).read_bytes()
         stop = self.control / "STOP"
         stop.write_text("Supervisor stopped: attention\n")
-        prepared = RUNNER.reconcile_timed_out_execute(
+        for target in ("publish_completed_response", "save_state"):
+            failure = (
+                patch.object(
+                    RUNNER, target, side_effect=OSError("publication interrupted")
+                )
+                if target == "publish_completed_response"
+                else patch.object(
+                    RUNNER.Study,
+                    "_save",
+                    side_effect=OSError("publication interrupted"),
+                )
+            )
+            with failure, self.assertRaisesRegex(OSError, "publication interrupted"):
+                RUNNER.reconcile_execute(
+                    self.root, self.backend, authorization="Recover retained execution"
+                )
+            self.assertEqual(self.study.status(), before)
+            self.assertEqual(len(list(old.parent.glob("attempt-*"))), 1)
+        prepared = RUNNER.reconcile_execute(
             self.root,
             self.backend,
             authorization="User authorized task failure Review and continuation",
         )
+        self.assertEqual(prepared["calls"], before["calls"])
         self.assertEqual(prepared["call_count"], before["call_count"])
         self.assertEqual(prepared["elapsed_seconds"], before["elapsed_seconds"])
         self.assertEqual(self.backend.evaluations, 1)
@@ -218,13 +239,14 @@ class FormalTimeoutTests(unittest.TestCase):
         self.assertEqual((self.study.root / before["plan_ref"]).read_bytes(), plan)
         self.assertEqual(stop.read_text(), "Supervisor stopped: attention\n")
         self.assertEqual(
-            RUNNER.reconcile_timed_out_execute(
+            RUNNER.reconcile_execute(
                 self.root, self.backend, authorization="Same user authorization"
             ),
             prepared,
         )
         self.assertEqual(
-            deploy_runtime.check_timeout_boundary(self.root, self.backend), prepared
+            deploy_runtime.check_reconciliation_boundary(self.root, self.backend),
+            prepared,
         )
         for field in ("call_count", "elapsed_seconds", "plan_ref"):
             with self.subTest(changed_state=field):
@@ -234,7 +256,9 @@ class FormalTimeoutTests(unittest.TestCase):
                 }
                 RUNNER.write(self.study.root / "state.json", changed)
                 with self.assertRaisesRegex(RuntimeError, "preparation"):
-                    deploy_runtime.check_timeout_boundary(self.root, self.backend)
+                    deploy_runtime.check_reconciliation_boundary(
+                        self.root, self.backend
+                    )
                 RUNNER.write(self.study.root / "state.json", prepared)
         for relative in (
             "control/continuation.json",
@@ -251,18 +275,20 @@ class FormalTimeoutTests(unittest.TestCase):
                     value["changed_after_preparation"] = True
                 RUNNER.write(path, value)
                 with self.assertRaisesRegex(RuntimeError, "protected contract"):
-                    deploy_runtime.check_timeout_boundary(self.root, self.backend)
+                    deploy_runtime.check_reconciliation_boundary(
+                        self.root, self.backend
+                    )
                 path.write_text(original)
         stop.write_text("A newer user stop\n")
         with self.assertRaisesRegex(RuntimeError, "STOP changed"):
-            deploy_runtime.check_timeout_boundary(self.root, self.backend)
+            deploy_runtime.check_reconciliation_boundary(self.root, self.backend)
         stop.write_text("Supervisor stopped: attention\n")
         owner = RUNNER.read(self.control / "ownership.json")
         RUNNER.write(
             self.control / "ownership.json", {**owner, "expires_at": time.time() - 1}
         )
         with self.assertRaisesRegex(RuntimeError, "deadline"):
-            deploy_runtime.check_timeout_boundary(self.root, self.backend)
+            deploy_runtime.check_reconciliation_boundary(self.root, self.backend)
         RUNNER.write(self.control / "ownership.json", owner)
         stop.unlink()
         state = self.run_one()

@@ -39,6 +39,21 @@ def command(*args):
     ).stdout.strip()
 
 
+def check_idle(backend):
+    """A runtime replacement affects all lanes, including independent long jobs."""
+    status = backend.inspect()
+    if status["outstanding"] or any(
+        status.get(key)
+        for key in (
+            "debug_outstanding",
+            "research_outstanding",
+            "long_training_outstanding",
+            "manual_training_outstanding",
+        )
+    ):
+        raise RuntimeError("Outstanding evaluation effects prevent a handoff")
+
+
 def check_boundary(root, backend):
     control = root / "control"
     if (control / "STOP").exists():
@@ -73,20 +88,12 @@ def check_boundary(root, backend):
             raise RuntimeError(
                 "Latest job is not completed or a reviewed debug rejection"
             )
-    status = backend.inspect()
-    if (
-        status["outstanding"]
-        or status.get("debug_outstanding")
-        or status.get("research_outstanding")
-        or status.get("long_training_outstanding")
-        or status.get("manual_training_outstanding")
-    ):
-        raise RuntimeError("Outstanding evaluation effects prevent a handoff")
+    check_idle(backend)
     return state
 
 
-def check_timeout_boundary(root, backend, *, research=False):
-    """Resume only the explicitly reconciled, settled failed allocation."""
+def check_reconciliation_boundary(root, backend):
+    """Resume only an explicitly reconciled execution, without replaying it."""
     state = read(root / "study/state.json")
     iteration = f"{state['iteration']:04d}"
     relative = state.get("calls", {}).get("execute", "")
@@ -98,18 +105,13 @@ def check_timeout_boundary(root, backend, *, research=False):
         or state.get("accepted_calls", {}).get("execute")
         or not re.fullmatch(rf"iterations/{iteration}/execute/attempt-[0-9]+", relative)
     ):
-        raise RuntimeError("An explicitly reconciled formal timeout is required")
+        raise RuntimeError("An explicitly reconciled execution is required")
     attempt = root / "study" / relative
     record = read(attempt / "reconciliation.json")
     stop = root / "control/STOP"
     stop_text = stop.read_text() if stop.exists() else None
     if (
-        record.get("operator_action")
-        != (
-            "reconcile-settled-research-result"
-            if research
-            else "reconcile-settled-formal-timeout"
-        )
+        record.get("operator_action") != "reconcile-execute"
         or not isinstance(record.get("authorization"), str)
         or not record["authorization"].strip()
         or record.get("stop_before") != "Supervisor stopped: attention\n"
@@ -119,18 +121,21 @@ def check_timeout_boundary(root, backend, *, research=False):
     owner = read(root / "control/ownership.json")
     lease = read(root / "control/continuation.json")
     if not time.time() < min(owner["expires_at"], lease["deadline"]):
-        raise RuntimeError("Timeout continuation cannot extend the original deadline")
+        raise RuntimeError("Execution continuation cannot extend the original deadline")
     if record.get("prepared_state") != state or any(
         (root / name).read_text() != value
         for name, value in record["protected"].items()
     ):
-        raise RuntimeError("Timeout preparation or protected contract changed")
+        raise RuntimeError("Execution preparation or protected contract changed")
     result = completed_response(attempt)
     if result is None:
-        raise RuntimeError("Timeout reconciliation has no completed controller receipt")
+        raise RuntimeError(
+            "Execution reconciliation has no completed controller receipt"
+        )
     ProTokHarness(backend, root, None, 0).validate_completed(
         result, workspace=Path(record["workspace"]), run_dir=attempt
     )
+    check_idle(backend)
     return state
 
 
@@ -156,17 +161,7 @@ def check_debug_boundary(root, backend):
     stop = root / "control/STOP"
     if (stop.read_text() if stop.exists() else None) != preparation.get("stop_before"):
         raise RuntimeError("STOP changed after the explicit debug preparation")
-    status = backend.inspect()
-    if (
-        status["outstanding"]
-        or status.get("debug_outstanding")
-        or status.get("research_outstanding")
-        or status.get("long_training_outstanding")
-        or status.get("manual_training_outstanding")
-    ):
-        raise RuntimeError(
-            "Outstanding effects prevent starting a prepared debug session"
-        )
+    check_idle(backend)
     return state
 
 
@@ -176,10 +171,9 @@ def deploy(
     *,
     resume_debug=False,
     resume_submission=False,
-    resume_timeout=False,
-    resume_research=False,
+    resume_execution=False,
 ):
-    if sum((resume_debug, resume_submission, resume_timeout, resume_research)) > 1:
+    if sum((resume_debug, resume_submission, resume_execution)) > 1:
         raise ValueError("Choose one explicit recovery mode")
     root, runtime = root.resolve(), runtime.resolve()
     commit = (runtime / "SOURCE_COMMIT").read_text().strip()
@@ -211,8 +205,9 @@ def deploy(
             from integrations.protok.resume_submission import validate_prepared
 
             state = validate_prepared(root, backend)
-        elif resume_timeout or resume_research:
-            state = check_timeout_boundary(root, backend, research=resume_research)
+            check_idle(backend)
+        elif resume_execution:
+            state = check_reconciliation_boundary(root, backend)
         else:
             state = (
                 check_debug_boundary(root, backend)
@@ -253,19 +248,12 @@ def deploy(
             or (stop.read_text() if stop.exists() else None) != stop_before
             or (
                 stop.exists()
-                and not (
-                    resume_debug
-                    or resume_submission
-                    or resume_timeout
-                    or resume_research
-                )
+                and not (resume_debug or resume_submission or resume_execution)
             )
         ):
             raise RuntimeError("Operator state changed during handoff")
         marker.unlink()
-        if (
-            resume_debug or resume_submission or resume_timeout or resume_research
-        ) and stop.exists():
+        if (resume_debug or resume_submission or resume_execution) and stop.exists():
             stop.unlink()
         write(
             backup / "deployment.json",
@@ -276,8 +264,7 @@ def deploy(
                 "after_iteration": state["iteration"],
                 "resume_debug": resume_debug,
                 "resume_submission": resume_submission,
-                "resume_timeout": resume_timeout,
-                "resume_research": resume_research,
+                "resume_execution": resume_execution,
                 "at": time.time(),
             },
         )
@@ -292,8 +279,7 @@ def deploy(
             "after_iteration": state["iteration"],
             "resume_debug": resume_debug,
             "resume_submission": resume_submission,
-            "resume_timeout": resume_timeout,
-            "resume_research": resume_research,
+            "resume_execution": resume_execution,
             "at": time.time(),
         },
     )
@@ -307,8 +293,7 @@ def main():
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument("--resume-debug", action="store_true")
     recovery.add_argument("--resume-submission", action="store_true")
-    recovery.add_argument("--resume-timeout", action="store_true")
-    recovery.add_argument("--resume-research", action="store_true")
+    recovery.add_argument("--resume-execution", action="store_true")
     args = parser.parse_args()
     print(
         json.dumps(
@@ -317,8 +302,7 @@ def main():
                 args.runtime,
                 resume_debug=args.resume_debug,
                 resume_submission=args.resume_submission,
-                resume_timeout=args.resume_timeout,
-                resume_research=args.resume_research,
+                resume_execution=args.resume_execution,
             )
         )
     )

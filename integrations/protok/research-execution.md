@@ -157,9 +157,17 @@ fixed random cotangents. It checks CUDA, read-only inputs, forward parity and gr
 path removal. It does not measure an actual training-loss gradient or establish
 that the path improves reconstruction.
 
-For a failed script retained by an older runtime, use
-`run.py --reconcile-research-execute --authorization TEXT` to prepare a separate
-controller completion from the unchanged frozen Plan, source and settled receipt.
-It retains the original attempt and STOP, consumes no new Agent call or allocation,
-and preserves call/time counters. `deploy_runtime.py --resume-research` verifies
-that preparation and the unchanged system-attention STOP before restoring service.
+For a fresh interrupted script, use
+`run.py --reconcile-execute --authorization TEXT`. The controller verifies the
+original execution journal and either the frozen source with its settled receipt,
+or positive proof that submission was never reached. It publishes completion in
+the original Execute attempt, retains Agent evidence and STOP, and consumes no new
+Agent call or allocation. Unknown submission effects stay blocked. Extra post-run
+reports do not change the frozen artifact; modifying an originally executed file
+or protected workspace file still blocks acceptance. A not-started closure has no fabricated
+job identity, measurements or Slurm terminal accounting.
+
+`deploy_runtime.py --resume-execution` checks that preparation and the unchanged
+system-attention STOP before restoring service, under the original authorization
+and deadlines. Every execution lane must be idle for runtime replacement. No
+historical execution-state migration or incident-specific reconcile flags remain.

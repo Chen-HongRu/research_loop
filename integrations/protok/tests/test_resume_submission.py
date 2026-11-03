@@ -329,7 +329,7 @@ class ResumeSubmissionTests(unittest.TestCase):
         self.prepare()
         self.assertEqual(evidence.read_bytes(), original)
 
-    def interrupt(self, *, legacy_completed=False):
+    def interrupt(self, *, legacy_completed=False, script=False):
         previous_control = self.control
         self.root = self.root.parent / "interrupted"
         initialize(
@@ -338,6 +338,7 @@ class ResumeSubmissionTests(unittest.TestCase):
             workspace=self.project,
             allow_write=True,
             max_seconds=36000,
+            research_execution={"version": 1} if script else None,
         )
         self.control = self.root / "control"
         self.control.mkdir()
@@ -362,7 +363,12 @@ class ResumeSubmissionTests(unittest.TestCase):
                     (Path(kwargs["workspace"]) / CANDIDATE_FILES[0]).write_text(
                         "# legitimate partial candidate intervention\n"
                     )
-                return super().response(phase, context, kwargs)
+                result = super().response(phase, context, kwargs)
+                if phase == "plan" and script:
+                    from test_research_contract import contract
+
+                    result.update(contract())
+                return result
 
         study = Study(self.root / "study", harness=InterruptHarness())
         with self.assertRaisesRegex(HarnessError, "transport interruption"):
@@ -373,6 +379,42 @@ class ResumeSubmissionTests(unittest.TestCase):
         write(self.control / "runner.json", {"status": "failed", "iteration": 1})
         (self.control / "STOP").write_text("Execute interrupted; reconcile first\n")
         return study
+
+    def test_script_execute_cannot_be_retired_or_replayed_by_unsubmitted_resume(self):
+        study = self.interrupt(script=True)
+        journal = self.control / "research-executions/0001/execution.json"
+        write(journal, {"status": "closed", "submission_intent": False})
+        attempt = study.root / self.before["calls"]["execute"]
+        protected = {
+            path: path.read_bytes()
+            for path in (
+                study.root / "state.json",
+                study.root / self.before["plan_ref"],
+                attempt / "agent/response.json",
+                attempt / "agent/process.json",
+                self.control / "STOP",
+                journal,
+            )
+        }
+        with self.assertRaisesRegex(ProTokError, "--reconcile-execute"):
+            self.prepare()
+        for path, contents in protected.items():
+            self.assertEqual(path.read_bytes(), contents)
+        self.assertFalse((self.control / "resume-submission.json").exists())
+        self.assertFalse((self.control / "reconciliations").exists())
+        self.backend.evaluate.assert_not_called()
+
+    def test_research_execution_records_prevent_formal_resume(self):
+        self.interrupt()
+        for namespace in ("research-executions", "research-sources", "research-jobs"):
+            with self.subTest(namespace=namespace):
+                directory = self.control / namespace / "0001"
+                directory.mkdir(parents=True)
+                with self.assertRaisesRegex(ProTokError, "execution record"):
+                    self.prepare()
+                self.assertEqual(read(self.root / "study/state.json"), self.before)
+                self.assertFalse((self.control / "resume-submission.json").exists())
+                directory.rmdir()
 
     def test_same_iteration_keeps_partial_source_plan_receipts_and_budgets(self):
         study = self.interrupt()

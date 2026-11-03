@@ -95,8 +95,18 @@ def _prepared_state(record):
     return {**record["state_before"], "status": "ready", "stop_reason": None}
 
 
+def _require_formal_plan(plan):
+    if (plan.get("execution") or {}).get("mode") == "script":
+        raise ProTokError(
+            "Unsubmitted resume supports only fixed evaluation; "
+            "settle the original script Execute with --reconcile-execute"
+        )
+
+
 def _identity(root, record):
     run = _runner()
+    if record.get("plan_ref"):
+        _require_formal_plan(run.read(root / "study" / record["plan_ref"]))
     source = root / "study/iterations" / record["source_iteration"]
     metadata = run.read(source / "iteration.json")
     if metadata["workspace_ref"] != record["source_workspace_ref"]:
@@ -146,9 +156,15 @@ def _identity(root, record):
             raise ProTokError("Source has a retained submission/request/result")
     if submission_status(workspace)["status"] != "not_submitted":
         raise ProTokError("Source submission is not confirmed not_submitted")
-    for namespace in ("jobs", "debug"):
+    for namespace in (
+        "jobs",
+        "debug",
+        "research-executions",
+        "research-sources",
+        "research-jobs",
+    ):
         if (root / "control" / namespace / record["source_iteration"]).exists():
-            raise ProTokError("Source already has an evaluation job or debug effects")
+            raise ProTokError("Source already has an execution record or debug effects")
 
 
 def _unchanged(root, record):
@@ -233,6 +249,7 @@ def _original_plan(study, source_id):
     plan = accepted_plan_response(study.root.parent, plan_ref, owner_state)
     if owner_state.get("plan_ref") != plan_ref or plan is None:
         raise ProTokError("Original Plan is not an accepted scientific Plan")
+    _require_formal_plan(plan)
     validate_response("plan", plan)
     if plan["decision"] != "investigate":
         raise ProTokError("Resume requires an investigating original Plan")
