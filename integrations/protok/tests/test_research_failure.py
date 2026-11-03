@@ -51,7 +51,7 @@ class ScriptDelegate(RecordedHarness):
                 inputs=[],
                 outputs=["result.json"],
             )
-            result["research_contract"] = design
+            result.update(design)
         return result
 
 

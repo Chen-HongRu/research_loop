@@ -8,11 +8,15 @@ from research_loop.protocol import SCHEMAS, context_schema, prompt, validate_res
 def plan():
     return {
         "decision": "investigate",
-        "markdown": "Measure an improvement; mechanism remains unknown.",
+        "markdown": (
+            "Measure an improvement at the observed bottleneck; mechanism remains unknown. "
+            "Modify candidate.py from rev-1 within this workspace. Use the fixed "
+            "development protocol, compare accuracy and latency constraints, and "
+            "retain raw evaluation output as evidence."
+        ),
         "route_research": "A practical optimization question.",
         "base_experiment": None,
         "references": ["0001"],
-        "input_artifacts": [{"path": "candidate.py", "version": "rev-1"}],
         "local_evaluation": {
             "id": "local-v1",
             "comparison_scope": "fixed-development-split",
@@ -26,14 +30,7 @@ def plan():
                 {"name": "latency", "operator": "le", "value": 10, "unit": "ms"}
             ],
         },
-        "contract": {
-            "rationale": "Observed bottleneck.",
-            "action": "Modify the candidate within this workspace.",
-            "evaluation": "Use the fixed protocol.",
-            "decision_criteria": "Compare accuracy and constraints.",
-            "evidence_required": ["raw evaluation output"],
-            "timeout_seconds": 60,
-        },
+        "timeout_seconds": 60,
         "stop_reason": None,
     }
 
@@ -105,13 +102,13 @@ class ProtocolTests(unittest.TestCase):
         value["references"] = [123]
         cases.append(value)
         value = plan()
-        value["input_artifacts"][0]["version"] = None
+        value["input_artifacts"] = [{"path": "candidate.py", "version": "rev-1"}]
         cases.append(value)
         value = plan()
         value["local_evaluation"]["allow_feedback"] = 1
         cases.append(value)
         value = plan()
-        value["contract"]["timeout_seconds"] = True
+        value["timeout_seconds"] = True
         cases.append(value)
         value = plan()
         value["local_evaluation"]["constraints"][0]["value"] = True
@@ -120,7 +117,7 @@ class ProtocolTests(unittest.TestCase):
         value["local_evaluation"]["objectives"][0]["extra"] = "unknown"
         cases.append(value)
         value = plan()
-        del value["contract"]["evidence_required"]
+        value["contract"] = {"action": "Legacy nested contract"}
         cases.append(value)
         value = plan()
         value["unknown"] = "unknown"

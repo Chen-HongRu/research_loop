@@ -120,23 +120,10 @@ def _execution(value, policy):
         raise ProTokError("Declare at most 16 research inputs")
     names = []
     for item in value["inputs"]:
-        if (
-            set(item) != {"name", "source", "role"}
-            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", item["name"])
-            or not isinstance(item["role"], str)
-            or not item["role"].strip()
+        if set(item) != {"name", "source"} or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_-]{0,63}", item["name"]
         ):
             raise ProTokError("Invalid named research input")
-        allowed_roles = {"development", "exploratory"}
-        if item["source"] == "teacher" or (
-            isinstance(item["source"], str)
-            and item["source"].startswith(("checkpoint:", "long-checkpoint:"))
-        ):
-            allowed_roles |= {"reference", "model"}
-        if item["role"] not in allowed_roles:
-            raise ProTokError(
-                "Research input role is outside development/exploratory or model/reference scope"
-            )
         names.append(item["name"])
     if len(set(names)) != len(names):
         raise ProTokError("Duplicate research input name")
@@ -338,7 +325,7 @@ print(json.dumps(items))
         {k: v for k, v in item.items() if k != "metadata"} != original
         for item, original in zip(result, inputs)
     ):
-        raise ProTokError("Input metadata probe changed its admitted paths/roles")
+        raise ProTokError("Input metadata probe changed its admitted inputs")
     return result
 
 
@@ -623,9 +610,7 @@ def run_script(
                 plan = _read(
                     root / "study" / _read(root / "study/state.json")["plan_ref"]
                 )
-                if deadline > time.time() + min(
-                    3600, plan["contract"]["timeout_seconds"]
-                ):
+                if deadline > time.time() + min(3600, plan["timeout_seconds"]):
                     raise ProTokError(
                         "Research deadline exceeds its frozen Plan timeout"
                     )

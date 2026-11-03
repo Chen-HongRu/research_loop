@@ -112,12 +112,12 @@ def frozen_contract(root, iteration, *, required=True):
     if reference.is_absolute() or ".." in reference.parts:
         raise ProTokError("Plan reference leaves the Study")
     plan = read(root / "study" / reference)
-    contract = plan.get("research_contract")
-    if contract is None and not required:
+    execution = plan.get("execution")
+    if execution is None and not required:
         return None
-    if plan.get("decision") != "investigate" or not isinstance(contract, dict):
+    if plan.get("decision") != "investigate" or not isinstance(execution, dict):
         raise ProTokError("No admitted research contract")
-    return contract
+    return plan
 
 
 def execute_script(harness, workspace, iteration, stop, deadline):
@@ -241,7 +241,7 @@ perform inference, gradient/Jacobian probes, simulations, counterexamples, short
 controlled updates, new local benchmarks or other computations; training is not
 required. Keep the three candidate files as the only editable model implementation.
 Protected data/scorer and the official ranking protocol remain fixed.
-Plan research_contract.execution chooses fixed_evaluation or script. Submit using
+Plan execution chooses fixed_evaluation or script. Submit using
 the same controller API, --action evaluate or --action research respectively.
 The controller executes a frozen script and its imported research/candidate code;
 do not change those files after submission. One script may perform multiple paired
@@ -256,7 +256,7 @@ The available compute profile is the existing H100 debug allocation, gpu=true,
 8 CPU / 96 GiB, 60..1800 seconds in whole minutes. Even CPU calculations in this
 profile consume and report GPU allocation seconds from the original shared budget.
 Request the smallest useful limit and leave polling/queue time within Plan timeout.
-Script inputs must be declared by name/source/role: sources hidden_cache, targets,
+Script inputs must be declared by name/source: sources hidden_cache, targets,
 teacher, checkpoint:<published iteration>:<step>, or independently reviewed
 long-checkpoint:<run ID>:<2000|4000|6000|8000|10000>. Long checkpoints retain their
 separate full-validation protocol; inspect their published Review and exact source.

@@ -148,8 +148,8 @@ There is no training or Meta request bridge in this workspace.
 CANARY_GOAL = """Complete one bounded supervision investigation using README.md.
 Propose the allowed policy configuration in proposal.json, verify its actual contents,
 and publish route and global research. No training, recursive loop, or performance claim.
-Plan base_experiment=null and references=[]; input_artifacts may reference only the
-existing baseline README.md and strategy.json with their actual Git HEAD.
+Plan base_experiment=null and references=[]; describe only existing baseline
+README.md and strategy.json inputs with their actual Git HEAD in markdown.
 Execute returns exactly one artifact: proposal.json in the current workspace,
 version=policy-proposal-v1, measurements=[]. Review reads the actual file and confirms
 scope, updates both memories, then stops after one iteration. Do not name an absent

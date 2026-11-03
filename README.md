@@ -54,6 +54,8 @@ uv run research-loop graph studies/demo
 
 ## 使用真实 Agent
 
+新 Study 使用 version 3。Plan 在 `markdown` 冻结科学合同，以顶层 `timeout_seconds` 限制执行；字段用途见[消费者审计](docs/plan-field-audit.md)。旧格式目录保留原样，不自动迁移，详见[使用说明](docs/usage.md)。
+
 先安装并登录本机 Codex 或 Pi CLI，再创建新 Study：
 
 ```bash

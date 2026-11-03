@@ -100,7 +100,7 @@ class ExecutionContinuationTests(unittest.TestCase):
         self.assertEqual(metadata["continuation"], self.record)
         self.assertIsNone(metadata["base_experiment"])
         self.assertEqual(metadata["references"], [])
-        self.assertEqual(metadata["input_artifacts"], [])
+        self.assertNotIn("input_artifacts", metadata)
         self.assertEqual(metadata["workspace_ref"], self.record["source_workspace_ref"])
         self.assertNotEqual(metadata["workspace_ref"], self.study.config["baseline"])
         self.assertEqual(

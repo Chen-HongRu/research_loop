@@ -512,7 +512,7 @@ class ResumeSubmissionTests(unittest.TestCase):
         state = study.status()
         operator = folder / "operator-plan/response.json"
         plan = read(study.root / original_plan)
-        plan["contract"]["action"] = "Legacy operator execution directive"
+        plan["markdown"] = "Legacy operator execution directive"
         write(operator, plan)
         state["plan_ref"] = str(operator.relative_to(study.root))
         state["calls"]["plan-0"] = str(operator.parent.relative_to(study.root))

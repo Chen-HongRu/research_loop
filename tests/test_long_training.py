@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from research_loop import Study, initialize
+from research_loop import Study, StudyError, initialize
 from research_loop.protocol import SCHEMAS
 from research_loop.long_training import (
     LongTrainingManager,
@@ -100,10 +100,6 @@ class LongHarness(RecordedHarness):
         result = super().response(phase, context, kwargs)
         if phase == "plan":
             result = {key: result[key] for key in kwargs["schema"]["properties"]}
-            result["contract"] = {
-                key: result["contract"][key]
-                for key in kwargs["schema"]["properties"]["contract"]["properties"]
-            }
         if phase == "review" and context.get("long_training_run"):
             observations = context["long_training_observations"]
             result["observation_reviews"] = [
@@ -218,6 +214,26 @@ class LongTrainingTests(unittest.TestCase):
             }
 
         return execute
+
+    def test_older_parent_format_rejected_before_lane_writes(self):
+        self.nominate()
+        delegate = LongHarness()
+        calls = []
+        manager = LongTrainingManager(self.root, delegate, self.executor(calls))
+        config_path = self.root / "study.json"
+        for version in (1, 2):
+            with self.subTest(version=version):
+                config = read(config_path)
+                config["version"] = version
+                config_path.write_text(json.dumps(config))
+                state = (self.root / "state.json").read_bytes()
+                with self.assertRaisesRegex(StudyError, "Unsupported study format"):
+                    manager.run_one(deadline=time.time() + 1000)
+                self.assertFalse((self.root / "long-runs").exists())
+                self.assertEqual((self.root / "state.json").read_bytes(), state)
+                self.assertEqual(read(config_path), config)
+                self.assertEqual(delegate.calls, [])
+                self.assertEqual(calls, [])
 
     def test_real_child_study_and_boundary_feedback(self):
         request = self.nominate()
@@ -616,12 +632,33 @@ class LongTrainingTests(unittest.TestCase):
             manager.run_one(deadline=time.time() + 1000)
         self.assertEqual(calls, [])
 
+    def test_fixed_allocation_timeout_is_controller_owned(self):
+        request = self.nominate()
+        calls = []
+        delegate = LongHarness()
+        manager = LongTrainingManager(
+            self.root,
+            delegate,
+            self.executor(calls),
+            admission=lambda request, token: {"policy": {"gpu_seconds_per_run": 10800}},
+        )
+        manager.run_one(deadline=time.time() + 1000)
+        plan_call = next(call for call in delegate.calls if call["phase"] == "plan")
+        self.assertNotIn("timeout_seconds", plan_call["schema"]["properties"])
+        self.assertNotIn(
+            "timeout_seconds", read(plan_call["run_dir"] / "response.json")
+        )
+        review_call = next(call for call in delegate.calls if call["phase"] == "review")
+        self.assertEqual(review_call["context"]["plan"]["timeout_seconds"], 10800)
+        self.assertNotIn("contract", review_call["context"]["plan"])
+        self.assertEqual(calls, [request["id"]])
+
     def test_inconsistent_fixed_controller_plan_cannot_allocate(self):
         class InvalidPlan(LongHarness):
             def response(self, phase, context, kwargs):
                 result = super().response(phase, context, kwargs)
                 if phase == "plan":
-                    result["contract"]["timeout_seconds"] = 60
+                    result["timeout_seconds"] = 60
                 return result
 
         self.nominate()
@@ -632,7 +669,7 @@ class LongTrainingTests(unittest.TestCase):
             self.executor(calls),
             admission=lambda request, token: {"policy": {"gpu_seconds_per_run": 10800}},
         )
-        with self.assertRaisesRegex(ValueError, "contract: must contain exactly"):
+        with self.assertRaisesRegex(ValueError, "must contain exactly"):
             manager.run_one(deadline=time.time() + 1000)
         self.assertEqual(calls, [])
 

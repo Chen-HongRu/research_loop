@@ -1,19 +1,18 @@
 # Research script execution
 
-`study.json` enables the generic frozen research contract with
+New version-3 Studies enable structured execution bounds with
 `"research_execution": {"version": 1}`. The ProTok controller additionally requires
 `control/research-policy.json` containing `version: 1`, the user's `authorization`,
 and `max_time_limit_seconds` (at most 1800). Enable these only between fully
 published iterations; preserve earlier context snapshots.
 
-Plan defines the question, purpose, observables, measurement inputs/method/timing,
-aggregation, expected cost, interpretation and insufficient-evidence conditions.
-Mechanism work also defines competing explanations and differing predictions.
-The schema checks declarations and references; Judge and Review assess whether
-the observations actually discriminate the explanations. Theory may specify a
-claim, assumptions and derivation instead of competing mechanisms.
+Plan's `markdown` freezes the scientific question, allowed action, exact input
+versions, measurement or derivation, evidence requirements and interpretation.
+These are free text, without required research categories or explanation/observable
+IDs. Judge and independent Review assess the actual design and evidence. The schema
+checks executable paths and bounds; it does not certify scientific meaning.
 
-The frozen `research_contract.execution` selects:
+The frozen top-level `execution` selects:
 
 * `fixed_evaluation`: the existing protected scorer and official RMSD Frontier.
 * `script`: an arbitrary Python entrypoint under `research/`, with named inputs,
@@ -76,10 +75,17 @@ inside the actual research sandbox. This is an operator environment check, not a
 scientific investigation or an official score.
 
 Supported inputs are `hidden_cache`, `targets`, `teacher` and
-`checkpoint:<published iteration>:<0|1000|2000>`. Data roles are `development` or
-`exploratory`; model inputs may also use `model` or `reference`. The current cache
-exposure is the existing development train/val cache. Final/holdout roles and
-additional hidden cache splits are rejected. No new external data is fetched.
+`checkpoint:<published iteration>:<0|1000|2000>` and independently reviewed long
+checkpoints. Each input has only `name` and `source`; `source` determines the
+trusted path and provenance. There is no input `role` label or declared-use label
+gate. The current cache exposure remains the existing development train/val cache;
+additional test/holdout splits and unknown sources are rejected. Final-only evidence
+must not feed adaptive search. No new external data is fetched.
+
+The research source record binds the entire accepted Plan, including its prose,
+as well as the authored source signatures. A completed result cannot be accepted
+against a changed Plan. Version-1/2 Studies retain their original records and must
+use their original runtime; this format change does not migrate or resume them.
 
 The initial compute profile is the existing H100 debug allocation, 8 CPU / 96 GiB,
 in whole minutes up to 1800 seconds. CPU calculations also work in that profile

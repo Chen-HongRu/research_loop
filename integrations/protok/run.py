@@ -1583,8 +1583,7 @@ def repair_completed_control(root, backend):
         return repaired
 
 
-def _run_one(root, backend):
-    study = Study(Path(root) / "study")
+def _run_one(root, backend, study):
     _repair_completed_control(root, backend, study)
     state = study.status()
     deadline = admission(root, backend, require_idle=not state.get("debugging"))
@@ -1610,6 +1609,7 @@ def _run_one(root, backend):
 
 
 def run_one(root, backend):
+    study = Study(Path(root) / "study")
     control = Path(root) / "control"
     with (control / "runner.lock").open("a") as lock:
         try:
@@ -1628,7 +1628,7 @@ def run_one(root, backend):
             {**record, "phase": read(Path(root) / "study/state.json")["phase"]},
         )
         try:
-            state = _run_one(root, backend)
+            state = _run_one(root, backend, study)
             record.update(
                 status="completed" if state["status"] == "ready" else "stopped",
                 iteration=state["iteration"],

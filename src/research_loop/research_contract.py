@@ -1,4 +1,4 @@
-"""Opt-in frozen research contracts; structural checks do not certify causality."""
+"""Opt-in executable bounds; scientific design lives in frozen Plan markdown."""
 
 import copy
 from pathlib import PurePosixPath
@@ -7,38 +7,13 @@ import re
 from .protocol import BOOLEAN, TEXT, _array, _enum, _nullable, _object, _validate
 
 
-RESEARCH_CONTRACT = _object(
-    purpose=_enum("performance", "mechanism", "observation", "theory"),
-    question=TEXT,
-    explanations=_array(_object(id=TEXT, statement=TEXT, prediction=TEXT)),
-    observables=_array(
-        _object(
-            id=TEXT,
-            definition=TEXT,
-            method=TEXT,
-            inputs=TEXT,
-            timing=TEXT,
-            aggregation=TEXT,
-            cost=TEXT,
-        )
-    ),
-    interpretation=_array(
-        _object(
-            explanation_id=TEXT,
-            observable_ids=_array(TEXT),
-            supports=TEXT,
-            refutes=TEXT,
-        )
-    ),
-    inconclusive=TEXT,
-    execution=_object(
-        mode=_enum("fixed_evaluation", "script"),
-        entrypoint=_nullable(TEXT),
-        gpu=BOOLEAN,
-        time_limit_seconds={"type": "integer"},
-        inputs=_array(_object(name=TEXT, source=TEXT, role=TEXT)),
-        outputs=_array(TEXT),
-    ),
+EXECUTION = _object(
+    mode=_enum("fixed_evaluation", "script"),
+    entrypoint=_nullable(TEXT),
+    gpu=BOOLEAN,
+    time_limit_seconds={"type": "integer"},
+    inputs=_array(_object(name=TEXT, source=TEXT)),
+    outputs=_array(TEXT),
 )
 
 
@@ -57,8 +32,8 @@ def validate_research_execution(value):
 
 def plan_schema(schema):
     result = copy.deepcopy(schema)
-    result["properties"]["research_contract"] = _nullable(RESEARCH_CONTRACT)
-    result["required"].append("research_contract")
+    result["properties"]["execution"] = _nullable(EXECUTION)
+    result["required"].append("execution")
     return result
 
 
@@ -80,53 +55,11 @@ def _relative_file(value):
 
 
 def validate_contract(plan):
-    """Check declarations, references and execution bounds, not scientific meaning."""
+    """Check executable paths and resource bounds, not scientific meaning."""
     if plan["decision"] != "investigate":
         return
-    value = plan.get("research_contract")
-    _validate(RESEARCH_CONTRACT, value, "research_contract")
-    _text(value["question"], "question")
-    _text(value["inconclusive"], "inconclusive")
-    explanations = value["explanations"]
-    observables = value["observables"]
-    for collection, label in (
-        (explanations, "explanations"),
-        (observables, "observables"),
-    ):
-        for item in collection:
-            for key, text in item.items():
-                _text(text, f"{label}.{key}")
-        if len({item["id"] for item in collection}) != len(collection):
-            raise ValueError(f"Duplicate research {label} id")
-    if not observables:
-        raise ValueError("Research needs an observable or derivation evidence")
-    explanation_ids = {item["id"] for item in explanations}
-    observable_ids = {item["id"] for item in observables}
-    interpreted = set()
-    for item in value["interpretation"]:
-        if item["explanation_id"] not in explanation_ids:
-            raise ValueError("Interpretation references unknown explanation")
-        if (
-            not item["observable_ids"]
-            or not set(item["observable_ids"]) <= observable_ids
-        ):
-            raise ValueError("Interpretation needs existing observables")
-        _text(item["supports"], "supports")
-        _text(item["refutes"], "refutes")
-        interpreted.add(item["explanation_id"])
-    if value["purpose"] == "mechanism":
-        if any(
-            len({item[key].strip().casefold() for item in explanations}) < 2
-            for key in ("statement", "prediction")
-        ):
-            raise ValueError(
-                "Mechanism research needs two distinct explanations and predictions"
-            )
-        if interpreted != explanation_ids:
-            raise ValueError(
-                "Mechanism research needs interpretation for each explanation"
-            )
-    execution = value["execution"]
+    execution = plan.get("execution")
+    _validate(EXECUTION, execution, "execution")
     seconds = execution["time_limit_seconds"]
     if not 1 <= seconds <= 1800 or seconds % 60:
         raise ValueError(
@@ -143,7 +76,6 @@ def validate_contract(plan):
             )
         names.append(item["name"])
         _text(item["source"], "input source")
-        _text(item["role"], "input role")
     if len(set(names)) != len(names):
         raise ValueError("Duplicate research input name")
     for output in execution["outputs"]:
@@ -189,30 +121,24 @@ an experimental intervention or measurement design without a model change.
         return (
             common
             + """
-For decision=investigate, fill research_contract with purpose, a concrete question,
-explanations and predictions where applicable, direct observables (or derivation
-evidence), predefined support/refutation rules and an inconclusive condition.
-Mechanism work needs at least two competing explanations with different predictions
-and interpretation referencing their observable IDs. Other purposes may use empty
-explanations/interpretation. Each observable declares definition, method, inputs,
-timing, aggregation and cost. Freeze these declarations before Execute.
-Explanation and observable IDs must be unique within their lists. Every
-interpretation references an existing explanation and a nonempty list of existing
-observable IDs; mechanism work needs an interpretation for every explanation.
+Write the scientific plan in markdown: describe the question, allowed action,
+relevant inputs and versions, measurement or derivation, and how evidence will be
+interpreted. Explain uncertainty and limitations where relevant. No research type,
+explanation IDs or observation IDs are required. Freeze this prose before Execute.
 When live telemetry is available, state the observable names, steps/units, conditions,
 publication boundaries and intended tags. Use dashboard only for user-facing progress;
 retain diagnostic/custom tags for Review. Log tags do not change the frozen scientific
 scope, data roles, required evidence or interpretation of incomplete measurements.
 execution selects fixed_evaluation or script. A script uses research/*.py, named
-inputs with source and role, relative output evidence files, GPU requirement and a
+inputs with name and source, relative output evidence files, GPU requirement and a
 whole-minute time limit no greater than 1800 seconds. Source resolution belongs to
 the execution adapter. Time limits are 60..1800 seconds in multiples of 60.
 Input names are unique simple letters/digits/underscore/dot/hyphen names without
-traversal; sources and roles are nonempty. Script entrypoints are Python files
+traversal; sources are nonempty. Script entrypoints are Python files
 under research/; output paths are unique relative files without dot/traversal
 components, and scripts require at least one output. Fixed evaluation requires entrypoint=null, inputs=[],
 outputs=[], gpu=true, time_limit_seconds=1800. No decision requires training.
-For reselect/stop research_contract may be null; do not invent an experiment.
+For reselect/stop execution may be null; do not invent an experiment.
 """
         )
     if phase in ("judge", "review"):

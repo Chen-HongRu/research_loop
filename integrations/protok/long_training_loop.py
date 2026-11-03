@@ -142,6 +142,7 @@ def recover(root, backend, run_id):
     from research_loop.harness import publish_completed_response
 
     root = Path(root)
+    Study(root / "study")
     run_id = _run_id(run_id)
     job_dir = root / "control/long-training-jobs" / run_id
     job = _read(job_dir / "job.json")

@@ -630,6 +630,11 @@ def launch(
     fresh_attempt=None,
     execution_deadline=None,
 ):
+    from research_loop import Study
+
+    parent = Path(control_dir).resolve().parent / "study"
+    if (parent / "study.json").exists():
+        Study(parent)
     backend, config, control = validate_continuation(
         project,
         control_dir,

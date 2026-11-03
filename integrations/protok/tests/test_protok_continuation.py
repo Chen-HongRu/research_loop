@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from research_loop import StudyError, initialize
+
 from integrations.protok.continuation import (
     install_hooks,
     launch,
@@ -432,6 +434,35 @@ class ContinuationTest(unittest.TestCase):
                 backend.collect_logs(config, self.records / "owned", attempt)
             self.assertIs(caught.exception, failure)
             fetch.assert_called_once_with(backend, config, "/owned/run")
+
+    def test_launch_rejects_older_parent_before_backend_or_control_changes(self):
+        parent = self.control.parent / "study"
+        initialize(parent, goal="Parent")
+        config_path = parent / "study.json"
+        for version in (1, 2):
+            for recover in (False, True):
+                with self.subTest(version=version, recover=recover):
+                    config = json.loads(config_path.read_text())
+                    config["version"] = version
+                    self.write(config_path, config)
+                    control_files = sorted(self.control.iterdir())
+                    with (
+                        patch(
+                            "integrations.protok.continuation.validate_continuation"
+                        ) as validate,
+                        self.assertRaisesRegex(StudyError, "Unsupported study format"),
+                    ):
+                        launch(
+                            self.project,
+                            self.control,
+                            "opaque",
+                            self.runtime,
+                            recover=recover,
+                        )
+                    validate.assert_not_called()
+                    self.assertEqual(sorted(self.control.iterdir()), control_files)
+                    self.assertEqual(json.loads(config_path.read_text()), config)
+                    self.assertFalse((self.records / ".eval.lock").exists())
 
     def test_original_main_enforces_global_lock(self):
         with (self.records / ".eval.lock").open("a") as lock:

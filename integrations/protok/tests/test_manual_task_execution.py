@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from research_loop import Study, initialize
+from research_loop import Study, StudyError, initialize
 from research_loop.harness import HarnessError
 from research_loop.protocol import SCHEMAS
 from research_loop.tasks import TaskQueue
@@ -37,7 +37,7 @@ class Author(RecordedHarness):
         if phase == "plan":
             result.pop("local_evaluation")
             result.pop("references")
-            result["contract"].pop("timeout_seconds")
+            result.pop("timeout_seconds")
         if phase == "review" and context.get("long_training_run"):
             result["observation_reviews"] = [
                 {
@@ -159,6 +159,37 @@ class ManualExecutionTests(unittest.TestCase):
             raise HarnessError("Reporting interrupted after the owned allocation")
         return long_training._envelope(request, workspace / "result.json", result)
 
+    def test_older_parent_format_rejected_before_claim_or_recovery(self):
+        request = self.submit()
+        author = Author()
+        manager = tasks.ManualTrainingManager(self.root, self.backend, delegate=author)
+        config_path = self.root / "study/study.json"
+        for version in (1, 2):
+            for operation in (manager.run_one, lambda: manager.recover(request["id"])):
+                with self.subTest(version=version, operation=operation):
+                    config = tasks._read(config_path)
+                    config["version"] = version
+                    tasks._write(config_path, config)
+                    before = self.queue.snapshot()
+                    control_files = sorted((self.root / "control").iterdir())
+                    with (
+                        patch.object(TaskQueue, "claim") as claim,
+                        patch.object(tasks, "execute") as execute,
+                        self.assertRaisesRegex(StudyError, "Unsupported study format"),
+                    ):
+                        operation()
+                    claim.assert_not_called()
+                    execute.assert_not_called()
+                    self.assertEqual(self.queue.snapshot(), before)
+                    self.assertEqual(
+                        sorted((self.root / "control").iterdir()), control_files
+                    )
+                    self.assertFalse(
+                        (self.root / "study/tasks" / request["id"] / "study").exists()
+                    )
+                    self.assertEqual(tasks._read(config_path), config)
+                    self.assertEqual(author.calls, [])
+
     def test_new_code_direct_long_review_and_boundary_knowledge(self):
         request = self.submit()
         author = Author()
@@ -178,11 +209,11 @@ class ManualExecutionTests(unittest.TestCase):
         self.assertNotIn("references", plan_call["schema"]["properties"])
         self.assertNotIn(
             "timeout_seconds",
-            plan_call["schema"]["properties"]["contract"]["properties"],
+            plan_call["schema"]["properties"],
         )
         raw_plan = tasks._read(plan_call["run_dir"] / "response.json")
         self.assertNotIn("base_experiment", raw_plan)
-        self.assertNotIn("timeout_seconds", raw_plan["contract"])
+        self.assertNotIn("timeout_seconds", raw_plan)
         authored = author.calls[1]
         self.assertEqual(set(authored["schema"]["properties"]), {"outcome", "markdown"})
         self.assertEqual(

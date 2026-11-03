@@ -73,16 +73,8 @@ SCHEMAS = {
         route_research=TEXT,
         base_experiment=_nullable(EXPERIMENT_REF),
         references=_array(EXPERIMENT_REF),
-        input_artifacts=_array(ARTIFACT),
         local_evaluation=_nullable(EVALUATION),
-        contract=_object(
-            rationale=TEXT,
-            action=TEXT,
-            evaluation=TEXT,
-            decision_criteria=TEXT,
-            evidence_required=_array(TEXT),
-            timeout_seconds={"type": "integer"},
-        ),
+        timeout_seconds={"type": "integer"},
         stop_reason=_nullable(TEXT),
     ),
     "execute": _object(
@@ -295,9 +287,11 @@ Read only; do not write files or run experiments. Debate is not new evidence.
 """,
     "plan": """Turn Judge's selected action into a bounded executable contract.
 Verify the starting experiment, precise recoverable input artifact versions, relevant
-conditions and historical limitations. Freeze rationale, allowed action and fixed
+conditions and historical limitations. In markdown, freeze the scientific question,
+rationale, allowed action and fixed
 conditions, evaluation protocol and data roles, decision criteria, required evidence
-and positive timeout within the remaining budget before results are observed.
+and interpretation limits before results are observed. Set a positive top-level
+timeout_seconds within the remaining budget.
 Reference the fixed Study global evaluation; describe its application or why it is
 inapplicable/incomplete. Define local evaluation only when needed, specifying
 objectives, constraints, units, protocol and comparison_scope; diagnostic observations
@@ -307,8 +301,8 @@ Return complete route_research for a new route, containing only its question,
 rationale and existing evidence. Historical references must be published nodes.
 base_experiment and references contain only earlier published DAG IDs such as
 '0001', never file paths or qualified candidate IDs such as '0001:foo'. Put
-recoverable file paths and versions in input_artifacts, and external evidence
-paths in the report; Execute uses evidence for measurement source paths.
+recoverable input file paths and versions, their uses and external evidence paths
+in markdown; Execute uses evidence for measurement source paths.
 If a premise fails or intent/route must change, return reselect with the reason;
 never silently replace the selected action. For stop, give the reason. Read only;
 do not write files, run experiments, change Study definitions, or publish documents.
