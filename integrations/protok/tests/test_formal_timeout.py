@@ -210,8 +210,9 @@ class FormalTimeoutTests(unittest.TestCase):
         stop.write_text("Supervisor stopped: attention\n")
         for target in ("publish_completed_response", "save_state"):
             failure = (
-                patch.object(
-                    RUNNER, target, side_effect=OSError("publication interrupted")
+                patch(
+                    "research_loop.core.publish_completed_response",
+                    side_effect=OSError("publication interrupted"),
                 )
                 if target == "publish_completed_response"
                 else patch.object(
@@ -248,6 +249,16 @@ class FormalTimeoutTests(unittest.TestCase):
             deploy_runtime.check_reconciliation_boundary(self.root, self.backend),
             prepared,
         )
+        canonical = (
+            self.study.root
+            / "recoveries"
+            / (f"settle-{before['iteration']:04d}-{old.name}.json")
+        )
+        canonical_bytes = canonical.read_bytes()
+        canonical.unlink()
+        with self.assertRaisesRegex(ProTokError, "Core recovery evidence"):
+            deploy_runtime.check_reconciliation_boundary(self.root, self.backend)
+        canonical.write_bytes(canonical_bytes)
         for field in ("call_count", "elapsed_seconds", "plan_ref"):
             with self.subTest(changed_state=field):
                 changed = {
@@ -299,6 +310,15 @@ class FormalTimeoutTests(unittest.TestCase):
         self.assertEqual(self.delegate.count("review"), 2)
         self.assertEqual(self.backend.evaluations, 1)
         self.assertEqual(state["call_count"], before["call_count"] + 1)
+        review = next(
+            call for call in reversed(self.delegate.calls) if call["phase"] == "review"
+        )
+        event = review["context"]["execution_recovery"][0]
+        self.assertEqual(event["source_attempt"], before["calls"]["execute"])
+        self.assertEqual(event["plan_ref"], before["plan_ref"])
+        self.assertEqual((event["action"], event["effect"]), ("settle", "terminal"))
+        self.assertIn(str(old / "reconciliation.json"), event["proof_refs"])
+        self.assertIn(event["recovery_id"], review["prompt"])
 
 
 if __name__ == "__main__":

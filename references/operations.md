@@ -62,9 +62,10 @@ requests, not a running experiment.
 Read [recovery](../docs/recovery.md) and the adapter's instructions before acting.
 Completed receipts/publication and partial read-only phases can normally resume via
 `run`; incomplete Execute requires inspecting retained work and external effects.
-Only after effects are reconciled and a fresh attempt is authorized use
-`retry STUDY`, then `run`. Unknown effects, active processes and unsettled accounting
-remain blocking. Do not edit state, clear locks, delete attempts or reinitialize to
+Use `retry STUDY`, then `run`, for read-only failures or completed-receipt replay.
+An unfinished Execute requires the backend's trusted `Study.reconcile_execution`
+certificate; a bare retry cannot authorize a replacement execution. Unknown
+effects, active processes and unsettled accounting remain blocking. Do not edit state, clear locks, delete attempts or reinitialize to
 force a replay. Task adapters may reconcile the original execution without a new
 Agent call; use their existing interface.
 

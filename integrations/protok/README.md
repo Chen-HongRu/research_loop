@@ -137,6 +137,14 @@ requires the matching HANDOFF, unchanged contract and system-attention STOP, and
 all runtime lanes idle. A user STOP remains blocking. Old incident-specific
 reconciliation commands and historical-state migration are not supported.
 
+Both commands use `Study.reconcile_execution` for normalized recovery records,
+state transitions and completion publication. The adapter retains task-specific
+identity, authorization and accounting checks. Core automatically includes the
+recovery summary and proof references in subsequent Execute/Review contexts for
+the same Plan, including same-iteration retry and published continuation. Full
+private reconciliation snapshots are not embedded in prompts. Historical private
+recovery records require separate verified handling; they are not auto-imported.
+
 Preparation retains STOP and immutable per-attempt evidence. Deployment checks
 the matching preparation and HANDOFF. An unpublished Execute continues in the
 same iteration with only its unaccepted call pointer retired. An already published

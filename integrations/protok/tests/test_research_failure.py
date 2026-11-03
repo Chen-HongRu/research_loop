@@ -411,6 +411,15 @@ class ResearchFailureTests(unittest.TestCase):
         (self.control / "STOP").unlink()
         self.assert_reviewed(self.run_one())
         self.assertEqual(self.delegate.count("execute"), 1)
+        review = next(
+            call for call in reversed(self.delegate.calls) if call["phase"] == "review"
+        )
+        event = review["context"]["execution_recovery"][0]
+        self.assertEqual(event["source_attempt"], before["calls"]["execute"])
+        self.assertEqual(event["plan_ref"], before["plan_ref"])
+        self.assertEqual((event["action"], event["effect"]), ("settle", "terminal"))
+        self.assertIn(str(previous / "reconciliation.json"), event["proof_refs"])
+        self.assertIn(event["recovery_id"], review["prompt"])
 
     def test_live_workspace_artifact_does_not_erase_frozen_settled_receipt(self):
         from integrations.protok.research_execution import completed_script
@@ -592,6 +601,13 @@ class ResearchFailureTests(unittest.TestCase):
         self.assertEqual(self.delegate.count("execute"), 1)
         self.assertEqual(self.delegate.count("review"), 1)
         self.assertEqual(self.allocations, 0)
+        review = next(call for call in self.delegate.calls if call["phase"] == "review")
+        event = review["context"]["execution_recovery"][0]
+        self.assertEqual(
+            (event["action"], event["effect"]), ("settle", "never_submitted")
+        )
+        self.assertEqual(event["source_attempt"], before["calls"]["execute"])
+        self.assertIn(event["recovery_id"], review["prompt"])
 
 
 if __name__ == "__main__":

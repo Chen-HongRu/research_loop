@@ -23,9 +23,10 @@ Downstream state and document publication can be retried from these receipts.
 An interrupted model generation does not resume at its last token. Partial JSON
 and final-looking text without a completion receipt are evidence, not completed
 results. Execute is never automatically repeated on this basis. A task adapter
-may validate existing external receipts and publish a separately labeled controller
-reconciliation receipt in the original Execute attempt. It must preserve the raw
-Agent evidence and must not count reconciliation as another Agent invocation.
+validates existing external receipts through `Study.reconcile_execution`; the
+controller records the recovery and publishes the verified completion in the
+original Execute attempt. Raw Agent evidence is retained and reconciliation does
+not count as another Agent invocation.
 
 Parameter correction keeps the original task and frozen context. Each new Agent
 call consumes the existing Study call/time budget; rejection does not reset either
@@ -63,9 +64,11 @@ controller never infers recoverability from an error string or job failure alone
 charges. Restarts reopen the same scope. Unknown submissions or missing terminal
 accounting block new allocation; consumed seconds cannot be refunded or reset.
 
-`research-loop retry STUDY` authorizes a fresh attempt after effects have been
-checked. It preserves completed Execute receipts and refuses an active local
-process. Replaying an unaccepted Execute through a custom harness invokes its
+`research-loop retry STUDY` retries read-only phases or reuses a completed Execute
+receipt. An unfinished Execute requires the trusted `Study.reconcile_execution`
+API; a bare retry cannot certify that external effects never happened. A fresh
+attempt requires the original process to be stopped. Replaying an unaccepted
+Execute through a custom harness invokes its
 `validate_completed(result, workspace=..., run_dir=...)` hook before acceptance.
 
 A completed Review may stop research while the goal remains `not_met` or
@@ -92,3 +95,56 @@ lease and GPU accounting across recovery.
 Backend preparation, start and retained-execution inspection are specified in the
 [execution backend guide](execution-backends.md). Preparation is shared with the
 dry-run API; only explicit, legally repairable authoring errors return feedback.
+
+## Controller-owned recovery evidence
+
+`Study.reconcile_execution(recovery_id=..., certify=...)` acquires the Study lock
+and calls trusted controller code with a copy of the current state. The callback
+validates backend identity, effects, authorization, deadline, accounting and STOP
+policy and returns a bounded certificate; it must not mutate Study state or launch
+computation. This is a Python controller API, not an Agent tool or a CLI accepting
+unverified JSON. See the [certificate contract](execution-backends.md#recovery-certificates).
+
+The controller binds the original Study, iteration, Execute attempt and frozen
+Plan, persists an immutable recovery record, and applies one of these actions:
+
+- `retry`: only positive `never_submitted` evidence permits retirement of an
+  unaccepted attempt. Existing submission interfaces are archived before clearing
+  the Execute pointer; the lock inode remains in place. The next invocation uses
+  a new attempt under the same Plan and remaining budgets. Its original Execute
+  absolute deadline in `parameter-budget.json` is retained; missing, malformed or
+  expired deadline evidence cannot authorize another call.
+- `settle`: verified terminal effects, or proven non-submission, produce a
+  completion receipt in the original attempt. This authorizes no new allocation.
+- `prepare_continuation`: a published unmeasured incomplete Execute with proven
+  non-submission is prepared for the existing append-only continuation path.
+  The original publication and Plan remain unchanged. This existing new-iteration
+  path has a new per-call timeout while the original Study budgets and backend
+  absolute resource lease remain authoritative.
+
+`recoveries/<recovery_id>.json` retains the transition. Reusing the same ID must
+agree with its original certificate and state; it cannot name another operation.
+A crash after record publication replays only the retained transition. The prepared
+state retains a reference to its canonical recovery evidence; missing or changed
+evidence blocks further execution. Proof references point to retained backend evidence; they are not evidence by themselves.
+No missing job ID, absent queue entry, error string or `accepted` controller request
+establishes an external computation outcome.
+
+Subsequent Execute and Review contexts automatically include `execution_recovery`
+for the original Plan lineage, including same-iteration retry and continuation.
+The projection contains only bounded summaries, identities and evidence references,
+not private authorization/configuration snapshots. A maximum of 32 records, 4096
+UTF-8 bytes per summary and 16 proof references per certificate bounds the prompt;
+overflow blocks rather than silently dropping history. Independent Review still
+judges evidence and may stop for unresolved limitations. Existing Review attempts
+are never rewritten, and arbitrary historical private records are not imported.
+
+Run the real local Study/Git example with scripted responses and no compute service:
+
+```sh
+uv run python examples/recovery_demo.py --output /tmp/new-recovery-demo
+```
+
+It retains an accepted first request, certifies failure before computation, retries
+once and verifies that the actual Review context and prompt contain the proof.
+This demonstrates wiring, not model judgment or a live scheduler's behavior.

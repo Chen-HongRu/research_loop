@@ -380,6 +380,8 @@ study/
 
 宿主可异步调度独立子 Study。每个 Study 的阶段与发布顺序保持串行，故障、attempt 和恢复身份限定在该 Study；故障不阻止其他独立子 Study 调度。共享计算授权的准入与核账门槛按预算池生效，未知费用不释放额度。父 Study 在轮次边界将已完整评审发布的子 Study 结果冻结为后续调查输入。
 
+执行恢复由 `Study.reconcile_execution` 接受可信后端的效果证明。控制器将恢复记录绑定 Study、原 iteration、Execute attempt 与冻结 Plan；明确未提交可准备同轮新 attempt，已结算或未提交结案在原 attempt 发布完成回执，已评审的未测量执行沿用追加式 continuation。恢复不重置预算、费用或后端资源截止时间；同轮重试沿用原 Execute 调用截止时间，追加式 continuation 的新调用仍受原 Study 与资源额度约束。后续 Execute / Review 自动接收同一 Plan 链上的有界恢复摘要和证明引用；私有授权与配置快照不进入提示。未知效果不能授权重试。
+
 已完整发布的 Review 停止可由操作员通过 `resume --reason` 重新授权：目标须未完成，原轮数、调用和时间额度须仍有剩余，且不存在活动或调试 attempt。控制器记录原因和原 Review 引用，只将状态置为 ready；目标、评价、路线状态、证据和预算计数不变。其他停止原因不能经此恢复，后续执行仍需通过原宿主的资源准入。
 
 ## 验收条件

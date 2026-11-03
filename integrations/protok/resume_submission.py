@@ -96,6 +96,30 @@ def _prepared_state(record):
     return {**record["state_before"], "status": "ready", "stop_reason": None}
 
 
+def _recovery_certificate(record):
+    return {
+        "source_iteration": record["source_iteration"],
+        "source_attempt": record["source_attempt"],
+        "plan_ref": record["plan_ref"],
+        "action": "retry"
+        if _mode(record) == "same_iteration"
+        else "prepare_continuation",
+        "effect": "never_submitted",
+        "summary": "Operator-authorized continuation of the original Plan after adapter verification that the retained Execute did not submit an allocation. Original source, grant, deadlines and usage are preserved.",
+        "proof_refs": [record["reconciliation"]],
+    }
+
+
+def _validate_core_resume(root, record):
+    _runner()._validate_core_recovery(
+        root,
+        Path(record["reconciliation"]).stem,
+        _recovery_certificate(record),
+        record["state_before"],
+        _prepared_state(record),
+    )
+
+
 def _require_formal_plan(plan):
     if (plan.get("execution") or {}).get("mode") == "script":
         raise ProTokError(
@@ -326,6 +350,7 @@ def validate_prepared(root, backend):
         raise ProTokError("Resume control publication is incomplete")
     _unchanged(root, record)
     _budget(root, backend, study)
+    _validate_core_resume(root, record)
     return study.status()
 
 
@@ -340,162 +365,198 @@ def prepare_resume(root, backend, *, authorization: str):
     with (
         (control / "supervisor.lock").open("a") as supervisor,
         (control / "runner.lock").open("a") as runner,
-        study._lock(),
     ):
         for lock in (supervisor, runner):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        initial = study.status()
+        source_id = f"{initial['iteration']:04d}"
         pending_path = control / "resume-submission.json"
-        state = study.status()
-        source_id = f"{state['iteration']:04d}"
-        folder = study.root / "iterations" / source_id
-        record = None
-        if pending_path.exists():
-            pending = run.read(pending_path)
-            saved = run.read(Path(pending["reconciliation"]))
-            if pending != {**saved, "status": pending.get("status")} or pending.get(
-                "status"
-            ) not in {"prepared", "begun"}:
-                raise ProTokError("Invalid pending resume evidence")
-            if pending["status"] == "prepared":
-                if pending["authorization"] != authorization:
-                    raise ProTokError(
-                        "An existing resume authorization cannot be replaced"
-                    )
-                record = saved
-            elif not (
-                _same_iteration(state, folder)
-                and state["calls"].get("execute") != saved.get("source_attempt")
-            ) and not (
-                state["status"] == "stopped"
-                and state["phase"] == "done"
-                and source_id != saved["source_iteration"]
-            ):
-                return pending
-        if record is None:
-            metadata = run.read(folder / "iteration.json")
-            same = _same_iteration(state, folder)
-            if state.get("debugging"):
-                raise ProTokError("Active debug recovery prevents unsubmitted resume")
-            if same:
-                attempt = state["calls"].get("execute")
-                if not attempt or state.get("active_attempt") not in (None, attempt):
-                    raise ProTokError(
-                        "Unaccepted Execute attempt identity is unresolved"
-                    )
-                if state.get("execution_ref") not in (
-                    None,
-                    str(Path(attempt) / "response.json"),
+        if pending_path.exists() and run.read(pending_path).get("status") == "prepared":
+            recovery_id = Path(run.read(pending_path)["reconciliation"]).stem
+        elif _same_iteration(initial, study.root / "iterations" / source_id):
+            recovery_id = (
+                f"resume-execute-{source_id}-{Path(initial['calls']['execute']).name}"
+            )
+        else:
+            recovery_id = f"resume-submission-{source_id}"
+        prepared_record = {}
+
+        def certify(state):
+            if state != initial:
+                raise ProTokError("Study state changed before resume certification")
+            pending_path = control / "resume-submission.json"
+            source_id = f"{state['iteration']:04d}"
+            folder = study.root / "iterations" / source_id
+            record = None
+            if pending_path.exists():
+                pending = run.read(pending_path)
+                saved = run.read(Path(pending["reconciliation"]))
+                if pending != {**saved, "status": pending.get("status")} or pending.get(
+                    "status"
+                ) not in {"prepared", "begun"}:
+                    raise ProTokError("Invalid pending resume evidence")
+                if pending["status"] == "prepared":
+                    if pending["authorization"] != authorization:
+                        raise ProTokError(
+                            "An existing resume authorization cannot be replaced"
+                        )
+                    record = saved
+                elif not (
+                    _same_iteration(state, folder)
+                    and state["calls"].get("execute") != saved.get("source_attempt")
+                ) and not (
+                    state["status"] == "stopped"
+                    and state["phase"] == "done"
+                    and source_id != saved["source_iteration"]
                 ):
+                    prepared_record["pending"] = pending
+                    return None
+            if record is None:
+                metadata = run.read(folder / "iteration.json")
+                same = _same_iteration(state, folder)
+                if state.get("debugging"):
                     raise ProTokError(
-                        "Unaccepted Execute response identity is unresolved"
+                        "Active debug recovery prevents unsubmitted resume"
                     )
-                mode = "same_iteration"
-                evidence_name = f"resume-execute-{source_id}-{Path(attempt).name}.json"
-            else:
-                _published_source(run, state, folder, metadata)
-                execute = run.read(study.root / state["execution_ref"])
-                review = run.read(study.root / state["review_ref"])
-                if (
-                    execute["outcome"] != "incomplete"
-                    or execute["artifacts"]
-                    or execute["measurements"]
-                    or review["decision"] != "stop"
-                ):
+                if same:
+                    attempt = state["calls"].get("execute")
+                    if not attempt or state.get("active_attempt") not in (
+                        None,
+                        attempt,
+                    ):
+                        raise ProTokError(
+                            "Unaccepted Execute attempt identity is unresolved"
+                        )
+                    if state.get("execution_ref") not in (
+                        None,
+                        str(Path(attempt) / "response.json"),
+                    ):
+                        raise ProTokError(
+                            "Unaccepted Execute response identity is unresolved"
+                        )
+                    mode = "same_iteration"
+                    evidence_name = (
+                        f"resume-execute-{source_id}-{Path(attempt).name}.json"
+                    )
+                else:
+                    _published_source(run, state, folder, metadata)
+                    execute = run.read(study.root / state["execution_ref"])
+                    review = run.read(study.root / state["review_ref"])
+                    if (
+                        execute["outcome"] != "incomplete"
+                        or execute["artifacts"]
+                        or execute["measurements"]
+                        or review["decision"] != "stop"
+                    ):
+                        raise ProTokError(
+                            "Source must be a reviewed, unmeasured incomplete Execute"
+                        )
+                    attempt = state["calls"]["execute"]
+                    mode = "published_continuation"
+                    evidence_name = f"resume-submission-{source_id}.json"
+                for relative in state["calls"].values():
+                    study._check_attempt_stopped(study.root / relative)
+                stop = control / "STOP"
+                if not stop.exists():
                     raise ProTokError(
-                        "Source must be a reviewed, unmeasured incomplete Execute"
+                        "Explicit STOP is required while preparing resume"
                     )
-                attempt = state["calls"]["execute"]
-                mode = "published_continuation"
-                evidence_name = f"resume-submission-{source_id}.json"
-            for relative in state["calls"].values():
-                study._check_attempt_stopped(study.root / relative)
-            stop = control / "STOP"
-            if not stop.exists():
-                raise ProTokError("Explicit STOP is required while preparing resume")
-            evidence = control / "reconciliations" / evidence_name
-            plan_ref = _original_plan(study, source_id)
-            names = [
-                "control/ownership.json",
-                "control/continuation.json",
-                "study/study.json",
-                "study/goal.md",
-            ]
-            names += [
-                str((folder / name).relative_to(root))
-                for name in (
-                    "iteration.json",
-                    "publication.json",
-                    "candidates.json",
-                    "review.md",
-                    "route.after.md",
-                    "global.after.md",
+                evidence = control / "reconciliations" / evidence_name
+                plan_ref = _original_plan(study, source_id)
+                names = [
+                    "control/ownership.json",
+                    "control/continuation.json",
+                    "study/study.json",
+                    "study/goal.md",
+                ]
+                names += [
+                    str((folder / name).relative_to(root))
+                    for name in (
+                        "iteration.json",
+                        "publication.json",
+                        "candidates.json",
+                        "review.md",
+                        "route.after.md",
+                        "global.after.md",
+                    )
+                    if (folder / name).exists()
+                ]
+                names += [
+                    str((study.root / state[key]).relative_to(root))
+                    for key in ("plan_ref", "execution_ref", "review_ref")
+                    if state.get(key)
+                ]
+                names.append(str((study.root / plan_ref).relative_to(root)))
+                names += [
+                    str((study.root / attempt / name).relative_to(root))
+                    for name in (
+                        "context.json",
+                        "process.json",
+                        "response.json",
+                        "agent/process.json",
+                        "agent/response.json",
+                    )
+                    if (study.root / attempt / name).exists()
+                ]
+                prepared = copy.deepcopy(state)
+                prepared.update(
+                    status="ready",
+                    stop_reason=None,
+                    execution_recovery_ref=f"recoveries/{recovery_id}.json",
                 )
-                if (folder / name).exists()
-            ]
-            names += [
-                str((study.root / state[key]).relative_to(root))
-                for key in ("plan_ref", "execution_ref", "review_ref")
-                if state.get(key)
-            ]
-            names.append(str((study.root / plan_ref).relative_to(root)))
-            names += [
-                str((study.root / attempt / name).relative_to(root))
-                for name in (
-                    "context.json",
-                    "process.json",
-                    "response.json",
-                    "agent/process.json",
-                    "agent/response.json",
-                )
-                if (study.root / attempt / name).exists()
-            ]
-            prepared = copy.deepcopy(state)
-            prepared.update(status="ready", stop_reason=None)
-            if same:
-                prepared["calls"].pop("execute", None)
-                prepared.get("accepted_calls", {}).pop("execute", None)
-                prepared.update(active_attempt=None, error=None, execution_ref=None)
-            record = {
-                "source": "operator",
-                "mode": mode,
-                "authorization": authorization,
-                "source_iteration": source_id,
-                "target_iteration": source_id
-                if same
-                else f"{state['iteration'] + 1:04d}",
-                "source_attempt": attempt,
-                "source_workspace_ref": metadata["workspace_ref"],
-                "source_signatures": run.signatures(
-                    run.candidate_bytes(metadata["workspace"])
-                ),
-                "plan_ref": plan_ref,
-                "directive": (
-                    "Resume the original unsubmitted Execute using the controller submission API; retain its scientific Plan and collect the actual receipt for independent Review."
+                if same:
+                    prepared["calls"].pop("execute", None)
+                    prepared.get("accepted_calls", {}).pop("execute", None)
+                    prepared.update(active_attempt=None, error=None, execution_ref=None)
+                record = {
+                    "source": "operator",
+                    "mode": mode,
+                    "authorization": authorization,
+                    "source_iteration": source_id,
+                    "target_iteration": source_id
                     if same
-                    else PUBLISHED_EXECUTION_DIRECTIVE
-                ),
-                "route_id": metadata["route_id"],
-                "route_title": metadata["route_title"],
-                "state_before": state,
-                "prepared_state": prepared,
-                "stop_before": stop.read_text(),
-                "runner_before": run.read(control / "runner.json"),
-                "protected": {name: (root / name).read_text() for name in names},
-                "reconciliation": str(evidence),
-            }
+                    else f"{state['iteration'] + 1:04d}",
+                    "source_attempt": attempt,
+                    "source_workspace_ref": metadata["workspace_ref"],
+                    "source_signatures": run.signatures(
+                        run.candidate_bytes(metadata["workspace"])
+                    ),
+                    "plan_ref": plan_ref,
+                    "directive": (
+                        "Resume the original unsubmitted Execute using the controller submission API; retain its scientific Plan and collect the actual receipt for independent Review."
+                        if same
+                        else PUBLISHED_EXECUTION_DIRECTIVE
+                    ),
+                    "route_id": metadata["route_id"],
+                    "route_title": metadata["route_title"],
+                    "state_before": state,
+                    "prepared_state": prepared,
+                    "stop_before": stop.read_text(),
+                    "runner_before": run.read(control / "runner.json"),
+                    "protected": {name: (root / name).read_text() for name in names},
+                    "reconciliation": str(evidence),
+                }
+                _unchanged(root, record)
+                _budget(root, backend, study)
+                run.immutable_record(evidence, record)
+                run.write(pending_path, {**record, "status": "prepared"})
             _unchanged(root, record)
             _budget(root, backend, study)
-            run.immutable_record(evidence, record)
-            run.write(pending_path, {**record, "status": "prepared"})
-        _unchanged(root, record)
-        _budget(root, backend, study)
-        expected = _prepared_state(record)
-        if study.status() not in (record["state_before"], expected):
-            raise ProTokError("Live state changed during resume preparation")
-        stop = control / "STOP"
-        if (stop.read_text() if stop.exists() else None) != record["stop_before"]:
-            raise ProTokError("STOP changed during resume preparation")
-        study._save(expected)
+            expected = _prepared_state(record)
+            if study.status() not in (record["state_before"], expected):
+                raise ProTokError("Live state changed during resume preparation")
+            stop = control / "STOP"
+            if (stop.read_text() if stop.exists() else None) != record["stop_before"]:
+                raise ProTokError("STOP changed during resume preparation")
+            if Path(record["reconciliation"]).stem != recovery_id:
+                raise ProTokError("Resume attempt changed before certification")
+            prepared_record["record"] = record
+            return _recovery_certificate(record)
+
+        expected = study.reconcile_execution(recovery_id=recovery_id, certify=certify)
+        if "pending" in prepared_record:
+            return prepared_record["pending"]
+        record = prepared_record["record"]
         run.write(
             control / "runner.json",
             {
@@ -530,6 +591,7 @@ def begin_pending(study, backend):
             return
         _unchanged(root, record)
         _budget(root, backend, study)
+        _validate_core_resume(root, record)
         if (root / "control/STOP").exists():
             raise ProTokError("Resume STOP must be cleared by deployment")
         if _mode(record) == "same_iteration":

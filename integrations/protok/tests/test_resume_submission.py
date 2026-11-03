@@ -120,6 +120,24 @@ class ResumeSubmissionTests(unittest.TestCase):
             authorization="User authorized same candidate first evaluation",
         )
 
+    def assert_resume_evidence(self, harness, pending):
+        recovery_id = Path(pending["reconciliation"]).stem
+        for call in harness.calls:
+            if call["phase"] not in {"execute", "review"}:
+                continue
+            events = call["context"]["execution_recovery"]
+            event = next(row for row in events if row["recovery_id"] == recovery_id)
+            self.assertEqual(event["source_attempt"], pending["source_attempt"])
+            self.assertEqual(event["plan_ref"], pending["plan_ref"])
+            self.assertEqual(event["effect"], "never_submitted")
+            self.assertIn(pending["reconciliation"], event["proof_refs"])
+            self.assertNotIn("protected", event)
+            self.assertNotIn("authorization", event)
+            self.assertIn(recovery_id, call["prompt"])
+            if pending["mode"] == "same_iteration":
+                retirement = self.root / "study" / event["interface_retirement_ref"]
+                self.assertTrue(retirement.is_file())
+
     def test_prepare_preserves_history_budget_and_counts_and_is_repeatable(self):
         original = {
             p: p.read_bytes()
@@ -137,11 +155,46 @@ class ResumeSubmissionTests(unittest.TestCase):
         pending = self.prepare()
         self.assertEqual(self.prepare(), pending)
         state = resume.validate_prepared(self.root, self.backend)
-        self.assertEqual(state, {**self.before, "status": "ready", "stop_reason": None})
+        self.assertEqual(
+            state,
+            {
+                **self.before,
+                "status": "ready",
+                "stop_reason": None,
+                "execution_recovery_ref": "recoveries/"
+                + Path(pending["reconciliation"]).stem
+                + ".json",
+            },
+        )
         self.assertEqual((self.control / "STOP").read_text(), pending["stop_before"])
         for path, contents in {**original, **budgets}.items():
             self.assertEqual(path.read_bytes(), contents)
         self.backend.evaluate.assert_not_called()
+
+    def test_prepared_resume_requires_matching_core_recovery(self):
+        pending = self.prepare()
+        canonical = (
+            self.root
+            / "study/recoveries"
+            / (Path(pending["reconciliation"]).stem + ".json")
+        )
+        original = canonical.read_bytes()
+        canonical.unlink()
+        with self.assertRaisesRegex(ProTokError, "Core recovery evidence"):
+            resume.validate_prepared(self.root, self.backend)
+        (self.control / "STOP").unlink()
+        study = Study(self.root / "study")
+        before = study.status()
+        with self.assertRaisesRegex(ProTokError, "Core recovery evidence"):
+            resume.begin_pending(study, self.backend)
+        self.assertEqual(study.status(), before)
+        canonical.write_bytes(original)
+        changed = read(canonical)
+        changed["certificate"]["effect"] = "terminal"
+        write(canonical, changed)
+        with self.assertRaisesRegex(ProTokError, "Core recovery evidence differs"):
+            resume.begin_pending(study, self.backend)
+        self.assertEqual(study.status(), before)
 
     def test_begin_preserves_original_plan_and_next_stage_is_execute_then_review(
         self,
@@ -177,6 +230,7 @@ class ResumeSubmissionTests(unittest.TestCase):
         self.assertEqual(
             [call["phase"] for call in harness.calls], ["execute", "review"]
         )
+        self.assert_resume_evidence(harness, pending)
         self.assertTrue((self.root / "study/iterations/0002/publication.json").exists())
         self.assertEqual(read(self.source / "candidates.json")["candidates"], [])
 
@@ -443,7 +497,13 @@ class ResumeSubmissionTests(unittest.TestCase):
         expected["calls"].pop("execute")
         expected["accepted_calls"].pop("execute", None)
         expected.update(
-            status="ready", active_attempt=None, error=None, stop_reason=None
+            status="ready",
+            active_attempt=None,
+            error=None,
+            stop_reason=None,
+            execution_recovery_ref="recoveries/"
+            + Path(pending["reconciliation"]).stem
+            + ".json",
         )
         self.assertEqual(prepared, expected)
         (self.control / "STOP").unlink()
@@ -459,6 +519,7 @@ class ResumeSubmissionTests(unittest.TestCase):
         self.assertEqual(
             [call["phase"] for call in harness.calls], ["execute", "review"]
         )
+        self.assert_resume_evidence(harness, pending)
         self.assertEqual(result["call_count"], self.before["call_count"] + 2)
         for path, value in protected.items():
             if path == self.source / "iteration.json":
