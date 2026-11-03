@@ -165,8 +165,31 @@ class ProTokServerTests(unittest.TestCase):
                 "additional_gpu_seconds": 86400,
             },
         )
-        initialize(self.root / "study", goal="Parent")
-        self.write("study/state.json", {"status": "ready", "phase": "done"})
+        initialize(
+            self.root / "study",
+            goal="Parent",
+            workspace=self.root / "baseline",
+            allow_write=True,
+        )
+        # A complete synthetic legacy adapter seed, not a marker-only shortcut.
+        (self.root / "study/research.md").write_text(
+            "# Historical ProTok evidence\n\nSynthetic only.\n"
+        )
+        routes = {}
+        for rid in ("R0001", "R0002", "R0003"):
+            folder = self.root / "study/routes" / rid
+            folder.mkdir()
+            (folder / "research.md").write_text("Synthetic seed; no measured result.\n")
+            (folder / "evaluation.json").write_text("{}")
+            routes[rid] = {
+                "title": "Synthetic seed",
+                "status": "active",
+                "reason": "Offline fixture",
+                "resume_condition": None,
+                "research_ref": f"routes/{rid}/research.md",
+                "evaluation_ref": f"routes/{rid}/evaluation.json",
+            }
+        self.write("study/routes/index.json", routes)
         self.backend = SimpleNamespace(
             inspect=Mock(return_value={"outstanding": [], "used_gpu_seconds": 100}),
             _config=Mock(return_value={"reserve_gpu_seconds": 100}),
@@ -175,6 +198,7 @@ class ProTokServerTests(unittest.TestCase):
             read=SERVER.read,
             run_one=Mock(),
             repair_completed_control=Mock(return_value=False),
+            ensure_study_ready=Mock(),
         )
 
     def write(self, name, value):
@@ -367,6 +391,76 @@ class ProTokServerTests(unittest.TestCase):
         self.assertEqual(status["consecutive_failures"], 5)
         self.assertEqual(status["blocked_since"], 123)
         self.runner.run_one.assert_not_called()
+
+    def test_initialization_retries_until_threshold_then_retains_evidence(self):
+        import shutil
+
+        shutil.rmtree(self.root / "study")
+        self.runner.init_study = Mock(side_effect=OSError("same staging failure"))
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            if len(waits) == 7:
+                (self.root / "control/STOP").touch()
+
+        SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 0, wait=wait)
+        self.assertEqual(self.runner.init_study.call_count, 5)
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(
+            (status["stage"], status["consecutive_failures"]), ("initialization", 7)
+        )
+        self.assertEqual(status["attention_status"], "needs_attention")
+        self.runner.run_one.assert_not_called()
+        self.runner.repair_completed_control.assert_not_called()
+
+    def test_retried_initialization_records_a_changed_error_before_retaining_it(self):
+        import shutil
+
+        shutil.rmtree(self.root / "study")
+        self.runner.init_study = Mock(
+            side_effect=[
+                OSError("first staging failure"),
+                OSError("changed staging failure"),
+                OSError("changed staging failure"),
+            ]
+        )
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            if len(waits) == 4:
+                (self.root / "control/STOP").touch()
+
+        SERVER.drive(
+            self.root,
+            self.runner,
+            self.backend,
+            clock=lambda: 0,
+            wait=wait,
+            escalate_after=2,
+        )
+        self.assertEqual(self.runner.init_study.call_count, 3)
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["error"], "OSError: changed staging failure")
+        counts = {
+            row["error"]: row["consecutive_failures"] for row in status["failures"]
+        }
+        self.assertEqual(counts["OSError: first staging failure"], 1)
+        self.assertEqual(counts["OSError: changed staging failure"], 3)
+        self.runner.run_one.assert_not_called()
+
+    def test_readiness_accepts_empty_target_but_retains_unknown_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "study").mkdir()
+            self.assertFalse(SERVER.retained_study(root))
+            (root / "study/notes.md").write_text("retained operator evidence")
+            self.assertTrue(SERVER.retained_study(root))
+            (root / "study/notes.md").unlink()
+            (root / "study").rmdir()
+            (root / "study").symlink_to(root / "missing")
+            self.assertTrue(SERVER.retained_study(root))
 
     def test_missing_required_state_counts_seven_observations_without_execution(self):
         (self.root / "study/state.json").unlink()
@@ -811,7 +905,7 @@ class ProTokServerTests(unittest.TestCase):
         long_training = Mock()
         long_training.shutdown.side_effect = RuntimeError("long shutdown failed")
         with (
-            patch.object(SERVER, "Study"),
+            patch("integrations.protok.initialization.ready"),
             patch.object(
                 SERVER.sys,
                 "argv",

@@ -267,6 +267,53 @@ read-only dashboard retains healthy subtotals and labels partial accounting;
 inspection success never means all accounting is known. No reader substitutes
 zero or stale usage. These changes do not alter training/evaluation semantics.
 
+### Initialization and readiness
+
+Initialization is resumable and publishes only complete records. A retained
+`baseline/` is reused only when it is clean at the acknowledged commit; the clone
+and the seeded Study (`initialize`, historical narrative and three initial routes)
+are staged under `.initializing/` and renamed into place. A nonblocking
+`control/initialization.lock` serializes initializers. The retained
+`.initializing/owner.json` identifies this adapter and the acknowledged baseline;
+only its known unpublished `baseline/` and `study/` staging trees may be rebuilt.
+Unknown nonempty directories (including older unmarked staging), published Studies
+and mismatched baselines are preserved for explicit operator reconciliation.
+Symlinks in these control/staging paths are refused, not followed for cleanup.
+Run roots must remain private controller-owned directories; the lock coordinates
+cooperative writers, not hostile concurrent filesystem mutation.
+
+After all seeds exist, staging receives `study/protok-initialization.json` with
+`version: 1`, `status: "complete"` and the frozen Git `baseline`. The Study is
+validated before its final directory rename. Clone, core initialization, seed
+write or rename interruptions leave no partially published Study; retry reuses
+the validated baseline and rebuilds only owned unpublished staging. The supervisor
+accepts an empty, nonsymlink `study/` as an initialization target and retries an
+interrupted initializer up to five observations of the retained failure. At that
+threshold it preserves the staging and reports parent-scoped attention while
+independent authorized children remain live; it does not replay Execute or reset
+budgets. A verified complete publication clears the initialization failure.
+Nonempty unknown targets and symlinks still require reconciliation. This is
+process-interruption recovery, not a power-loss/fsync durability guarantee.
+
+Initialization, supervisor startup/polling and direct parent `--run-one` share
+`run.ensure_study_ready(root)` / `initialization.ready(root)`. The marker is never
+a substitute for current state: checks read the config, state, route/frontier
+indexes and required research documents. At zero rounds the three initial seed
+records must still exist. Without a marker, zero-round legacy Studies additionally
+need their historical narrative; a core-only `study.json` and ready `state.json`
+are incomplete and must not run. Already-running legacy Studies instead use the
+current iteration metadata and its frozen config context as evidence, so retired
+seed routes and evolving research remain valid. Readiness never writes a marker
+to certify legacy data, resets budgets/attempts, or rewrites notes/routes.
+
+These checks read a fixed set of local controller files only: JSON records are
+limited to 4 MiB each, research documents to their first 128 characters, and only
+the current iteration is inspected. There is no history-tree, dataset, checkpoint
+or workspace scan. They check initialization, not scientific correctness or
+backend authorization/accounting; normal per-task recovery and independent budget
+isolation still apply. Missing/corrupt retained evidence requires reconciliation,
+not deleting the published Study or inventing a completion record.
+
 ## Checks
 
 ```sh

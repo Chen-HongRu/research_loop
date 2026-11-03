@@ -19,6 +19,20 @@ historical identity or score is supplied by default. Existing initialized runs
 retain their frozen goal, candidate references and receipts; this change does
 not rewrite them. Configure settings before starting the process.
 
+The supervisor and direct parent runner also enforce the shared
+[initialization/readiness gate](README.md#initialization-and-readiness). A legacy
+zero-round core-only Study is incomplete even if `study.json` and a ready state
+exist. Preserve it for reconciliation; do not add a completion marker or delete
+it to force a restart. Previously running legacy Studies are accepted using their
+retained current-iteration metadata and frozen context, without requiring the
+original three routes forever. Marked Studies still need valid current state.
+Unknown unmarked staging is not automatically cleaned; only explicitly owned,
+unpublished initialization staging can be rebuilt. An empty nonsymlink `study/`
+may enter initialization. The supervisor retries initializer failures up to the
+five-observation threshold, then retains parent attention without stopping
+independent authorized children. Verified publication clears that failure; no
+recovery here resets research notes, attempts, budgets or published evidence.
+
 Keep these values and site-specific SSH/resource configuration in the operator's
 private environment. Do not infer a fingerprint or score from the current source,
 and do not fabricate a historical receipt to make initialization pass.

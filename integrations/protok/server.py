@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.run import job_path  # noqa: E402
-from research_loop import Study  # noqa: E402
 from research_loop.diagnostics import CommandDiagnostics, diagnostic_view  # noqa: E402
 
 
@@ -154,6 +153,14 @@ def readonly_resume(root, state):
     return True
 
 
+def retained_study(root):
+    """Distinguish published/unknown evidence from an empty initialization target."""
+    folder = root / "study"
+    return folder.is_symlink() or (
+        folder.exists() and (not folder.is_dir() or any(folder.iterdir()))
+    )
+
+
 def drive(root, runner, backend, *, clock=time.time, wait=time.sleep, escalate_after=5):
     from integrations.protok.round_admission import active_round
     from integrations.protok.supervisor_state import FailureCounts
@@ -184,6 +191,7 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep, escalate_a
     while not (control / "STOP").exists():
         stage = "control"
         state = None
+        initialization_attempted = False
         try:
             if original_owner is not None:
                 owner = read(ownership_path)
@@ -202,6 +210,9 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep, escalate_a
                 )
             reserve = backend._config()["reserve_gpu_seconds"]
             stage = "readiness"
+            if retained_study(root):
+                runner.ensure_study_ready(root)
+
             state_path = root / "study/state.json"
             state = read(state_path) if state_path.exists() else None
             if (control / "HANDOFF").exists() and state and state["phase"] == "done":
@@ -219,6 +230,16 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep, escalate_a
             ):
                 raise RuntimeError("Existing Study state is invalid")
             failures.success(stage)
+            if (
+                state is not None
+                and failed_operation
+                and failed_operation["stage"] == "initialization"
+            ):
+                # Readiness has verified a complete publication after an earlier
+                # initializer interruption; no Execute attempt has been replayed.
+                failures.success("initialization")
+                failed_operation = None
+                failed_state = None
             if (
                 failed_operation
                 and failed_state is not None
@@ -312,10 +333,13 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep, escalate_a
                     failed_operation
                     and failed_operation["stage"] == stage
                     and state == failed_state
+                    and failures.count(stage, failed_operation["error"])
+                    >= escalate_after
                 ):
                     raise RuntimeError(
                         "Retained initialization requires explicit reconciliation"
                     )
+                initialization_attempted = True
                 runner.init_study(root, backend)
                 failures.success(stage)
             write(
@@ -353,6 +377,7 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep, escalate_a
                 failed_operation
                 and state == failed_state
                 and stage == failed_operation["stage"]
+                and not initialization_attempted
             ):
                 message = failed_operation["error"]
             failure, first = failures.failure(stage, message, clock())
@@ -531,8 +556,10 @@ def main():
     # A copied archive or pending grant cannot become executable by starting this.
     if (control / "STOP").exists():
         raise SystemExit("Study is stopped; no action taken")
-    if (root / "study/study.json").exists():
-        Study(root / "study")
+    if retained_study(root):
+        from integrations.protok.initialization import ready
+
+        ready(root)
     try:
         owner = read(control / "ownership.json")
         spec = importlib.util.spec_from_file_location(

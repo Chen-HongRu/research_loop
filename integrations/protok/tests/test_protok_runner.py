@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -60,6 +61,9 @@ class FakeBackend:
                 str(control / "original/summary.json"),
             ],
         }
+
+    def _config(self):
+        return {"reserve_gpu_seconds": 3600}
 
     def inspect(self):
         return {
@@ -239,7 +243,7 @@ class ProTokRunnerTests(unittest.TestCase):
             return state
 
         with (
-            patch.object(RUNNER, "Study", return_value=Mock()),
+            patch.object(RUNNER, "ensure_study_ready", return_value=Mock()),
             patch.object(RUNNER, "_run_one", side_effect=execute),
         ):
             self.assertEqual(RUNNER.run_one(self.root, self.backend), state)
@@ -953,6 +957,8 @@ class ProTokRunnerTests(unittest.TestCase):
             },
         )
 
+        self.seed_synthetic_initialization()
+
         class InterruptedHarness(RecordedHarness):
             stop_after = 10
 
@@ -1082,6 +1088,546 @@ class ProTokRunnerTests(unittest.TestCase):
         self.assertEqual(RUNNER.git(self.project, "status", "--porcelain"), "")
         self.assertEqual(backend.evaluations, 0)
 
+    def seed_synthetic_initialization(self):
+        # Valid adapter seeds for core/harness fixtures, not a marker-only bypass.
+        from integrations.protok.initialization import COMPLETION, SEEDS, completion
+
+        folder = self.root / "study"
+        (folder / "research.md").write_text(
+            "# Historical ProTok evidence\n\nSynthetic evidence only.\n"
+        )
+        routes = {}
+        for rid in SEEDS:
+            research = f"routes/{rid}/research.md"
+            evaluation = f"routes/{rid}/evaluation.json"
+            RUNNER.write(folder / evaluation, {})
+            (folder / research).write_text("# Synthetic seed\n\nNo measurement.\n")
+            routes[rid] = {
+                "title": "Synthetic seed",
+                "status": "active",
+                "reason": "Offline fixture",
+                "resume_condition": None,
+                "research_ref": research,
+                "evaluation_ref": evaluation,
+            }
+        RUNNER.write(folder / "routes/index.json", routes)
+        RUNNER.write(
+            folder / COMPLETION,
+            completion(RUNNER.read(folder / "study.json")["baseline"]),
+        )
+        RUNNER.ensure_study_ready(self.root)
+
+    def study_snapshot(self, root):
+        return {
+            p.relative_to(root): p.read_bytes()
+            for p in (root / "study").rglob("*")
+            if p.is_file()
+        }
+
+    def initialization_root(self):
+        (self.project / "autoresearch-report.md").write_text(
+            "Historical best: 2.6046197081836633 A; 12 records, 11660 GPU s.\n"
+        )
+        RUNNER.git(self.project, "add", "--", "autoresearch-report.md")
+        RUNNER.git(
+            self.project,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "-m",
+            "Historical report",
+        )
+        best = RUNNER.git(self.project, "rev-parse", "HEAD")
+        root = self.directory / "initialized"
+        control = root / "control"
+        for name in ("ownership.json", "continuation.json"):
+            RUNNER.write(control / name, RUNNER.read(self.control / name))
+        return root, FakeBackend(self.project, control), best
+
+    def test_supervisor_resumes_owned_staging_after_one_seed_write_failure(self):
+        from integrations.protok import server
+
+        root, backend, best = self.initialization_root()
+        (root / "study").mkdir()  # An empty target is valid for initialization.
+        lease = RUNNER.read(root / "control/continuation.json")
+        RUNNER.write(
+            root / "control/continuation.json",
+            {
+                **lease,
+                "schema": 2,
+                "seconds": 86400,
+                "initial_gpu_seconds": backend.inspect()["used_gpu_seconds"],
+                "additional_gpu_seconds": 86400,
+            },
+        )
+        original = RUNNER.write
+        interrupted = False
+        waits = []
+
+        def write(path, value):
+            nonlocal interrupted
+            if not interrupted and str(path).endswith("R0002/evaluation.json"):
+                interrupted = True
+                raise OSError("synthetic seed write interruption")
+            return original(path, value)
+
+        def wait(seconds):
+            waits.append(seconds)
+            self.assertFalse((root / "study").exists())
+            self.assertTrue((root / ".initializing/study/study.json").exists())
+            status = RUNNER.read(root / "control/supervisor-status.json")
+            self.assertEqual(
+                (status["stage"], status["consecutive_failures"]), ("initialization", 1)
+            )
+
+        def finish(*args):
+            state = RUNNER.ensure_study_ready(root).status()
+            self.assertEqual((state["iteration"], state["call_count"]), (0, 0))
+            (root / "control/STOP").touch()
+            return state
+
+        with (
+            patch.object(RUNNER, "BEST_COMMIT", best),
+            patch.object(RUNNER, "write", side_effect=write),
+            patch.object(RUNNER, "init_study", wraps=RUNNER.init_study) as init,
+            patch.object(RUNNER, "run_one", side_effect=finish) as run,
+        ):
+            self.assertEqual(
+                server.drive(root, RUNNER, backend, wait=wait), "user_stop"
+            )
+        self.assertEqual(init.call_count, 2)
+        run.assert_called_once()
+        self.assertEqual(waits, [5])
+        self.assertEqual(backend.evaluations, 0)
+        self.assertEqual(RUNNER.git(root / "baseline", "rev-parse", "HEAD"), best)
+        status = RUNNER.read(root / "control/supervisor-status.json")
+        self.assertIsNone(
+            status["failed_operation"] if "failed_operation" in status else None
+        )
+        self.assertTrue(
+            all(row["consecutive_failures"] == 0 for row in status["failures"])
+        )
+
+    def test_initialization_resumes_after_a_retained_baseline(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+            # Crash after the clone and before the study was published.
+            shutil.rmtree(root / "study")
+            with patch.object(
+                RUNNER.subprocess, "run", wraps=RUNNER.subprocess.run
+            ) as run:
+                state = RUNNER.init_study(root, backend)
+        clones = [
+            call
+            for call in run.call_args_list
+            if isinstance(call.args[0], list) and "clone" in call.args[0]
+        ]
+        self.assertEqual(state["iteration"], 0)
+        self.assertEqual(clones, [])
+        self.assertEqual(RUNNER.git(root / "baseline", "rev-parse", "HEAD"), best)
+        self.assertEqual(len(RUNNER.read(root / "study/routes/index.json")), 3)
+
+    def test_initialization_rejects_a_retained_baseline_at_another_commit(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+        shutil.rmtree(root / "study")
+        with patch.object(RUNNER, "BEST_COMMIT", "0" * 40):
+            with self.assertRaisesRegex(ProTokError, "Retained baseline"):
+                RUNNER.init_study(root, backend)
+        self.assertFalse((root / "study").exists())
+
+    def test_legacy_core_only_initialization_is_rejected_by_all_entry_points(self):
+        import importlib.util
+
+        root, backend, best = self.initialization_root()
+        # Exact legacy interruption window: core initialized, adapter seeds not
+        # written yet. Use real Git and core, not a fabricated ready state.
+        RUNNER.initialize(
+            root / "study", goal=RUNNER.GOAL, workspace=self.project, allow_write=True
+        )
+        before = self.study_snapshot(root)
+        spec = importlib.util.spec_from_file_location(
+            "readiness_server", Path(RUNNER.__file__).with_name("server.py")
+        )
+        server = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(server)
+        lease = RUNNER.read(root / "control/continuation.json")
+        RUNNER.write(
+            root / "control/continuation.json",
+            {
+                **lease,
+                "schema": 2,
+                "seconds": 86400,
+                "initial_gpu_seconds": 0,
+                "additional_gpu_seconds": 86400,
+            },
+        )
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            for entry in (RUNNER.init_study, RUNNER.run_one):
+                with self.assertRaisesRegex(ProTokError, "incomplete"):
+                    entry(root, backend)
+        with (
+            patch.object(
+                server.sys,
+                "argv",
+                ["server", "--root", str(root), "--runner", RUNNER.__file__],
+            ),
+            patch("integrations.protok.tasks.ExperimentScheduler") as scheduler,
+            patch.object(server, "recover_owned") as recovery,
+        ):
+            with self.assertRaisesRegex(ProTokError, "incomplete"):
+                server.main()
+            scheduler.assert_not_called()
+            recovery.assert_not_called()
+        with patch.object(RUNNER, "run_one") as run:
+
+            def stop(_):
+                (root / "control/STOP").touch()
+
+            self.assertEqual(
+                server.drive(root, RUNNER, backend, wait=stop), "user_stop"
+            )
+            run.assert_not_called()
+        self.assertIn(
+            "incomplete", RUNNER.read(root / "control/supervisor-status.json")["error"]
+        )
+        self.assertEqual(before, self.study_snapshot(root))
+
+    def test_completion_record_does_not_hide_missing_current_state(self):
+        from integrations.protok import server
+
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+            (root / "study/state.json").unlink()
+            for entry in (RUNNER.init_study, RUNNER.run_one):
+                with self.assertRaisesRegex(ProTokError, "incomplete"):
+                    entry(root, backend)
+        before = self.study_snapshot(root)
+        with (
+            patch.object(
+                server.sys,
+                "argv",
+                ["server", "--root", str(root), "--runner", RUNNER.__file__],
+            ),
+            patch("integrations.protok.tasks.ExperimentScheduler") as scheduler,
+            self.assertRaisesRegex(ProTokError, "incomplete"),
+        ):
+            server.main()
+        scheduler.assert_not_called()
+        lease = RUNNER.read(root / "control/continuation.json")
+        RUNNER.write(
+            root / "control/continuation.json", {**lease, "schema": 2, "seconds": 86400}
+        )
+        with (
+            patch.object(RUNNER, "run_one") as run,
+            patch.object(RUNNER, "repair_completed_control") as repair,
+        ):
+            server.drive(
+                root, RUNNER, backend, wait=lambda _: (root / "control/STOP").touch()
+            )
+        run.assert_not_called()
+        repair.assert_not_called()
+        self.assertIn(
+            "incomplete", RUNNER.read(root / "control/supervisor-status.json")["error"]
+        )
+        self.assertEqual(self.study_snapshot(root), before)
+
+    def test_legacy_running_study_does_not_require_unchanged_seed_routes(self):
+        from integrations.protok.initialization import COMPLETION
+
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+            (root / "study" / COMPLETION).unlink()
+            # Complete legacy zero-round seeds are sufficient without a marker.
+            RUNNER.ensure_study_ready(root)
+            harness = RecordedHarness()
+            harness.stop_after = 10
+            study = RUNNER.Study(root / "study", harness=harness)
+            state = study.run(iterations=1)
+            self.assertEqual(state["iteration"], 1)
+            self.assertGreater(state["call_count"], 0)
+            self.assertEqual(harness.count("review"), 1)
+            # A real reviewed iteration remains evidence after seeds retire.
+            RUNNER.write(root / "study/routes/index.json", {})
+            shutil.rmtree(root / "study/routes/R0002")
+            before = self.study_snapshot(root)
+            self.assertEqual(RUNNER.init_study(root, backend), state)
+            self.assertEqual(RUNNER.ensure_study_ready(root).status(), state)
+            self.assertEqual(self.study_snapshot(root), before)
+            self.assertFalse((root / "study" / COMPLETION).exists())
+
+    def test_seed_write_interruption_is_not_published(self):
+        root, backend, best = self.initialization_root()
+        original = RUNNER.write
+
+        def interrupt(path, value):
+            if str(path).endswith("R0002/evaluation.json"):
+                raise OSError("synthetic seed write interruption")
+            return original(path, value)
+
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            with patch.object(RUNNER, "write", side_effect=interrupt):
+                with self.assertRaisesRegex(OSError, "seed write"):
+                    RUNNER.init_study(root, backend)
+            self.assertFalse((root / "study").exists())
+            RUNNER.init_study(root, backend)
+            self.assertEqual(RUNNER.ensure_study_ready(root).status()["iteration"], 0)
+
+    def test_initialization_preserves_an_unrecognized_study_directory(self):
+        root, backend, best = self.initialization_root()
+        (root / "study").mkdir(parents=True)
+        (root / "study/notes.md").write_text("operator notes")
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            with self.assertRaisesRegex(ProTokError, "without study.json"):
+                RUNNER.init_study(root, backend)
+        self.assertTrue((root / "study/notes.md").exists())
+
+    def test_initialization_rebuilds_an_interrupted_staging_study(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+            shutil.rmtree(root / "study")
+            stale = root / ".initializing/study/routes"
+            stale.mkdir(parents=True)
+            (stale / "stale.json").write_text("{}")
+            state = RUNNER.init_study(root, backend)
+        self.assertEqual(state["status"], "ready")
+        self.assertFalse((root / "study/routes/stale.json").exists())
+        self.assertEqual(len(RUNNER.read(root / "study/routes/index.json")), 3)
+
+    def test_initialization_does_not_rewrite_a_complete_study(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+            index = RUNNER.read(root / "study/routes/index.json")
+            index["R0001"]["status"] = "paused"
+            RUNNER.write(root / "study/routes/index.json", index)
+            (root / "study/research.md").write_text(
+                "Operator's evolving research notes.\n"
+            )
+            before = self.study_snapshot(root)
+            state = RUNNER.init_study(root, backend)
+            self.assertEqual(self.study_snapshot(root), before)
+        self.assertEqual(state["status"], "ready")
+        self.assertEqual(RUNNER.read(root / "study/routes/index.json"), index)
+
+    def test_initialization_publishes_the_study_only_when_complete(self):
+        root, backend, best = self.initialization_root()
+        original = RUNNER.initialize
+
+        def interrupt(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("crash after core initialization")
+
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            with patch.object(RUNNER, "initialize", side_effect=interrupt):
+                with self.assertRaisesRegex(RuntimeError, "crash"):
+                    RUNNER.init_study(root, backend)
+            self.assertFalse((root / "study").exists())
+            self.assertTrue((root / "baseline").is_dir())
+            state = RUNNER.init_study(root, backend)
+        self.assertEqual(state["iteration"], 0)
+        self.assertTrue((root / "study/study.json").exists())
+
+    def test_clone_interruption_retries_only_owned_unpublished_staging(self):
+        root, backend, best = self.initialization_root()
+        original = RUNNER.subprocess.run
+
+        def interrupt(command, *args, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                partial = Path(command[-1])
+                partial.mkdir()
+                (partial / "partial-clone").write_text("interrupted")
+                raise RuntimeError("clone interrupted")
+            return original(command, *args, **kwargs)
+
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            with patch.object(RUNNER.subprocess, "run", side_effect=interrupt):
+                with self.assertRaisesRegex(RuntimeError, "clone interrupted"):
+                    RUNNER.init_study(root, backend)
+            self.assertFalse((root / "baseline").exists())
+            self.assertFalse((root / "study").exists())
+            RUNNER.init_study(root, backend)
+        self.assertFalse((root / "baseline/partial-clone").exists())
+        self.assertEqual(RUNNER.ensure_study_ready(root).status()["iteration"], 0)
+
+    def test_final_rename_interruption_preserves_baseline_and_retries(self):
+        from integrations.protok.initialization import COMPLETION
+
+        root, backend, best = self.initialization_root()
+        original = Path.rename
+
+        def interrupt(path, target):
+            if path == root / ".initializing/study":
+                raise OSError("publication interrupted")
+            return original(path, target)
+
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            with patch.object(Path, "rename", interrupt):
+                with self.assertRaisesRegex(OSError, "publication interrupted"):
+                    RUNNER.init_study(root, backend)
+            self.assertFalse((root / "study").exists())
+            self.assertTrue((root / ".initializing/study" / COMPLETION).exists())
+            baseline_inode = (root / "baseline").stat().st_ino
+            state = RUNNER.init_study(root, backend)
+        self.assertEqual((root / "baseline").stat().st_ino, baseline_inode)
+        self.assertEqual(state["iteration"], 0)
+
+    def test_unrecognized_staging_is_preserved(self):
+        root, backend, best = self.initialization_root()
+        note = root / ".initializing/study/operator-notes.md"
+        note.parent.mkdir(parents=True)
+        note.write_text("Unknown retained evidence")
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            with self.assertRaisesRegex(ProTokError, "Unowned"):
+                RUNNER.init_study(root, backend)
+        self.assertEqual(note.read_text(), "Unknown retained evidence")
+        self.assertFalse((root / "baseline").exists())
+
+    def test_concurrent_initializer_cannot_remove_live_staging(self):
+        from integrations.protok.initialization import initialization_lock
+
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            with initialization_lock(root):
+                staging = RUNNER._initialization_staging(root, "study")
+                staging.mkdir()
+                note = staging / "in-progress"
+                note.write_text("live writer")
+                with self.assertRaisesRegex(ProTokError, "initializer is active"):
+                    RUNNER.init_study(root, backend)
+                self.assertEqual(note.read_text(), "live writer")
+            RUNNER.init_study(root, backend)
+        RUNNER.ensure_study_ready(root)
+
+    def test_initialization_rejects_symlink_targets_without_touching_them(self):
+        root, backend, best = self.initialization_root()
+        outside = self.directory / "outside"
+        outside.mkdir()
+        note = outside / "notes.md"
+        note.write_text("Do not touch")
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            for relative in (
+                "study",
+                "baseline",
+                ".initializing",
+                "control/initialization.lock",
+            ):
+                with self.subTest(relative=relative):
+                    link = root / relative
+                    link.unlink(missing_ok=True)
+                    link.symlink_to(outside, target_is_directory=True)
+                    with self.assertRaises(ProTokError):
+                        RUNNER.init_study(root, backend)
+                    self.assertTrue(link.is_symlink())
+                    self.assertEqual(note.read_text(), "Do not touch")
+                    link.unlink()
+            # The same protection applies inside an explicitly owned staging root.
+            staging = RUNNER._initialization_staging(root, "study")
+            staging.symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ProTokError):
+                RUNNER.init_study(root, backend)
+            self.assertEqual(note.read_text(), "Do not touch")
+
+    def test_marker_cannot_hide_missing_or_invalid_required_records(self):
+        from integrations.protok.initialization import COMPLETION
+
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+        for relative in (
+            "study.json",
+            "state.json",
+            "routes/index.json",
+            "frontiers.json",
+            "goal.md",
+            "research.md",
+            "routes/R0002/evaluation.json",
+        ):
+            with self.subTest(relative=relative):
+                path = root / "study" / relative
+                content = path.read_bytes()
+                path.unlink()
+                with self.assertRaises(ProTokError):
+                    RUNNER.ensure_study_ready(root)
+                path.write_bytes(content)
+        marker = root / "study" / COMPLETION
+        original = RUNNER.read(marker)
+        for changed in (
+            {"version": 2},
+            {"status": "initializing"},
+            {"baseline": "0" * 40},
+        ):
+            RUNNER.write(marker, {**original, **changed})
+            with self.assertRaises(ProTokError):
+                RUNNER.ensure_study_ready(root)
+        RUNNER.write(marker, original)
+        state = root / "study/state.json"
+        outside = self.directory / "retained-state.json"
+        state.rename(outside)
+        state.symlink_to(outside)
+        with self.assertRaises(ProTokError):
+            RUNNER.ensure_study_ready(root)
+        self.assertTrue(outside.is_file())
+
+    def test_legacy_iteration_counter_without_retained_evidence_is_rejected(self):
+        from integrations.protok.initialization import COMPLETION
+
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+        (root / "study" / COMPLETION).unlink()
+        state = RUNNER.read(root / "study/state.json")
+        RUNNER.write(root / "study/state.json", {**state, "iteration": 1})
+        RUNNER.write(root / "study/iterations/0001/iteration.json", {"id": "0001"})
+        before = self.study_snapshot(root)
+        with self.assertRaises(ProTokError):
+            RUNNER.ensure_study_ready(root)
+        self.assertEqual(self.study_snapshot(root), before)
+
+    def test_readiness_reads_only_bounded_controller_records(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+        # These paths must never be scanned or opened by readiness.
+        (root / "study/checkpoints").symlink_to(self.project, target_is_directory=True)
+        (root / "study/datasets").symlink_to(self.project, target_is_directory=True)
+        opened = []
+        original = Path.open
+
+        def tracked(path, *args, **kwargs):
+            opened.append(path.relative_to(root / "study").as_posix())
+            return original(path, *args, **kwargs)
+
+        with (
+            patch.object(Path, "open", tracked),
+            patch.object(Path, "rglob", side_effect=AssertionError("No scans")),
+            patch.object(Path, "iterdir", side_effect=AssertionError("No scans")),
+        ):
+            RUNNER.ensure_study_ready(root)
+        expected = {
+            "study.json",
+            "state.json",
+            "routes/index.json",
+            "frontiers.json",
+            "goal.md",
+            "research.md",
+            "protok-initialization.json",
+        }
+        expected |= {
+            f"routes/R000{i}/{name}"
+            for i in (1, 2, 3)
+            for name in ("research.md", "evaluation.json")
+        }
+        self.assertEqual(set(opened), expected)
+        self.assertEqual(len(opened), len(expected) + 1)  # Study also reads config.
+
     def test_run_one_corrects_rejected_plan_and_publishes_import(self):
         from research_loop import initialize
         from research_loop.harness import HarnessConfig
@@ -1112,6 +1658,8 @@ class ProTokRunnerTests(unittest.TestCase):
                 "constraints": [],
             },
         )
+
+        self.seed_synthetic_initialization()
 
         class InterfaceHarness(RecordedHarness):
             bad_plan = True
