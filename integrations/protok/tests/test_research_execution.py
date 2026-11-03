@@ -675,8 +675,14 @@ class ResearchExecutionTests(unittest.TestCase):
         receipt = RUNNER.read(path)
         receipt["execution_identity"] = "another-job"
         RUNNER.write(path, receipt)
-        with self.assertRaisesRegex(ProTokError, "inconsistent"):
-            research_usage(self.control)
+        report = research_usage(self.control)
+        self.assertIsNone(report["gpu_seconds"])
+        self.assertEqual(report["known_gpu_seconds"], 0)
+        self.assertIn("inconsistent", report["errors"][0]["error"])
+        backend, config, _, submit = self.formal_hooks()
+        with self.assertRaisesRegex(RuntimeError, "Unsettled research allocation"):
+            backend.submit(config, None, {}, {})
+        submit.assert_not_called()
 
     def test_formal_hook_refuses_new_job_with_unknown_research_accounting(self):
         RUNNER.write(

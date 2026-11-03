@@ -1195,7 +1195,8 @@ def snapshot(root, *, snapshot_only=False):
         "snapshot_only": snapshot_only,
         "backend_observed_at": backend.get("observed_at"),
         "backend_error": backend_error,
-        "accounting_available": backend_error is None,
+        "accounting_available": backend_error is None
+        and backend.get("accounting_status", "known") == "known",
         "research_overruns": backend.get("research_overruns", []),
         "state": {
             k: state.get(k)
@@ -1220,10 +1221,20 @@ def snapshot(root, *, snapshot_only=False):
         "long_training": long_training_snapshot(root / "study"),
         "best": {"id": best.get("experiment_id"), "metrics": best.get("metrics", {})},
         "gpu_seconds": backend.get("total_gpu_seconds", backend["used_gpu_seconds"]),
-        "formal_gpu_seconds": backend["used_gpu_seconds"]
-        - backend.get("research_gpu_seconds", 0)
-        if backend_error is None
-        else None,
+        "accounting_status": backend.get(
+            "accounting_status", "unknown" if backend_error else "known"
+        ),
+        "accounting_errors": backend.get("accounting_errors", []),
+        "known_gpu_seconds": backend.get("known_gpu_seconds"),
+        "formal_gpu_seconds": backend.get(
+            "formal_gpu_seconds",
+            (
+                backend["used_gpu_seconds"] - backend.get("research_gpu_seconds", 0)
+                if backend["used_gpu_seconds"] is not None
+                and backend.get("research_gpu_seconds", 0) is not None
+                else None
+            ),
+        ),
         "research_gpu_seconds": backend.get("research_gpu_seconds", 0)
         if backend_error is None
         else None,
@@ -2075,6 +2086,10 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
     limitations.extend(notes)
     if active.get("backend_error"):
         limitations.append("当前后端核账不可用：" + active["backend_error"])
+    elif active.get("accounting_status") == "partial":
+        limitations.append(
+            "部分费用未核清：已知小计不代表总费用或剩余额度；仅受影响任务/预算池等待核对。"
+        )
     for overrun in active.get("research_overruns", []):
         limitations.append(
             f"研究 #{overrun['iteration']} 已按实际 {overrun['gpu_seconds']} GPU 秒结算"

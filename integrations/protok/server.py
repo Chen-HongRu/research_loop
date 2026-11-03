@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.run import job_path  # noqa: E402
-from research_loop import Study  # noqa: E402
 from research_loop.diagnostics import CommandDiagnostics, diagnostic_view  # noqa: E402
 
 
@@ -154,8 +153,17 @@ def readonly_resume(root, state):
     return True
 
 
-def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
+def retained_study(root):
+    """Distinguish published/unknown evidence from an empty initialization target."""
+    folder = root / "study"
+    return folder.is_symlink() or (
+        folder.exists() and (not folder.is_dir() or any(folder.iterdir()))
+    )
+
+
+def drive(root, runner, backend, *, clock=time.time, wait=time.sleep, escalate_after=5):
     from integrations.protok.round_admission import active_round
+    from integrations.protok.supervisor_state import FailureCounts
 
     control = root / "control"
     lease = read(control / "continuation.json")
@@ -174,16 +182,37 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
         control / "pipeline-diagnostics",
         secrets=(owner_token,) if isinstance(owner_token, str) else (),
     )
-    last_error = (previous.get("stage"), previous.get("error"))
+    failures = FailureCounts(previous, root / "study")
+    failed_operation = previous.get("failed_operation")
+    ownership_path = control / "ownership.json"
+    original_owner = read(ownership_path) if ownership_path.exists() else None
     delay = 5
     repaired = False
     while not (control / "STOP").exists():
-        stage = "inspection"
+        stage = "control"
         state = None
+        initialization_attempted = False
         try:
-            ownership = control / "ownership.json"
-            if ownership.exists():
-                deadline = min(deadline, read(ownership)["expires_at"])
+            if original_owner is not None:
+                owner = read(ownership_path)
+                deadline = min(deadline, owner["expires_at"])
+                if owner != original_owner:
+                    raise RuntimeError("Shared ownership changed")
+            if isinstance(owner_token, str) and (
+                original_owner is None
+                or original_owner.get("owner_token") != owner_token
+                or original_owner.get("handoff_acknowledged") is not True
+                or read(control / "continuation.json") != lease
+                or lease.get("owner_token") != owner_token
+            ):
+                raise RuntimeError(
+                    "Shared ownership/continuation authorization is invalid"
+                )
+            reserve = backend._config()["reserve_gpu_seconds"]
+            stage = "readiness"
+            if retained_study(root):
+                runner.ensure_study_ready(root)
+
             state_path = root / "study/state.json"
             state = read(state_path) if state_path.exists() else None
             if (control / "HANDOFF").exists() and state and state["phase"] == "done":
@@ -192,56 +221,173 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
                 root, owner_token=getattr(backend, "owner_token", None)
             ):
                 return "deadline"
+            if (root / "study/study.json").exists() and state is None:
+                raise RuntimeError(
+                    "Existing Study is missing required state.json; preserve initialization evidence"
+                )
+            if state is not None and (
+                not isinstance(state, dict) or "phase" not in state
+            ):
+                raise RuntimeError("Existing Study state is invalid")
+            failures.success(stage)
+            if (
+                state is not None
+                and failed_operation
+                and failed_operation["stage"] == "initialization"
+            ):
+                # Readiness has verified a complete publication after an earlier
+                # initializer interruption; no Execute attempt has been replayed.
+                failures.success("initialization")
+                failed_operation = None
+                failed_state = None
+            if (
+                failed_operation
+                and failed_state is not None
+                and state != failed_state
+                and state
+                and state.get("status") == "ready"
+            ):
+                # The same state transition used by child scheduling recognizes
+                # an explicit retry/reconciliation. Automatic retries clear their
+                # retained snapshot themselves and do not take this reset path.
+                failures.success(failed_operation["stage"])
+                failed_operation = None
+                failed_state = None
             if state and not repaired:
+                stage = "repair"
+                if (
+                    failed_operation
+                    and failed_operation["stage"] == stage
+                    and state == failed_state
+                ):
+                    raise RuntimeError(
+                        "Retained repair requires explicit reconciliation"
+                    )
                 runner.repair_completed_control(root, backend)
                 repaired = True
                 state = read(state_path)
+                failures.success(stage)
+            stage = "inspection"
             status = backend.inspect()
-            if status.get("research_outstanding") or (
-                status["outstanding"] and not (state and state.get("debugging"))
-            ):
-                raise RuntimeError("Outstanding job requires explicit reconciliation")
-            spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
-            if spent < 0:
-                raise RuntimeError("Historical GPU accounting decreased")
-            reserve = backend._config()["reserve_gpu_seconds"]
             fresh = state is None or state["phase"] == "done"
+            safe_readonly = (
+                state
+                and state.get("phase") in {"selection", "plan", "review"}
+                and not state.get("debugging")
+            )
+            if not safe_readonly:
+                if status.get("research_outstanding") or (
+                    status["outstanding"] and not (state and state.get("debugging"))
+                ):
+                    raise RuntimeError(
+                        "Outstanding job requires explicit reconciliation"
+                    )
+                if status["used_gpu_seconds"] is None:
+                    raise RuntimeError("Short allocation accounting is unknown")
+            spent = (
+                status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
+                if status["used_gpu_seconds"] is not None
+                else None
+            )
+            if spent is not None and spent < 0:
+                raise RuntimeError("Historical GPU accounting decreased")
+            if status["used_gpu_seconds"] is not None and not (
+                status["outstanding"] or status.get("research_outstanding")
+            ):
+                failures.success(stage)
             minimum = 60 if (control / "research-policy.json").exists() else 1800
             if fresh and spent + minimum + reserve > lease["additional_gpu_seconds"]:
                 return "budget"
+            stage = "retained_state"
             if state and state.get("status") == "stopped":
-                return "attention"
+                raise RuntimeError(
+                    "Parent Study stopped; independent children remain authorized"
+                )
             if state and (
                 state.get("status") == "needs_attention" or state == failed_state
             ):
+                if failed_operation and state == failed_state:
+                    operation_count = failures.count(
+                        failed_operation["stage"], failed_operation["error"]
+                    )
+                    if not (
+                        safe_readonly
+                        and failed_operation["stage"] == "iteration"
+                        and operation_count < escalate_after
+                    ):
+                        stage = failed_operation["stage"]
+                        raise RuntimeError(
+                            "Retained operation requires explicit reconciliation"
+                        )
+                stage = "readonly_retry"
                 if readonly_resume(root, state):
                     # Review publication may have completed the iteration. Re-read
                     # state and admission before starting any subsequent agent call.
                     failed_state = None
+                    failures.success(stage)
                     continue
                 raise RuntimeError("Retained effects require explicit reconciliation")
             if not (root / "study/study.json").exists():
                 stage = "initialization"
+                if (
+                    failed_operation
+                    and failed_operation["stage"] == stage
+                    and state == failed_state
+                    and failures.count(stage, failed_operation["error"])
+                    >= escalate_after
+                ):
+                    raise RuntimeError(
+                        "Retained initialization requires explicit reconciliation"
+                    )
+                initialization_attempted = True
                 runner.init_study(root, backend)
+                failures.success(stage)
             write(
                 supervisor_path,
-                {"status": "running", "at": clock(), "first_error": first_error},
+                {
+                    "status": "running",
+                    "at": clock(),
+                    "first_error": first_error,
+                    "failures": failures.rows,
+                },
             )
             stage = "iteration"
             state = runner.run_one(root, backend)
-            failed_state = None
             delay = 5
             if state["status"] == "needs_attention":
                 raise RuntimeError("Iteration requires attention")
+            failed_state = None
+            failed_operation = None
+            failures.success(stage)
+            write(
+                supervisor_path,
+                {
+                    "status": "running",
+                    "at": clock(),
+                    "first_error": first_error,
+                    "failures": failures.rows,
+                },
+            )
             if state["status"] != "ready":
                 return "review_stop"
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             first_error = first_error or message
-            if (stage, message) != last_error:
+            if (
+                failed_operation
+                and state == failed_state
+                and stage == failed_operation["stage"]
+                and not initialization_attempted
+            ):
+                message = failed_operation["error"]
+            failure, first = failures.failure(stage, message, clock())
+            consecutive = failure["consecutive_failures"]
+            if first:
                 diagnostics.record_error(error, stage=stage, owner="pipeline")
-                last_error = (stage, message)
-            if stage in {"iteration", "initialization"}:
+            if stage in {"iteration", "initialization"} or (
+                stage in {"readonly_retry", "repair"} and consecutive >= escalate_after
+            ):
+                failed_operation = {"stage": stage, "error": message}
                 path = root / "study/state.json"
                 failed_state = state
                 try:
@@ -257,14 +403,35 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
                     "first_error": first_error,
                     "error": message,
                     "failed_state": failed_state,
+                    "consecutive_failures": consecutive,
+                    "blocked_since": failure["blocked_since"],
+                    "escalated": consecutive >= escalate_after,
+                    "attention_status": "needs_attention"
+                    if consecutive >= escalate_after
+                    else "retrying",
+                    "scope": "global" if stage == "control" else "parent",
+                    "target": str(root / "study"),
+                    "failures": failures.rows,
+                    "failed_operation": failed_operation,
                     "diagnostics": diagnostics.view(owner="pipeline"),
                 },
             )
-            # Polling only reads receipts. Execute remains blocked until explicit
-            # reconciliation changes its retained state; core budgets bound retries.
+            if stage == "control":
+                # Invalidate affected workers before joining, not after they exit.
+                (control / "STOP").write_text(
+                    "Shared control invalid; reconcile before resuming.\n"
+                )
+                return "global_attention"
+            # Execute remains blocked until explicit reconciliation changes its
+            # retained state; core budgets bound retries.
             wait(delay if clock() >= deadline else min(delay, deadline - clock()))
             delay = min(delay * 2, 60)
     return "user_stop"
+
+
+def exit_status(reason):
+    """Only shared-control failure requires global failure exit."""
+    return 2 if reason == "global_attention" else 0
 
 
 def finish_long_training(root, scheduler, reason, *, wait=time.sleep):
@@ -298,7 +465,7 @@ def final_summary(root, runner, backend, reason, *, first_error=None):
             errors.append(f"{label}: {type(error).__name__}: {error}")
             return None
 
-    status = attempt("inspection", backend.inspect)
+    status = attempt("inspection", lambda: backend.inspect())
     lease = attempt("lease", lambda: read(control / "continuation.json"))
     supervisor = attempt(
         "supervisor status",
@@ -349,7 +516,30 @@ def final_summary(root, runner, backend, reason, *, first_error=None):
             "total_gpu_seconds": status.get("total_gpu_seconds", used)
             if status is not None
             else None,
-            "accounting_status": "known" if status is not None else "unknown",
+            "accounting_status": status.get("accounting_status", "known")
+            if status is not None
+            else "unknown",
+            "known_gpu_seconds": status.get(
+                "known_gpu_seconds", status.get("total_gpu_seconds", used)
+            )
+            if status is not None
+            else None,
+            "known_subtotals": {
+                "short_gpu_seconds": status.get("short_known_gpu_seconds", used),
+                "automatic_gpu_seconds": status.get(
+                    "long_training_known_gpu_seconds",
+                    status.get("long_training_gpu_seconds"),
+                ),
+                "manual_gpu_seconds": status.get(
+                    "manual_training_known_gpu_seconds",
+                    status.get("manual_training_gpu_seconds"),
+                ),
+            }
+            if status is not None
+            else None,
+            "accounting_errors": status.get("accounting_errors", [])
+            if status is not None
+            else [],
             "cleanup_errors": errors,
             "best": best,
         },
@@ -366,15 +556,36 @@ def main():
     # A copied archive or pending grant cannot become executable by starting this.
     if (control / "STOP").exists():
         raise SystemExit("Study is stopped; no action taken")
-    if (root / "study/study.json").exists():
-        Study(root / "study")
-    owner = read(control / "ownership.json")
-    spec = importlib.util.spec_from_file_location("trusted_protok_runner", args.runner)
-    runner = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(runner)
-    backend = runner.ProTokBackend(
-        Path(owner["project"]), control, owner["owner_token"]
-    )
+    if retained_study(root):
+        from integrations.protok.initialization import ready
+
+        ready(root)
+    try:
+        owner = read(control / "ownership.json")
+        spec = importlib.util.spec_from_file_location(
+            "trusted_protok_runner", args.runner
+        )
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        backend = runner.ProTokBackend(
+            Path(owner["project"]), control, owner["owner_token"]
+        )
+    except Exception as error:
+        # No worker has started, but a broken shared control entry point still
+        # needs a durable stop and summary, not only a process traceback.
+        control.mkdir(parents=True, exist_ok=True)
+        with (control / "supervisor.lock").open("a") as lock:
+            # A failed duplicate startup may not stop another supervisor owner.
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            (control / "STOP").write_text(
+                "Shared supervisor startup failed; preserve control.\n"
+            )
+            message = f"{type(error).__name__}: {error}"
+            write(
+                control / "supervisor-error.json", {"error": message, "at": time.time()}
+            )
+            final_summary(root, None, None, "global_attention", first_error=message)
+        return exit_status("global_attention")
 
     def stop(signum, frame):
         (control / "STOP").write_text("Supervisor stop requested; cancel owned work.\n")
@@ -384,13 +595,18 @@ def main():
     signal.signal(signal.SIGINT, stop)
     with (control / "supervisor.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        reason = "attention"
+        reason = "global_attention"
         scout = None
         first_error = None
         long_training = None
         try:
             from integrations.protok.tasks import ExperimentScheduler
 
+            if (
+                not isinstance(owner.get("owner_token"), str)
+                or not owner["owner_token"]
+            ):
+                raise ValueError("A nonempty shared ownership identity is required")
             long_training = ExperimentScheduler(root, backend)
             long_training.start()
             study_config = root / "study/study.json"
@@ -417,6 +633,8 @@ def main():
             if isinstance(error, KeyboardInterrupt):
                 reason = "user_stop"
         finally:
+            if reason in {"global_attention", "user_stop"}:
+                (control / "STOP").write_text(f"Supervisor stopped: {reason}\n")
             try:
                 if scout is not None:
                     scout.shutdown()
@@ -437,8 +655,14 @@ def main():
                         )
                 except KeyboardInterrupt:
                     reason = "user_stop"
+                    (control / "STOP").write_text(
+                        "Supervisor interrupted; cancel owned work.\n"
+                    )
                 except Exception as error:
-                    reason = "attention"
+                    reason = "global_attention"
+                    (control / "STOP").write_text(
+                        "Scheduler control failed; cancel owned work.\n"
+                    )
                     first_error = first_error or f"{type(error).__name__}: {error}"
                     write(
                         control / "long-training-shutdown-error.json",
@@ -453,8 +677,15 @@ def main():
                     long_training.shutdown()
                 except KeyboardInterrupt:
                     reason = "user_stop"
+                    (control / "STOP").write_text(
+                        "Supervisor interrupted; cancel owned work.\n"
+                    )
                     long_training.shutdown()
                 except Exception as error:
+                    reason = "global_attention"
+                    (control / "STOP").write_text(
+                        "Scheduler shutdown failed; cancel owned work.\n"
+                    )
                     first_error = first_error or f"{type(error).__name__}: {error}"
                     write(
                         control / "long-training-shutdown-error.json",
@@ -478,7 +709,8 @@ def main():
                         {"error": str(recovery_error), "at": time.time()},
                     )
             final_summary(root, runner, backend, reason, first_error=first_error)
+        return exit_status(reason)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

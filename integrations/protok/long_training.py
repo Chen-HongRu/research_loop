@@ -125,7 +125,7 @@ def round_authorization(backend, root, request, token=None, *, reconcile=False):
     spent = usage(
         control, pool="manual" if task_id is not None else "automatic", task_id=task_id
     )
-    if spent["outstanding"]:
+    if spent["outstanding"] or spent["gpu_seconds"] is None:
         raise ProTokError("Long allocation accounting is unresolved")
     if (
         spent["gpu_seconds"] + policy["gpu_seconds_per_run"]
@@ -140,7 +140,13 @@ def _directory(root, run_id):
 
 
 def usage(control, *, pool="automatic", task_id=None):
-    """Read only small allocation ledgers; unresolved jobs remain charged/outstanding."""
+    """Report known costs separately from unresolved allocations, never as credit.
+
+    The controller's ledger directory fixes the pool. Only the original job (not
+    a receipt's claimed task ID) can exclude another manual grant. A damaged job
+    cannot exclude any task in that pool. Contradictory pool metadata affects both
+    long pools. No receipt fault mutates jobs, reservations or child state.
+    """
     control = Path(control)
     if pool not in {"automatic", "manual"} or (
         pool == "automatic" and task_id is not None
@@ -148,42 +154,148 @@ def usage(control, *, pool="automatic", task_id=None):
         raise ProTokError("Invalid long-training budget pool")
     if task_id is not None:
         _task_folder(control, task_id)
-    used, outstanding = 0, []
-    ledger = "manual-training-jobs" if pool == "manual" else "long-training-jobs"
-    for path in sorted((control / ledger).glob("L*/job.json")):
-        job = _read(path)
-        if pool == "manual":
-            identity = job.get("manual_task_id")
-            if (
-                not identity
-                or job.get("budget_pool") != "manual"
-                or job.get("request", {}).get("manual_task_id") != identity
-            ):
-                raise ProTokError("Manual allocation identity is invalid")
-            if task_id is not None and identity != task_id:
-                continue
-        receipt_path = path.parent / "receipt.json"
-        if not receipt_path.exists():
-            outstanding.append(str(path.parent))
-            continue
-        receipt = _read(receipt_path)
-        seconds = receipt.get("gpu_seconds")
-        if (
-            type(seconds) is not int
-            or seconds < 0
-            or receipt.get("source_identity") != job["source_identity"]
-            or receipt.get("run_id") != job["run_id"]
-            or receipt.get("status") not in {"completed", "failed"}
-            or (
-                pool == "manual"
-                and (
-                    receipt.get("manual_task_id") != identity
-                    or receipt.get("budget_pool") != "manual"
+    used, outstanding, errors = 0, [], []
+    for ledger_pool, ledger in (
+        ("automatic", "long-training-jobs"),
+        ("manual", "manual-training-jobs"),
+    ):
+        directory = control / ledger
+        try:
+            if directory.is_symlink():
+                raise ProTokError("Long allocation ledger must be anchored in control")
+            folders = sorted(directory.iterdir()) if directory.exists() else []
+        except (OSError, ProTokError) as error:
+            if pool == ledger_pool:
+                outstanding.append(str(directory))
+                errors.append(
+                    {
+                        "pool": ledger_pool,
+                        "task_id": None,
+                        "record": str(directory),
+                        "error": f"{type(error).__name__}: {error}",
+                    }
                 )
-            )
-        ):
-            raise ProTokError("Long-training accounting receipt is invalid")
-        used += seconds
+            continue
+        for folder in folders:
+            if not folder.name.startswith("L"):
+                continue
+            # Explicit recover_authored archives only pre-allocation preparation
+            # after checking these effect records are absent. Preserve that
+            # existing recovery boundary; a canonical missing job remains unknown.
+            if (
+                re.fullmatch(
+                    r"L[a-f0-9]{16}\.pre-allocation\.[a-f0-9]{32}", folder.name
+                )
+                and folder.is_dir()
+                and not folder.is_symlink()
+                and not any(
+                    (folder / name).exists() or (folder / name).is_symlink()
+                    for name in (
+                        "job.json",
+                        "state.json",
+                        "receipt.json",
+                        "blocked.json",
+                    )
+                )
+            ):
+                continue
+            identity, affected_pool = None, ledger_pool
+            try:
+                if folder.is_symlink() or not folder.is_dir():
+                    raise ProTokError(
+                        "Long allocation ledger entry is not an anchored directory"
+                    )
+                if (folder / "job.json").is_symlink():
+                    raise ProTokError("Long allocation job identity is not anchored")
+                job = _read(folder / "job.json")
+                request = job.get("request", {})
+                if job.get("budget_pool", ledger_pool) != ledger_pool or (
+                    ledger_pool == "automatic"
+                    and (
+                        job.get("manual_task_id") is not None
+                        or request.get("manual_task_id") is not None
+                    )
+                ):
+                    affected_pool = None
+                    raise ProTokError("Long allocation pool identity is inconsistent")
+                if pool != ledger_pool:
+                    continue
+                _run_id(folder.name)
+                if (
+                    job.get("run_id") != folder.name
+                    or request.get("id", folder.name) != folder.name
+                    or not isinstance(job.get("source_identity"), str)
+                    or not job["source_identity"]
+                ):
+                    raise ProTokError("Long allocation job identity is invalid")
+                if ledger_pool == "manual":
+                    candidate = job.get("manual_task_id")
+                    _task_folder(control, candidate)
+                    if (
+                        job.get("budget_pool") != "manual"
+                        or request.get("manual_task_id") != candidate
+                    ):
+                        raise ProTokError("Manual allocation identity is invalid")
+                    # New jobs retain the original complete task authority. Check
+                    # it too; never let a changed receipt reattribute the charge.
+                    admission = job.get("round_admission")
+                    if admission and (
+                        admission.get("request", {}).get("id") != candidate
+                        or admission.get("authorization", {}).get("manual_task")
+                        != admission.get("request")
+                    ):
+                        raise ProTokError("Manual allocation authority is inconsistent")
+                    identity = candidate
+                    if task_id is not None and identity != task_id:
+                        continue
+                receipt_path = folder / "receipt.json"
+                if receipt_path.is_symlink() or not receipt_path.exists():
+                    raise ProTokError("Long allocation has no anchored settled receipt")
+                receipt = _read(receipt_path)
+                seconds = receipt.get("gpu_seconds")
+                if (
+                    type(seconds) is not int
+                    or seconds < 0
+                    or receipt.get("source_identity") != job["source_identity"]
+                    or receipt.get("run_id") != job["run_id"]
+                    or receipt.get("status") not in {"completed", "failed"}
+                    or (
+                        ledger_pool == "manual"
+                        and (
+                            receipt.get("manual_task_id") != identity
+                            or receipt.get("budget_pool") != "manual"
+                        )
+                    )
+                ):
+                    raise ProTokError("Long-training accounting receipt is invalid")
+                used += seconds
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                ProTokError,
+            ) as error:
+                if affected_pool is not None and affected_pool != pool:
+                    continue
+                outstanding.append(str(folder))
+                errors.append(
+                    {
+                        "pool": affected_pool,
+                        "task_id": identity,
+                        "record": str(folder),
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                )
+    if outstanding:
+        return {
+            "gpu_seconds": None,
+            "known_gpu_seconds": used,
+            "accounting_status": "partial",
+            "outstanding": outstanding,
+            "errors": errors,
+        }
     return {"gpu_seconds": used, "outstanding": outstanding}
 
 
@@ -209,7 +321,8 @@ def automatic_slot(control, *, admission=False):
             except BlockingIOError:
                 time.sleep(0.1)
                 continue
-            if usage(control)["outstanding"]:
+            report = usage(control)
+            if report["outstanding"] or report["gpu_seconds"] is None:
                 fcntl.flock(lock, fcntl.LOCK_UN)
                 time.sleep(0.1)
                 continue
@@ -822,6 +935,7 @@ def execute(
             allocated = policy["gpu_seconds_per_run"]
             if (
                 spent["outstanding"]
+                or spent["gpu_seconds"] is None
                 or spent["gpu_seconds"] + allocated > policy["total_gpu_seconds"]
                 or (control / "STOP").exists()
             ):

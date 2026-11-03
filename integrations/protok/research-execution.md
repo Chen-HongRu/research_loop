@@ -131,7 +131,10 @@ in whole minutes up to 1800 seconds. CPU calculations also work in that profile
 and consume single-GPU allocation time. A dedicated CPU-only scheduler profile is
 not enabled. All research GPU allocation seconds share the existing formal budget,
 deadline and reserve; independent failure-debug grants are not used. Missing
-accounting blocks subsequent work.
+accounting blocks subsequent allocations in that shared short/research budget,
+not independently authorized long-training pools or safe read-only Plan/Review.
+Inspection preserves healthy costs but reports affected subtotals and the total
+as null (`accounting_status: partial`); known subtotals do not authorize spending.
 
 The result distinguishes execution status from scientific support. A successful
 script returns its exact evidence artifact with `measurements=[]`; a settled

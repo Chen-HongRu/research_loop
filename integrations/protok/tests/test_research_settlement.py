@@ -178,8 +178,10 @@ class ScriptSettlementTests(unittest.TestCase):
         self.assertEqual(research_usage(self.control)["outstanding"], [])
         receipt["gpu_seconds"] = 1
         _write(job / "receipt.json", receipt)
-        with self.assertRaisesRegex(ProTokError, "No-allocation accounting"):
-            research_usage(self.control)
+        report = research_usage(self.control)
+        self.assertIsNone(report["gpu_seconds"])
+        self.assertEqual(report["outstanding"], [str(job)])
+        self.assertIn("No-allocation accounting", report["errors"][0]["error"])
 
     def test_fixed_mode_has_no_script_journal(self):
         self.plan["execution"]["mode"] = "fixed_evaluation"

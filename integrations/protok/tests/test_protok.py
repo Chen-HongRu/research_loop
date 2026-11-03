@@ -158,6 +158,54 @@ class ProTokTests(unittest.TestCase):
     def git(root, *args):
         subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True)
 
+    def test_partial_short_accounting_preserves_healthy_costs_and_blocks_allocations(
+        self,
+    ):
+        from integrations.protok.long_training import _write
+
+        _write(
+            self.records / "healthy/state.json",
+            {
+                "fingerprint": "healthy",
+                "status": "complete",
+                "attempts": [
+                    {
+                        "status": "complete",
+                        "terminal_state": "COMPLETED",
+                        "gpu_seconds": 7,
+                    }
+                ],
+            },
+        )
+        _write(self.records / "unknown/state.json", {})
+        (self.records / "unknown/state.json").write_text("{")
+        _write(
+            self.control / "research-jobs/0001/job.json",
+            {"allocated_seconds": 60, "source_identity": "synthetic-source"},
+        )
+        _write(
+            self.control / "research-jobs/0001/receipt.json",
+            {
+                "purpose": "research",
+                "quality_score_eligible": False,
+                "status": "completed",
+                "gpu_seconds": 6,
+                "source_identity": "synthetic-source",
+            },
+        )
+        report = self.backend.inspect()
+        self.assertIsNone(report["used_gpu_seconds"])
+        self.assertIsNone(report["formal_gpu_seconds"])
+        self.assertIsNone(report["total_gpu_seconds"])
+        self.assertEqual(report["known_gpu_seconds"], 13)
+        self.assertEqual(report["research_gpu_seconds"], 6)
+        self.assertEqual(report["long_training_gpu_seconds"], 0)
+        self.assertEqual(report["manual_training_gpu_seconds"], 0)
+        self.assertEqual(report["accounting_status"], "partial")
+        with self.assertRaisesRegex(ProTokError, "Outstanding"):
+            self.backend.evaluate(self.workspace, self.output, 10)
+        self.assertFalse((self.root / "invoked").exists())
+
     def test_retargets_only_workspace_and_allows_candidate_change(self):
         (self.workspace / CANDIDATE_FILES[0]).write_text("# new candidate\n")
         prepared = self.backend.prepare_config(self.workspace, self.output)

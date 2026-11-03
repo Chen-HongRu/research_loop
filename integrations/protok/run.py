@@ -365,7 +365,11 @@ def admission(root, backend, *, require_idle=True):
             "An acknowledged active bounded continuation lease is required"
         )
     status = backend.inspect()
-    if require_idle and (status["outstanding"] or status.get("research_outstanding")):
+    if require_idle and (
+        status["outstanding"]
+        or status.get("research_outstanding")
+        or status.get("used_gpu_seconds") is None
+    ):
         raise ProTokError(
             "Outstanding original record requires explicit operator reconciliation"
         )
@@ -1564,30 +1568,90 @@ failures, user STOP or exhausted authorization, not solely on a settled time lim
 """
 
 
+def ensure_study_ready(root):
+    from integrations.protok.initialization import ready
+
+    return ready(root)
+
+
 def init_study(root, backend):
+    from integrations.protok.initialization import initialization_lock
+
     require_baseline()
-    deadline = admission(root, backend)
-    baseline = Path(root) / "baseline"
-    if baseline.exists():
+    with initialization_lock(root):
+        return _init_study(root, backend)
+
+
+def _init_study(root, backend):
+    from integrations.protok.initialization import plain_path
+
+    root = Path(root)
+    try:
+        study = plain_path(root, "study")
+        baseline = plain_path(root, "baseline")
+        plain_path(root, "baseline/.git")
+    except ValueError as error:
         raise ProTokError(
-            "Baseline already exists; initialization is not a reset operation"
+            "Unsafe initialization path; preserve and reconcile it"
+        ) from error
+    if (study / "study.json").exists():
+        return ensure_study_ready(root).status()
+    if study.exists():
+        if any(study.iterdir()):
+            raise ProTokError(
+                "Study directory exists without study.json; preserve and reconcile it"
+            )
+        study.rmdir()
+    deadline = admission(root, backend)
+    if baseline.exists():
+        # A crash after the clone must not require deleting retained work. Reuse
+        # the baseline only when it is demonstrably the acknowledged source.
+        if (
+            git(baseline, "status", "--porcelain")
+            or git(baseline, "rev-parse", "HEAD") != BEST_COMMIT
+        ):
+            raise ProTokError(
+                "Retained baseline does not match the acknowledged clean commit"
+            )
+    else:
+        if (
+            git(backend.project, "status", "--porcelain")
+            or git(backend.project, "rev-parse", "HEAD") != BEST_COMMIT
+        ):
+            raise ProTokError(
+                "Canonical best must be clean and at its acknowledged commit"
+            )
+        staging_baseline = _initialization_staging(root, "baseline")
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--shared",
+                "--quiet",
+                str(backend.project),
+                str(staging_baseline),
+            ],
+            check=True,
         )
-    if (
-        git(backend.project, "status", "--porcelain")
-        or git(backend.project, "rev-parse", "HEAD") != BEST_COMMIT
-    ):
-        raise ProTokError("Canonical best must be clean and at its acknowledged commit")
-    subprocess.run(
-        ["git", "clone", "--shared", "--quiet", str(backend.project), str(baseline)],
-        check=True,
-    )
+        if (
+            git(staging_baseline, "status", "--porcelain")
+            or git(staging_baseline, "rev-parse", "HEAD") != BEST_COMMIT
+        ):
+            raise ProTokError(
+                "Staged baseline differs from the acknowledged clean commit"
+            )
+        staging_baseline.rename(baseline)
     config = HarnessConfig(
         executable=CODEX, model="gpt-6.1-sol", reasoning="medium", timeout_seconds=3600
     )
     from integrations.protok.long_training_loop import study_policy as long_study_policy
 
+    # Publish the study only after every seed file exists, so an interrupted
+    # initialization never looks like a runnable study. Leftover staging is
+    # rebuilt from scratch; it contains no Agent or backend effects.
+    staging_study = _initialization_staging(root, "study")
     initialize(
-        Path(root) / "study",
+        staging_study,
         goal=GOAL,
         workspace=baseline,
         allow_write=True,
@@ -1610,7 +1674,7 @@ def init_study(root, backend):
     )
     report = (backend.project / "autoresearch-report.md").read_text()
     history = backend.inspect()
-    (Path(root) / "study/research.md").write_text(
+    (staging_study / "research.md").write_text(
         "# Historical ProTok evidence\n\n"
         f"Imported narrative from canonical autoresearch-report.md; prior {history['scored_records']} scored records and {history['used_gpu_seconds']} GPU s remain historical. "
         "No old DAG nodes or new measurements are inferred. First iteration audits the best receipt.\n\n"
@@ -1635,7 +1699,7 @@ def init_study(root, backend):
         1,
     ):
         rid = f"R{number:04d}"
-        folder = Path(root) / "study/routes" / rid
+        folder = staging_study / "routes" / rid
         folder.mkdir(parents=True)
         (folder / "research.md").write_text(
             f"# {title}\n\nHistorical direction, not a new measured experiment. {question}\nFirst audit/import the unchanged best before investigating new candidates.\n"
@@ -1649,8 +1713,51 @@ def init_study(root, backend):
             "research_ref": f"routes/{rid}/research.md",
             "evaluation_ref": f"routes/{rid}/evaluation.json",
         }
-    write(Path(root) / "study/routes/index.json", routes)
-    return Study(Path(root) / "study").status()
+    write(staging_study / "routes/index.json", routes)
+    from integrations.protok.initialization import COMPLETION, completion
+
+    write(
+        staging_study / COMPLETION,
+        completion(read(staging_study / "study.json")["baseline"]),
+    )
+    # Validate the actual publication, not just the presence of its marker.
+    ensure_study_ready(root / ".initializing")
+    staging_study.rename(study)
+    return ensure_study_ready(root).status()
+
+
+def _initialization_staging(root, name):
+    """Rebuild only explicitly owned, unpublished staging under the init lock."""
+    from integrations.protok.initialization import plain_path
+
+    if name not in {"baseline", "study"}:
+        raise ProTokError("Unknown initialization staging purpose")
+    try:
+        parent = plain_path(root, ".initializing")
+        marker = plain_path(root, ".initializing/owner.json")
+        staging = plain_path(root, f".initializing/{name}")
+        expected = {
+            "version": 1,
+            "purpose": "protok-parent-initialization",
+            "baseline": BEST_COMMIT,
+        }
+        if parent.exists():
+            if marker.exists():
+                if read(marker) != expected:
+                    raise ValueError("Staging ownership differs")
+            elif any(parent.iterdir()):
+                raise ValueError("Unrecognized nonempty staging directory")
+        else:
+            parent.mkdir()
+        if not marker.exists():
+            write(marker, expected)
+        if staging.exists():
+            shutil.rmtree(staging)
+    except (OSError, ValueError) as error:
+        raise ProTokError(
+            "Unowned or unsafe initialization staging; preserve and reconcile it"
+        ) from error
+    return staging
 
 
 def publish_control(root, study, backend):
@@ -1765,7 +1872,12 @@ def repair_completed_control(root, backend):
 def _run_one(root, backend, study):
     _repair_completed_control(root, backend, study)
     state = study.status()
-    deadline = admission(root, backend, require_idle=not state.get("debugging"))
+    deadline = admission(
+        root,
+        backend,
+        require_idle=not state.get("debugging")
+        and state.get("phase") not in {"selection", "plan", "review"},
+    )
     from integrations.protok.resume_submission import begin_pending
 
     begin_pending(study, backend)
@@ -1788,7 +1900,7 @@ def _run_one(root, backend, study):
 
 
 def run_one(root, backend):
-    study = Study(Path(root) / "study")
+    study = ensure_study_ready(root)
     control = Path(root) / "control"
     with (control / "runner.lock").open("a") as lock:
         try:

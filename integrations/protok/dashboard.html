@@ -212,7 +212,8 @@ function renderProgress() {
   if (progress.active_role) bits.push((state.status==='running'?'主循环当前角色 ':'主循环最近调用角色 ')+progress.active_role);
   if (progress.elapsed_seconds != null) bits.push((state.status==='running'?'主循环本次调用已用 ':'主循环最近调用耗时 ')+duration(progress.elapsed_seconds));
   if (data.runner?.status) bits.push('主循环 Runner '+(STATUS[data.runner.status] || data.runner.status));
-  if (data.formal_gpu_seconds != null) bits.push('正式评分 '+data.formal_gpu_seconds+' GPU 秒 · 研究脚本 '+(data.research_gpu_seconds || 0)+' GPU 秒 · 调试 '+(data.debug_gpu_seconds || 0)+' GPU 秒（独立记账）');
+  if (data.accounting_status === 'partial') bits.push('部分费用未知 · 已知小计 '+data.known_gpu_seconds+' GPU 秒（不是总费用或可用额度）');
+  if (data.formal_gpu_seconds != null) bits.push('正式评分 '+data.formal_gpu_seconds+' GPU 秒 · 研究脚本 '+(data.research_gpu_seconds ?? '未知')+' GPU 秒 · 调试 '+(data.debug_gpu_seconds ?? '未知')+' GPU 秒（独立记账）');
   if (data.manual_training_gpu_seconds != null) bits.push('人工长训练 '+data.manual_training_gpu_seconds+' GPU秒（任务独立预算）');
   if (data.long_training_gpu_seconds != null) bits.push('自动长训练 '+data.long_training_gpu_seconds+' GPU 秒（独立记账）');
   for (const overrun of data.research_overruns || []) bits.push('研究 #'+overrun.iteration+' 已按实际 '+overrun.gpu_seconds+' GPU 秒结算（申请 '+overrun.allocated_seconds+' 秒，超出 '+overrun.overrun_seconds+' 秒）');
@@ -639,7 +640,7 @@ $('tabs').querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{tab
 $('follow').onclick=async()=>{following=true;globalView=false;detailSignature='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);focusTreeTask();};
 $('researchBtn').onclick=async()=>{following=false;globalView=true;research='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);};
 async function refresh() {
-  try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.backend_error?'● 研究目录已连接 · 后端核账不可用':snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className=snapshot.backend_error?'amber':'green';renderSnapshot();await Promise.all([loadDetail(),loadTaskMetrics()]); }
+  try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.backend_error?'● 研究目录已连接 · 后端核账不可用':snapshot.accounting_status==='partial'?'● 研究目录已连接 · 部分核账未知':snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className=snapshot.backend_error||snapshot.accounting_status==='partial'?'amber':'green';renderSnapshot();await Promise.all([loadDetail(),loadTaskMetrics()]); }
   catch(error){$('connection').textContent='读取失败 · '+error.message;$('connection').className='red';}
   finally{setTimeout(refresh,5000);}
 }
