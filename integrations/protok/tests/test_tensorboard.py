@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from integrations.protok import tensorboard as mirror
+from integrations.protok import tensorboard_scope
 from research_loop import telemetry
 
 try:
@@ -213,6 +214,7 @@ class TensorBoardTests(unittest.TestCase):
             EventMultiplexer,
         )
         from tensorboard.plugins.base_plugin import TBContext
+        from tensorboard.plugins.metrics.metrics_plugin import MetricsPlugin
         from tensorboard.plugins.scalar.scalars_plugin import ScalarsPlugin
         from werkzeug.test import Client
 
@@ -220,7 +222,9 @@ class TensorBoardTests(unittest.TestCase):
         provider = MultiplexerDataProvider(multiplexer, str(self.logdir / "events-v2"))
         plugin = ScalarsPlugin(TBContext(data_provider=provider))
         app = TensorBoardWSGI(
-            [plugin], path_prefix="/tensorboard", data_provider=provider
+            [plugin, MetricsPlugin(TBContext(data_provider=provider))],
+            path_prefix="/tensorboard",
+            data_provider=provider,
         )
         return multiplexer, Client(app)
 
@@ -251,6 +255,133 @@ class TensorBoardTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             [row[1:] for row in response.get_json()], [[10, 0.25], [20, 0.125]]
+        )
+
+    def test_real_task_scope_reduces_tags_and_retains_live_curves_and_attempts(self):
+        for seed in range(33):
+            self.emit(seed + 0.25, step=10, unit="loss", context={"seed": seed})
+        self.emit(0.125, step=20, unit="loss", context={"seed": 0})
+        telemetry.register(
+            self.study, "retry", self.source | {"execution_identity": "retry-job"}
+        )
+        self.emit(0.5, stream="retry", step=10, unit="loss", context={"seed": 0})
+        telemetry.register(
+            self.study, "unrelated", self.source | {"experiment_id": "0002"}
+        )
+        for start in range(0, 1001, 250):
+            self.emit(
+                {
+                    f"field-{index:04d}": index
+                    for index in range(start, min(start + 250, 1001))
+                },
+                stream="unrelated",
+                step=10,
+            )
+        archive = self.base / "archive"
+        telemetry.register(archive / "study", "live", self.source)
+        self.emit(
+            99, study=archive / "study", step=10, unit="loss", context={"seed": 0}
+        )
+        exporter = mirror.Exporter(self.root, self.logdir, [archive])
+        self.assertEqual(exporter.poll()["errors"], [])
+        multiplexer, client = self.scalar_app()
+        global_tags = self.reload_scalars(multiplexer, client)
+        self.assertGreater(sum(len(tags) for tags in global_tags.values()), 1000)
+        self.assertEqual(len(global_tags["active/#0002"]), 1001)
+        _, scope = tensorboard_scope.parse_request(
+            '/tensorboard?dashboard_task={"source":"active","experiment":"0001"}',
+            {"active", "history-1"},
+        )
+        selected = "active/#0001"
+        retry = selected + " (attempt 2)"
+        filtered_tags = tensorboard_scope.filter_response(
+            "/data/plugin/scalars/tags", global_tags, scope
+        )
+        self.assertEqual(set(filtered_tags), {selected, retry})
+        self.assertEqual(sum(len(tags) for tags in filtered_tags.values()), 34)
+        self.assertEqual(filtered_tags[selected], global_tags[selected])
+        self.assertEqual(filtered_tags[retry], global_tags[retry])
+        tag = next(
+            tag
+            for tag, metadata in filtered_tags[selected].items()
+            if "seed=0;" in metadata["displayName"]
+        )
+        retry_tag = next(iter(filtered_tags[retry]))
+
+        def scalar_curve():
+            response = client.get(
+                "/tensorboard/data/plugin/scalars/scalars",
+                query_string={"run": selected, "tag": tag},
+            )
+            self.assertEqual(response.status_code, 200)
+            return response.get_json()
+
+        def timeseries_curve():
+            response = client.get("/tensorboard/data/plugin/timeseries/tags")
+            self.assertEqual(response.status_code, 200)
+            metadata = tensorboard_scope.filter_response(
+                "/data/plugin/timeseries/tags", response.get_json(), scope
+            )
+            self.assertEqual(
+                metadata["scalars"]["runTagInfo"],
+                {run: sorted(tags) for run, tags in filtered_tags.items()},
+            )
+            self.assertEqual(metadata["scalars"]["tagDescriptions"], {})
+            response = client.get(
+                "/tensorboard/data/plugin/timeseries/timeSeries",
+                query_string={
+                    "requests": json.dumps(
+                        [
+                            {"plugin": "scalars", "tag": tag},
+                            {"plugin": "scalars", "tag": retry_tag, "run": retry},
+                            {"plugin": "scalars", "tag": tag, "run": "history-1/#0001"},
+                            {"plugin": "invalid", "tag": tag},
+                        ]
+                    )
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            global_series = response.get_json()
+            self.assertEqual(
+                set(global_series[0]["runToSeries"]),
+                {selected, "history-1/#0001"},
+            )
+            series = tensorboard_scope.filter_response(
+                "/data/plugin/timeseries/timeSeries", global_series, scope
+            )
+            self.assertEqual(len(series), 4)
+            self.assertEqual(set(series[0]["runToSeries"]), {selected})
+            self.assertEqual(series[1], global_series[1])
+            self.assertEqual(series[2], {**global_series[2], "runToSeries": {}})
+            self.assertEqual(series[3], global_series[3])
+            self.assertEqual(series[3]["error"], "Invalid plugin")
+            return series[0]["runToSeries"][selected]
+
+        curve = scalar_curve()
+        self.assertEqual([row[1:] for row in curve], [[10, 0.25], [20, 0.125]])
+        self.assertEqual(
+            timeseries_curve(),
+            [
+                {"wallTime": wall, "step": step, "value": value}
+                for wall, step, value in curve
+            ],
+        )
+        self.emit(0.0625, step=30, unit="loss", context={"seed": 0})
+        self.assertEqual(exporter.poll()["exported"], 1)
+        self.assertEqual(exporter.poll()["exported"], 0)
+        self.assertEqual(self.reload_scalars(multiplexer, client), global_tags)
+        updated_curve = scalar_curve()
+        self.assertEqual(updated_curve[:2], curve)
+        self.assertEqual(
+            [row[1:] for row in updated_curve],
+            [[10, 0.25], [20, 0.125], [30, 0.0625]],
+        )
+        self.assertEqual(
+            timeseries_curve(),
+            [
+                {"wallTime": wall, "step": step, "value": value}
+                for wall, step, value in updated_curve
+            ],
         )
 
     def test_shared_run_streams_append_and_crash_replay_reach_existing_reader(self):

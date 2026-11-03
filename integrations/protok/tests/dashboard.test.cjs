@@ -28,7 +28,8 @@ test('TensorBoard link filters the selected dashboard task before the native 40-
   ];
   for(const [task,matches,others] of cases) {
     const url=ui.tensorboardTaskURL(task);
-    assert.ok(url.startsWith('/tensorboard/#scalars&runFilter='));
+    assert.ok(url.startsWith('/tensorboard/?dashboard_task='));
+    assert.deepEqual(JSON.parse(new URL('http://example.invalid'+url).searchParams.get('dashboard_task')),task);
     const regex=new RegExp(decodeURIComponent(url.split('runFilter=')[1]));
     for(const run of matches)assert.ok(regex.test(run),run);
     for(const run of others)assert.ok(!regex.test(run),run);

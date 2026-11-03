@@ -165,6 +165,100 @@ class TaskMetricsTests(unittest.TestCase):
                 self.request(handler, "/api/telemetry", "POST"),
             )
 
+    def test_proxy_scopes_metadata_per_request_and_regenerates_headers(self):
+        from urllib.parse import parse_qs, urlencode, urlparse
+
+        payload = {
+            "active/#0001": {f"selected/{i}": {} for i in range(34)},
+            "active/#0002": {f"other/{i}": {} for i in range(1000)},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            handler = self.handler(Path(temporary), tensorboard_port=6006)
+            for experiment in ("0001", "0002", None):
+                query = (
+                    "?"
+                    + urlencode(
+                        {
+                            "dashboard_task": json.dumps(
+                                {"source": "active", "experiment": experiment}
+                            )
+                        }
+                    )
+                    if experiment
+                    else ""
+                )
+                response = Mock(status=200)
+                response.getheader.side_effect = lambda key: (
+                    "application/json" if key == "Content-Type" else None
+                )
+                response.getheaders.return_value = [
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", "999"),
+                    ("ETag", "global"),
+                ]
+                response.read.side_effect = [json.dumps(payload).encode(), b""]
+                with patch.object(dash.http.client, "HTTPConnection") as factory:
+                    factory.return_value.getresponse.return_value = response
+                    shown = self.request(
+                        handler,
+                        "/tensorboard/experiment/default/data/plugin/scalars/tags"
+                        + query,
+                    )
+                    sent = factory.return_value.request.call_args
+                    self.assertEqual(
+                        urlparse(sent.args[1]).path,
+                        "/tensorboard/experiment/default/data/plugin/scalars/tags",
+                    )
+                    forwarded = parse_qs(urlparse(sent.args[1]).query)
+                    self.assertEqual(
+                        json.loads(forwarded["dashboard_task"][0])
+                        if experiment
+                        else forwarded,
+                        {"source": "active", "experiment": experiment}
+                        if experiment
+                        else {},
+                    )
+                    header, body = shown.split(b"\r\n\r\n", 1)
+                    parsed = json.loads(body)
+                    self.assertEqual(
+                        parsed,
+                        {"active/#" + experiment: payload["active/#" + experiment]}
+                        if experiment
+                        else payload,
+                    )
+                    if experiment:
+                        self.assertIn(
+                            ("Content-Length: " + str(len(body))).encode(), header
+                        )
+                        self.assertIn(b"Cache-Control: no-store", header)
+                        self.assertNotIn(b"ETag:", header)
+                        self.assertEqual(
+                            sent.kwargs["headers"]["Accept-Encoding"], "identity"
+                        )
+
+    def test_proxy_rejects_invalid_scope_and_foreign_runs_before_upstream(self):
+        from urllib.parse import urlencode
+
+        with tempfile.TemporaryDirectory() as temporary:
+            handler = self.handler(Path(temporary), tensorboard_port=6006)
+            queries = [
+                {"dashboard_task": "invalid"},
+                {
+                    "dashboard_task": json.dumps(
+                        {"source": "active", "experiment": "0001"}
+                    ),
+                    "run": "active/#0002",
+                },
+            ]
+            with patch.object(dash.http.client, "HTTPConnection") as factory:
+                for query in queries:
+                    shown = self.request(
+                        handler,
+                        "/tensorboard/data/plugin/scalars/scalars?" + urlencode(query),
+                    )
+                    self.assertIn(b" 400 ", shown)
+                factory.assert_not_called()
+
     def test_tensorboard_index_initializes_missing_reload_preference_before_app(self):
         with tempfile.TemporaryDirectory() as temporary:
             handler = self.handler(Path(temporary), tensorboard_port=6006)
