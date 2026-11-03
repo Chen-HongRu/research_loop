@@ -87,3 +87,18 @@ test('Existing generated task links upgrade but arbitrary regexes stay global',a
   await invalid.window.fetch('/tensorboard/data/runs');
   assert.equal(new URL(invalid.calls[0][0]).searchParams.get('dashboard_task'),'{bad');
 });
+
+
+test('Prefixed TensorBoard keeps native requests and task scope within its public path',async()=>{
+  const task={source:'active',experiment:'0001'};
+  const view=page(taskURL(task).replace('/tensorboard/','/fm/tensorboard/'));
+  await view.window.fetch('/tensorboard/data/plugin/scalars/tags');
+  const first=new URL(view.calls.at(-1)[0]);
+  assert.equal(first.pathname,'/fm/tensorboard/data/plugin/scalars/tags');
+  assert.deepEqual(JSON.parse(first.searchParams.get('dashboard_task')),task);
+  await view.window.fetch('/fm/tensorboard/data/plugin/scalars/tags');
+  assert.equal(new URL(view.calls.at(-1)[0]).pathname,'/fm/tensorboard/data/plugin/scalars/tags');
+  const global=page('http://example.invalid/fm/tensorboard/#scalars');
+  await global.window.fetch('/tensorboard/data/runs');
+  assert.equal(new URL(global.calls.at(-1)[0]).pathname,'/fm/tensorboard/data/runs');
+});

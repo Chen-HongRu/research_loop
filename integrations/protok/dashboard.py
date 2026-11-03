@@ -920,11 +920,86 @@ def frontier_snapshot(root):
     return result
 
 
+def controller_accounting(root):
+    """Read one bounded public sidecar only when this Study has no native backend."""
+    owner = root / "control/ownership.json"
+    if owner.exists() or owner.is_symlink():
+        return None
+    path = root / "control/dashboard-accounting.json"
+    try:
+        if not path.is_file() or path.is_symlink() or (root / "control").is_symlink():
+            return None
+        with path.open("rb") as stream:
+            raw = stream.read(65537)
+        if len(raw) > 65536:
+            return None
+        value = json.loads(raw)
+        if (
+            not isinstance(value, dict)
+            or type(value.get("version")) is not int
+            or value["version"] != 1
+        ):
+            return None
+        for key in (
+            "observed_at",
+            "known_gpu_seconds",
+            "reserved_gpu_seconds",
+            "limit_gpu_seconds",
+            "deadline",
+        ):
+            number = value.get(key)
+            if (
+                type(number) not in (int, float)
+                or not math.isfinite(number)
+                or number < 0
+            ):
+                return None
+        if value["limit_gpu_seconds"] <= 0 or value["deadline"] <= 0:
+            return None
+        outstanding = value.get("outstanding")
+        if (
+            not isinstance(outstanding, list)
+            or len(outstanding) > 256
+            or any(
+                not isinstance(item, str) or not item or len(item) > 1024
+                for item in outstanding
+            )
+        ):
+            return None
+        status, used = value.get("accounting_status"), value.get("used_gpu_seconds")
+        if status == "known":
+            if (
+                type(used) not in (int, float)
+                or not math.isfinite(used)
+                or used < value["known_gpu_seconds"]
+                or outstanding
+            ):
+                return None
+        elif status != "partial" or used is not None:
+            return None
+        return {
+            key: value[key]
+            for key in (
+                "observed_at",
+                "accounting_status",
+                "used_gpu_seconds",
+                "known_gpu_seconds",
+                "reserved_gpu_seconds",
+                "outstanding",
+                "limit_gpu_seconds",
+                "deadline",
+            )
+        }
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        return None
+
+
 def snapshot(root, *, snapshot_only=False):
     study = root / "study"
     state = read(study / "state.json", {})
     best = read(root / "control/active-best.json", {})
     backend_error = None
+    accounting = None if snapshot_only else controller_accounting(root)
     if snapshot_only:
         backend = read(root / "control/backend-snapshot.json")
         if not backend:
@@ -1176,7 +1251,7 @@ def snapshot(root, *, snapshot_only=False):
     reserved_debug = active_debug.get("allocated_gpu_seconds", 0)
     debug_limit = debug_budget.get("limit_gpu_seconds", 1800)
     current_progress = progress(root, state, backend, runner, current_agents)
-    if backend_error:
+    if backend_error and accounting is None:
         current_progress["title"] = "后端核账不可用 · 需要处理"
         current_progress["message"] = (
             "保留的研究记录仍可阅读；当前 GPU 用量与作业核账状态未知。"
@@ -1188,7 +1263,7 @@ def snapshot(root, *, snapshot_only=False):
                 "source": "backend.inspect",
             }
         )
-    return {
+    result = {
         "observed_at": time.time(),
         "study_name": root.name,
         "study_root": str(root),
@@ -1269,6 +1344,39 @@ def snapshot(root, *, snapshot_only=False):
         "frontier": frontier,
         "routes": read(study / "routes/index.json", {}),
     }
+
+    if accounting is not None:
+        used = accounting["used_gpu_seconds"]
+        result.update(
+            backend_error=None,
+            backend_observed_at=accounting["observed_at"],
+            accounting_source="controller_sidecar",
+            accounting_available=accounting["accounting_status"] == "known",
+            accounting_status=accounting["accounting_status"],
+            gpu_seconds=used,
+            known_gpu_seconds=accounting["known_gpu_seconds"],
+            deadline=accounting["deadline"],
+            effective_deadline=accounting["deadline"],
+            controller_outstanding=accounting["outstanding"],
+            formal_gpu_seconds=None,
+            research_gpu_seconds=None,
+            debug_gpu_seconds=None,
+            long_training_gpu_seconds=None,
+            manual_training_gpu_seconds=None,
+            budget={
+                "limit_gpu_seconds": accounting["limit_gpu_seconds"],
+                "reserved_gpu_seconds": accounting["reserved_gpu_seconds"],
+                "remaining_gpu_seconds": max(
+                    0,
+                    accounting["limit_gpu_seconds"]
+                    - used
+                    - accounting["reserved_gpu_seconds"],
+                )
+                if used is not None
+                else None,
+            },
+        )
+    return result
 
 
 def execution_details(root, identity):
@@ -2586,6 +2694,19 @@ def telemetry_view(
     return {"version": 1, "observed_at": time.time(), "streams": streams}
 
 
+def normalize_base_path(value):
+    """An external proxy prefix; upstream requests arrive with it stripped."""
+    if not isinstance(value, str):
+        raise ValueError("Dashboard base path must be a string")
+    if value in {"", "/"}:
+        return ""
+    if not re.fullmatch(
+        r"/(?:[A-Za-z0-9][A-Za-z0-9_-]*)(?:/[A-Za-z0-9][A-Za-z0-9_-]*)*/?", value
+    ):
+        raise ValueError("Dashboard base path must contain plain URL path segments")
+    return value.rstrip("/")
+
+
 def serve(
     root,
     port,
@@ -2594,7 +2715,9 @@ def serve(
     history_roots=(),
     records_root=None,
     tensorboard_port=None,
+    base_path="",
 ):
+    base_path = normalize_base_path(base_path)
     if tensorboard_port is not None and not 1 <= tensorboard_port <= 65535:
         raise ValueError("TensorBoard port must be a local TCP port")
 
@@ -2631,7 +2754,8 @@ def serve(
                 self.send_response(302)
                 self.send_header(
                     "Location",
-                    "/tensorboard/"
+                    base_path
+                    + "/tensorboard/"
                     + ("?" + self.path.split("?", 1)[1] if "?" in self.path else ""),
                 )
                 self.send_header("Content-Length", "0")
@@ -2711,9 +2835,19 @@ def serve(
                         return
                     document = document.replace(
                         b"</head>",
-                        b'<script src="/assets/tensorboard-live.js"></script></head>',
+                        (
+                            f'<script src="{base_path}/assets/tensorboard-live.js"></script></head>'
+                        ).encode(),
                         1,
                     )
+                    if base_path:
+                        document = document.replace(
+                            b'href="/tensorboard',
+                            f'href="{base_path}/tensorboard'.encode(),
+                        ).replace(
+                            b'src="/tensorboard',
+                            f'src="{base_path}/tensorboard'.encode(),
+                        )
                 elif scoped_json and response.status == 200:
                     # Buffer only task-scoped JSON, never large TensorBoard assets
                     # or training artifacts. No response may fall back to global.
@@ -2757,6 +2891,8 @@ def serve(
                         value = value.removeprefix(
                             f"http://127.0.0.1:{tensorboard_port}"
                         )
+                    if key.lower() == "location" and value.startswith("/tensorboard"):
+                        value = base_path + value
                     self.send_header(key, value)
                 if document is not None:
                     self.send_header("Content-Length", str(len(document)))
@@ -2796,7 +2932,12 @@ def serve(
                     self.tensorboard_proxy()
                     return
                 elif path == "/":
-                    body = Path(__file__).with_suffix(".html").read_bytes()
+                    body = (
+                        Path(__file__)
+                        .with_suffix(".html")
+                        .read_bytes()
+                        .replace(b"__DASHBOARD_BASE_PATH__", base_path.encode())
+                    )
                     mime = "text/html; charset=utf-8"
                 elif path.startswith("/assets/"):
                     assets = Path(__file__).parent / "assets"
@@ -2884,7 +3025,7 @@ def serve(
                     )
                     payload["tensorboard"] = {
                         "enabled": tensorboard_port is not None,
-                        "url": "/tensorboard/"
+                        "url": base_path + "/tensorboard/"
                         if tensorboard_port is not None
                         else None,
                     }
@@ -2969,6 +3110,12 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--snapshot-only", action="store_true")
+    parser.add_argument(
+        "--base-path",
+        type=normalize_base_path,
+        default="",
+        help="External reverse-proxy prefix; proxy strips it before forwarding",
+    )
     parser.add_argument("--history-root", type=Path, action="append", default=[])
     parser.add_argument("--records-root", type=Path)
     parser.add_argument(
@@ -2984,4 +3131,5 @@ if __name__ == "__main__":
         history_roots=[path.resolve() for path in args.history_root],
         records_root=args.records_root.resolve() if args.records_root else None,
         tensorboard_port=args.tensorboard_port,
+        base_path=args.base_path,
     )

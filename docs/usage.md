@@ -112,6 +112,18 @@ uv run research-loop init studies/my-study-v2 \
 
 工作区不能等于或包含研究目录；默认基线位于研究目录下的 `workspace/`，实验 worktree 位于对应 iteration 的 `workspace/`。Codex 使用 `workspace-write` 沙箱，不自动批准提权，并关闭命令工具的网络访问；模型连接由 CLI 本身处理。需要远程执行时可接任务专用的受限接口，Cactus 示例采用可信文件请求桥。Pi 的工具白名单不是 OS 沙箱，启用写入会开放 bash/edit/write，需要隔离时在单独环境运行。
 
+## 统一执行后端
+
+实际远程计算使用通用启动入口，不为每个 Study 维护一份 runner：
+
+```bash
+uv run research-loop run /absolute/study --iterations 10 \
+  --backend /absolute/task_adapter.py \
+  --backend-config /absolute/backend.json
+```
+
+任务适配器只提供准备、一次启动、同一执行的检查，以及授权、绝对期限和核账钩子；GPU 与墙钟额度必须在该任务配置中显式授权。通用控制器负责请求认领、Agent 截止时间、完成回执和独立 Review。初次启动登记模块与不可变配置，后续普通 `run` 自动沿用登记；配置变化会阻断。脚本执行只接受后端核实的结构化结果，原始 Agent 报告单独保留。Plan 的 `execution=null` 在此桥接中只读执行，不调用计算后端，产物和 measurements 必须为空。接口与最小适配器合同见[执行后端](execution-backends.md#unified-launcher)。
+
 ## 记录与恢复
 
 ```text
