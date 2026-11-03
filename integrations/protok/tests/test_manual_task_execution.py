@@ -130,7 +130,17 @@ class ManualExecutionTests(unittest.TestCase):
         job = self.root / "control/manual-training-jobs" / request["id"]
         if not recover:
             self.allocations.append(request)
-            tasks._write(job / "job.json", {"deadline": deadline})
+            tasks._write(
+                job / "job.json",
+                {
+                    "deadline": deadline,
+                    "manual_task_id": request["manual_task_id"],
+                    "budget_pool": "manual",
+                    "request": request,
+                    "run_id": request["id"],
+                    "source_identity": "trusted-driver-" + request["candidate"]["id"],
+                },
+            )
         result = {
             "status": "completed",
             "run_id": request["id"],
@@ -157,6 +167,14 @@ class ManualExecutionTests(unittest.TestCase):
         if self.interrupt and not recover:
             self.interrupt = False
             raise HarnessError("Reporting interrupted after the owned allocation")
+        tasks._write(
+            job / "receipt.json",
+            result
+            | {
+                "manual_task_id": request["manual_task_id"],
+                "budget_pool": "manual",
+            },
+        )
         return long_training._envelope(request, workspace / "result.json", result)
 
     def test_older_parent_format_rejected_before_claim_or_recovery(self):
@@ -315,8 +333,7 @@ class ManualExecutionTests(unittest.TestCase):
                 manager.run_one()
             child = Study(self.root / "study/tasks" / request["id"] / "study")
             original = child.status()["calls"]["execute"]
-            with self.assertRaises(Exception):
-                manager.run_one()
+            self.assertIsNone(manager.run_one())
             manager.recover(request["id"])
         self.assertEqual(len(self.allocations), 1)
         self.assertEqual(child.status()["calls"]["execute"], original)
@@ -433,6 +450,143 @@ class ManualExecutionTests(unittest.TestCase):
             tasks.admitted_round(self.root / "study/tasks" / request["id"])
         )
 
+    def test_failed_child_does_not_pin_next_and_recovery_targets_original(self):
+        first = self.submit("first", priority=0)
+        self.interrupt = True
+        manager = tasks.ManualTrainingManager(
+            self.root, self.backend, delegate=Author()
+        )
+        with (
+            patch.object(tasks, "_load_backend", return_value=(self.fixed, None)),
+            patch.object(tasks, "execute", side_effect=self.allocate),
+        ):
+            with self.assertRaises(HarnessError):
+                manager.run_one()
+            second = self.submit("second", priority=-1)
+            # Recovery must resume first even though second is now preferred.
+            manager.recover(first["id"])
+            rows = {row["id"]: row for row in self.queue.snapshot()}
+            self.assertEqual(rows[first["id"]]["status"], "reviewed")
+            self.assertIsNone(rows[second["id"]]["binding"])
+            manager.run_one()
+        self.assertEqual(len(self.allocations), 2)
+        self.assertTrue(
+            all(row["status"] == "reviewed" for row in self.queue.snapshot())
+        )
+
+    def test_unknown_execute_is_skipped_while_next_task_completes(self):
+        first = self.submit("first", priority=0)
+        self.interrupt = True
+        manager = tasks.ManualTrainingManager(
+            self.root, self.backend, delegate=Author()
+        )
+        with (
+            patch.object(tasks, "_load_backend", return_value=(self.fixed, None)),
+            patch.object(tasks, "execute", side_effect=self.allocate),
+        ):
+            with self.assertRaises(HarnessError):
+                manager.run_one()
+            child = Study(self.root / "study/tasks" / first["id"] / "study")
+            retained = child.status()
+            self.submit("second")
+            manager.run_one()
+            self.assertIsNone(manager.run_one())
+            self.assertEqual(child.status(), retained)
+        self.assertEqual(len(self.allocations), 2)
+        rows = {row["id"]: row for row in self.queue.snapshot()}
+        self.assertEqual(rows["first"]["status"], "needs_attention")
+        self.assertEqual(rows["second"]["status"], "reviewed")
+
+    def test_preinit_failure_persists_and_default_skips_to_next(self):
+        first = self.submit("first", priority=0)
+        manager = tasks.ManualTrainingManager(
+            self.root, self.backend, delegate=Author()
+        )
+        with patch.object(
+            tasks.subprocess, "run", side_effect=OSError("clone unavailable")
+        ):
+            with self.assertRaisesRegex(OSError, "clone unavailable"):
+                manager.run_one()
+        folder = self.root / "study/tasks" / first["id"]
+        self.assertTrue((folder / "scheduler-error.json").exists())
+        restarted = tasks.ManualTrainingManager(
+            self.root, self.backend, delegate=Author()
+        )
+        self.assertIsNone(restarted.run_one())
+        self.assertEqual(self.queue.snapshot()[0]["status"], "needs_attention")
+        self.submit("second")
+        with (
+            patch.object(tasks, "_load_backend", return_value=(self.fixed, None)),
+            patch.object(tasks, "execute", side_effect=self.allocate),
+        ):
+            restarted.run_one()
+            # Explicit identity is the only way to reattempt pre-init setup.
+            restarted.run_one(task_id=first["id"])
+        self.assertEqual(len(self.allocations), 2)
+        self.assertFalse((folder / "scheduler-error.json").exists())
+
+    def test_real_children_overlap_but_each_phase_remains_serial(self):
+        self.submit("first", priority=0)
+        self.submit("second", priority=1)
+        entered = {identity: threading.Event() for identity in ("first", "second")}
+        release = threading.Event()
+        author = Author()
+
+        def overlapping(backend, root, request, workspace, **kwargs):
+            if not kwargs.get("recover", False):
+                entered[request["manual_task_id"]].set()
+                if not release.wait(5):
+                    raise RuntimeError("test release timed out")
+            return self.allocate(backend, root, request, workspace, **kwargs)
+
+        scheduler = tasks.ManualTrainingScheduler(
+            self.root,
+            self.backend,
+            manager=tasks.ManualTrainingManager(
+                self.root, self.backend, delegate=author
+            ),
+            interval=0.01,
+        )
+        with (
+            patch.object(tasks, "_load_backend", return_value=(self.fixed, None)),
+            patch.object(tasks, "execute", side_effect=overlapping),
+        ):
+            try:
+                scheduler.start()
+                self.assertTrue(entered["first"].wait(3))
+                self.assertTrue(entered["second"].wait(3))
+                self.assertEqual(scheduler.status()["status"], "running")
+                release.set()
+                scheduler.finish_nominations()
+                scheduler.thread.join(5)
+                self.assertFalse(scheduler.thread.is_alive())
+            finally:
+                release.set()
+                scheduler.shutdown()
+        for identity in entered:
+            calls = [
+                call["phase"]
+                for call in author.calls
+                if identity in str(call["run_dir"]).split("/")
+            ]
+            self.assertEqual(calls, ["plan", "execute", "review"])
+        self.assertEqual(len(self.allocations), 2)
+        self.assertTrue(
+            all(row["status"] == "reviewed" for row in self.queue.snapshot())
+        )
+
+    def test_blocked_lane_does_not_hide_progressing_lane(self):
+        automatic, manual = Mock(), Mock()
+        automatic.status.return_value = {"status": "blocked", "reason": "unknown job"}
+        manual.status.return_value = {"status": "idle", "reason": None}
+        scheduler = tasks.ExperimentScheduler(
+            self.root, self.backend, automatic=automatic, manual=manual
+        )
+        self.assertEqual(scheduler.status()["status"], "running")
+        self.assertEqual(scheduler.status()["lanes"][0]["reason"], "unknown job")
+        manual.status.return_value = {"status": "finished", "reason": None}
+        self.assertEqual(scheduler.status()["status"], "blocked")
+
     def test_manual_and_automatic_long_workers_start_independently(self):
         entered, release = threading.Event(), threading.Event()
         manual_entered = threading.Event()
@@ -449,7 +603,10 @@ class ManualExecutionTests(unittest.TestCase):
         manual = tasks.ManualTrainingScheduler(
             self.root,
             self.backend,
-            manager=SimpleNamespace(run_one=lambda **kwargs: manual_entered.set()),
+            manager=SimpleNamespace(
+                pending=lambda **kwargs: [{"id": "one", "folder": self.root / "one"}],
+                run_one=lambda **kwargs: manual_entered.set(),
+            ),
             interval=0.01,
         )
         scheduler = tasks.ExperimentScheduler(

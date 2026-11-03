@@ -28,6 +28,24 @@ class LongTrainingLoopTests(unittest.TestCase):
         }
         lane._write(self.root / "control/long-training-policy.json", self.grant)
 
+    def test_public_manager_does_not_wait_for_shared_slot(self):
+        initialize(self.root / "study", goal="Parent")
+        with (
+            patch.object(lane, "automatic_slot") as slot,
+            patch.object(
+                lane, "round_authorization", return_value={"authorization": "original"}
+            ) as authorize,
+            patch.object(lane, "execute", return_value={}) as execute,
+        ):
+            manager = lane.manager(self.root, Mock())
+            self.assertEqual(
+                manager.admission({"id": "child"}, None), {"authorization": "original"}
+            )
+            manager.executor({"id": "child"}, self.root / "workspace", deadline=123)
+            slot.assert_not_called()
+            authorize.assert_called_once()
+            self.assertFalse(execute.call_args.kwargs["wait_for_slot"])
+
     def test_recovery_rejects_older_parent_before_effects(self):
         initialize(self.root / "study", goal="Parent")
         config_path = self.root / "study/study.json"
@@ -81,7 +99,12 @@ class LongTrainingLoopTests(unittest.TestCase):
             entered.set()
             release.wait(3)
 
-        long_manager = SimpleNamespace(run_one=long_run)
+        long_manager = SimpleNamespace(
+            run_one=long_run,
+            pending=lambda **kwargs: [
+                {"id": "child", "folder": self.root / "study/long-runs/child"}
+            ],
+        )
         scheduler = lane.LongTrainingScheduler(
             self.root, Mock(), lane_manager=long_manager, interval=0.01
         )
@@ -189,30 +212,37 @@ class LongTrainingLoopTests(unittest.TestCase):
             long_training=lane.study_policy(self.root),
         )
         calls = []
-        rows = [{"status": "queued"}, {"status": "queued"}]
+        rows = [
+            {
+                "id": identity,
+                "folder": self.root / "study/long-runs" / identity,
+                "status": "queued",
+            }
+            for identity in ("first", "second")
+        ]
 
         def run_one(**kwargs):
             calls.append(kwargs)
-            if len(calls) == 1:
+            if kwargs["run_id"] == "first":
                 rows[0]["status"] = "withdrawn"
                 return None
-            if len(calls) == 2:
-                rows[1]["status"] = "reviewed"
-                return {"id": "second"}
-            return None
+            rows[1]["status"] = "reviewed"
+            return {"id": "second"}
 
         scheduler = lane.LongTrainingScheduler(
             self.root,
             Mock(),
-            lane_manager=SimpleNamespace(run_one=run_one),
+            lane_manager=SimpleNamespace(
+                run_one=run_one,
+                pending=lambda **kwargs: [r for r in rows if r["status"] == "queued"],
+            ),
             interval=0.001,
         )
         scheduler.finish_nominations()
-        with patch.object(lane, "snapshot", side_effect=lambda root: rows):
-            scheduler.start()
-            scheduler.thread.join(2)
+        scheduler.start()
+        scheduler.thread.join(2)
         self.assertFalse(scheduler.thread.is_alive())
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(
             scheduler.status(), {"status": "finished", "reason": "no_pending"}
         )

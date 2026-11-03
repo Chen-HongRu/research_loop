@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -184,6 +185,36 @@ def usage(control, *, pool="automatic", task_id=None):
             raise ProTokError("Long-training accounting receipt is invalid")
         used += seconds
     return {"gpu_seconds": used, "outstanding": outstanding}
+
+
+@contextmanager
+def automatic_slot(control, *, admission=False):
+    """Wait for the shared allocation pool without blocking sibling schedulers.
+
+    Unknown costs remain outstanding until explicitly reconciled. No reservation
+    or new allowance is inferred from a child being suspended.
+    """
+    control = Path(control)
+    with (control / "long-training.lock").open("a") as lock:
+        while True:
+            if (control / "STOP").exists():
+                raise ProTokError("Parent Study is stopped")
+            if admission and (
+                (control / "HANDOFF").exists()
+                or time.time() >= _policy(control)["deadline"]
+            ):
+                raise ProTokError("Long round admission closed")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                time.sleep(0.1)
+                continue
+            if usage(control)["outstanding"]:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                time.sleep(0.1)
+                continue
+            yield
+            return
 
 
 def _validate_request(request):
@@ -654,6 +685,7 @@ def execute(
     *,
     deadline: float,
     recover: bool = False,
+    wait_for_slot: bool = False,
 ):
     """Run/reconcile one independently receipted allocation; never replace uncertain effects."""
     _validate_request(request)
@@ -665,9 +697,18 @@ def execute(
     pool = "manual" if manual else "automatic"
     lane = "manual-training" if manual else "long-training"
     record = control / (lane + "-jobs") / request["id"]
-    with (control / (lane + ".lock")).open("a") as lock:
-        # This lane's lock deliberately does not block search/research jobs.
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    lock_path = control / (
+        "manual-training-" + task_id + ".lock" if manual else "long-training.lock"
+    )
+    with (
+        automatic_slot(control)
+        if wait_for_slot and not manual and not (record / "job.json").exists()
+        else lock_path.open("a")
+    ) as lock:
+        # Independent manual grants share no execution lock. Automatic work
+        # retains one allocation slot and rechecks settled budget under it.
+        if lock is not None:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = backend._config()
         if not manual:
             _published_source(root, request)

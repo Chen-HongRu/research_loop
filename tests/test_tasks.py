@@ -311,10 +311,48 @@ class TaskTests(unittest.TestCase):
             with self.subTest(change=change):
                 (child / "state.json").write_text(json.dumps(original | change))
                 with patch("research_loop.tasks.time.time", return_value=150):
+                    claimed = self.queue.claim("long_training", allow_new=False)
                     self.assertEqual(
-                        self.queue.claim("long_training", allow_new=False), request
+                        claimed,
+                        None if change.get("status") == "needs_attention" else request,
+                    )
+                    self.assertEqual(
+                        self.queue.claim(
+                            "long_training", identity="manual", allow_new=False
+                        ),
+                        request,
                     )
                     self.assertNotEqual(self.queue.snapshot()[0]["status"], "expired")
+
+    def test_exact_long_claim_never_rebinds_or_selects_another_task(self):
+        budget = {
+            "authorization": "operator",
+            "gpu_seconds_per_run": 60,
+            "total_gpu_seconds": 60,
+            "deadline": 9999999999,
+        }
+        first = self.submit("first", kind="long_training", budget=budget)
+        second = self.submit("second", kind="long_training", budget=budget, priority=-1)
+        self.assertIsNone(
+            self.queue.claim("long_training", identity="first", allow_new=False)
+        )
+        self.assertIsNone(self.queue.claim("long_training", identity="missing"))
+        self.assertEqual(self.queue.claim("long_training", identity="first"), first)
+        binding = read(self.root / "tasks/first/binding.json")
+        (self.root / "tasks/first/scheduler-error.json").write_text(
+            json.dumps({"error": "clone failed", "state": None})
+        )
+        self.assertEqual(self.queue.claim("long_training"), second)
+        self.assertEqual(
+            self.queue.claim("long_training", identity="first", allow_new=False), first
+        )
+        self.assertEqual(read(self.root / "tasks/first/binding.json"), binding)
+        self.assertEqual(
+            next(row for row in self.queue.snapshot() if row["id"] == "first")[
+                "scheduling_error"
+            ],
+            "clone failed",
+        )
 
     def test_invalid_long_budget_and_readonly_fields(self):
         with self.assertRaisesRegex(

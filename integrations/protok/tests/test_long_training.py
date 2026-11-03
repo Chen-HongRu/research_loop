@@ -2,7 +2,9 @@
 
 import ast
 import copy
+import fcntl
 import json
+import threading
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -218,6 +220,82 @@ class LongTrainingTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.tmp_path = Path(temporary.name)
+
+    def test_manual_execution_ownership_is_per_task(self):
+        root, control, req, config, backend = setup(self.tmp_path)
+        req["manual_task_id"] = "first"
+        with (control / "manual-training-first.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):
+                lane.execute(backend, root, req, root / "first", deadline=100000.0)
+            req["manual_task_id"] = "second"
+            with (
+                patch.object(
+                    lane,
+                    "_load_backend",
+                    side_effect=ValueError("Reached independent task"),
+                ),
+                self.assertRaisesRegex(ValueError, "Reached independent task"),
+            ):
+                lane.execute(backend, root, req, root / "second", deadline=100000.0)
+
+    def test_automatic_slot_waits_for_explicitly_settled_accounting(self):
+        root, control, req, config, backend = setup(self.tmp_path)
+        checked, settled, entered = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+
+        def usage(*args, **kwargs):
+            checked.set()
+            return {
+                "gpu_seconds": 100,
+                "outstanding": [] if settled.is_set() else ["retained-job"],
+            }
+
+        def waiter():
+            with lane.automatic_slot(control):
+                entered.set()
+
+        with patch.object(lane, "usage", side_effect=usage):
+            worker = threading.Thread(target=waiter)
+            worker.start()
+            try:
+                self.assertTrue(checked.wait(1))
+                self.assertFalse(entered.is_set())
+                settled.set()
+                self.assertTrue(entered.wait(1))
+            finally:
+                settled.set()
+                worker.join(2)
+            self.assertFalse(worker.is_alive())
+
+    def test_stop_interrupts_automatic_pool_wait_without_clearing_unknown_cost(self):
+        root, control, req, config, backend = setup(self.tmp_path)
+        checked, errors = threading.Event(), []
+        outstanding = {"gpu_seconds": 0, "outstanding": ["unresolved-job"]}
+
+        def usage(*args, **kwargs):
+            checked.set()
+            return outstanding
+
+        def waiter():
+            try:
+                with lane.automatic_slot(control):
+                    self.fail("Unsettled cost cannot admit a new allocation")
+            except lane.ProTokError as error:
+                errors.append(str(error))
+
+        with patch.object(lane, "usage", side_effect=usage):
+            worker = threading.Thread(target=waiter)
+            worker.start()
+            self.assertTrue(checked.wait(1))
+            (control / "STOP").touch()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, ["Parent Study is stopped"])
+        self.assertEqual(outstanding["outstanding"], ["unresolved-job"])
 
     def test_recipe_and_complete_curve(self):
         req = request()

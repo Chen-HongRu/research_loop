@@ -664,6 +664,32 @@ class ProTokServerTests(unittest.TestCase):
             ("attention", "unknown job"),
         )
 
+    def test_drain_waits_for_independent_lane_before_reporting_blocked_sibling(self):
+        from integrations.protok.tasks import ExperimentScheduler
+
+        automatic = Mock()
+        automatic.status.return_value = {
+            "status": "blocked",
+            "reason": "retained child",
+        }
+        manual = Mock()
+        manual.status.side_effect = [
+            {"status": "running", "active": ["independent-child"]},
+            {"status": "finished", "reason": "no_pending"},
+        ]
+        scheduler = ExperimentScheduler(
+            self.root, self.backend, automatic=automatic, manual=manual
+        )
+        waits = []
+        self.assertEqual(
+            SERVER.finish_long_training(
+                self.root, scheduler, "budget", wait=waits.append
+            ),
+            ("attention", "retained child"),
+        )
+        self.assertEqual(waits, [3])
+        self.assertFalse((self.root / "control/STOP").exists())
+
     def test_blocked_outstanding_deadline_recovers_and_summarizes_failure(self):
         self.write(
             "control/ownership.json",

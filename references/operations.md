@@ -34,6 +34,13 @@ new ID. Submission is durable but does not start computation. Generic `run` cons
 pending main investigations; long training requires an authorized task adapter and
 scheduler. Do not promise background execution just because submission succeeded.
 
+The ProTok scheduler dispatches long-training children asynchronously and isolates
+retained failures by child ID. Other independent tasks can proceed while one child
+awaits reconciliation. Automatic children still share their allocation/accounting
+gate; manual task budgets are independent. A parent Study's incomplete iteration
+remains serial. Follow the task guide for exact-ID recovery or explicit advancement
+after fixing a preparation error; do not clear errors or replay unknown Execute.
+
 ## Pause, stop and recovery
 
 If Review stopped an unfinished Study awaiting a later instruction, an explicit

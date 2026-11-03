@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -436,6 +437,14 @@ def snapshot(study_root):
             row.update(
                 status="reviewed", phase="done", result=_read(folder / "result.json")
             )
+        if row["status"] not in {"reviewed", "withdrawn"}:
+            from .scheduling import recorded_child_error
+
+            error = recorded_child_error(folder)
+            if error:
+                row.update(
+                    status="needs_attention", error=error, scheduling_error=error
+                )
         rows.append(row)
     return rows
 
@@ -703,15 +712,33 @@ class LongTrainingManager:
                     if not destination.exists():
                         _write(destination, request)
 
-    def run_one(self, *, deadline, allow_new=True):
-        from .core import Study, initialize
+    def _prepared(self, folder):
+        path = folder / "study/state.json"
+        if not path.exists():
+            return False
+        state = _read(path)
+        return (
+            state.get("iteration") == 0
+            and state.get("phase") == "done"
+            and state.get("status") == "ready"
+            and state.get("call_count") == 0
+            and state.get("calls") == {}
+            and state.get("active_attempt") is None
+            and state.get("round_admission") is None
+        )
+
+    def pending(self, *, deadline, allow_new=True, _reserve_id=None):
+        from .core import Study
+        from .scheduling import child_blocked
 
         parent = Study(self.root)
         policy = parent.long_training
         if policy is None:
-            return None
+            return []
         lane = self.root / "long-runs"
         lane.mkdir(parents=True, exist_ok=True)
+        # Only queue discovery/publication is shared. A child never holds this
+        # lock while waiting for an Agent or an allocation.
         with (lane / "lane.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.sync_requests()
@@ -719,54 +746,83 @@ class LongTrainingManager:
             started = [
                 r for r in rows if (lane / r["id"] / "study/study.json").exists()
             ]
-            prepared = []
-            for row in started:
-                state = _read(lane / row["id"] / "study/state.json")
-                if (
-                    row["status"] != "withdrawn"
-                    and state.get("iteration") == 0
-                    and state.get("phase") == "done"
-                    and state.get("status") == "ready"
-                    and state.get("call_count") == 0
-                    and state.get("calls") == {}
-                    and state.get("active_attempt") is None
-                    and state.get("round_admission") is None
-                ):
-                    prepared.append(row)
-            active = [
-                r
-                for r in started
-                if r["status"] != "reviewed"
-                and not (
-                    r["phase"] == "done"
-                    and not _published(
-                        lane / r["id"] / "study",
-                        lane / r["id"] / "study/iterations/0001",
-                    )
-                )
-            ]
-            eligible = active or (
-                [
-                    r
-                    for r in rows
-                    if (r not in started or r in prepared)
-                    and r["status"] != "withdrawn"
-                ][:1]
-                if allow_new
-                and (
-                    policy["max_runs"] is None
-                    or len(started) - len(prepared) < policy["max_runs"]
-                )
-                else []
+            prepared = [r for r in started if self._prepared(lane / r["id"])]
+            reserved = {
+                r["id"] for r in rows if (lane / r["id"] / "dispatch.json").exists()
+            }
+            used = {r["id"] for r in started if r not in prepared} | reserved
+            slots = (
+                len(rows)
+                if policy["max_runs"] is None
+                else max(0, policy["max_runs"] - len(used))
             )
-            if not eligible:
-                return None
-            if time.time() >= deadline and not admitted_round(lane / eligible[0]["id"]):
-                return None
-            row = eligible[0]
+            pending = []
+            for row in rows:
+                if row["status"] in {"reviewed", "withdrawn"}:
+                    continue
+                folder = lane / row["id"]
+                admitted = admitted_round(folder)
+                if not allow_new and not admitted:
+                    continue
+                if time.time() >= deadline and not admitted:
+                    continue
+                if (row not in started or row in prepared) and row[
+                    "id"
+                ] not in reserved:
+                    if not allow_new or slots == 0:
+                        continue
+                    # A failed preparation has not consumed a child run. Keep
+                    # it visible without taking a slot from independent work.
+                    if not child_blocked(folder):
+                        slots -= 1
+                pending.append({**row, "folder": folder})
+            if _reserve_id is not None:
+                row = next((r for r in pending if r["id"] == _reserve_id), None)
+                if row is not None:
+                    _write(row["folder"] / "dispatch.json", {"id": _reserve_id})
+            return pending
+
+    @contextmanager
+    def _reserve(self, identity, *, deadline, allow_new):
+        rows = self.pending(
+            deadline=deadline, allow_new=allow_new, _reserve_id=identity
+        )
+        row = next((r for r in rows if r["id"] == identity), None)
+        try:
+            yield row
+        finally:
+            if row is not None:
+                (row["folder"] / "dispatch.json").unlink(missing_ok=True)
+
+    def run_one(self, *, deadline, allow_new=True, run_id=None):
+        from .core import Study, initialize
+        from .scheduling import child_blocked, child_run
+
+        rows = self.pending(deadline=deadline, allow_new=allow_new)
+        row = (
+            next(
+                (r for r in rows if r["id"] == run_id),
+                None,
+            )
+            if run_id is not None
+            else next((r for r in rows if not child_blocked(r["folder"])), None)
+        )
+        if row is None:
+            return None
+        policy = Study(self.root).long_training
+        lane = self.root / "long-runs"
+        with (
+            child_run(row["folder"]),
+            self._reserve(row["id"], deadline=deadline, allow_new=allow_new) as claimed,
+        ):
+            if claimed is None:
+                raise BlockingIOError(
+                    "Child capacity or admission changed before dispatch"
+                )
+            row = claimed
             request, folder = row["request"], lane / row["id"]
             child = folder / "study"
-            if row in prepared or not (child / "study.json").exists():
+            if self._prepared(folder) or not (child / "study.json").exists():
                 views = _read(self.root / "frontiers.json")["global"]
                 view = views.get(request["candidate"]["evaluation_id"], {})
                 exclusions = {

@@ -28,6 +28,8 @@ Research Loop 把研究目标拆成有边界的调查：选择路线、冻结计
 
 可选 [Scout](docs/scout.md) 独立阅读论文与实现，提供外部洞见、反证和新视角。Reviewer 综合本地证据与未解问题，研究选择阶段决定下一步。宿主接入 Scout 后，默认每推进一轮且间隔至少五分钟可调用；结果在下一轮边界进入主循环，不改变当前 Plan。
 
+ProTok supervisor 按子 Study 异步调度长训任务。某个子 Study 等待处理时保留原调查，其他独立任务继续；各人工长训使用独立预算，自动提名共享的分配与核账门槛继续生效。每个 Study 内的阶段和父 Study 轮次仍顺序发布，详见[任务调度](docs/task-queue.md)。
+
 ## 快速体验
 
 要求 Python 3.11+、[uv](https://docs.astral.sh/uv/) 和 Git，运行环境为 macOS/Linux。

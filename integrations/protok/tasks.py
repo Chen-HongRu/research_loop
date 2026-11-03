@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 from pathlib import Path
 import shutil
 import subprocess
-import threading
 import time
 import uuid
 
@@ -22,6 +20,7 @@ from research_loop.harness import (
 )
 from research_loop.long_training import admission_path, admitted_round
 from research_loop.tasks import TaskQueue
+from research_loop.scheduling import AsyncStudyScheduler, child_blocked, child_run
 from research_loop.protocol import validate_response
 from research_loop.schema import omit_fields
 
@@ -349,22 +348,50 @@ class ManualTrainingManager:
     def __init__(self, root, backend, *, delegate=None):
         self.root, self.backend, self.delegate = Path(root), backend, delegate
 
-    def run_one(self, *, allow_new=True):
+    def pending(self, *, allow_new=True):
+        if not (self.root / "study/study.json").exists():
+            return []
+        Study(self.root / "study")
+        allow_new = allow_new and not (self.root / "control/HANDOFF").exists()
+        return [
+            {"id": row["id"], "folder": self.root / "study/tasks" / row["id"]}
+            for row in TaskQueue(self.root / "study").snapshot()
+            if row["request"]["kind"] == "long_training"
+            and row["status"] not in {"reviewed", "cancelled", "expired"}
+            and row["phase"] != "done"
+            and (allow_new or admitted_round(self.root / "study/tasks" / row["id"]))
+        ]
+
+    def run_one(self, *, task_id=None, allow_new=True):
         Study(self.root / "study")
         control = self.root / "control"
-        control.mkdir(parents=True, exist_ok=True)
-        with (control / "manual-task-runner.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if (control / "STOP").exists():
+            return None
+        if task_id is None:
+            task_id = next(
+                (
+                    row["id"]
+                    for row in self.pending(allow_new=allow_new)
+                    if not child_blocked(row["folder"])
+                ),
+                None,
+            )
+        if task_id is None:
+            return None
+        queue = TaskQueue(self.root / "study")
+        # Resolve the exact request before constructing a path from operator input.
+        queue.request(task_id)
+        folder = self.root / "study/tasks" / task_id
+        with child_run(folder):
             if (control / "STOP").exists():
                 return None
-            queue = TaskQueue(self.root / "study")
             request = queue.claim(
                 "long_training",
+                identity=task_id,
                 allow_new=allow_new and not (control / "HANDOFF").exists(),
             )
             if request is None:
                 return None
-            folder = self.root / "study/tasks" / request["id"]
             child, baseline = folder / "study", folder / "baseline"
             if not (child / "study.json").exists():
                 if not baseline.exists():
@@ -443,8 +470,7 @@ class ManualTrainingManager:
         Study(self.root / "study")
         folder = self.root / "study/tasks" / task_id
         request = TaskQueue(self.root / "study").request(task_id)
-        with (self.root / "control/manual-task-runner.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with child_run(folder):
             child = Study(folder / "study")
             with child._lock():
                 state = child.status()
@@ -476,72 +502,25 @@ class ManualTrainingManager:
                 publish_completed_response(attempt, result)
             child.retry()
         return (
-            self.run_one(allow_new=False)
+            self.run_one(task_id=task_id, allow_new=False)
             if not (self.root / "control/STOP").exists()
             else {"reconciled": task_id, "review_pending": True}
         )
 
 
-class ManualTrainingScheduler:
+class ManualTrainingScheduler(AsyncStudyScheduler):
     def __init__(self, root, backend, *, manager=None, interval=3):
-        self.root, self.backend = Path(root), backend
+        self.backend = backend
         self.manager = manager or ManualTrainingManager(root, backend)
-        self.interval = interval
-        self.stopped, self.draining = threading.Event(), threading.Event()
-        self._status = {"status": "idle", "reason": None}
-        self.thread = threading.Thread(
-            target=self._run, daemon=True, name="manual-training"
+        super().__init__(
+            root,
+            pending=self.manager.pending,
+            run_one=lambda identity, *, allow_new: self.manager.run_one(
+                task_id=identity, allow_new=allow_new
+            ),
+            name="manual-training",
+            interval=interval,
         )
-
-    def status(self):
-        return dict(self._status)
-
-    def start(self):
-        self.thread.start()
-
-    def finish_nominations(self):
-        self.draining.set()
-
-    def _run(self):
-        try:
-            while not self.stopped.is_set():
-                if (self.root / "control/STOP").exists():
-                    self._status = {"status": "finished", "reason": "user_stop"}
-                    return
-                handoff = (self.root / "control/HANDOFF").exists()
-                if (self.root / "study/study.json").exists():
-                    self._status = {"status": "running", "reason": None}
-                    result = self.manager.run_one(allow_new=not handoff)
-                    if result is not None and result.get("status") in {
-                        "needs_attention",
-                        "stopped",
-                    }:
-                        raise ProTokError("Manual child requires attention")
-                    if result is None and (self.draining.is_set() or handoff):
-                        self._status = {
-                            "status": "finished",
-                            "reason": "handoff" if handoff else "no_pending",
-                        }
-                        return
-                elif self.draining.is_set() or handoff:
-                    self._status = {"status": "finished", "reason": "no_study"}
-                    return
-                self._status = {"status": "idle", "reason": None}
-                self.stopped.wait(self.interval)
-        except Exception as error:
-            self._status = {
-                "status": "blocked",
-                "reason": f"{type(error).__name__}: {error}",
-            }
-            _write(
-                self.root / "control/manual-training-error.json",
-                self._status | {"at": time.time()},
-            )
-
-    def shutdown(self):
-        self.stopped.set()
-        if self.thread.ident is not None:
-            self.thread.join()
 
 
 class ExperimentScheduler:
@@ -559,12 +538,16 @@ class ExperimentScheduler:
 
     def status(self):
         rows = [worker.status() for worker in self.workers]
+        progressing = any(row["status"] in {"running", "idle"} for row in rows)
         blocked = next((row for row in rows if row["status"] == "blocked"), None)
-        return blocked or {
-            "status": "finished"
-            if all(row["status"] == "finished" for row in rows)
-            else "running",
-            "reason": None,
+        return {
+            "status": "running"
+            if progressing
+            else "blocked"
+            if blocked
+            else "finished",
+            "reason": blocked.get("reason") if blocked and not progressing else None,
+            "lanes": rows,
         }
 
     def finish_nominations(self):
@@ -579,7 +562,9 @@ class ExperimentScheduler:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--recover", metavar="TASK_ID")
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--recover", metavar="TASK_ID")
+    target.add_argument("--task-id", metavar="TASK_ID")
     args = parser.parse_args(argv)
     root = args.root.resolve()
     owner = _read(root / "control/ownership.json")
@@ -587,7 +572,11 @@ def main(argv=None):
         Path(owner["project"]), root / "control", owner["owner_token"]
     )
     manager = ManualTrainingManager(root, backend)
-    result = manager.recover(args.recover) if args.recover else manager.run_one()
+    result = (
+        manager.recover(args.recover)
+        if args.recover
+        else manager.run_one(task_id=args.task_id)
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
