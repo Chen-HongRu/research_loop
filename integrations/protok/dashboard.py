@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -22,6 +22,7 @@ from integrations.protok.explanation import explanation_coverage, explanation_st
 from integrations.protok.plan_provenance import accepted_plan_response, execution_plan
 from integrations.protok.run import job_path
 from integrations.protok.task_telemetry import TASK_ID, manual_locations
+from integrations.protok import tensorboard_scope
 from research_loop import telemetry
 from research_loop.tasks import TaskQueue
 from research_loop.harness import completed_response
@@ -2587,6 +2588,30 @@ def serve(
             if tensorboard_port is None:
                 self.send_error(503, "TensorBoard is not configured")
                 return
+            try:
+                upstream_path, task_scope = tensorboard_scope.parse_request(
+                    self.path,
+                    {
+                        "active",
+                        *(f"history-{i}" for i in range(1, len(history_roots) + 1)),
+                    },
+                )
+            except ValueError as error:
+                self.send_error(400, str(error))
+                return
+            if task_scope is not None and tensorboard_scope.route(upstream_path) in {
+                "/data/plugin/scalars/tags",
+                "/data/plugin/text/tags",
+                "/data/plugin/timeseries/tags",
+            }:
+                selector = {
+                    key: value
+                    for key, value in vars(task_scope).items()
+                    if value is not None
+                }
+                upstream_path += ("&" if "?" in upstream_path else "?") + urlencode(
+                    {"dashboard_task": json.dumps(selector)}
+                )
             if self.path.split("?", 1)[0] == "/tensorboard":
                 self.send_response(302)
                 self.send_header(
@@ -2629,7 +2654,13 @@ def serve(
                 if key.lower() not in excluded
             }
             index_request = urlparse(self.path).path == "/tensorboard/"
-            if index_request:
+            scoped_json = (
+                task_scope is not None
+                and tensorboard_scope.route(upstream_path)
+                in tensorboard_scope.JSON_ROUTES
+                and self.command != "HEAD"
+            )
+            if index_request or scoped_json:
                 headers = {
                     key: value
                     for key, value in headers.items()
@@ -2641,7 +2672,9 @@ def serve(
                 "127.0.0.1", tensorboard_port, timeout=30
             )
             try:
-                upstream.request(self.command, self.path, body=body, headers=headers)
+                upstream.request(
+                    self.command, upstream_path, body=body, headers=headers
+                )
                 response = upstream.getresponse()
             except (OSError, http.client.HTTPException):
                 upstream.close()
@@ -2666,6 +2699,25 @@ def serve(
                         b'<script src="/assets/tensorboard-live.js"></script></head>',
                         1,
                     )
+                elif scoped_json and response.status == 200:
+                    # Buffer only task-scoped JSON, never large TensorBoard assets
+                    # or training artifacts. No response may fall back to global.
+                    raw = response.read(33_554_433)
+                    if len(raw) > 33_554_432:
+                        self.send_error(
+                            502, "TensorBoard metadata exceeds task view limit"
+                        )
+                        return
+                    try:
+                        payload = tensorboard_scope.filter_response(
+                            tensorboard_scope.route(upstream_path),
+                            json.loads(raw),
+                            task_scope,
+                        )
+                        document = json.dumps(payload, ensure_ascii=False).encode()
+                    except (ValueError, TypeError, UnicodeError):
+                        self.send_error(502, "Invalid TensorBoard task response")
+                        return
                 self.send_response(response.status)
                 response_excluded = excluded | {
                     header.strip().lower()

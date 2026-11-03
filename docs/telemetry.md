@@ -132,10 +132,23 @@ their source timestamp. Arrays, strings and booleans are not inferred to be scal
 metrics. Each selected stream retains at most 256 recent dashboard events in the
 browser; this is a live preview, not the complete evidence history.
 
-The panel's **TensorBoard · 全量指标** button opens Scalars filtered to the selected
-task at `/tensorboard/`. TensorBoard 2.21.0 selects no runs by default when more
-than 40 match its run filter; the task filter keeps an experiment discoverable as
-the total history grows. Existing explicit selections remain authoritative.
+The panel's **TensorBoard · 全量指标** button opens Scalars for the selected task
+at `/tensorboard/`. Structured task identity stays in that page's query and data
+requests. The dashboard proxy filters run/tag metadata and curve responses for
+legacy Scalars, Text and Time Series; unrelated tags do not create empty cards or
+inflate pagination. Browser tabs keep independent scopes. The task banner links
+to an explicit all-task comparison view. Existing generated run-filter links are
+upgraded; an unscoped TensorBoard URL remains global. Invalid scopes return an
+error rather than falling back to global data.
+
+Scientific tag identities, units, conditions, streams and execution attempts stay
+unchanged. The TensorBoard service applies request-local run filters before
+building metric metadata; other tasks' descriptions are not processed first.
+Deploy the proxy, scope helper, TensorBoard plugin adapter and registration,
+dashboard link and bootstrap asset together, then restart the two display
+services. Existing event files and export cursors remain in place; no rebuild
+or research Runner restart is needed. Time Series descriptions combined across runs are omitted in scoped
+views; original per-event provenance remains in Text evidence and source logs.
 Install the optional CPU-only dependency and start its separate
 service with the same active and history roots as the dashboard:
 

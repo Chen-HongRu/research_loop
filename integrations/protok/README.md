@@ -42,6 +42,10 @@ to the panel. Non-overlapping side branches reuse tracks without implying ancest
 
 ## Tagged live observations
 
+The dashboard's TensorBoard link scopes run lists, metric tags and curve responses
+to the selected task, independently in each browser tab. An explicit all-task
+view remains available. See the [TensorBoard setup and scope contract](dashboard.md#启用-tensorboard).
+
 Research scripts use `research_loop_events.emit` with optional `dashboard` tags.
 The controller incrementally receives all tags during owned allocations; the live
 panel filters presentation while Review retains an unfiltered frozen prefix.

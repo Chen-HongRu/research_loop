@@ -28,7 +28,7 @@ function tensorboardTaskURL(task) {
   const name=task.source+'/'+(task.task?'manual/'+task.task+'/':task.run?'long/'+task.run:'#'+task.experiment);
   // Filter before TensorBoard's 40-run default-selection limit is applied.
   const boundary=task.task?'':'(?:$| \\(attempt [0-9]+\\)|/)';
-  return '/tensorboard/#scalars&runFilter='+encodeURIComponent('^'+escape(name)+boundary);
+  return '/tensorboard/?dashboard_task='+encodeURIComponent(JSON.stringify(task))+'#scalars&runFilter='+encodeURIComponent('^'+escape(name)+boundary);
 }
 function metricView(id) {
   if(!metricViews.has(id))metricViews.set(id,{filter:'',pinned:new Map(),error:null});

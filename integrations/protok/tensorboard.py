@@ -346,7 +346,11 @@ def main(argv=None):
     print(canonical(result), flush=True)
     if args.once:
         return
-    board = program.TensorBoard()
+    from integrations.protok.tensorboard_plugins import task_plugins
+
+    board = program.TensorBoard(
+        plugins=task_plugins({source_id for source_id, _ in exporter.sources})
+    )
     board.configure(
         argv=[
             "tensorboard",

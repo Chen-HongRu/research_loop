@@ -64,7 +64,11 @@ uv run --extra dashboard python -m integrations.protok.tensorboard \
 
 看板原启动命令增加 `--tensorboard-port 6006` 后显示按钮。TensorBoard 仅监听本机，由看板在 `/tensorboard/` 转发，沿用现有认证与访问路径；不对外开放 6006 端口。服务未配置或暂不可用时，任务进展仍可读取回传数据。
 
-按钮默认打开 Scalars 并过滤到所选任务。Run 使用面板编号，例如 `active/#0026`；同一执行的指标和条件分别作为曲线，不再生成数百个 run。其他执行使用 `(attempt N)` 区分。TensorBoard 2.21.0 在匹配 run 超过 40 个时默认全不选，任务过滤避免历史增长再次造成空图，并保留用户的显式选择。没有保留遥测的旧实验不能仅凭最终分数补出训练曲线。
+按钮默认打开所选任务的 Scalars。任务身份随页面和每个数据请求传递，代理按任务筛选运行列表、Scalars/Text 标签以及 Time Series 元数据和曲线；分页只计算该任务的指标，不列出其他任务的空图。每个浏览器标签页独立，不通过共享 cookie 或存储切换任务。页面底部显示任务范围，“查看所有任务”进入全局比较视图。旧看板生成的 `runFilter` 链接会自动升级为同样的任务范围；无任务筛选的 TensorBoard 入口仍显示全局数据。
+
+Run 使用面板编号，例如 `active/#0026`；同一执行的指标和条件分别作为曲线，其他执行使用 `(attempt N)` 区分。单位、seed、arm、来源流与执行身份均保留，不为减少页数而合并不同科学条件；没有保留遥测的旧实验不能仅凭最终分数补出训练曲线。无效任务筛选返回错误，不回退到全局图；无遥测时显示 TensorBoard 的空数据提示。
+
+任务范围修复需一起更新 `dashboard.py`、`tensorboard_scope.py`、`tensorboard_plugins.py`、`tensorboard.py`、`assets/task-metrics.js` 和 `assets/tensorboard-live.js`，重启看板与 TensorBoard 两个展示服务。TensorBoard 在构建元数据前按当前请求筛选任务；源遥测、现有 event 文件和导出游标保持原位，无需重建或重启研究 Runner。依赖固定版本的数据路由与响应结构；升级 TensorBoard 时须复核 Scalars、Text 与 Time Series 的任务隔离。
 
 升级导出器与看板时需一起更新 `tensorboard.py` 与 `assets/task-metrics.js`。原 logdir 可继续使用；新版在 `events-v2/` 与 `.export-state-v2/` 增量重建派生视图，保留旧目录供回退，TensorBoard 只观察新版目录。切换来源目录时使用新的 logdir。只需重启两个展示服务，无需重启研究 Runner。
 
