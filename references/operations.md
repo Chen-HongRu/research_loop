@@ -5,6 +5,15 @@ Identify the Study and runtime from the earlier handoff or repository records;
 inspect status before mutations. Multiple plausible Studies require clarification.
 Task-specific runners supersede generic `run` and have separate resource controls.
 
+The generic launcher does not dispatch adapter scripts. Adapter guides assume a
+repository-root working directory: use `uv run --locked --directory SKILL_ROOT
+python -m integrations.protok.tasks ...` (or the guide's script path) with all
+Study/project/input/output arguments absolute. `--project` alone preserves the
+external cwd and does not expose root-level `integrations` modules. Apply each
+adapter's own dependency instructions. For an already deployed runtime, keep its
+existing runner and host; installing this skill does not authorize switching or
+redeploying that runtime.
+
 | Intent | CLI or evidence |
 | --- | --- |
 | Status and failures | `status STUDY`; inspect current attempt receipts/logs as needed |
@@ -12,6 +21,7 @@ Task-specific runners supersede generic `run` and have separate resource control
 | Experimental history | `graph STUDY` |
 | Best comparable candidates | `frontiers STUDY`; preserve evaluation/scope distinctions |
 | Continue autonomous work | `run STUDY --iterations 1` within remaining authorization |
+| Reopen an unfinished reviewed stop | `resume STUDY --reason "Actual user request"`, then the correct runner |
 | Queue a specified investigation | `task submit STUDY --request FILE` |
 | Inspect requests | `task list STUDY`, `task status STUDY ID` |
 | Reprioritize/cancel an unbound request | `task priority STUDY ID NUMBER`, `task cancel STUDY ID` |
@@ -25,6 +35,14 @@ pending main investigations; long training requires an authorized task adapter a
 scheduler. Do not promise background execution just because submission succeeded.
 
 ## Pause, stop and recovery
+
+If Review stopped an unfinished Study awaiting a later instruction, an explicit
+user request to continue authorizes `resume STUDY --reason ...`. This records the
+request and makes the Study ready without a model call. It requires a published
+Review, an unfinished goal and remaining original iteration/call/time budgets;
+it preserves all counters, evidence and route statuses. It cannot reopen goal-met,
+budget, Plan/Judge or interrupted-execution stops. `run` remains a separate bounded
+action, subject to the existing adapter's admission, lease and STOP checks.
 
 A generic `run` is bounded and has no persistent daemon or generic pause/stop CLI.
 If idle, do not start another iteration. If active, signal the exact owned runner

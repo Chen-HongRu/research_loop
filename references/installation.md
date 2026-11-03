@@ -11,6 +11,20 @@ root must be copied: `src/`, `scripts/`, `pyproject.toml`, `uv.lock`, references
 examples and docs must remain together. A GitHub archive needs no `.git` directory.
 Do not install the previous `skills/research-loop` draft; it is not the distribution.
 
+If the helper's archive download fails due to local TLS/network configuration, use
+its supported `--method git` with the chosen branch/tag and record the installed
+Git revision. Do not disable TLS verification. Some helper versions cannot fetch
+an arbitrary commit through shallow Git fallback; use a branch/tag containing the
+intended revision and verify HEAD, or fix archive transport for commit-pinned installs.
+
+Some helper versions implement `--path .` as a sparse root checkout and copy only
+root files. If the newly installed directory contains `.git` but lacks `scripts/`
+or `src/`, run `git -C /path/to/installed/research-loop sparse-checkout disable`.
+This hydrates the same checked-out revision; verify HEAD and required files before
+doctor. Do not apply it to the research target repository. If there is no Git
+metadata, the archive/install is incomplete: retain it for inspection and reinstall
+to a fresh destination rather than guessing a runtime.
+
 The built-in installer's destination may vary by Codex version. Use the path it
 actually reports and check discovery in the next turn. The currently documented
 user discovery location is `~/.agents/skills`; some clients/helpers install under
@@ -36,6 +50,16 @@ commands preserve the caller's working directory. No model calls occur in doctor
 it does not prove the requested model is available to the account, that a GPU is
 accessible, or that a task-specific backend works. Only an authorized real run can
 establish those conditions. Never advertise automatic model installation/login.
+
+The controller starts child Codex CLI processes. A controller launched inside an
+outer Codex command sandbox may be unable to initialize that child's app server
+or write the CLI state database even when `doctor` and login checks pass. If that
+specific failure occurs, retain the attempt and request normal host execution
+approval for the same controller command. Keep the controller's child-stage
+sandboxes enabled; do not use danger-full-access or bypass approval flags. A failed
+read-only selection can resume through `run` within the original budget. Inspect
+Execute effects before any recovery involving execution. If approval is unavailable,
+report the precise blocker rather than repeating commands or claiming success.
 
 After installation, report the installed path and that the skill is available on
 the next turn. If discovery is stale, restart Codex. When installation/setup is the

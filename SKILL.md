@@ -10,6 +10,13 @@ source, locked dependencies, examples and task adapters. Resolve this file's
 directory as SKILL_ROOT; never assume the user's repository contains the runtime.
 The target repository and Study are separate from this installed directory.
 
+Check installation completeness before running: `scripts/research_loop.py`, `src/`
+and `uv.lock` must exist. Some skill-installer Git versions install only top-level
+files for `--path .`; if this new installation has `.git` and is sparse, run
+`git -C SKILL_ROOT sparse-checkout disable` to materialize its checked-out revision,
+then verify HEAD and the files. Do not run this repair in the user's target repo.
+Archive installs do not have or need Git metadata.
+
 Use `python3 SKILL_ROOT/scripts/research_loop.py ...` from the target repository
 to invoke the bundled CLI. Replace SKILL_ROOT with its actual absolute path and
 quote paths. The launcher uses uv with this release's lockfile, preserves the
@@ -23,7 +30,7 @@ a globally installed `research-loop` which may be a different release.
 | Install or check setup | Read [installation](references/installation.md); run `doctor` |
 | Research a new question | Follow the setup workflow below, then actually run one bounded iteration |
 | Show progress, findings or best candidates | Read `status`, `knowledge`, `graph`, `frontiers`; distinguish live observations from reviewed evidence |
-| Continue | Confirm the Study and runner, inspect status and remaining authorization, then `run --iterations 1` |
+| Continue | Confirm the Study and runner, inspect status and remaining authorization; use `resume --reason` for an eligible reviewed stop, then `run --iterations 1` |
 | Run a specific follow-up | Read [operations](references/operations.md); submit a task with frozen source, then advance through the correct runner |
 | Pause, stop, recover, extend, update or remove | Read [operations](references/operations.md) before acting |
 
@@ -51,6 +58,8 @@ Never initialize a second Study just to bypass an interruption or spent budget.
    metric into unrelated tasks. Final-only data/scores stay outside search.
    Diagnostics and theory need not produce ranked candidates or an optimization
    hypothesis. See [design](docs/evidence-driven-design.md) if semantics are unclear.
+   Carry applicable repository research constraints into the goal or frozen baseline
+   instructions: child stages have no access to this chat's implicit agreements.
 
 3. **Implement the missing experimental path.** Reuse existing scripts; generate
    only the missing run/evaluate/smoke entry points in the target experiment
@@ -62,7 +71,9 @@ Never initialize a second Study just to bypass an interruption or spent budget.
 
 4. **Verify the smallest real path.** Exercise actual inputs, model/loss and
    evaluator with the smallest meaningful smoke; distinguish smoke from a study
-   result. Do not add full-data scans/hashes or repeated startup validation.
+   result. Do not add full-content scans/hashes of data, caches, manifests,
+   checkpoints or derived artifacts, including smoke/validation; use version
+   references and cheap metadata. Do not add repeated startup validation.
    Generic Codex Execute is workspace-write, command-network disabled and cannot
    approve escalation; selection, Plan and Review are read-only. Prepare dependencies
    and data beforehand. Verify device, input and output access in the execution
@@ -77,8 +88,9 @@ Never initialize a second Study just to bypass an interruption or spent budget.
    its source revision and any deliberately included uncommitted changes; never
    commit or clean the user's entire dirty checkout. Keep large data/checkpoints
    external and version-referenced. The baseline workspace cannot equal or contain
-   the Study control directory. Use sibling paths for clarity. All research outputs
-   and environments belong outside the installed skill.
+   the Study control directory. Use sibling paths for clarity. All experiment
+   outputs and experiment environments belong outside the installed skill; uv may
+   prepare the bundled controller's own `.venv` inside the installation.
 
 6. **Initialize, then start.** Inspect `init --help` and [usage](docs/usage.md).
    Use actual absolute paths for Study, goal, baseline and evaluation. Set explicit
@@ -87,7 +99,9 @@ Never initialize a second Study just to bypass an interruption or spent budget.
    `gpt-6.1-sol`/`medium`, without fallback. Add `--allow-write` only for authorized
    writes; omit `--evaluation` for qualitative work. `init` makes no model call.
    Start with `run STUDY --iterations 1` through the launcher, or the task runner
-   when required. Run it as a supervised process whose status can be polled, so
+   when required. If nested CLI startup is blocked by the outer command sandbox,
+   use the normal host approval path described in [installation](references/installation.md),
+   preserving the child-stage sandboxes. Run it as a supervised process whose status can be polled, so
    Codex can report progress and honor stop requests. Do not launch an untracked
    background loop. A request to begin research authorizes this bounded path, not
    an arbitrary paid/shared GPU allocation.

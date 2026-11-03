@@ -354,6 +354,52 @@ class Study:
             )
         _write(self.root / "state.json", state)
 
+    def resume(self, *, reason: str) -> dict:
+        """Authorize another bounded run after Review stopped an unfinished study."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("A nonempty operator reason is required")
+        with self._lock():
+            state = self.status()
+            if (
+                state["status"] != "stopped"
+                or state["phase"] != "done"
+                or state.get("stop_reason") != "review"
+                or state.get("goal_status") not in {"not_met", "undetermined"}
+                or state.get("active_attempt")
+                or state.get("debugging")
+            ):
+                raise StudyError(
+                    "Only a reviewed stop with an unfinished goal can resume"
+                )
+            for limit, used in (
+                ("max_iterations", "iteration"),
+                ("max_calls", "call_count"),
+                ("max_seconds", "elapsed_seconds"),
+            ):
+                if self.config[limit] is not None and state[used] >= self.config[limit]:
+                    raise StudyError(f"Cannot resume: {limit} is exhausted")
+            folder = self._folder(state)
+            if (
+                _read(folder / "iteration.json").get("status") != "reviewed"
+                or not (folder / "publication.json").is_file()
+                or not state.get("review_ref")
+            ):
+                raise StudyError("Cannot resume without a published Review")
+            self._check_attempt_stopped(self.root / state["calls"]["review"])
+            state.setdefault("resumptions", []).append(
+                {
+                    "reason": reason.strip(),
+                    "recorded_at": _now(),
+                    "iteration": state["iteration"],
+                    "review_ref": state["review_ref"],
+                    "call_count": state["call_count"],
+                    "elapsed_seconds": state["elapsed_seconds"],
+                }
+            )
+            state.update(status="ready", stop_reason=None)
+            self._save(state)
+            return state
+
     def retry(self, *, readonly: bool = False) -> dict:
         with self._lock():
             self._recover_observations()
