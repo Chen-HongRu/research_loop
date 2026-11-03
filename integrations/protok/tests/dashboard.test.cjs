@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, tensorboardTaskURL, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, graphParent, drawGraph, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, tensorboardTaskURL, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, treeEdge, graphParent, drawGraph, focusTreeTask, frontierSpine, previewTreeTask, renderTreePopover, setTreeZoom, zoomTree, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -96,7 +96,7 @@ test('Scout renders structured research insights, open questions and legacy find
   }
 });
 
-test('Git rows follow time; tracks follow code parents, independently of routes and references', () => {
+test('Horizontal time slots and branch tracks follow code parents, independently of routes and references', () => {
   const nodes = [
     {id:'0001', base:null, route_id:'A'},
     {id:'0002', base:'0001', route_id:'A'},
@@ -105,7 +105,8 @@ test('Git rows follow time; tracks follow code parents, independently of routes 
     {id:'0005', base:'0003', route_id:'A'},
   ];
   const graph = ui.gitLayout(nodes);
-  assert.deepEqual(plain(graph.ordered.map(node => node.id)), ['0005','0004','0003','0002','0001']);
+  assert.deepEqual(plain(graph.ordered.map(node => node.id)), ['0001','0002','0003','0004','0005']);
+  assert.ok(graph.positions['0001'].x<graph.positions['0002'].x);
   assert.equal(graph.positions['0005'].lane, graph.positions['0003'].lane);
   assert.equal(graph.positions['0004'].lane, graph.positions['0002'].lane);
   assert.notEqual(graph.positions['0004'].lane, graph.positions['0005'].lane);
@@ -116,6 +117,216 @@ test('Git rows follow time; tracks follow code parents, independently of routes 
 test('References and missing parents never create imaginary code nodes', () => {
   const graph = ui.gitLayout([{id:'0003',base:'0000',references:['0002']},{id:'0002',base:null}]);
   assert.deepEqual(Object.keys(graph.positions).sort(), ['0002','0003']);
+});
+
+test('Timeline follows recorded creation time, with stable ties and an explicit undated tail', () => {
+  const nodes=[
+    {id:'main',sequence:1,created_at:300},
+    {id:'long',sequence:2,created_at:100},
+    {id:'same-b',sequence:4,created_at:200},
+    {id:'same-a',sequence:3,created_at:200},
+    {id:'unknown',sequence:0,created_at:null},
+  ];
+  const model=ui.gitLayout(nodes);
+  assert.deepEqual(plain(model.ordered.map(node=>node.id)),['long','same-a','same-b','main','unknown']);
+  assert.deepEqual(plain(ui.gitLayout([...nodes].reverse()).positions),plain(model.positions));
+});
+
+test('Eight sibling branches expand past two compact tracks and keep nodes distinct', () => {
+  const root={id:'0001',created_at:1};
+  const branches=Array.from({length:8},(_,index)=>({id:'branch-'+index,base:root.id,created_at:2+index}));
+  const long={id:'long',validation_of:root.id,created_at:20};
+  const next={id:'next',continuation_of:branches[4].id,created_at:30};
+  const model=ui.gitLayout([root,...branches,long,next]);
+  assert.equal(new Set(branches.map(node=>model.positions[node.id].lane)).size,8);
+  assert.notEqual(model.positions.long.lane,model.positions[root.id].lane);
+  assert.equal(model.positions.next.lane,model.positions[branches[4].id].lane);
+  assert.equal(model.lanes,9);
+  const points=Object.values(model.positions);
+  for(const [index,point] of points.entries())for(const other of points.slice(index+1)) {
+    assert.ok(Math.abs(point.x-other.x)>=44 || Math.abs(point.y-other.y)>=44,'node targets overlap');
+  }
+  assert.ok(model.height>=Math.max(...points.map(point=>point.y+28)));
+  assert.ok(model.height<700,'relationship tracks do not reserve experiment-card height');
+});
+
+test('Frontier ancestry stays horizontal even when earlier children explored other routes', () => {
+  const nodes=[{id:'root',created_at:1},{id:'first',base:'root',created_at:2},
+    {id:'main',base:'root',created_at:3},{id:'side',base:'main',created_at:4},
+    {id:'tip',continuation_of:'main',created_at:5,frontier_current:true},
+    {id:'long',validation_of:'tip',created_at:6},{id:'later',base:'tip',created_at:7}];
+  const model=ui.gitLayout(nodes);
+  for(const id of ['root','main','tip']) {
+    assert.equal(model.positions[id].lane,0);
+    assert.equal(model.positions[id].y,model.positions.root.y);
+    assert.equal(model.positions[id].mainline,true);
+  }
+  for(const id of ['first','side','long','later'])assert.notEqual(model.positions[id].lane,0);
+  assert.doesNotMatch(ui.treeEdge(model.positions.root,model.positions.main),/V/,'mainline edges are horizontal');
+  assert.equal(ui.frontierSpine(nodes.map(n=>({...n,frontier_current:false}))).tip,undefined);
+  const tied=ui.frontierSpine([...nodes,{id:'tie',base:'root',created_at:8,frontier_current:true}]);
+  assert.equal(tied.tip.id,'tie');assert.equal(tied.members.length,2);
+});
+
+test('Disjoint branch intervals reuse tracks without creating inheritance', () => {
+  const nodes=[{id:'root',created_at:1},{id:'a',base:'root',created_at:2},
+    {id:'tip',base:'root',created_at:3,frontier_current:true},
+    {id:'b',base:'tip',created_at:4}];
+  const model=ui.gitLayout(nodes);
+  assert.equal(model.positions.a.lane,model.positions.b.lane);
+  assert.equal(nodes[3].base,'tip');
+  assert.equal(model.lanes,2);
+});
+
+test('Running filters keep the canonical Frontier mainline as context', () => {
+  context.spineFilter=[{id:'root',created_at:1,task_status:'completed'},
+    {id:'tip',created_at:2,base:'root',task_status:'completed',frontier_current:true},
+    {id:'running',created_at:3,task_status:'running'}];
+  try {
+    vm.runInContext("data={tasks:spineFilter,nodes:spineFilter};selected='running';following=false;treeLayout=null;",context);
+    elements.get('taskFilter').value='running';ui.drawGraph();
+    assert.match(elements.get('graph').innerHTML,/data-node="tip" data-mainline="true"/);
+    assert.match(elements.get('graph').innerHTML,/data-node="root" data-mainline="true"/);
+    assert.match(elements.get('treeMainline').textContent,/#tip/);
+  } finally {elements.get('taskFilter').value='';vm.runInContext('data=null;selected=null;following=true;treeLayout=null;',context);}
+});
+
+test('Hover previews one card without changing the selected task and dismissal survives refresh', () => {
+  context.popupFixture=[{id:'active:0001',created_at:1,action_summary:'First task summary'},
+    {id:'active:0002',created_at:2,base:'active:0001',action_summary:'Selected task summary'}];
+  try {
+    vm.runInContext("data={nodes:popupFixture};selected='active:0002';following=false;treeLayout=null;treeHovered=null;treeCardDismissed=null;",context);
+    elements.get('taskFilter').value='';ui.drawGraph();
+    const popup=elements.get('treePopover');
+    assert.match(popup.innerHTML,/Selected task summary/);
+    assert.doesNotMatch(elements.get('graph').innerHTML,/First task summary/);
+    ui.previewTreeTask('active:0001');
+    assert.match(popup.innerHTML,/First task summary/);
+    assert.match(popup.innerHTML,/任务预览/);
+    assert.equal(vm.runInContext('selected',context),'active:0002');
+    elements.get('treeCardClose').onclick();ui.drawGraph();
+    assert.equal(popup.hidden,true);
+    ui.previewTreeTask('active:0002');
+    assert.equal(popup.hidden,false);
+    assert.match(popup.innerHTML,/data-task="active:0002"/);
+    ui.drawGraph();assert.match(popup.innerHTML,/Selected task summary/);
+  } finally {vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeHovered=null;treeCardDismissed=null;',context);}
+});
+
+test('Overview fits 120 tasks and all fork tracks inside a phone viewport', () => {
+  const nodes=Array.from({length:120},(_,index)=>({id:'node-'+index,created_at:index+1,base:index?'node-0':null}));
+  const model=ui.gitLayout(nodes,{overview:true,width:335,height:300});
+  assert.equal(model.ordered.length,120);
+  assert.equal(model.lanes,119);
+  assert.ok(model.width<=335 && model.height<=300);
+  for(const point of Object.values(model.positions)) {
+    assert.ok(point.x>=5 && point.x<=330,'node is horizontally outside the overview');
+    assert.ok(point.y>=40 && point.y<=295,'branch is vertically outside the overview');
+  }
+  const detail=ui.gitLayout(nodes);
+  assert.ok(detail.columnWidth<252/4,'local view can show several tasks per card-width slot');
+  assert.deepEqual(plain(model.ordered.map(node=>node.id)),plain(detail.ordered.map(node=>node.id)));
+  const larger=ui.gitLayout(Array.from({length:600},(_,i)=>({id:'large-'+i,created_at:i+1,base:i?'large-0':null})),{overview:true,width:335,height:300});
+  assert.equal(larger.ordered.length,600);
+  assert.ok(larger.width<=335 && larger.height<=300,'global view stays fitted as the loop grows');
+});
+
+test('Zooming focuses the selection, retains mode on refresh and returns to the whole tree', () => {
+  context.zoomFixture=Array.from({length:30},(_,index)=>({id:'zoom-'+index,created_at:index+1,base:index?'zoom-0':null}));
+  try {
+    vm.runInContext("data={nodes:zoomFixture};selected='zoom-29';following=false;treeLayout=null;treeZoom=null;",context);
+    ui.drawGraph();
+    assert.equal(elements.get('treeScale').textContent,'全局概览');
+    ui.setTreeZoom(1);
+    assert.equal(elements.get('treeScale').textContent,'100%');
+    assert.ok(elements.get('graphWrap').scrollLeft>0);
+    ui.zoomTree(1);ui.drawGraph();
+    assert.equal(elements.get('treeScale').textContent,'160%');
+    ui.setTreeZoom(null);
+    assert.equal(elements.get('treeScale').textContent,'全局概览');
+    assert.equal(elements.get('graphWrap').scrollLeft,0);
+    assert.equal(elements.get('graphWrap').scrollTop,0);
+    assert.equal(vm.runInContext('selected',context),'zoom-29');
+  } finally {vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeZoom=null;',context);}
+});
+
+test('Forks clear unrelated task circles and reverse edges approach the destination', () => {
+  const model=ui.gitLayout([{id:'root',created_at:1},{id:'first',base:'root',created_at:2},{id:'second',base:'root',created_at:3}]);
+  // Interpret the actual orthogonal SVG path and measure its clearance, rather
+  // than asserting a copy of the expected implementation string.
+  const segments=(path)=>{
+    const commands=[...path.matchAll(/([MHV])(-?[\d.]+)(?:,(-?[\d.]+))?/g)];
+    let point=null;const result=[];
+    for(const [,command,a,b] of commands){
+      const next=command==='M'?{x:+a,y:+b}:command==='H'?{x:+a,y:point.y}:{x:point.x,y:+a};
+      if(point)result.push([point,next]);point=next;
+    }
+    return result;
+  };
+  for(const target of ['first','second']) {
+    const other=model.positions[target==='first'?'second':'first'];
+    for(const [start,end] of segments(ui.treeEdge(model.positions.root,model.positions[target]))) {
+      const nearestX=Math.max(Math.min(start.x,end.x),Math.min(other.x,Math.max(start.x,end.x)));
+      const nearestY=Math.max(Math.min(start.y,end.y),Math.min(other.y,Math.max(start.y,end.y)));
+      assert.ok(Math.hypot(other.x-nearestX,other.y-nearestY)>10,'an edge passes through an unrelated task dot');
+    }
+  }
+  const reverse=ui.gitLayout([{id:'parent'},{id:'child',base:'parent',created_at:1}]);
+  assert.ok(reverse.positions.parent.x>reverse.positions.child.x);
+  const parts=segments(ui.treeEdge(reverse.positions.parent,reverse.positions.child));
+  const [start,end]=parts.at(-1),child=reverse.positions.child;
+  assert.ok(start.y<end.y && end.y<child.y,'arrow approaches the top of the destination circle');
+  assert.equal(end.x,child.x);
+  assert.ok(Math.abs(end.y-child.y)<=10);
+});
+
+test('Refreshing and inserting earlier records preserve the panned timeline anchor', () => {
+  const prior=elements.get('graphWrap');
+  const wrap={clientWidth:600,clientHeight:220,scrollLeft:0,scrollTop:0};
+  const priorView=elements.get('treeView');
+  const treeView={scrollIntoView(){this.revealed=true;}};
+  elements.set('graphWrap',wrap);
+  elements.set('treeView',treeView);
+  context.timelineFixture=Array.from({length:20},(_,index)=>({id:String(index+1).padStart(4,'0'),source_id:'active',created_at:100+index}));
+  try {
+    vm.runInContext("data={nodes:timelineFixture};selected='0020';following=false;treeLayout=null;treeFollowed=null;treeZoom=1;",context);
+    elements.get('routeFilter').value='';elements.get('sourceFilter').value='';elements.get('taskFilter').value='';
+    ui.drawGraph();
+    assert.ok(wrap.scrollLeft>0,'initial view locates the selected task');
+    wrap.scrollTop=40;
+    const before=wrap.scrollLeft;
+    ui.drawGraph();
+    assert.equal(wrap.scrollLeft,before);
+    assert.equal(wrap.scrollTop,40);
+    vm.runInContext("timelineFixture.push({id:'earlier',source_id:'active',created_at:1});",context);
+    ui.drawGraph();
+    assert.equal(wrap.scrollLeft,before+56,'tree preserves its compact timeline anchor');
+    vm.runInContext("timelineFixture.push({id:'middle',source_id:'active',created_at:115.5});",context);
+    ui.drawGraph();
+    assert.equal(wrap.scrollLeft,before+56,'insertion after the tree anchor does not pan the tree');
+    assert.equal(vm.runInContext('selected',context),'0020');
+    assert.equal(treeView.revealed,undefined,'ordinary refresh never scrolls the page to the tree');
+    document.getElementById('treeLocate').onclick();
+    assert.equal(treeView.revealed,true,'explicit locate also reveals both regions in the page viewport');
+    ui.focusTreeTask('0001');
+    assert.ok(wrap.scrollLeft<before);
+    assert.match(elements.get('graph').innerHTML,/timeline-axis/);
+  } finally {
+    if(prior)elements.set('graphWrap',prior);else elements.delete('graphWrap');
+    if(priorView)elements.set('treeView',priorView);else elements.delete('treeView');
+    vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeFollowed=null;treeZoom=null;',context);
+  }
+});
+
+test('An available imported origin remains visible when the declared code parent is missing', () => {
+  context.originFixture=[{id:'history:0001',source_id:'history',created_at:1},{id:'active:0001',source_id:'active',base:'missing',imported_from:'history:0001',created_at:2,references:['missing-evidence']}];
+  try {
+    vm.runInContext('data={nodes:originFixture};',context);
+    ui.drawGraph();
+    assert.match(elements.get('graph').innerHTML,/同版本结果导入：history:0001 → active:0001；不增加新评价结果/);
+    assert.doesNotMatch(elements.get('graph').innerHTML,/代码继承：#missing/);
+    assert.equal(Object.keys(ui.gitLayout(context.originFixture).positions).length,2);
+  } finally {vm.runInContext('data=null;treeLayout=null;',context);}
 });
 
 test('Execution continuation follows retained source with a distinct edge and original Plan', () => {
@@ -306,11 +517,11 @@ test('Recent-window curve carries in the earlier best rather than inventing a ne
   assert.equal(plot.curve.at(-1).value,2.2);
 });
 
-test('Namespaced Git rows and local references keep colliding Study iteration IDs distinct', () => {
+test('Namespaced timeline slots and local references keep colliding Study iteration IDs distinct', () => {
   const nodes=[{id:'history-1:0001',local_id:'0001',source_id:'history-1',sequence:1},{id:'active:0001',local_id:'0001',source_id:'active',sequence:2,imported_from:'history-1:0001'}];
   const graph=ui.gitLayout(nodes);
   assert.equal(Object.keys(graph.positions).length,2);
-  assert.equal(graph.ordered[0].id,'active:0001');
+  assert.equal(graph.ordered[0].id,'history-1:0001');
   assert.equal(graph.positions['active:0001'].lane,graph.positions['history-1:0001'].lane);
   context.fixture={nodes,sources:[{id:'history-1'},{id:'active'}]};
   vm.runInContext("data=fixture;selected='history-1:0001';detail=null",context);
@@ -577,8 +788,8 @@ test('Work tree shows concurrent lifecycles and labels long validation as its ow
   assert.match(markup,/data-node="active:long:L0123456789abcdef"/);
   assert.match(markup,/data-node="active:0002"/);
   assert.match(markup,/● 进行中/);
-  assert.match(markup,/归档 · ● 进行中/);
-  assert.match(markup,/资格已排除 · 历史导入 · 已完成/);
+  ui.previewTreeTask(tasks[4].id);assert.match(elements.get('treePopover').innerHTML,/归档 · ● 进行中/);
+  ui.previewTreeTask(tasks[0].id);assert.match(elements.get('treePopover').innerHTML,/资格已排除 · 历史导入 · 已完成/);
   assert.doesNotMatch(markup,/代码继承：#undefined → #active:long/);
   vm.runInContext('data=null;selected=null;',context);
 });

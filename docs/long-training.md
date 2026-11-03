@@ -143,8 +143,11 @@ the grant. STOP can remain set for reconciliation; Review then remains pending
 until the parent is explicitly resumed. A read-only Review interruption can be
 retried with ordinary `research-loop retry` against the child Study.
 
-The dashboard has a separate long-training panel for nominations, status,
-reviewed curves, aligned metrics, knowledge and source/checkpoint references.
+The dashboard places automatic and manual long-training tasks in its horizontal
+Work tree, with a fitted global relationship graph and node-triggered task cards.
+Zoom or switch to the compact local view to inspect dense branches. Hover or select a node to preview its card; select the node to read nominations, status, reviewed curves, aligned
+metrics, knowledge and source/checkpoint references below the tree. Long-training
+measurements keep their independent protocol and do not enter the short-run Frontier.
 Explanations use the parent's frozen evidence snapshot. A subsequent research
 script may declare a model input such as
 `long-checkpoint:L0123456789abcdef:6000`; a partial run requires a settled,
