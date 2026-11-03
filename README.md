@@ -54,6 +54,20 @@ uv run research-loop graph studies/demo
 
 ## 使用真实 Agent
 
+### 在 Codex 中安装和使用
+
+整个仓库根目录也是一个可安装的 [research-loop skill](SKILL.md)，包含匹配的控制器源码、锁定依赖与操作指南。可以直接对 Codex 说：
+
+> 使用 skill-installer 从 Chen-HongRu/research_loop 安装仓库根目录（`--path . --name research-loop`），然后检查运行环境，先不启动研究。
+
+安装后，在下一轮对 Codex 说：
+
+> $research-loop 在当前仓库研究……。允许修改……，数据位置为……，资源预算为……。请补齐必要脚本、验证最小链路并启动第一轮。
+
+之后可以继续说“查看当前研究与证据”“再推进一轮”“提交这个指定调查”“停止当前运行”或“检查并恢复中断”。Codex 负责将请求落实为脚本和控制器操作；研究含义或资源授权不足时会询问缺失信息。安装指引见 [安装与环境检查](references/installation.md)，运行、恢复和更新见 [操作指南](references/operations.md)。
+
+安装需要 Python 3.11+、uv、Git 和已登录的 Codex CLI。skill 不安装模型或代办账号登录，也不会自动取得共享 GPU 权限。首次运行下载锁定依赖；`doctor` 不调用模型。具体实验仍需真实数据、评价器和适用的任务后端。
+
 新 Study 使用 version 3。Plan 在 `markdown` 冻结科学合同，以顶层 `timeout_seconds` 限制执行；字段用途见[消费者审计](docs/plan-field-audit.md)。旧格式目录保留原样，不自动迁移，详见[使用说明](docs/usage.md)。
 
 结构化输入输出由 Pydantic v2 模型统一定义，生成给现有 CLI 的 JSON Schema 并执行本地严格校验；安装或更新依赖使用 `uv sync --locked`。预算、作业、源码身份和核账仍由控制器判断。

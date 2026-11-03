@@ -2,6 +2,8 @@
 
 [返回 README](../README.md) · [AeroArm 接入](aeroarm.md) · [离线展示](showcase.md)
 
+通过 Codex 自然语言使用时，先安装仓库根目录的 [research-loop skill](../SKILL.md)。安装后的所有通用命令使用 `python3 /path/to/installed/research-loop/scripts/research_loop.py` 替代本页的 `uv run research-loop` 前缀；启动器固定使用随 skill 安装的源码和锁文件，并保留调用目录。安装和环境检查见[安装指南](../references/installation.md)，继续、任务、停止与恢复见[操作指南](../references/operations.md)。本页的源码开发命令继续有效。
+
 阶段结构化输出与研究执行请求通过 Pydantic v2 严格模型校验；同一模型生成 Codex/Pi CLI 使用的 JSON Schema。新增依赖由根目录 `uv sync --locked` 安装，不需要切换到 Agents SDK。控制器从冻结上下文派生动态选择和模型省略字段，首次调用与缓存接纳共用这些类型。预算、作业状态、身份、来源和核账判断仍在控制器中执行。
 
 只读阶段的明确输出参数错误会带着拒收反馈返回原阶段，使用同一任务、冻结上下文和剩余预算。每次新调用照常计费并保留独立 attempt；不会因为纠错增加调用或时间额度。CLI/管线故障、来源/身份/核账错误及效果未知的作业仍然阻断，Execute 不会因输出不合规而自动重跑。
