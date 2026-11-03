@@ -68,6 +68,16 @@ checked. It preserves completed Execute receipts and refuses an active local
 process. Replaying an unaccepted Execute through a custom harness invokes its
 `validate_completed(result, workspace=..., run_dir=...)` hook before acceptance.
 
+A completed Review may stop research while the goal remains `not_met` or
+`undetermined`, for example while waiting for further operator direction.
+After an explicit request to continue, `research-loop resume STUDY --reason TEXT`
+records that direction in `state.json` and makes the Study ready. It calls no model
+and resets no counters. Resume requires the published Review stop and remaining
+original iteration/call/time budget; it refuses completed goals, other stop causes,
+partial execution and active/debug attempts. Follow with the appropriate bounded
+runner; adapter resource leases and STOP controls remain authoritative. Route
+statuses remain as reviewed. Resume does not change the goal or evaluation.
+
 ```sh
 uv run research-loop run /path/to/study
 uv run research-loop status /path/to/study

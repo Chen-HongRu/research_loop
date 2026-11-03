@@ -80,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     run = commands.add_parser("run", help="Run or recover bounded research iterations")
     run.add_argument("study", type=Path)
     run.add_argument("--iterations", type=int, default=1)
+    resume = commands.add_parser("resume", help="Reopen an unfinished reviewed stop")
+    resume.add_argument("study", type=Path)
+    resume.add_argument("--reason", required=True)
     for name, description in (
         ("status", "Read the controller state; no model call"),
         ("graph", "Read published experiment nodes; no model call"),
@@ -176,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
             study = Study(args.study)
             if args.command == "run":
                 result = study.run(iterations=args.iterations)
+            elif args.command == "resume":
+                result = study.resume(reason=args.reason)
             elif args.command == "retry":
                 result = study.retry()
             elif args.command == "graph":

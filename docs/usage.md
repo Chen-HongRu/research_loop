@@ -2,6 +2,8 @@
 
 [返回 README](../README.md) · [AeroArm 接入](aeroarm.md) · [离线展示](showcase.md)
 
+通过 Codex 自然语言使用时，先安装仓库根目录的 [research-loop skill](../SKILL.md)。安装后的所有通用命令使用 `python3 /path/to/installed/research-loop/scripts/research_loop.py` 替代本页的 `uv run research-loop` 前缀；启动器固定使用随 skill 安装的源码和锁文件，并保留调用目录。安装和环境检查见[安装指南](../references/installation.md)，继续、任务、停止与恢复见[操作指南](../references/operations.md)。本页的源码开发命令继续有效。
+
 阶段结构化输出与研究执行请求通过 Pydantic v2 严格模型校验；同一模型生成 Codex/Pi CLI 使用的 JSON Schema。新增依赖由根目录 `uv sync --locked` 安装，不需要切换到 Agents SDK。控制器从冻结上下文派生动态选择和模型省略字段，首次调用与缓存接纳共用这些类型。预算、作业状态、身份、来源和核账判断仍在控制器中执行。
 
 只读阶段的明确输出参数错误会带着拒收反馈返回原阶段，使用同一任务、冻结上下文和剩余预算。每次新调用照常计费并保留独立 attempt；不会因为纠错增加调用或时间额度。CLI/管线故障、来源/身份/核账错误及效果未知的作业仍然阻断，Execute 不会因输出不合规而自动重跑。
@@ -141,6 +143,8 @@ uv run research-loop run studies/my-study-v2
 ```
 
 `retry` 本身不调用模型。成功执行后的控制器后处理重试保留执行收据；只有经核对的失败调用才产生新 attempt，研究文档冲突会重新评审，已准备的发布只补齐原清单。超时终止本地进程组，不能保证远程操作已取消。重试不是新实验或额外独立支持。
+
+若完整 Review 已停止研究，但目标仍为 `not_met / undetermined`，用户后续明确要求继续时可执行 `research-loop resume STUDY --reason "实际继续请求"`，再用相应 runner 推进一轮。此命令不调用模型，记录继续原因并保留原预算、计数、证据和路线状态；预算耗尽、目标已达到、其他停止原因或未完成执行不能借此恢复。它不延长资源租约、不清除任务后端的 STOP，也不修改目标或评价。
 
 Review 返回两份完整研究文档、路线状态和候选核查结果，由控制器按发布清单发布文档、定义、Frontier 和状态后推进游标。发布中断只补齐同一清单；发现其他修改时保留内容并停止，不让下一轮读取半发布状态。冲突后可用新文档重新 Review，沿用原合同与结果。请在空闲时修改目标、评价与研究文档。
 
