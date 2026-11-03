@@ -259,6 +259,27 @@ class TaskMetricsTests(unittest.TestCase):
                     self.assertIn(b" 400 ", shown)
                 factory.assert_not_called()
 
+    def test_tensorboard_prefix_is_retained_in_index_and_redirect(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            handler = self.handler(
+                Path(temporary), tensorboard_port=6006, base_path="/fm"
+            )
+            redirect = self.request(handler, "/tensorboard")
+            self.assertIn(b"Location: /fm/tensorboard/", redirect)
+            original = b'<html><head><base href="/tensorboard/"></head><script src="/tensorboard/index.js"></script></html>'
+            response = Mock(status=200)
+            response.getheader.side_effect = lambda key: (
+                "text/html" if key == "Content-Type" else None
+            )
+            response.getheaders.return_value = [("Content-Type", "text/html")]
+            response.read.return_value = original
+            with patch.object(dash.http.client, "HTTPConnection") as factory:
+                factory.return_value.getresponse.return_value = response
+                shown = self.request(handler, "/tensorboard/")
+            self.assertIn(b'href="/fm/tensorboard/"', shown)
+            self.assertIn(b'src="/fm/tensorboard/index.js"', shown)
+            self.assertIn(b'src="/fm/assets/tensorboard-live.js"', shown)
+
     def test_tensorboard_index_initializes_missing_reload_preference_before_app(self):
         with tempfile.TemporaryDirectory() as temporary:
             handler = self.handler(Path(temporary), tensorboard_port=6006)

@@ -51,6 +51,50 @@ uv run python integrations/protok/dashboard.py \
 
 `--history-root` 可重复指定，每个历史来源都使用离线快照。`--records-root` 仅读取早于所有已接入 Study 首轮的小型账本元数据；缺失创建时间的记录不会被猜测为前置历史。页面列出来源、覆盖数量与缺失限制。全局 GPU 费用仍读取当前后端的统一账本，不将各历史快照相加。
 
+### 在现有认证入口下使用子路径
+
+默认不加前缀，原有根路径访问不变。部署到 `/fm/` 时启动：
+
+```sh
+uv run python integrations/protok/dashboard.py \
+  --root /path/to/new-study --port 8768 --base-path /fm
+```
+
+`--base-path` 仅声明浏览器看到的外部前缀；代理必须在转发时移除它。
+前缀只接受由字母、数字、下划线和连字符组成的普通路径段，不接受查询、
+转义分隔符、点段或其他站点地址。静态资源、API、任务详情和可选 TensorBoard
+链接均使用该前缀。保持现有 TLS/Basic Auth server 和根路径代理不变，在同一
+已认证 server 内添加以下 location；末尾的 `/` 使 upstream 收到原始根路径：
+
+```nginx
+location = /fm { return 302 /fm/; }
+location ^~ /fm/ {
+    limit_except GET { deny all; }
+    proxy_set_header Authorization "";
+    proxy_set_header Host $host;
+    proxy_pass http://127.0.0.1:8768/;
+}
+```
+
+上述最小只读入口允许 GET/HEAD。若显式启用 TensorBoard，其只读 POST 查询
+还需在该入口允许 POST；dashboard 只将 `/tensorboard/` 的 POST 转给受限本地代理。
+本地健康检查仍请求 `http://127.0.0.1:8768/` 或 `/api/snapshot`。
+
+### 通用控制器核账侧文件
+
+没有原生 `control/ownership.json` 的 Study 可由可信控制器原子发布
+`control/dashboard-accounting.json`，让看板显示当前授权的用量、预留、额度和截止。
+看板只读该文件，不执行适配器，不生成作业回执、质量测量或授权。若原生
+ownership 记录存在，即使后端读取失败，也不会用侧文件覆盖原生核账。
+
+记录固定为 `version: 1`，最多 64 KiB，包含 `observed_at`、`accounting_status`、
+`used_gpu_seconds`、`known_gpu_seconds`、`reserved_gpu_seconds`、`outstanding`、
+`limit_gpu_seconds` 和 `deadline`。数值字段须有限且非负，额度和截止须为正数；
+`outstanding` 是最多 256 个公开作业标识或证据引用字符串，每项不超过 1024 字符。
+`known` 要求用量已知、不小于已知小计，且无待核账作业；`partial` 要求
+`used_gpu_seconds: null`。部分未知时只展示已知小计，剩余额度保持未知。
+无效、超限或符号链接侧文件不被采用，费用仍显示未知；侧文件不能把未知费用当零。
+
 ### 启用 TensorBoard
 
 使用独立的 CPU 服务，源目录与看板保持一致，派生日志单独存放：

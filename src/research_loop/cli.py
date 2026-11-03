@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .core import Study, StudyError, initialize
 from .harness import HarnessConfig, HarnessError
+from .execution_bridge import load_execution_harness
 from .meta import MetaStudy
 from .tasks import TaskQueue
 
@@ -80,6 +81,14 @@ def main(argv: list[str] | None = None) -> int:
     run = commands.add_parser("run", help="Run or recover bounded research iterations")
     run.add_argument("study", type=Path)
     run.add_argument("--iterations", type=int, default=1)
+    run.add_argument(
+        "--backend", type=Path, help="Absolute trusted execution adapter module"
+    )
+    run.add_argument(
+        "--backend-config",
+        type=Path,
+        help="Absolute immutable adapter JSON configuration",
+    )
     resume = commands.add_parser("resume", help="Reopen an unfinished reviewed stop")
     resume.add_argument("study", type=Path)
     resume.add_argument("--reason", required=True)
@@ -178,6 +187,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             study = Study(args.study)
             if args.command == "run":
+                harness = load_execution_harness(
+                    args.study,
+                    study.harness,
+                    backend=args.backend,
+                    backend_config=args.backend_config,
+                )
+                study.harness = harness
                 result = study.run(iterations=args.iterations)
             elif args.command == "resume":
                 result = study.resume(reason=args.reason)

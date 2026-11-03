@@ -5,6 +5,80 @@ controller owns the Plan, submission claim, Agent deadline, budgets and Review.
 The adapter owns source/input preparation, transport, durable execution identity,
 accounting and evidence. Task code stays outside `src/research_loop/`.
 
+## Unified launcher
+
+Launch an initialized Study through the shared command:
+
+```bash
+uv run research-loop run /absolute/study --iterations 10 \
+  --backend /absolute/task_adapter.py \
+  --backend-config /absolute/backend.json
+```
+
+The trusted adapter is a Python module, not an Agent tool or a per-Study runner.
+Its immutable JSON configuration identifies the task's data, backend and grant.
+The launcher registers both absolute paths and a configuration fingerprint in
+`study/execution-backend.json`; later `run` commands automatically use that
+registration. A changed adapter path or configuration blocks. Version the deployed
+adapter and runtime explicitly; the registration does not hash Python source.
+
+The module exports this factory:
+
+```python
+def create_backend(config, *, study_root, workspace, run_dir, context, stop, deadline):
+    return Backend(...)
+```
+
+The factory is side-effect-free. `context` is the original frozen Execute input;
+`run_dir` is the controller attempt, and `deadline` is its original absolute Unix
+deadline. `stop` is a threading Event. The bound backend implements the three
+operations below. `start` and `inspect` return a complete native Execute response
+(`outcome`, `markdown`, `artifacts`, `measurements`) built from trusted receipts.
+`inspect` returns the same terminal response or raises when identity, accounting,
+or effects remain unresolved. It never submits another operation. Both preparation
+and start must recheck the stop signal and original deadline. Adapters must bound
+transport calls, cooperate with cancellation, and settle/account their own jobs;
+the generic bridge cannot forcibly terminate a Python backend thread.
+
+Only `Plan.execution.mode=script` uses this bridge's computation path. The Agent
+gets a report-only schema, authors permitted source, and uses the shared submission
+API with `action=research`. A single bounded worker watches requests, calls
+side-effect-free `prepare()` before atomic claim, then calls `start(prepared)` once.
+Only explicit `ParameterError` from preparation permits live source/request
+correction before claim. A retained claimed receipt is never cleared to retry.
+The Agent runs on the main thread so native interruption terminates its process
+group and signals the backend worker. Unknown effects block completion and Review.
+
+The bridge retains raw Agent context/output under `attempt/agent/`, a separate
+`backend-response.json`, and the verified outer completion. The workspace interface
+contains `status` plus that trusted response. Neither Agent prose nor Agent numbers
+construct measurements. Start, inspection, retained response and workspace interface
+must agree before completion. Read-only stages use the configured Codex/Pi harness.
+An explicit null Plan execution is qualitative: this enforcing bridge runs Execute
+read-only, invokes no backend, and accepts only empty artifacts/measurements.
+Ordinary harnesses retain their existing computational Plan requirements.
+
+Before the first Agent in a new iteration workspace, the bridge removes only
+bounded transport files that exactly match files inherited from Git HEAD. A durable
+initialization record makes that operation restartable. It preserves the submission
+lock inode and never clears fresh or changed interfaces. Reentry in the same
+iteration cannot erase an accepted receipt.
+
+The module may additionally export `create_controller(config, *, study_root)`.
+Construction is side-effect-free. Its optional existing controller hooks are
+`admit_iteration(iteration)`, `commit_iteration(iteration, token)`,
+`call_allowance(remaining)`, `validate_plan(result, *, iteration)`,
+`response_schema(phase, context, schema)`, `validate_completed(result, *, workspace,
+run_dir)`, `diagnostic_context(iteration)`, and `close()`. Admission activates the
+explicit task grant under the Study lock. Grant creation, absolute wall deadline,
+GPU accounting and owned-job settlement belong to the adapter; the launcher grants
+no resources. Validation must return the unchanged trusted response. Diagnostic
+context contains bounded public evidence and accounting references, never secrets
+or protected configuration dumps. Cleanup affects only jobs owned by that
+invocation. Cleanup runs before the native Study releases its controller lock;
+a duplicate launcher that cannot acquire that lock performs no cleanup. The native
+Study continues to own model-call/time budgets and Review.
+
 `research_loop.execution.ExecutionBackend` has three operations:
 
 ```python

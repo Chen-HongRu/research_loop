@@ -4,10 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8').replaceAll('__DASHBOARD_BASE_PATH__','');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const elements = new Map();
-const document = {getElementById(id) {
+const document = {querySelector:()=>({content:''}),getElementById(id) {
   if (!elements.has(id)) elements.set(id, {querySelectorAll: () => [], setAttribute() {}, style:{}});
   return elements.get(id);
 }};
@@ -981,4 +981,17 @@ test('Manual long metrics use the stable task selector and isolate all other lan
   } finally {
     vm.runInContext('({api,renderTaskMetrics}=savedManualMetricIO);delete globalThis.savedManualMetricIO;data=null;selected=null;',context);
   }
+});
+
+
+test('External dashboard prefix covers polling, node details and TensorBoard task links',()=>{
+  const calls=[];
+  const prefixed=vm.createContext({document:{...document,querySelector:()=>({content:'/fm'})},fetch:url=>{calls.push(url);return new Promise(()=>{});},setTimeout(){}});
+  for(const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g))vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),prefixed);
+  vm.runInContext(script+'\nglobalThis.paths={api,dashboardURL,tensorboardTaskURL};',prefixed);
+  assert.equal(calls[0],'/fm/api/snapshot');
+  prefixed.paths.api('/api/node/active/0001');
+  assert.equal(calls.at(-1),'/fm/api/node/active/0001');
+  assert.ok(prefixed.paths.tensorboardTaskURL({source:'active',experiment:'0001'}).startsWith('/fm/tensorboard/'));
+  assert.throws(()=>prefixed.paths.dashboardURL('//foreign.invalid/path'));
 });

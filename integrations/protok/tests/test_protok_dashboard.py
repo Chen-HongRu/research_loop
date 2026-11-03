@@ -14,6 +14,103 @@ SPEC.loader.exec_module(DASH)
 
 
 class DashboardTests(unittest.TestCase):
+    def test_external_base_path_rewrites_ui_and_preserves_stripped_upstream_routes(
+        self,
+    ):
+        from io import BytesIO
+
+        with tempfile.TemporaryDirectory() as temporary:
+            for prefix in ("", "/fm"):
+                with patch.object(DASH, "ThreadingHTTPServer") as factory:
+                    factory.return_value.server_port = 0
+                    DASH.serve(Path(temporary), 0, base_path=prefix)
+                    handler = factory.call_args.args[1]
+                for route in ("/", "/assets/work-tree.js", "/api/research"):
+                    connection = Mock()
+                    connection.makefile.return_value = BytesIO(
+                        ("GET " + route + " HTTP/1.0\r\n\r\n").encode()
+                    )
+                    response = bytearray()
+                    connection.sendall.side_effect = response.extend
+                    handler(connection, ("127.0.0.1", 1), Mock())
+                    self.assertIn(b"200 OK", response)
+                    if route == "/":
+                        self.assertIn((f'content="{prefix}"').encode(), response)
+                        self.assertIn(
+                            (f'src="{prefix}/assets/work-tree.js"').encode(), response
+                        )
+                        self.assertNotIn(b"__DASHBOARD_BASE_PATH__", response)
+
+    def test_external_base_path_refuses_unsafe_prefixes_before_binding(self):
+        for value in ("fm", "//fm", "/../fm", "/fm/%2f", '/fm"', "/fm?x=1", None):
+            with (
+                self.subTest(value=value),
+                patch.object(DASH, "ThreadingHTTPServer") as factory,
+            ):
+                with self.assertRaises(ValueError):
+                    DASH.serve(Path("/unused"), 0, base_path=value)
+                factory.assert_not_called()
+        self.assertEqual(DASH.normalize_base_path("/fm/"), "/fm")
+        self.assertEqual(DASH.normalize_base_path("/"), "")
+
+    def test_controller_sidecar_reports_budget_without_native_measurement_receipts(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "control/dashboard-accounting.json"
+            path.parent.mkdir()
+            value = {
+                "version": 1,
+                "observed_at": 100,
+                "accounting_status": "known",
+                "used_gpu_seconds": 24,
+                "known_gpu_seconds": 24,
+                "reserved_gpu_seconds": 60,
+                "outstanding": [],
+                "limit_gpu_seconds": 86400,
+                "deadline": 86500,
+            }
+            path.write_text(json.dumps(value))
+            result = DASH.snapshot(root)
+            self.assertEqual(result["accounting_source"], "controller_sidecar")
+            self.assertEqual((result["gpu_seconds"], result["deadline"]), (24, 86500))
+            self.assertEqual(result["budget"]["remaining_gpu_seconds"], 86316)
+            self.assertIsNone(result["formal_gpu_seconds"])
+            self.assertEqual(result["nodes"], [])
+            self.assertIsNone(result["backend_error"])
+            path.write_text(
+                json.dumps(
+                    value
+                    | {
+                        "accounting_status": "partial",
+                        "used_gpu_seconds": None,
+                        "outstanding": ["synthetic-owned-job"],
+                    }
+                )
+            )
+            partial = DASH.snapshot(root)
+            self.assertIsNone(partial["gpu_seconds"])
+            self.assertIsNone(partial["budget"]["remaining_gpu_seconds"])
+            self.assertEqual(partial["known_gpu_seconds"], 24)
+            self.assertFalse(partial["accounting_available"])
+            self.assertEqual(partial["controller_outstanding"], ["synthetic-owned-job"])
+            for invalid in (
+                {"known_gpu_seconds": -1},
+                {"known_gpu_seconds": 10**1000},
+                {"deadline": float("nan")},
+                {"accounting_status": "known", "used_gpu_seconds": None},
+                {"accounting_status": "partial", "used_gpu_seconds": 0},
+                {"outstanding": [{"private": "unsupported"}]},
+            ):
+                path.write_text(json.dumps(value | invalid))
+                self.assertIsNone(DASH.controller_accounting(root), invalid)
+                self.assertIsNone(DASH.snapshot(root)["gpu_seconds"])
+            path.write_text(json.dumps(value))
+            (path.parent / "ownership.json").write_text("{}")
+            self.assertIsNone(DASH.controller_accounting(root))
+            self.assertIsNone(DASH.snapshot(root)["gpu_seconds"])
+
     def test_presentation_reads_only_cached_content_and_static_assets_are_contained(
         self,
     ):

@@ -1,11 +1,12 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
+<meta name="dashboard-base-path" content="__DASHBOARD_BASE_PATH__">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Research Loop · 研究现场</title>
-<link rel="stylesheet" href="/assets/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/assets/research-explanation.css">
+<link rel="stylesheet" href="__DASHBOARD_BASE_PATH__/assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="__DASHBOARD_BASE_PATH__/assets/research-explanation.css">
 <style>
 :root{color-scheme:dark;--bg:#0d1422;--panel:#151f30;--inset:#101a2a;--line:#2a3850;--text:#e4ecf7;--muted:#a0afc5;--green:#72dfb3;--blue:#8ab8ff;--amber:#f2cb85;--red:#ffacac}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,select,input{font:inherit}button,select{color:var(--text);background:#1c2a40;border:1px solid var(--line);border-radius:7px;padding:6px 11px;cursor:pointer}button:hover,select:hover{border-color:var(--blue)}button:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offset:3px}button.on,button[aria-pressed="true"]{border-color:var(--green);color:var(--green);background:#203b3d}button:disabled{opacity:.5;cursor:default}button.link{padding:0;background:none;border:0;color:var(--blue);font-size:inherit}a{color:var(--blue);overflow-wrap:anywhere}h1,h2,h3,h4,p{margin-top:0}h1{font-size:27px;letter-spacing:-.6px;margin-bottom:4px}h2{font-size:18px;margin-bottom:5px}h3{font-size:16px;margin-bottom:8px}h4{font-size:14px;margin-bottom:6px}small,.muted{color:var(--muted)}small{font-size:12px}.green{color:var(--green)}.amber{color:var(--amber)}.red{color:var(--red)}.eyebrow{font-size:11px;font-weight:650;letter-spacing:1.6px;color:var(--green);margin-bottom:5px}header{border-bottom:1px solid var(--line);padding:22px 30px;display:flex;justify-content:space-between;gap:20px;align-items:center}.connection{text-align:right;font-size:12px;color:var(--muted)}main{max-width:1840px;margin:auto;padding:22px 30px}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:11px;min-width:0}.card{padding:16px 18px}.card b{display:block;font-size:26px;line-height:1.4;margin:5px 0}.card:first-child b{color:var(--green)}.panel{padding:18px}.wide{margin:16px 0}.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.between{justify-content:space-between}.caption{font-size:12px;color:var(--muted);margin:6px 0 12px}.progress-title{display:flex;justify-content:space-between;gap:12px;align-items:start}.progress-title h2{margin:0 0 5px}.phase{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:15px}.phase-item{border-top:3px solid var(--line);padding:9px 8px 1px;color:var(--muted)}.phase-item strong{display:block;font-size:13px;font-weight:550}.phase-item small{font-size:11px}.phase-item.active{border-color:var(--green);color:var(--green)}.phase-item.complete{border-color:#497c72}.phase-item.blocked{border-color:var(--amber);color:var(--amber)}.reasons{display:grid;gap:8px;margin-top:12px}.reason{border-left:3px solid var(--amber);background:#302b23;padding:9px 12px;border-radius:0 6px 6px 0;overflow-wrap:anywhere}.reason p{margin:2px 0}.reason small{display:block}.statusline{margin-top:12px;display:flex;gap:8px 20px;flex-wrap:wrap;color:var(--muted);font-size:12px}.layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:16px;align-items:start}.graph-note{display:flex;gap:12px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:12px;padding:10px 0}.legend-line{display:inline-block;vertical-align:middle;width:24px;border-top:2px solid var(--blue);margin-right:5px}.legend-line.dashed{border-top:2px dashed #a99bc9}.git-scroll{max-height:660px;overflow:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.git-log{position:relative;min-width:520px}.git-rail{position:absolute;left:0;top:0;overflow:visible}.git-row{height:102px;padding:9px 10px;text-align:left;display:block;width:100%;border:0;border-bottom:1px solid #253148;border-radius:0;background:transparent;position:relative;overflow:hidden}.git-row:hover{background:#1b2b42}.git-row.selected{background:#20364b;box-shadow:inset 3px 0 var(--blue)}.git-row.other-route{opacity:.42}.git-row .row-top{display:flex;align-items:center;justify-content:space-between;gap:10px}.commit-id{color:var(--blue);font:600 13px ui-monospace,SFMono-Regular,monospace}.row-action{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:3px 0;font-size:13px}.row-meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;overflow:hidden;white-space:nowrap}.badge{display:inline-block;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:11px;line-height:1.7;font-weight:450;vertical-align:middle;max-width:100%;overflow-wrap:anywhere}.badge.green{border-color:#396052;background:#1d3a33}.badge.amber{border-color:#6d5734;background:#392f22}.badge.red{border-color:#714343;background:#3b272e}.badge.route{border-color:#415474;color:#bad0ed}.score{font:600 13px ui-monospace,SFMono-Regular,monospace;white-space:nowrap}.empty{color:var(--muted);padding:24px 15px;background:var(--inset);border:1px dashed var(--line);border-radius:7px}.route-cards{display:grid;gap:12px;max-height:660px;overflow:auto}.route-card{border:1px solid var(--line);border-radius:8px;padding:13px;background:var(--inset)}.route-card p{font-size:12px;color:var(--muted);margin:7px 0}.route-history{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.route-history button{font-size:12px;padding:4px 8px}.chart-section{margin-top:18px}.chart-section h3{margin:0}#chart{width:100%;height:210px;display:block}.detail-heading{display:flex;justify-content:space-between;align-items:start;gap:12px}.detail-heading h2{margin:0 0 5px}.detail-heading .toolbar{justify-content:flex-end;flex-shrink:0}.tabs{display:flex;gap:5px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:12px;margin:14px 0}.tabs button{font-size:13px}.detail-body{max-height:900px;overflow:auto;overflow-wrap:anywhere;padding:0 3px 4px 0}.detail-meta{font-size:12px;color:var(--muted)}.context-box{border:1px solid var(--line);border-radius:8px;padding:11px 13px;background:var(--inset);margin-bottom:13px;font-size:12px}.context-box .toolbar{gap:5px}.context-box p{margin:4px 0}.facts{margin:0;display:grid;grid-template-columns:minmax(82px,auto) minmax(0,1fr);gap:8px 13px;font-size:13px}.facts dt{color:var(--muted)}.facts dd{margin:0;min-width:0;overflow-wrap:anywhere}.facts .facts{grid-template-columns:90px minmax(0,1fr)}.field-list{margin:0;padding-left:19px}.field-list li{margin-bottom:5px}.fact-block{border-top:1px solid var(--line);padding-top:12px;margin-top:12px}.agent-card{border:1px solid var(--line);border-radius:9px;padding:14px;margin-bottom:13px;background:var(--inset)}.agent-header{display:flex;align-items:center;justify-content:space-between;gap:9px;flex-wrap:wrap;margin-bottom:5px}.agent-header h3{margin:0}.agent-provenance{font-size:11px;color:var(--muted);margin-bottom:11px}.agent-output>.prose>p:last-child{margin-bottom:0}.agent-action{font-size:14px;font-weight:550;border-left:2px solid var(--blue);padding-left:11px;margin:10px 0}.agent-error{color:var(--red);font-size:13px}.source{font:11px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--muted);word-break:break-all}.prose{font-size:13px;line-height:1.85;overflow-wrap:anywhere}.prose p{margin:0 0 10px}.prose h2{font-size:17px;margin:18px 0 8px}.prose h3{font-size:15px;margin:16px 0 6px}.prose h4{font-size:14px;margin:14px 0 5px}.prose ul,.prose ol{padding-left:22px;margin:7px 0 12px}.prose li{margin-bottom:5px}.prose blockquote{margin:10px 0;border-left:3px solid #506485;padding:4px 12px;color:#bbc9dd}.prose pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0a121f;border:1px solid var(--line);border-radius:6px;padding:11px;font:12px/1.75 ui-monospace,SFMono-Regular,monospace;overflow:auto}.prose code{font:12px/1.7 ui-monospace,SFMono-Regular,monospace;background:#26334a;padding:1px 4px;border-radius:3px}.prose pre code{background:none;padding:0}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px;margin:9px 0}th,td{text-align:left;border:1px solid var(--line);padding:7px 9px;vertical-align:top}th{background:#1c2a40}details{margin:10px 0}summary{cursor:pointer;color:var(--blue);font-size:12px;padding:3px 0}details>.prose,details>.facts{margin-top:9px}.subtoolbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.subtoolbar button{font-size:12px;padding:4px 9px}.notice{background:#242c3d;border:1px solid var(--line);border-radius:7px;padding:10px 12px;color:#becbe0;font-size:12px;margin-bottom:12px}.scout{margin:16px 0 0}.scout h3{margin:0}.footer{font-size:11px;color:var(--muted);padding:22px 1px 4px}.loading{color:var(--muted)}[hidden]{display:none!important}
@@ -18,7 +19,7 @@
 <style>
 .task-metrics{margin-top:15px;border-top:1px solid var(--line);padding-top:14px}.task-metrics h4{margin:0}.metric-tools{margin:8px 0}.metric-tools select{max-width:100%;width:100%;font-size:12px}.metric-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;max-height:550px;overflow:auto}.metric-card{min-width:0;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--inset);overflow-wrap:anywhere}.metric-card h4{font-size:12px}.metric-card .caption{font-size:10px;margin:5px 0}.metric-card .metric-value{font:550 19px/1.5 ui-monospace,SFMono-Regular,monospace;color:var(--amber);overflow-wrap:anywhere;margin-top:8px}.metric-plot{width:100%;display:block}.metric-plot circle{cursor:pointer}.metric-plot circle:focus{outline:none;stroke:var(--blue);stroke-width:3}.metric-latest{font-size:10px;padding:2px 5px}.metric-empty{padding:10px;color:var(--muted);font-size:12px;grid-column:1/-1}.tensorboard-link{font-size:12px;border:1px solid var(--line);border-radius:6px;padding:5px 9px;text-decoration:none;white-space:nowrap}.metric-card details .facts{grid-template-columns:1fr;font-size:11px;gap:3px}.metric-card summary{font-size:11px}@media(max-width:620px){.metric-cards{grid-template-columns:1fr}}
 </style>
-<link rel="stylesheet" href="/assets/work-tree.css">
+<link rel="stylesheet" href="__DASHBOARD_BASE_PATH__/assets/work-tree.css">
 </head>
 <body>
 <header>
@@ -39,7 +40,7 @@
   </section>
   <div class="cards">
     <div class="card"><small>任务状态 · 本地记录</small><b id="current">—</b><small id="currentSub">—</small></div>
-    <div class="card"><small>累计 GPU 用量</small><b id="gpu">—</b><small>含接管前历史；回执核账后更新</small></div>
+    <div class="card"><small>累计 GPU 用量</small><b id="gpu">—</b><small id="gpuSub">含接管前历史；回执核账后更新</small></div>
     <div class="card"><small>主循环新轮次进入截止</small><b id="remaining">—</b><small id="deadline">—</small></div>
   </div>
   <div id="statusline" class="statusline" style="margin-bottom:16px"></div>
@@ -65,7 +66,7 @@
         <div class="progress-title"><div><h3 id="now">正在读取任务状态…</h3><div id="intent" class="caption"></div></div><span id="goal" class="badge">目标尚未判定</span></div>
         <div class="phase" id="phases"></div><div id="reasons" class="reasons"></div>
         <section id="taskMetrics" class="task-metrics" hidden aria-labelledby="taskMetricTitle">
-          <div class="toolbar between"><h4 id="taskMetricTitle">实时回传指标</h4><a id="tensorboardLink" class="tensorboard-link" href="/tensorboard/" target="_blank" rel="noopener noreferrer" hidden>TensorBoard · 全量指标 ↗</a><span id="tensorboardDisabled" class="muted" style="font-size:11px">TensorBoard 未启用</span></div>
+          <div class="toolbar between"><h4 id="taskMetricTitle">实时回传指标</h4><a id="tensorboardLink" class="tensorboard-link" href="__DASHBOARD_BASE_PATH__/tensorboard/" target="_blank" rel="noopener noreferrer" hidden>TensorBoard · 全量指标 ↗</a><span id="tensorboardDisabled" class="muted" style="font-size:11px">TensorBoard 未启用</span></div>
           <p id="taskMetricStatus" class="caption" aria-live="polite">等待回传…</p>
           <div class="metric-tools"><select id="taskMetricFilter" aria-label="选择任务回传指标"><option value="">进度概览（最多 6 项）</option></select></div>
           <div id="taskMetricCards" class="metric-cards"></div>
@@ -79,11 +80,11 @@
   <section class="panel scout" id="scoutPanel" hidden><div class="toolbar between"><h3>Scout · 外部研究输入</h3><span id="scoutStatus" class="badge"></span></div><div id="scoutBody"></div></section>
   <div class="footer">固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板读取本地研究记录与回执，不发起训练、模型调用或远程轮询。Execute 展示已完成的执行与修复输出、作业回执及调试历史；调试不计正式质量，正式测量经过独立 Review 后才进入质量曲线。</div>
 </main>
-<script src="/assets/vendor/markdown-it/markdown-it.umd.min.js"></script>
-<script src="/assets/vendor/katex/katex.min.js"></script>
-<script src="/assets/research-explanation.js"></script>
-<script src="/assets/task-metrics.js"></script>
-<script src="/assets/work-tree.js"></script>
+<script src="__DASHBOARD_BASE_PATH__/assets/vendor/markdown-it/markdown-it.umd.min.js"></script>
+<script src="__DASHBOARD_BASE_PATH__/assets/vendor/katex/katex.min.js"></script>
+<script src="__DASHBOARD_BASE_PATH__/assets/research-explanation.js"></script>
+<script src="__DASHBOARD_BASE_PATH__/assets/task-metrics.js"></script>
+<script src="__DASHBOARD_BASE_PATH__/assets/work-tree.js"></script>
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
@@ -143,7 +144,12 @@ function visibleTasks() {
 function resolveReference(id) { const alias=taskNodes().find(node=>node.experiment_id===String(id)); if(alias)return alias.id; if (String(id).includes(':') || !data?.sources) return String(id); const source=detail?.source_id || data.nodes.find(node=>node.id===selected)?.source_id || 'active'; return source+':'+id; }
 function experimentLink(id, label, preferredTab) { const resolved=resolveReference(id),node=taskNodes().find(item=>item.id===resolved);return '<button class="link" data-node="'+esc(resolved)+'"'+(preferredTab?' data-task-tab="'+esc(preferredTab)+'"':'')+'>'+esc(label || (node?nodeLabel(node):'#'+id))+'</button>'; }
 function exactScore(value) { return typeof value==='number' && Number.isFinite(value) ? String(value) : '未测量'; }
-async function api(path) { const result = await fetch(path, {cache:'no-store'}); if (!result.ok) throw new Error('HTTP '+result.status); return result.json(); }
+const dashboardBasePath = document.querySelector('meta[name="dashboard-base-path"]').content;
+function dashboardURL(path) {
+  if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) throw new Error('Invalid dashboard path');
+  return dashboardBasePath + path;
+}
+async function api(path) { const result = await fetch(dashboardURL(path), {cache:'no-store'}); if (!result.ok) throw new Error('HTTP '+result.status); return result.json(); }
 
 // Parse Markdown with a maintained local renderer; untrusted records never become HTML.
 const proseRenderer=markdownit({html:false,linkify:false,typographer:false,breaks:true});
@@ -200,15 +206,21 @@ function renderProgress() {
     $('taskSummary').textContent=running.length+' 项进行中 · '+attention+' 项需要处理';
   }
   $('gpu').textContent = data.gpu_seconds == null ? '未知' : (data.gpu_seconds/3600).toFixed(2)+' 小时';
+  if (data.budget) {
+    $('gpu').textContent += ' / '+(data.budget.limit_gpu_seconds/3600).toFixed(2)+' 小时';
+    $('gpuSub').textContent = '本次授权 · 已预留 '+data.budget.reserved_gpu_seconds+' GPU 秒 · 剩余 '+(data.budget.remaining_gpu_seconds ?? '未知')+' GPU 秒';
+  }
+
   const effectiveDeadline = data.effective_deadline ?? data.deadline;
   const deadline = timestamp(effectiveDeadline), remaining = deadline == null ? null : Math.max(0, Math.floor((deadline-Date.now())/1000));
   $('remaining').textContent = remaining == null ? '未记录' : remaining === 0 ? '新轮次进入已截止' : duration(remaining);
   $('deadline').textContent = deadline == null ? '入轮截止时间未记录' : clock(effectiveDeadline)+' 北京时间 · 已入轮任务可继续完成';
   renderTaskProgress();
   const jobs = (data.outstanding || []).flatMap(row => {const label=row.mode==='research'?'研究脚本作业 ':'正式评测作业 ';return row.attempts?.length?row.attempts.map(attempt=>label+(attempt.owned_job_id || '待绑定')+' · '+(attempt.terminal_state || attempt.status || '待核账')):[label+'状态待确认 · '+(row.status || '待核账')];});
+  for (const identity of data.controller_outstanding || []) jobs.push('控制器作业 '+identity+' · 待核账');
   for (const path of data.manual_training_outstanding || []) jobs.push('人工长训练作业 '+path.split('/').pop()+' · 待核账');
   for (const path of data.long_training_outstanding || []) jobs.push('长训练作业 '+path.split('/').pop()+' · 待核账');
-  const bits = [data.snapshot_only ? '归档快照 · 非实时 HPC · 核账时间 '+clock(data.backend_observed_at) : '读取本地控制记录与后端回执', data.accounting_available===false ? 'GPU 用量与待核账作业未知 · 后端读取失败' : jobs.length ? jobs.join(' / ') : '无待核账 GPU 作业', '主循环角色调用 '+(state.call_count ?? '—')+' 次'];
+  const bits = [data.snapshot_only ? '归档快照 · 非实时 HPC · 核账时间 '+clock(data.backend_observed_at) : '读取本地控制记录与后端回执', data.backend_error ? 'GPU 用量与待核账作业未知 · 后端读取失败' : data.accounting_status==='partial' ? '部分费用待核账' : jobs.length ? jobs.join(' / ') : '无待核账 GPU 作业', '主循环角色调用 '+(state.call_count ?? '—')+' 次'];
   if (progress.active_role) bits.push((state.status==='running'?'主循环当前角色 ':'主循环最近调用角色 ')+progress.active_role);
   if (progress.elapsed_seconds != null) bits.push((state.status==='running'?'主循环本次调用已用 ':'主循环最近调用耗时 ')+duration(progress.elapsed_seconds));
   if (data.runner?.status) bits.push('主循环 Runner '+(STATUS[data.runner.status] || data.runner.status));
