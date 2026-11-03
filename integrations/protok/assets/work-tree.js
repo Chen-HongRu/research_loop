@@ -125,8 +125,8 @@ function drawGraph() {
   function edge(parentId,node,kind,title) {
     const parent=positions[parentId],child=positions[node.id];if(!parent)return;
     const trunk=parent.mainline&&child.mainline,style=trunk&&kind==='code'?'trunk':kind;
-    const [color,dash]=styles[style],active=trunk||node.id===selected||parentId===selected;
-    svg+=`<path d="${treeEdge(parent,child)}" fill="none" stroke="${color}"${dash?' stroke-dasharray="'+dash+'"':''} stroke-width="${active?2.2:model.overview?1:1.7}" stroke-linejoin="round" opacity="${active?1:.55}"${!model.overview||active?' marker-end="url(#tree-'+kind+')"':''}><title>${esc(title)}</title></path>`;
+    const [color,dash]=styles[style],active=trunk||node.id===selected;
+    svg+=`<path d="${treeEdge(parent,child)}" fill="none" stroke="${color}"${dash?' stroke-dasharray="'+dash+'"':''} stroke-width="${active?2.2:model.overview?1:1.7}" stroke-linejoin="round" opacity="${active?1:.55}"${!model.overview?' marker-end="url(#tree-'+style+')"':''}><title>${esc(title)}</title></path>`;
   }
   for(const node of ordered) {
     const parent=node.validation_of||node.continuation_of||node.base;
@@ -164,7 +164,7 @@ function drawGraph() {
   graph.innerHTML='<div class="timeline-axis">'+ticks+'</div>'+selection+lanes+`<svg class="git-rail" width="${width}" height="${height}" aria-hidden="true">${svg}</svg>`+nodes;
   graph.querySelectorAll('[data-node]').forEach(button=>{
     button.onclick=()=>selectTreeTask(button.dataset.node);
-    button.onpointerenter=event=>{if(event.pointerType!=='touch')previewTreeTask(button.dataset.node);};
+    button.onpointermove=event=>{if(event.pointerType!=='touch'&&treeHovered!==button.dataset.node)previewTreeTask(button.dataset.node);};
     button.onfocus=()=>previewTreeTask(button.dataset.node);
   });
   if(focused)for(const button of focusRegion.querySelectorAll('[data-node]'))if(button.dataset.node===focused)button.focus({preventScroll:true});
