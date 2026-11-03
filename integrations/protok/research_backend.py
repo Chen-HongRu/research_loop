@@ -822,6 +822,8 @@ def run_script(
             elif deadline > admitted["effective_deadline"]:
                 raise ProTokError("Research cannot extend the original lease")
             status = backend.inspect()
+            if status["used_gpu_seconds"] is None:
+                raise ProTokError("Short allocation accounting is unknown")
             spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
             if (
                 status["outstanding"]

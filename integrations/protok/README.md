@@ -236,15 +236,36 @@ ownership and budget files and records the previous service configuration.
 Settled timeouts and failed research scripts enter independent Review as incomplete
 experiments with real resource charges and no invented measurement. The supervisor
 keeps admission/effect failures observable in `control/supervisor-status.json`,
-with bounded polling and no automatic Execute replay. Only core-authorized read-only
-calls retry within persisted call/time budgets. The short lease deadline is an
+with bounded polling and no automatic Execute replay. Identical blocked polls are
+counted by scope, target, stage and error in the persistent `failures` list.
+After five observations the affected object is marked `needs_attention` and its
+automatic operation retries stop. The scheduler keeps discovering independent
+tasks; parent Execute attention does not revoke independently authorized children
+with frozen inputs. Read-only accounting/readiness polling may detect reconciliation
+but never replays Execute or changes attempts, frozen inputs or budget reservations.
+Only success of the corresponding operation resets its counter; earlier successful
+checks do not. Counts, first errors and diagnostics survive supervisor restart.
+Only core-authorized read-only calls retry within persisted call/time budgets.
+Shared ownership/authorization/control invalidity publishes `control/STOP` **before**
+joining workers, writes the final summary and exits 2 (`global_attention`). Local
+attention alone neither writes STOP nor causes a global nonzero exit. The short lease deadline is an
 entry cutoff: a durably admitted investigation may finish after it, while no new
 investigation may start. User STOP cancels owned work; handoff drains the active
 investigation. Short and long GPU allowances remain independent.
 
-Inspection and cleanup failures are recorded separately. Final summaries use
-`null` for unavailable accounting; the read-only dashboard retains study records
-and labels unavailable totals. Neither service substitutes zero or stale usage.
+Inspection and cleanup failures are recorded separately. `inspect()` and final
+summaries distinguish `known`, `partial` and unavailable (`unknown`) accounting.
+A faulty manual receipt is attributed using its original job, not its claimed
+receipt task ID; only that task's grant becomes unknown. An unverifiable task
+identity blocks all manual grants that cannot be excluded. Contradictory pool
+identity blocks both long pools. An unknown automatic allocation blocks the
+shared automatic pool, not independent manual grants or safe Plan/Review calls.
+Unknown affected subtotals and the overall total are `null`; `known_gpu_seconds`
+is only a known subtotal, never spending authority or proof of unused allowance.
+Outstanding entries and reservations remain until explicit reconciliation. The
+read-only dashboard retains healthy subtotals and labels partial accounting;
+inspection success never means all accounting is known. No reader substitutes
+zero or stale usage. These changes do not alter training/evaluation semantics.
 
 ## Checks
 

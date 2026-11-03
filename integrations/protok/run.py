@@ -365,7 +365,11 @@ def admission(root, backend, *, require_idle=True):
             "An acknowledged active bounded continuation lease is required"
         )
     status = backend.inspect()
-    if require_idle and (status["outstanding"] or status.get("research_outstanding")):
+    if require_idle and (
+        status["outstanding"]
+        or status.get("research_outstanding")
+        or status.get("used_gpu_seconds") is None
+    ):
         raise ProTokError(
             "Outstanding original record requires explicit operator reconciliation"
         )
@@ -1758,7 +1762,12 @@ def repair_completed_control(root, backend):
 def _run_one(root, backend, study):
     _repair_completed_control(root, backend, study)
     state = study.status()
-    deadline = admission(root, backend, require_idle=not state.get("debugging"))
+    deadline = admission(
+        root,
+        backend,
+        require_idle=not state.get("debugging")
+        and state.get("phase") not in {"selection", "plan", "review"},
+    )
     from integrations.protok.resume_submission import begin_pending
 
     begin_pending(study, backend)

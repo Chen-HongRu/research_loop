@@ -45,7 +45,11 @@ class RoundAdmissionTests(unittest.TestCase):
         self.backend = SimpleNamespace(
             owner_token="owner",
             project=Path("/canonical"),
-            inspect=lambda: {"outstanding": [], "research_outstanding": []},
+            inspect=lambda: {
+                "outstanding": [],
+                "research_outstanding": [],
+                "used_gpu_seconds": 0,
+            },
         )
 
     def write(self, name, value):

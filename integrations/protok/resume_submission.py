@@ -55,6 +55,7 @@ def _budget(root, backend, study):
         status["outstanding"]
         or status.get("debug_outstanding")
         or status.get("research_outstanding")
+        or status.get("used_gpu_seconds") is None
     ):
         raise ProTokError("Outstanding or unknown evaluation effects prevent resume")
     spent = status["used_gpu_seconds"] - lease["initial_gpu_seconds"]
