@@ -80,6 +80,8 @@ uv run research-loop graph studies/demo
 
 ProTok 在接纳 Plan 前复用后端输入引用解析：未知来源、非法 checkpoint 引用、未来或未发布来源可在同一 Plan 阶段按原调用/时间预算修正。该检查只读本地配置和发布凭据；已发布证据损坏仍阻断，远端文件存在性留到执行准备检查，已接纳 Plan 不会被替换。
 
+通用恢复入口 `Study.reconcile_execution(recovery_id=..., certify=...)` 由后端提供可信效果证明，控制器保存恢复记录、执行状态转换，并自动将原 attempt、冻结 Plan、恢复摘要与证明引用交给后续 Execute / Review。控制器的 `accepted` 不代表外部计算已提交；只有明确的未提交证明允许新 attempt，未知效果继续阻断。任务适配器无需自行拼接恢复提示或修改 Study 状态。可运行[离线恢复示例](examples/recovery_demo.py)验证这条链路。
+
 ProTok 的执行结案使用统一的 `--reconcile-execute` 入口：依据原执行记录确认未启动、已完成或已结算失败，在原 attempt 发布控制器回执；不重跑 Agent、不重提计算、不重置预算或 STOP。未知提交效果继续阻断，不兼容历史任务恢复。详见[后端约定](docs/execution-backends.md)。
 
 先安装并登录本机 Codex 或 Pi CLI，再创建新 Study：

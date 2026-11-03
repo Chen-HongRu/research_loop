@@ -227,6 +227,97 @@ def claim_request(workspace, *, preflight=None):
         return request
 
 
+def retire_unstarted_request(workspace, *, archive, certify):
+    """Archive a controller request only with positive trusted non-submission proof.
+
+    Called by the controller after trusted backend certification and a stopped
+    original Agent. ``certify(current)`` runs under the submission lock and returns a small
+    JSON object with ``never_submitted: True`` and an auditable ``proof_ref``.
+    It must inspect authoritative backend evidence, not infer effects from an
+    absent job ID/queue. No backend is started here. Keep the lock inode in place.
+    A retained manifest makes partial retirement restartable; a completed archive
+    is returned without touching any later request in the same workspace.
+    """
+    archive = Path(archive).resolve()
+    workspace = Path(workspace).resolve()
+    if archive == workspace or archive.is_relative_to(workspace):
+        raise SubmissionError("Retirement archive must be outside the workspace")
+    with _locked(workspace) as directory:
+        manifest = archive / "retirement.json"
+        resuming = manifest.exists()
+        if resuming:
+            record = _read(manifest)
+            if (
+                not isinstance(record.get("interfaces"), dict)
+                or set(record["interfaces"]) - (INTERFACE_FILES - {LOCK})
+                or not isinstance(record.get("certification"), dict)
+                or not isinstance(record.get("state_before"), dict)
+            ):
+                raise SubmissionError("Invalid retirement manifest")
+            if record.get("workspace") != str(directory):
+                raise SubmissionError("Retirement belongs to another workspace")
+            if record.get("status") == "retired":
+                return record
+            if record.get("status") != "prepared":
+                raise SubmissionError("Invalid retirement status")
+        else:
+            current = _state(directory)
+            proof = certify(current)
+            if (
+                not isinstance(proof, dict)
+                or proof.get("never_submitted") is not True
+                or not isinstance(proof.get("proof_ref"), str)
+                or not proof["proof_ref"].strip()
+            ):
+                raise SubmissionError("Positive backend non-submission proof required")
+            # Only bounded coordination metadata is read; no source/data scans.
+            files = {}
+            for name in sorted(INTERFACE_FILES - {LOCK}):
+                value = _read(directory / name)
+                if value is not None:
+                    files[name] = value
+            record = {
+                "workspace": str(directory),
+                "status": "prepared",
+                "state_before": current,
+                "certification": proof,
+                "interfaces": files,
+            }
+            archive.mkdir(parents=True, exist_ok=True)
+            _publish_retirement(manifest, record)
+        # Revalidate proof on restart before finishing a partial retirement.
+        if record["status"] == "prepared":
+            proof = certify(record["state_before"]) if resuming else proof
+            if proof != record["certification"]:
+                raise SubmissionError("Non-submission certification changed")
+            for name in INTERFACE_FILES - {LOCK}:
+                value = _read(directory / name)
+                if value is not None and value != record["interfaces"].get(name):
+                    raise SubmissionError(
+                        "Submission interface changed during retirement"
+                    )
+            for name in record["interfaces"]:
+                (directory / name).unlink(missing_ok=True)
+            _sync_directory(directory)
+            record = {**record, "status": "retired"}
+            _publish_retirement(manifest, record)
+        return record
+
+
+def _publish_retirement(path, record):
+    payload = json.dumps(record, ensure_ascii=False) + "\n"
+    if len(payload.encode()) > 1024 * 1024:
+        raise SubmissionError("Retirement exceeds bounded control metadata size")
+    staging = path.with_suffix(".tmp")
+    fd = _regular_open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(staging, path)
+    _sync_directory(path.parent)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)

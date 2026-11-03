@@ -1386,6 +1386,13 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
                     "Execute reconciliation differs from retained settlement"
                 )
             _validate_settlement_response(result, trusted, workspace)
+            _validate_core_recovery(
+                self.root,
+                f"settle-{iteration}-{Path(attempt_ref).name}",
+                _settlement_recovery_certificate(record),
+                record["state_before"],
+                record["prepared_state"],
+            )
             return result
         fixed = check_fixed_candidate(self.root, workspace, iteration)
         if fixed is not None:
@@ -1966,6 +1973,65 @@ def _validate_settlement_response(response, trusted, workspace):
         raise ProTokError("Reconciled Execute differs from its settled execution")
 
 
+def _settlement_recovery_certificate(record):
+    attempt = record["previous_attempt"]
+    return {
+        "source_iteration": Path(attempt).parts[1],
+        "source_attempt": attempt,
+        "plan_ref": record["state_before"]["plan_ref"],
+        "action": "settle",
+        "effect": "never_submitted"
+        if record["trusted_result"]["status"] == "not_started"
+        else "terminal",
+        "summary": "Adapter-verified settlement of the original Execute without a new Agent call or allocation. The original Plan, grant and usage remain unchanged; independent Review remains next.",
+        "proof_refs": [
+            str(
+                Path(record["workspace"]).parent
+                / "execute"
+                / Path(attempt).name
+                / "reconciliation.json"
+            ),
+            record["trusted_result"]["artifact"]["path"],
+        ],
+        "response": record["response"],
+    }
+
+
+def _validate_core_recovery(root, recovery_id, certificate, state_before, state_after):
+    """Require the core receipt that owns this adapter's prepared transition."""
+    study_root = Path(root) / "study"
+    path = study_root / "recoveries" / (recovery_id + ".json")
+    if not path.is_file() or path.is_symlink():
+        raise ProTokError("Core recovery evidence is missing or unanchored")
+    saved = read(path)
+    expected = {key: value for key, value in certificate.items() if key != "response"}
+    if expected["action"] == "retry":
+        expected["interface_retirement_ref"] = str(
+            Path(expected["source_attempt"])
+            / "recovery-interfaces"
+            / recovery_id
+            / "retirement.json"
+        )
+    if expected["action"] == "retry":
+        expected["execution_deadline"] = read(
+            study_root / expected["source_attempt"] / "parameter-budget.json"
+        )["deadline"]
+    if expected["action"] == "settle":
+        expected["previous_output_ref"] = str(
+            Path("recoveries") / f"{recovery_id}.previous"
+        )
+    if (
+        saved.get("version") != 1
+        or saved.get("study_root") != str(study_root.resolve())
+        or saved.get("recovery_id") != recovery_id
+        or saved.get("certificate") != expected
+        or saved.get("response") != certificate.get("response")
+        or saved.get("state_before") != state_before
+        or saved.get("state_after") != state_after
+    ):
+        raise ProTokError("Core recovery evidence differs from the prepared transition")
+
+
 def reconcile_execute(root, backend, *, authorization):
     """Publish a verified settlement on the original interrupted Execute attempt.
 
@@ -1978,8 +2044,15 @@ def reconcile_execute(root, backend, *, authorization):
     study = Study(root / "study")
     with (root / "control/runner.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with study._lock():
-            state = study.status()
+        initial = study.status()
+        relative = initial["calls"].get("execute")
+        if not relative:
+            raise ProTokError("There is no unaccepted Execute to reconcile")
+        recovery_id = f"settle-{initial['iteration']:04d}-{Path(relative).name}"
+
+        def certify(state):
+            if state != initial:
+                raise ProTokError("Study state changed before settlement certification")
             relative = state["calls"].get("execute")
             if (
                 state["phase"] != "execute"
@@ -2092,6 +2165,7 @@ def reconcile_execute(root, backend, *, authorization):
                     "status": "ready",
                     "active_attempt": None,
                     "error": None,
+                    "execution_recovery_ref": f"recoveries/{recovery_id}.json",
                 }
                 record = {
                     "operator_action": "reconcile-execute",
@@ -2120,12 +2194,11 @@ def reconcile_execute(root, backend, *, authorization):
                     },
                 }
                 immutable_record(record_path, record)
-            # The outer receipt belongs to the controller. Raw Agent evidence stays
-            # untouched under attempt/agent, including process and partial output.
-            if completed_response(attempt) != response:
-                publish_completed_response(attempt, response)
-            study._save(prepared)
-            return prepared
+            if f"settle-{state['iteration']:04d}-{Path(relative).name}" != recovery_id:
+                raise ProTokError("Execute attempt changed before certification")
+            return _settlement_recovery_certificate(saved or record)
+
+        return study.reconcile_execution(recovery_id=recovery_id, certify=certify)
 
 
 def main(argv=None):

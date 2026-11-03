@@ -144,7 +144,7 @@ uv run research-loop retry studies/my-study-v2
 uv run research-loop run studies/my-study-v2
 ```
 
-`retry` 本身不调用模型。成功执行后的控制器后处理重试保留执行收据；只有经核对的失败调用才产生新 attempt，研究文档冲突会重新评审，已准备的发布只补齐原清单。超时终止本地进程组，不能保证远程操作已取消。重试不是新实验或额外独立支持。
+`retry` 本身不调用模型。成功执行后的控制器后处理重试保留执行收据；未完成 Execute 必须通过可信后端调用 `Study.reconcile_execution` 提供效果证明，不能用裸 `retry` 重提计算。研究文档冲突会重新评审，已准备的发布只补齐原清单。超时终止本地进程组，不能保证远程操作已取消。重试不是新实验或额外独立支持。
 
 若完整 Review 已停止研究，但目标仍为 `not_met / undetermined`，用户后续明确要求继续时可执行 `research-loop resume STUDY --reason "实际继续请求"`，再用相应 runner 推进一轮。此命令不调用模型，记录继续原因并保留原预算、计数、证据和路线状态；预算耗尽、目标已达到、其他停止原因或未完成执行不能借此恢复。它不延长资源租约、不清除任务后端的 STOP，也不修改目标或评价。
 

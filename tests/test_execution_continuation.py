@@ -269,7 +269,18 @@ class ExecutionContinuationTests(unittest.TestCase):
         (root / "study.json").write_text(json.dumps(config))
         harness.before = None
         study = Study(root, harness)
-        study.retry()
+        study.reconcile_execution(
+            recovery_id="verified-transport-interruption",
+            certify=lambda state: {
+                "source_iteration": "0001",
+                "source_attempt": interrupted["calls"]["execute"],
+                "plan_ref": interrupted["plan_ref"],
+                "action": "retry",
+                "effect": "never_submitted",
+                "summary": "Trusted fixture transport confirms no external execution was submitted.",
+                "proof_refs": ["backend/unsubmitted-transport.json"],
+            },
+        )
         final = study.run()
         self.assertEqual((final["iteration"], final["phase"]), (1, "done"))
         self.assertEqual(final["plan_ref"], interrupted["plan_ref"])

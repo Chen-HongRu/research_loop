@@ -1230,6 +1230,7 @@ class ProTokRunnerTests(unittest.TestCase):
         self.assertEqual(self.backend.evaluations, 0)
 
     def test_unsubmitted_interruption_preserves_plan_then_retries_one_evaluation(self):
+        from research_loop import StudyError
         from research_loop.harness import completed_response
 
         (self.project / "autoresearch-report.md").write_text("Historical best.\n")
@@ -1264,6 +1265,7 @@ class ProTokRunnerTests(unittest.TestCase):
                     )
                     if self.interrupt:
                         self.interrupt = False
+                        self.unsubmitted_attempt = str(kwargs["run_dir"])
                         (kwargs["run_dir"] / "partial.json").write_text(
                             '{"error":"linkat failed with ENOENT before publication"}'
                         )
@@ -1329,7 +1331,40 @@ class ProTokRunnerTests(unittest.TestCase):
             self.assertEqual(self.backend.evaluations, 0)
             self.assertEqual(self.backend.inspect()["outstanding"], [])
             plan_count = delegate.count("plan")
-            retried = study.retry()
+            with self.assertRaisesRegex(StudyError, "trusted reconciliation"):
+                study.retry()
+            self.assertEqual(study.status(), paused)
+
+            def certify(state):
+                self.assertEqual(state, paused)
+                self.assertEqual(delegate.unsubmitted_attempt, str(attempt / "agent"))
+                self.assertEqual(
+                    submission_status(workspace)["status"], "not_submitted"
+                )
+                self.assertFalse((self.control / "jobs/0002").exists())
+                self.assertEqual(self.backend.evaluations, 0)
+                proof = attempt / "synthetic-never-submitted.json"
+                RUNNER.immutable_record(
+                    proof,
+                    {
+                        "attempt": paused["calls"]["execute"],
+                        "harness_boundary": "raised_before_submission_api",
+                        "backend_evaluations": self.backend.evaluations,
+                    },
+                )
+                return {
+                    "source_iteration": "0002",
+                    "source_attempt": paused["calls"]["execute"],
+                    "plan_ref": paused["plan_ref"],
+                    "action": "retry",
+                    "effect": "never_submitted",
+                    "summary": "Synthetic trusted harness stopped before the submission API; its backend recorded no new evaluation.",
+                    "proof_refs": [str(proof.relative_to(study.root))],
+                }
+
+            retried = study.reconcile_execution(
+                recovery_id="retry-0002-attempt-001", certify=certify
+            )
             self.assertEqual((retried["iteration"], retried["phase"]), (2, "execute"))
             self.assertNotIn("execute", retried["calls"])
             completed = RUNNER.run_one(self.root, self.backend)

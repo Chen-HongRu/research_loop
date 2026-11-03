@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import json
+import math
 import os
 import random
+import re
 import subprocess
 import time
 import uuid
@@ -57,6 +60,7 @@ from .protocol import SCHEMAS, context_schema, prompt, validate_response
 from .research_contract import validate_research_execution
 from .scout import REPORT_MAX_BYTES as SCOUT_REPORT_MAX_BYTES
 from .strategy import debate_rounds, review_guidance, validate_strategy
+from .submission import retire_unstarted_request
 from .tasks import TaskQueue, completed_results as task_results
 
 
@@ -413,6 +417,16 @@ class Study:
             ):
                 raise StudyError("Automatic retry requires a failed read-only phase")
             active = state["active_attempt"]
+            if (
+                state["phase"] == "execute"
+                and not state.get("accepted_calls", {}).get("execute")
+                and (not active or completed_response(self.root / active) is None)
+            ):
+                if active:
+                    self._check_attempt_stopped(self.root / active)
+                raise StudyError(
+                    "Execute effects require trusted reconciliation before retry"
+                )
             if active and (readonly or completed_response(self.root / active) is None):
                 self._check_attempt_stopped(self.root / active)
             if active and not (
@@ -439,6 +453,424 @@ class Study:
             state.update(status="ready", active_attempt=None, error=None)
             self._save(state)
             return state
+
+    def reconcile_execution(self, *, recovery_id: str, certify) -> dict:
+        """Apply a trusted backend's reconciliation under the controller lock.
+
+        ``certify(state)`` is controller code, never Agent output. It verifies the
+        backend effect boundary and returns only a bounded certificate plus an
+        optional terminal response. The receipt precedes every Study mutation so
+        a controller crash can replay the same transition without another call.
+        """
+        if not isinstance(recovery_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", recovery_id
+        ):
+            raise StudyError("Invalid execution recovery identity")
+        with self._lock():
+            state = self.status()
+            path = self.root / "recoveries" / f"{recovery_id}.json"
+            saved = _read(path) if path.exists() else None
+            for relative in state["calls"].values():
+                self._check_attempt_stopped(self.root / relative)
+            certificate = certify(copy.deepcopy(state))
+            if certificate is None:
+                return state
+            public = self._recovery_certificate(certificate)
+            if public["action"] == "retry":
+                public["interface_retirement_ref"] = str(
+                    Path(public["source_attempt"])
+                    / "recovery-interfaces"
+                    / recovery_id
+                    / "retirement.json"
+                )
+            contract = self._execution_recovery_contract(public, state)
+            if public["action"] == "retry":
+                public["execution_deadline"] = contract["execution_deadline"]
+            if public["action"] == "settle":
+                public["previous_output_ref"] = str(
+                    Path("recoveries") / f"{recovery_id}.previous"
+                )
+            if saved is not None:
+                if (
+                    saved.get("version") != 1
+                    or saved.get("study_root") != str(self.root)
+                    or saved.get("recovery_id") != recovery_id
+                    or saved.get("certificate") != public
+                    or saved.get("contract") != contract
+                    or saved.get("response") != certificate.get("response")
+                ):
+                    raise StudyError("Immutable execution recovery evidence changed")
+                if state == saved["state_after"]:
+                    return state
+                if state != saved["state_before"]:
+                    raise StudyError("Live state changed after execution recovery")
+                self._apply_execution_recovery(saved)
+                return saved["state_after"]
+            self._check_execution_recovery(state, public)
+            prepared = copy.deepcopy(state)
+            prepared["execution_recovery_ref"] = str(path.relative_to(self.root))
+            action = public["action"]
+            if action == "retry":
+                prepared["calls"].pop("execute", None)
+                prepared.get("accepted_calls", {}).pop("execute", None)
+                prepared.update(
+                    status="ready",
+                    stop_reason=None,
+                    active_attempt=None,
+                    error=None,
+                    execution_ref=None,
+                )
+            elif action == "prepare_continuation":
+                prepared.update(status="ready", stop_reason=None)
+            else:
+                response = certificate.get("response")
+                folder = self._folder(state)
+                metadata = _read(folder / "iteration.json")
+                context = {
+                    **self._context(folder),
+                    "plan": _read(self.root / state["plan_ref"]),
+                    "experiment": metadata,
+                    "workspace": metadata["workspace"],
+                }
+                self._validate_result("execute", response, context)
+                prepared.update(status="ready", active_attempt=None, error=None)
+            record = {
+                "version": 1,
+                "study_root": str(self.root),
+                "recovery_id": recovery_id,
+                "recorded_at": _now(),
+                "certificate": public,
+                "contract": contract,
+                "previous_output": {
+                    name: (self.root / public["source_attempt"] / name)
+                    .read_bytes()
+                    .hex()
+                    for name in ("response.json", "completed.json")
+                    if public["action"] == "settle"
+                    and (self.root / public["source_attempt"] / name).exists()
+                },
+                "response": certificate.get("response"),
+                "state_before": state,
+                "state_after": prepared,
+            }
+            _write(path, record)
+            self._apply_execution_recovery(record)
+            return prepared
+
+    def _recovery_certificate(self, certificate: dict) -> dict:
+        if not isinstance(certificate, dict):
+            raise StudyError("Trusted execution recovery certificate is required")
+        keys = {
+            "source_iteration",
+            "source_attempt",
+            "plan_ref",
+            "action",
+            "effect",
+            "summary",
+            "proof_refs",
+        }
+        if not keys <= certificate.keys():
+            raise StudyError("Incomplete execution recovery certificate")
+        public = {key: certificate[key] for key in keys}
+        iteration = public["source_iteration"]
+        if (
+            not isinstance(iteration, str)
+            or not re.fullmatch(r"[0-9]{4,}", iteration)
+            or int(iteration) < 1
+            or iteration != f"{int(iteration):04d}"
+        ):
+            raise StudyError("Invalid recovery source iteration")
+        for key in ("source_attempt", "plan_ref"):
+            value = public[key]
+            if not isinstance(value, str) or not value or len(value) > 1024:
+                raise StudyError("Invalid recovery identity reference")
+            path = Path(value)
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or not (self.root / path).resolve().is_relative_to(self.root)
+            ):
+                raise StudyError("Recovery identity leaves the Study")
+        if public["action"] not in {"retry", "settle", "prepare_continuation"}:
+            raise StudyError("Unsupported execution recovery action")
+        if public["effect"] not in {"never_submitted", "terminal"}:
+            raise StudyError("Unknown execution effects cannot authorize recovery")
+        if public["action"] != "settle" and public["effect"] != "never_submitted":
+            raise StudyError(
+                "Execution retry requires certified never-submitted effects"
+            )
+        if (
+            not isinstance(public["summary"], str)
+            or not public["summary"].strip()
+            or len(public["summary"].encode()) > 4096
+            or not isinstance(public["proof_refs"], list)
+            or not 1 <= len(public["proof_refs"]) <= 16
+            or any(
+                not isinstance(ref, str) or not ref.strip() or len(ref.encode()) > 1024
+                for ref in public["proof_refs"]
+            )
+        ):
+            raise StudyError("Recovery summary and proof references must be bounded")
+        return public
+
+    def _execution_recovery_contract(self, certificate: dict, state: dict) -> dict:
+        plan_ref = certificate["plan_ref"]
+        parts = Path(plan_ref).parts
+        if (
+            len(parts) < 4
+            or parts[0] != "iterations"
+            or not parts[1].isdigit()
+            or parts[-1] not in {"response.json", "canonical-response.json"}
+        ):
+            raise StudyError("Invalid accepted recovery Plan reference")
+        owner = self.root / "iterations" / parts[1]
+        owner_state = (
+            state
+            if owner == self._folder(state)
+            else _read(owner / "publication.json")["state_after"]
+        )
+        plan = _read(self.root / plan_ref)
+        attempt = (self.root / plan_ref).parent
+        raw = completed_response(attempt)
+        if not isinstance(raw, dict) or _read(attempt / "response.json") != raw:
+            raise StudyError("Recovery Plan differs from its completed evidence")
+        expected = raw
+        if parts[-1] == "canonical-response.json":
+            expected = {
+                **raw,
+                "base_experiment": owner_state["selected"]["proposal"][
+                    "base_experiment"
+                ],
+            }
+        if plan != expected:
+            raise StudyError("Recovery Plan differs from its accepted content")
+        config = _read(self.root / "study.json")
+        original = _read(owner / "context/study.before.json")
+        goal = (self.root / "goal.md").read_text()
+        if (
+            self.config != config
+            or {
+                key: value
+                for key, value in config.items()
+                if key != "research_execution"
+            }
+            != {
+                key: value
+                for key, value in original.items()
+                if key != "research_execution"
+            }
+            or goal != (owner / "context/goal.md").read_text()
+        ):
+            raise StudyError("Recovery requires the original frozen Study contract")
+        contract = {"plan": plan, "study": config, "goal": goal}
+        if certificate["action"] == "retry":
+            budget = self.root / certificate["source_attempt"] / "parameter-budget.json"
+            value = _read(budget) if budget.is_file() else None
+            deadline = value.get("deadline") if isinstance(value, dict) else None
+            if type(deadline) not in (int, float) or not math.isfinite(deadline):
+                raise StudyError(
+                    "Certified retry requires the original Execute deadline"
+                )
+            contract["execution_deadline"] = deadline
+        return contract
+
+    def _check_execution_recovery(self, state: dict, certificate: dict) -> None:
+        source = certificate["source_iteration"]
+        attempt = certificate["source_attempt"]
+        plan_ref = certificate["plan_ref"]
+        if (
+            source != f"{state['iteration']:04d}"
+            or state["calls"].get("execute") != attempt
+            or state.get("active_attempt") not in (None, attempt)
+            or (
+                certificate["action"] != "prepare_continuation"
+                and state.get("plan_ref") != plan_ref
+            )
+            or state.get("debugging")
+            or not Path(attempt).is_relative_to(Path("iterations") / source / "execute")
+        ):
+            raise StudyError("Recovery does not match the retained Execute and Plan")
+        for relative in state["calls"].values():
+            self._check_attempt_stopped(self.root / relative)
+        plan_path = Path(plan_ref)
+        if (
+            len(plan_path.parts) < 4
+            or plan_path.parts[0] != "iterations"
+            or not plan_path.parts[1].isdigit()
+            or not 1 <= int(plan_path.parts[1]) <= int(source)
+        ):
+            raise StudyError("Invalid accepted recovery Plan reference")
+        owner = self.root / "iterations" / plan_path.parts[1]
+        owner_state = (
+            state
+            if owner == self._folder(state)
+            else _read(owner / "publication.json")["state_after"]
+        )
+        if (
+            owner_state.get("plan_ref") != plan_ref
+            or not any(
+                key.startswith("plan-")
+                and owner_state.get("accepted_calls", {}).get(key)
+                and plan_ref
+                in {
+                    str(Path(call) / "response.json"),
+                    str(Path(call) / "canonical-response.json"),
+                }
+                for key, call in owner_state["calls"].items()
+            )
+            or _read(self.root / plan_ref).get("decision") != "investigate"
+        ):
+            raise StudyError("Recovery requires the accepted original Plan")
+        folder = self._folder(state)
+        if certificate["action"] == "prepare_continuation":
+            publication = _read(folder / "publication.json")
+            metadata = _read(folder / "iteration.json")
+            execute = _read(self.root / state["execution_ref"])
+            if (
+                (state["status"], state["phase"], state.get("stop_reason"))
+                != ("stopped", "done", "review")
+                or metadata.get("status") != "reviewed"
+                or publication["metadata"] != metadata
+                or {
+                    key: value
+                    for key, value in publication["state_after"].items()
+                    if key != "elapsed_seconds"
+                }
+                != {
+                    key: value
+                    for key, value in state.items()
+                    if key != "elapsed_seconds"
+                }
+                or state["elapsed_seconds"]
+                < publication["state_after"]["elapsed_seconds"]
+                or not state.get("accepted_calls", {}).get("execute")
+                or execute.get("outcome") != "incomplete"
+                or execute.get("artifacts") != []
+                or execute.get("measurements") != []
+            ):
+                raise StudyError(
+                    "Continuation recovery requires a published incomplete Execute"
+                )
+        elif (
+            state["phase"] != "execute"
+            or state["status"] not in {"running", "needs_attention"}
+            or state.get("accepted_calls", {}).get("execute")
+            or (folder / "publication.json").exists()
+        ):
+            raise StudyError("Recovery requires an interrupted unaccepted Execute")
+
+    def _apply_execution_recovery(self, record: dict) -> None:
+        certificate = record["certificate"]
+        for relative in record["state_before"]["calls"].values():
+            self._check_attempt_stopped(self.root / relative)
+        if certificate["action"] == "retry":
+            metadata = _read(
+                self.root
+                / "iterations"
+                / certificate["source_iteration"]
+                / "iteration.json"
+            )
+            retire_unstarted_request(
+                metadata["workspace"],
+                archive=(self.root / certificate["interface_retirement_ref"]).parent,
+                certify=lambda status: {
+                    "never_submitted": True,
+                    "proof_ref": str(
+                        Path("recoveries") / f"{record['recovery_id']}.json"
+                    ),
+                },
+            )
+        elif certificate["action"] == "settle":
+            attempt = self.root / certificate["source_attempt"]
+            self._check_attempt_stopped(attempt)
+            response = record["response"]
+            archive = self.root / certificate["previous_output_ref"]
+            for name, encoded in record["previous_output"].items():
+                target = archive / name
+                original = bytes.fromhex(encoded)
+                if target.exists():
+                    if target.read_bytes() != original:
+                        raise StudyError("Retained original Execute evidence changed")
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = target.with_name(target.name + ".tmp")
+                    temporary.write_bytes(original)
+                    temporary.replace(target)
+            if completed_response(attempt) != response:
+                publish_completed_response(attempt, response)
+        self._save(record["state_after"])
+
+    def _execution_recovery_context(self, folder: Path, metadata: dict) -> list:
+        state = self.status()
+        reference = metadata.get("execution_recovery_ref")
+        if state["iteration"] == int(folder.name):
+            reference = state.get("execution_recovery_ref") or reference
+        elif (folder / "publication.json").exists():
+            reference = (
+                _read(folder / "publication.json")["state_after"].get(
+                    "execution_recovery_ref"
+                )
+                or reference
+            )
+        plan_ref = (metadata.get("continuation") or {}).get("plan_ref")
+        if plan_ref is None and state["iteration"] == int(folder.name):
+            plan_ref = state.get("plan_ref")
+        records = []
+        seen = set()
+        while reference:
+            if not isinstance(reference, str):
+                raise StudyError("Invalid controller recovery reference")
+            path = Path(reference)
+            if (
+                not isinstance(reference, str)
+                or not re.fullmatch(
+                    r"recoveries/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json", reference
+                )
+                or reference in seen
+                or len(records) >= 32
+                or not (self.root / path).is_file()
+            ):
+                raise StudyError("Missing or invalid controller recovery evidence")
+            seen.add(reference)
+            record = _read(self.root / path)
+            certificate = record["certificate"]
+            if (
+                record.get("version") != 1
+                or record.get("study_root") != str(self.root)
+                or path.stem != record.get("recovery_id")
+                or record["state_after"].get("execution_recovery_ref") != reference
+                or certificate["plan_ref"] != plan_ref
+            ):
+                raise StudyError("Controller recovery evidence changed identity")
+            live = self._execution_recovery_contract(certificate, state)
+            frozen = record["contract"]
+            if (
+                live["plan"] != frozen["plan"]
+                or live["goal"] != frozen["goal"]
+                or {
+                    key: value
+                    for key, value in live["study"].items()
+                    if key != "research_execution"
+                }
+                != {
+                    key: value
+                    for key, value in frozen["study"].items()
+                    if key != "research_execution"
+                }
+                or live.get("execution_deadline") != frozen.get("execution_deadline")
+                or certificate.get("execution_deadline")
+                != frozen.get("execution_deadline")
+            ):
+                raise StudyError("Frozen execution recovery contract changed")
+            records.append(
+                {
+                    "recovery_id": record["recovery_id"],
+                    "record_ref": reference,
+                    **certificate,
+                }
+            )
+            reference = record["state_before"].get("execution_recovery_ref")
+        return list(reversed(records))
 
     def _folder(self, state: dict) -> Path:
         return self.root / "iterations" / f"{state['iteration']:04d}"
@@ -578,7 +1010,7 @@ class Study:
         )
         self._save(state)
 
-    def _begin(self, state: dict) -> None:
+    def _begin(self, state: dict, *, execution_recovery_ref=None) -> None:
         admission = getattr(self.harness, "admit_iteration", None)
         token = (
             admission(f"{state['iteration'] + 1:04d}")
@@ -711,6 +1143,7 @@ class Study:
             route_id=None,
             plan_ref=None,
             execution_ref=None,
+            execution_recovery_ref=execution_recovery_ref,
             review_ref=None,
             error=None,
             debugging=None,
@@ -862,8 +1295,12 @@ class Study:
             and number > self.config["max_iterations"]
         ):
             raise StudyError("Continuation exceeds the physical iteration budget")
+        recovery_ref = state.get("execution_recovery_ref")
         if state["iteration"] == int(source_iteration):
-            self._begin(state)
+            if recovery_ref:
+                self._begin(state, execution_recovery_ref=recovery_ref)
+            else:
+                self._begin(state)
         folder = self._folder(state)
         metadata = _read(folder / "iteration.json")
         workdir = folder / "workspace" if self.config["allow_write"] else self.workspace
@@ -879,6 +1316,8 @@ class Study:
             "route_title": source_metadata["route_title"],
             "continuation": continuation,
         }
+        if recovery_ref:
+            expected["execution_recovery_ref"] = recovery_ref
         if metadata.get("id") != f"{number:04d}" or metadata.get(
             "previous_iteration"
         ) != int(source_iteration):
@@ -994,6 +1433,23 @@ class Study:
         if long_results.exists():
             context["long_training_results"] = _read(long_results)
         metadata = _read(folder / "iteration.json")
+        recovery = self._execution_recovery_context(folder, metadata)
+        if recovery:
+            context["execution_recovery"] = recovery
+            current = self.status()
+            if current["iteration"] == int(folder.name) and current["calls"].get(
+                "execute"
+            ):
+                context["execution_recovery_current_attempt"] = current["calls"][
+                    "execute"
+                ]
+            context["execution_recovery_guidance"] = (
+                "These controller records reconcile retained execution effects; proof_refs point "
+                "to original evidence. A controller-accepted submission is distinct from external "
+                "backend submission. A certified retry retains the original Plan and budgets; it "
+                "is not an independent experiment or an additional grant. Unknown effects remain "
+                "blocking. Review the actual evidence and its limitations independently."
+            )
         continuation = metadata.get("continuation")
         scientific_folder = folder
         scientific_config = config
@@ -1262,6 +1718,17 @@ class Study:
             call_allowance = getattr(self.harness, "call_allowance", None)
             if call_allowance is not None:
                 remaining = call_allowance(remaining)
+            inherited_deadline = None
+            if phase == "execute":
+                deadlines = [
+                    record["execution_deadline"]
+                    for record in context.get("execution_recovery", [])
+                    if record["action"] == "retry"
+                    and record["source_iteration"] == f"{state['iteration']:04d}"
+                ]
+                if deadlines:
+                    inherited_deadline = min(deadlines)
+                    remaining = min(remaining, inherited_deadline - time.time())
             if feedback is not None:
                 remaining = min(remaining, feedback["deadline"] - time.time())
             if remaining < 1:
@@ -1273,6 +1740,10 @@ class Study:
                 directory / f"attempt-{len(list(directory.glob('attempt-*'))) + 1:03d}"
             )
             attempt.mkdir(parents=True)
+            if phase == "execute" and context.get("execution_recovery"):
+                context["execution_recovery_current_attempt"] = str(
+                    attempt.relative_to(self.root)
+                )
             _write(attempt / "context.json", context)
             _write(attempt / "schema.json", self._agent_schema(phase, context))
             if feedback is not None:
@@ -1282,6 +1753,8 @@ class Study:
                 {
                     "deadline": feedback["deadline"]
                     if feedback
+                    else inherited_deadline
+                    if inherited_deadline is not None
                     else time.time() + max(1, timeout)
                 },
             )

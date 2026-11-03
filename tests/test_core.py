@@ -558,7 +558,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(study.run()["status"], "stopped")
         self.assertEqual(harness.count("execute"), 1)
 
-    def test_unknown_execution_requires_retry_and_preserves_old_attempt(self):
+    def test_unknown_execution_requires_certification_and_preserves_old_attempt(self):
         study, harness = self.study()
 
         def fail(call):
@@ -576,7 +576,21 @@ class CoreTests(unittest.TestCase):
             study.run()
         self.assertEqual(harness.count("execute"), 1)
         harness.before = None
-        study.retry()
+        with self.assertRaisesRegex(StudyError, "trusted reconciliation"):
+            study.retry()
+        retained = study.status()
+        study.reconcile_execution(
+            recovery_id="verified-unsubmitted-execute",
+            certify=lambda state: {
+                "source_iteration": "0001",
+                "source_attempt": retained["calls"]["execute"],
+                "plan_ref": retained["plan_ref"],
+                "action": "retry",
+                "effect": "never_submitted",
+                "summary": "Trusted fixture backend confirms no execution was submitted.",
+                "proof_refs": ["backend/no-submission.json"],
+            },
+        )
         study.run()
         folder = self.root / "iterations/0001/execute"
         self.assertEqual(

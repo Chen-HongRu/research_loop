@@ -154,3 +154,65 @@ remain blocked. Source/configuration/receipt identity remains mandatory. Reconci
 Result reconciliation concerns the retained execution. Runtime replacement is
 broader: deployment checks every affected lane, including independent long jobs.
 Neither path changes the allocation grants of other lanes.
+
+## Recovery certificates
+
+Use the shared controller for recovery instead of writing a per-study runner to
+edit `state.json`, publish completion receipts or append evidence to Review prompts.
+Keep experiment preparation, transport, input/source checks and accounting in the
+backend. A recovery callback runs under the Study lock, so do not acquire that
+lock again. Host-level supervisor/runner locks remain the adapter's responsibility.
+
+```python
+def certify(state):
+    # Trusted backend code: inspect this exact retained attempt, verify original
+    # authorization, immutable Plan/source, deadline and positive effect evidence.
+    proof = backend.inspect()  # never submits a replacement
+    verify_recovery_contract(state, proof)
+    return {
+        "source_iteration": f"{state['iteration']:04d}",
+        "source_attempt": state["calls"]["execute"],
+        "plan_ref": state["plan_ref"],
+        "action": "settle",
+        "effect": "terminal",
+        "summary": "Original execution is terminal and its costs are settled.",
+        "proof_refs": [proof.reference],
+        "response": response_from_verified_receipt(proof),
+    }
+
+study.reconcile_execution(recovery_id="execution-settlement-0001", certify=certify)
+```
+
+This sketch's verification/response functions are task-specific; the runnable
+[offline example](../examples/recovery_demo.py) demonstrates the complete shared
+recovery path. `source_attempt` and `plan_ref` are Study-relative references.
+`proof_refs` identify retained backend evidence and must not contain secrets.
+Use a stable recovery ID per operation, and return the same certificate on a retry
+of interrupted recovery. The callback may retain its private evidence/authorization
+record; do not include those full snapshots in `summary`.
+
+For `retry` or `prepare_continuation`, `effect` must be `never_submitted` backed by
+positive evidence from before the external submission boundary. For `settle`, it
+may be `terminal` or `never_submitted`; include a validated Execute response.
+Unresolved effects cannot be certified. Neither a terminal failure nor a zero-cost
+closure grants another compute allocation. A new attempt still faces original
+Study budgets and the backend's unchanged absolute deadline and resource grant.
+Same-iteration retry also retains the failed Execute's original per-call absolute
+deadline; it cannot obtain another full timeout window. Published continuation is
+the existing new-iteration path with a new per-call timeout, subject to the original
+Study and backend resource limits.
+
+A controller request marked `accepted` is distinct from external submission.
+For a certified retry the core uses `retire_unstarted_request` to retain the
+original interface contents and certification under the old attempt before
+allowing another request. The shared helper preserves its lock and can finish an
+interrupted archive without touching a later request. Adapters must not delete
+claimed receipts as a substitute for proving non-submission.
+
+ProTok's existing `--resume-unsubmitted` and `--reconcile-execute` commands now
+submit certificates to this API. Their resource/identity/STOP checks remain
+adapter-owned; normalized recovery state and evidence delivery belong to core.
+The formal resume path still refuses retained pending/accepted interfaces; this
+change does not import arbitrary private retirement files or widen its grants.
+The controller reads only small recovery/control metadata at recovery and context
+construction, with no dataset/checkpoint scans or per-rank/worker checks.
