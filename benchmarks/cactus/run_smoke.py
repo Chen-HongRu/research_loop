@@ -60,7 +60,7 @@ GOAL = """完成一次真实 Cactus tiny-cnn GPU 训练调查，报告固定开�
 
 读取工作区 README.md 中的文件请求接口。选择和 Plan 必须聚焦于该可执行接口，
 提出一次训练行动，base_experiment 为 null，历史 references 为空。
-Plan 可以不设置 local_evaluation，input_artifacts 只引用实际存在的基线 README.md
+Plan 可以不设置 local_evaluation，markdown 只声明实际存在的基线输入 README.md
 及其 Git HEAD 版本；不要把远端路径当成本地输入。Plan 的 timeout_seconds 在剩余
 预算内，应足以等待真实训练（建议至多 900 秒）。不要求机制假设。
 

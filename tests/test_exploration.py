@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from research_loop import Study, initialize
+from research_loop import Study, StudyError, initialize
 from research_loop.exploration import (
     allocation,
     route_candidates,
@@ -175,9 +175,21 @@ class ExplorationTests(unittest.TestCase):
             "kind", call["schema"]["properties"]["research_design"]["properties"]
         )
         selected = read(s.root / "iterations/0001/selection.json")
+        canonical = selected["rounds"]["0"]["proposals"]["a"]
         self.assertEqual(
-            selected["rounds"]["0"]["proposals"]["a"]["research_design"]["kind"],
+            canonical["research_design"]["kind"],
             "architecture",
+        )
+        self.assertIs(call["schema"].validate(raw), raw)
+        full_schema = stage_schema("proposal", call["context"], SCHEMAS)
+        self.assertIs(full_schema.validate(canonical), canonical)
+        with self.assertRaisesRegex(ValueError, "kind"):
+            full_schema.validate(raw)
+        with self.assertRaisesRegex(ValueError, "kind"):
+            call["schema"].validate(canonical)
+        self.assertIn(
+            "kind",
+            full_schema.model.model_fields["research_design"].annotation.model_fields,
         )
 
     def test_legacy_completed_allocation_requires_original_kind(self):
@@ -227,7 +239,9 @@ class ExplorationTests(unittest.TestCase):
                     )
                     self.assertEqual(result["research_design"]["kind"], kind)
                 else:
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(
+                        StudyError, "changed controller fields"
+                    ):
                         resumed._call(state, "proposal", key, context, attempt.parent)
                 self.assertEqual((attempt / "completed.json").read_bytes(), raw)
                 self.assertEqual(state["call_count"], 1)

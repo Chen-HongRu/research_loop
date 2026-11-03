@@ -1,45 +1,82 @@
-"""Opt-in frozen research contracts; structural checks do not certify causality."""
+"""Opt-in executable bounds; scientific design lives in frozen Plan markdown."""
 
 import copy
 from pathlib import PurePosixPath
 import re
 
-from .protocol import BOOLEAN, TEXT, _array, _enum, _nullable, _object, _validate
+from typing import Annotated, Literal
+
+from pydantic import Field, model_validator
+
+from .schema import OutputModel, OutputSchema, with_fields
 
 
-RESEARCH_CONTRACT = _object(
-    purpose=_enum("performance", "mechanism", "observation", "theory"),
-    question=TEXT,
-    explanations=_array(_object(id=TEXT, statement=TEXT, prediction=TEXT)),
-    observables=_array(
-        _object(
-            id=TEXT,
-            definition=TEXT,
-            method=TEXT,
-            inputs=TEXT,
-            timing=TEXT,
-            aggregation=TEXT,
-            cost=TEXT,
-        )
-    ),
-    interpretation=_array(
-        _object(
-            explanation_id=TEXT,
-            observable_ids=_array(TEXT),
-            supports=TEXT,
-            refutes=TEXT,
-        )
-    ),
-    inconclusive=TEXT,
-    execution=_object(
-        mode=_enum("fixed_evaluation", "script"),
-        entrypoint=_nullable(TEXT),
-        gpu=BOOLEAN,
-        time_limit_seconds={"type": "integer"},
-        inputs=_array(_object(name=TEXT, source=TEXT, role=TEXT)),
-        outputs=_array(TEXT),
-    ),
-)
+class ResearchInput(OutputModel):
+    name: str
+    source: str
+
+
+class ExecutionEnvelope(OutputModel):
+    mode: Literal["fixed_evaluation", "script"]
+    entrypoint: str | None
+    gpu: bool
+    time_limit_seconds: int
+    inputs: list[ResearchInput]
+    outputs: list[str]
+
+
+class ResearchExecution(ExecutionEnvelope):
+    time_limit_seconds: Annotated[int, Field(ge=60, le=1800, multiple_of=60)]
+
+    @model_validator(mode="after")
+    def executable_bounds(self):
+        seconds = self.time_limit_seconds
+        names = []
+        for item in self.inputs:
+            if (
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", item.name)
+                or ".." in item.name
+            ):
+                raise ValueError(
+                    "Research input name must be a simple name without traversal"
+                )
+            if not item.source.strip():
+                raise ValueError("Empty research input source")
+            names.append(item.name)
+        if len(set(names)) != len(names):
+            raise ValueError("Duplicate research input name")
+        for output in self.outputs:
+            _relative_file(output)
+        if len(set(self.outputs)) != len(self.outputs):
+            raise ValueError("Duplicate research output")
+        if self.mode == "script":
+            if self.entrypoint is None:
+                raise ValueError("Script research needs an entrypoint")
+            path = _relative_file(self.entrypoint)
+            if (
+                len(path.parts) < 2
+                or path.parts[0] != "research"
+                or path.suffix != ".py"
+            ):
+                raise ValueError(
+                    "Script entrypoint must be a Python file under research/"
+                )
+            if not self.outputs:
+                raise ValueError("Script research needs declared output evidence files")
+        elif (
+            self.entrypoint is not None
+            or self.gpu is not True
+            or seconds != 1800
+            or self.inputs
+            or self.outputs
+        ):
+            raise ValueError(
+                "Fixed evaluation uses its original GPU/1800s profile and no script inputs/outputs"
+            )
+        return self
+
+
+EXECUTION = OutputSchema(ResearchExecution)
 
 
 def validate_research_execution(value):
@@ -56,15 +93,7 @@ def validate_research_execution(value):
 
 
 def plan_schema(schema):
-    result = copy.deepcopy(schema)
-    result["properties"]["research_contract"] = _nullable(RESEARCH_CONTRACT)
-    result["required"].append("research_contract")
-    return result
-
-
-def _text(value, name):
-    if not value.strip():
-        raise ValueError(f"Empty research contract {name}")
+    return with_fields(schema, execution=ResearchExecution | None)
 
 
 def _relative_file(value):
@@ -80,95 +109,9 @@ def _relative_file(value):
 
 
 def validate_contract(plan):
-    """Check declarations, references and execution bounds, not scientific meaning."""
-    if plan["decision"] != "investigate":
-        return
-    value = plan.get("research_contract")
-    _validate(RESEARCH_CONTRACT, value, "research_contract")
-    _text(value["question"], "question")
-    _text(value["inconclusive"], "inconclusive")
-    explanations = value["explanations"]
-    observables = value["observables"]
-    for collection, label in (
-        (explanations, "explanations"),
-        (observables, "observables"),
-    ):
-        for item in collection:
-            for key, text in item.items():
-                _text(text, f"{label}.{key}")
-        if len({item["id"] for item in collection}) != len(collection):
-            raise ValueError(f"Duplicate research {label} id")
-    if not observables:
-        raise ValueError("Research needs an observable or derivation evidence")
-    explanation_ids = {item["id"] for item in explanations}
-    observable_ids = {item["id"] for item in observables}
-    interpreted = set()
-    for item in value["interpretation"]:
-        if item["explanation_id"] not in explanation_ids:
-            raise ValueError("Interpretation references unknown explanation")
-        if (
-            not item["observable_ids"]
-            or not set(item["observable_ids"]) <= observable_ids
-        ):
-            raise ValueError("Interpretation needs existing observables")
-        _text(item["supports"], "supports")
-        _text(item["refutes"], "refutes")
-        interpreted.add(item["explanation_id"])
-    if value["purpose"] == "mechanism":
-        if any(
-            len({item[key].strip().casefold() for item in explanations}) < 2
-            for key in ("statement", "prediction")
-        ):
-            raise ValueError(
-                "Mechanism research needs two distinct explanations and predictions"
-            )
-        if interpreted != explanation_ids:
-            raise ValueError(
-                "Mechanism research needs interpretation for each explanation"
-            )
-    execution = value["execution"]
-    seconds = execution["time_limit_seconds"]
-    if not 1 <= seconds <= 1800 or seconds % 60:
-        raise ValueError(
-            "Research time limit must be whole minutes within 1..1800 seconds"
-        )
-    names = []
-    for item in execution["inputs"]:
-        if (
-            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", item["name"])
-            or ".." in item["name"]
-        ):
-            raise ValueError(
-                "Research input name must be a simple name without traversal"
-            )
-        names.append(item["name"])
-        _text(item["source"], "input source")
-        _text(item["role"], "input role")
-    if len(set(names)) != len(names):
-        raise ValueError("Duplicate research input name")
-    for output in execution["outputs"]:
-        _relative_file(output)
-    if len(set(execution["outputs"])) != len(execution["outputs"]):
-        raise ValueError("Duplicate research output")
-    if execution["mode"] == "script":
-        entrypoint = execution["entrypoint"]
-        if entrypoint is None:
-            raise ValueError("Script research needs an entrypoint")
-        path = _relative_file(entrypoint)
-        if len(path.parts) < 2 or path.parts[0] != "research" or path.suffix != ".py":
-            raise ValueError("Script entrypoint must be a Python file under research/")
-        if not execution["outputs"]:
-            raise ValueError("Script research needs declared output evidence files")
-    elif (
-        execution["entrypoint"] is not None
-        or execution["gpu"] is not True
-        or seconds != 1800
-        or execution["inputs"]
-        or execution["outputs"]
-    ):
-        raise ValueError(
-            "Fixed evaluation uses its original GPU/1800s profile and no script inputs/outputs"
-        )
+    """Validate the same executable model emitted to the research agent."""
+    if plan["decision"] == "investigate":
+        EXECUTION.validate(plan.get("execution"))
 
 
 def guidance(phase):
@@ -189,30 +132,24 @@ an experimental intervention or measurement design without a model change.
         return (
             common
             + """
-For decision=investigate, fill research_contract with purpose, a concrete question,
-explanations and predictions where applicable, direct observables (or derivation
-evidence), predefined support/refutation rules and an inconclusive condition.
-Mechanism work needs at least two competing explanations with different predictions
-and interpretation referencing their observable IDs. Other purposes may use empty
-explanations/interpretation. Each observable declares definition, method, inputs,
-timing, aggregation and cost. Freeze these declarations before Execute.
-Explanation and observable IDs must be unique within their lists. Every
-interpretation references an existing explanation and a nonempty list of existing
-observable IDs; mechanism work needs an interpretation for every explanation.
+Write the scientific plan in markdown: describe the question, allowed action,
+relevant inputs and versions, measurement or derivation, and how evidence will be
+interpreted. Explain uncertainty and limitations where relevant. No research type,
+explanation IDs or observation IDs are required. Freeze this prose before Execute.
 When live telemetry is available, state the observable names, steps/units, conditions,
 publication boundaries and intended tags. Use dashboard only for user-facing progress;
 retain diagnostic/custom tags for Review. Log tags do not change the frozen scientific
 scope, data roles, required evidence or interpretation of incomplete measurements.
 execution selects fixed_evaluation or script. A script uses research/*.py, named
-inputs with source and role, relative output evidence files, GPU requirement and a
+inputs with name and source, relative output evidence files, GPU requirement and a
 whole-minute time limit no greater than 1800 seconds. Source resolution belongs to
 the execution adapter. Time limits are 60..1800 seconds in multiples of 60.
 Input names are unique simple letters/digits/underscore/dot/hyphen names without
-traversal; sources and roles are nonempty. Script entrypoints are Python files
+traversal; sources are nonempty. Script entrypoints are Python files
 under research/; output paths are unique relative files without dot/traversal
 components, and scripts require at least one output. Fixed evaluation requires entrypoint=null, inputs=[],
 outputs=[], gpu=true, time_limit_seconds=1800. No decision requires training.
-For reselect/stop research_contract may be null; do not invent an experiment.
+For reselect/stop execution may be null; do not invent an experiment.
 """
         )
     if phase in ("judge", "review"):

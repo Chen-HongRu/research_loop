@@ -24,7 +24,7 @@ Research Loop 把研究目标拆成有边界的调查：选择路线、冻结计
 | 文档与恢复 | 两层研究文档、阶段回执和发布记录；保留中断现场供核对 |
 | 可选扩展 | Scout、实时观测、人工任务队列、独立预算的长训练 |
 
-控制器和研究后端分离：`src/research_loop/` 保存通用协议；`benchmarks/` 与 `integrations/` 保存任务边界。现有 ProTok 看板属于任务适配器，可作为实现参考；其[横向关系树、实验卡片与下方进展面板](integrations/protok/dashboard.md#阅读方式)统一展示正在进行和已完成的任务，并支持手机阅读。
+控制器和研究后端分离：`src/research_loop/` 保存通用协议；`benchmarks/` 与 `integrations/` 保存任务边界。后端通过 prepare → start → inspect 分离准备、启动与同一执行的核对，接入方法见[执行后端指南](docs/execution-backends.md)。现有 ProTok 看板属于任务适配器，可作为实现参考；其[横向关系树、实验卡片与下方进展面板](integrations/protok/dashboard.md#阅读方式)统一展示正在进行和已完成的任务，并支持手机阅读。
 
 可选 [Scout](docs/scout.md) 独立阅读论文与实现，提供外部洞见、反证和新视角。Reviewer 综合本地证据与未解问题，研究选择阶段决定下一步。宿主接入 Scout 后，默认每推进一轮且间隔至少五分钟可调用；结果在下一轮边界进入主循环，不改变当前 Plan。
 
@@ -53,6 +53,12 @@ uv run research-loop graph studies/demo
 离线演示不需要模型账号、GPU 或数据集。它用明确标记的脚本回复，走真实控制器的一轮选择 → Plan → Execute → Review → 发布，输出保存在 `studies/demo/`。**这验证流程接线，不是模型能力或 AeroArm 实验结果。** 已有目录不会被覆盖；完整说明见[展示导览](docs/showcase.md)。
 
 ## 使用真实 Agent
+
+新 Study 使用 version 3。Plan 在 `markdown` 冻结科学合同，以顶层 `timeout_seconds` 限制执行；字段用途见[消费者审计](docs/plan-field-audit.md)。旧格式目录保留原样，不自动迁移，详见[使用说明](docs/usage.md)。
+
+结构化输入输出由 Pydantic v2 模型统一定义，生成给现有 CLI 的 JSON Schema 并执行本地严格校验；安装或更新依赖使用 `uv sync --locked`。预算、作业、源码身份和核账仍由控制器判断。
+
+尚未接纳的只读阶段输出若存在明确的参数错误，控制器保留原回复，将校验反馈返回同一阶段，在原任务和剩余调用/时间预算内修正。管线故障、身份或核账异常以及效果未知的作业继续阻断；输出校验失败不会自动重跑 Execute。ProTok 脚本请求在 claim 前检查入口文件、可修改源码与 Python 语法；明确的作者参数错误返回同一仍在运行的 Execute，在原 Plan 和剩余期限内修正。准备不分配计算资源，已提交或效果未知的作业不能由此重试。
 
 先安装并登录本机 Codex 或 Pi CLI，再创建新 Study：
 

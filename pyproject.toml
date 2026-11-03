@@ -5,7 +5,9 @@ description = "A document-based research loop using Codex or Pi."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pydantic>=2.11,<3",
+]
 
 [project.optional-dependencies]
 dashboard = ["tensorboard==2.21.0"]

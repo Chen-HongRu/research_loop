@@ -1,17 +1,10 @@
 """Model-authored reports, separate from controller-owned execution evidence."""
 
-from research_loop.protocol import validate_response
+from research_loop.protocol import AuthorReport, validate_response
+from research_loop.schema import OutputSchema
 
 
-REPORT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "outcome": {"type": "string", "enum": ["completed", "incomplete"]},
-        "markdown": {"type": "string"},
-    },
-    "required": ["outcome", "markdown"],
-    "additionalProperties": False,
-}
+REPORT_SCHEMA = OutputSchema(AuthorReport)
 
 REPORT_INSTRUCTIONS = """
 Final response contract for this controller overrides earlier Execute output examples:

@@ -160,9 +160,7 @@ class ResearchBackendTests(unittest.TestCase):
             "entrypoint": "research/probe.py",
             "gpu": True,
             "time_limit_seconds": 61,
-            "inputs": [
-                {"name": "hidden", "source": "hidden_cache", "role": "development"}
-            ],
+            "inputs": [{"name": "hidden", "source": "hidden_cache"}],
             "outputs": ["result.json"],
         }
         self.backend = Mock()
@@ -203,6 +201,45 @@ class ResearchBackendTests(unittest.TestCase):
             deadline=self.deadline,
             **changes,
         )
+
+    def prepare(self):
+        return research.prepare_script(
+            self.backend,
+            root=self.root,
+            iteration="0002",
+            source=self.source,
+            execution=self.execution,
+            deadline=self.deadline,
+        )
+
+    def test_dryrun_and_start_share_metadata_without_allocating_during_prepare(self):
+        with patch.object(
+            research, "_input_metadata", wraps=research._input_metadata
+        ) as metadata:
+            prepared = self.prepare()
+            self.assertEqual(self.fixed.submissions, 0)
+            self.assertFalse((self.control / "research-jobs").exists())
+            self.assertFalse((self.directory / "remote").exists())
+            receipt = self.run_job(prepared=prepared)
+            self.assertEqual(receipt["inputs"], prepared.inputs)
+            self.assertEqual(self.fixed.submissions, 1)
+            metadata.assert_called_once()
+
+    def test_prepared_identity_change_stops_before_effects(self):
+        prepared = self.prepare()
+        (self.source / "research/probe.py").write_text("print('changed')\n")
+        with self.assertRaisesRegex(ProTokError, "changed after preparation"):
+            self.run_job(prepared=prepared)
+        self.assertEqual(self.fixed.submissions, 0)
+        self.assertFalse((self.control / "research-jobs").exists())
+
+    def test_settled_inspection_does_not_require_a_live_preparation_lease(self):
+        initial = self.run_job()
+        with patch.object(
+            research, "prepare_script", side_effect=AssertionError("no re-prepare")
+        ):
+            self.assertEqual(self.run_job(), initial)
+        self.assertEqual(self.fixed.submissions, 1)
 
     def environment(self):
         return {
@@ -378,8 +415,8 @@ class ResearchBackendTests(unittest.TestCase):
             folder / "plan.json",
             {
                 "decision": "investigate",
-                "contract": {"timeout_seconds": 1800},
-                "research_contract": {"execution": self.execution},
+                "timeout_seconds": 1800,
+                "execution": self.execution,
             },
         )
         research._write(
@@ -628,16 +665,19 @@ class ResearchBackendTests(unittest.TestCase):
         self.assertEqual(paths, [])
         self.assertEqual(len(errors), 2)
 
-    def test_roles_and_unknown_research_jobs_rejected_before_effects(self):
-        for role in ("final", "holdout", "model", "reference"):
-            with self.subTest(role=role):
-                self.execution["inputs"][0]["role"] = role
-                with self.assertRaises(ProTokError):
-                    self.run_job()
-        self.execution["inputs"][0]["role"] = "development"
+    def test_unknown_research_jobs_rejected_before_effects(self):
         self.backend.inspect.return_value["research_outstanding"] = ["another-script"]
         with self.assertRaises(ProTokError):
             self.run_job()
+        self.assertFalse((self.control / "research-jobs/0002").exists())
+
+    def test_untrusted_sources_rejected_without_a_role_label_or_allocation(self):
+        for source in ("final", "holdout", "/untrusted/data"):
+            with self.subTest(source=source):
+                self.execution["inputs"][0]["source"] = source
+                with self.assertRaises(ProTokError):
+                    self.run_job()
+        self.assertEqual(self.fixed.submissions, 0)
         self.assertFalse((self.control / "research-jobs/0002").exists())
 
     def test_execution_identity_binds_script_request_and_input_metadata(self):
@@ -710,9 +750,7 @@ class ResearchBackendTests(unittest.TestCase):
         }
         research._write(formal / "state.json", state)
         execution = copy.deepcopy(self.execution)
-        execution["inputs"] = [
-            {"name": "model", "source": "checkpoint:0001:2000", "role": "development"}
-        ]
+        execution["inputs"] = [{"name": "model", "source": "checkpoint:0001:2000"}]
         inputs = research._inputs(self.root, self.config, execution, "0002")
         self.assertTrue(inputs[0]["path"].endswith("/train/checkpoint-step-2000.pt"))
         state["attempts"][0]["terminal_state"] = "FAILED"

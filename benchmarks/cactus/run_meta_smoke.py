@@ -22,7 +22,6 @@ from meta_inner import (
     read,
     usage,
     write,
-    run_review_recovery,
 )
 
 
@@ -500,8 +499,8 @@ Only development feedback is returned. One pair cannot authorize promotion.
 """
     goal = """Run one policy-only Meta investigation to reduce selection and Review overhead.
 Follow README.md exactly; base_experiment=null, references=[], no local_evaluation.
-Plan input_artifacts only existing baseline README.md/strategy.json with actual Git
-HEAD. Plan action creates the exact allowed policy and submits one request. Set
+Plan markdown names only existing baseline README.md/strategy.json inputs with actual
+Git HEAD. Plan action creates the exact allowed policy and submits one request. Set
 timeout_seconds=2700 for the long evaluation. The future iteration workspace need
 not exist during Plan; use the actual path supplied during Execute.
 Execute must await evaluation-result.json and inspect report. On completed report
@@ -548,12 +547,10 @@ evidence, update both route/global research, and stop. No production promotion c
         "supervisor_ref": frozen["ref"],
     }
     try:
-        result["state"] = run_review_recovery(
-            Study(
-                root / "research",
-                harness=UsageBudgetHarness(harness, root / "research"),
-            )
-        )
+        result["state"] = Study(
+            root / "research",
+            harness=UsageBudgetHarness(harness, root / "research"),
+        ).run(iterations=1)
         measured = usage(root / "research")
         elapsed = time.monotonic() - started
         complete = (

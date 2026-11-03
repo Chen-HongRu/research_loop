@@ -2,6 +2,10 @@
 
 [返回 README](../README.md) · [AeroArm 接入](aeroarm.md) · [离线展示](showcase.md)
 
+阶段结构化输出与研究执行请求通过 Pydantic v2 严格模型校验；同一模型生成 Codex/Pi CLI 使用的 JSON Schema。新增依赖由根目录 `uv sync --locked` 安装，不需要切换到 Agents SDK。控制器从冻结上下文派生动态选择和模型省略字段，首次调用与缓存接纳共用这些类型。预算、作业状态、身份、来源和核账判断仍在控制器中执行。
+
+只读阶段的明确输出参数错误会带着拒收反馈返回原阶段，使用同一任务、冻结上下文和剩余预算。每次新调用照常计费并保留独立 attempt；不会因为纠错增加调用或时间额度。CLI/管线故障、来源/身份/核账错误及效果未知的作业仍然阻断，Execute 不会因输出不合规而自动重跑。
+
 ## Meta Loop
 
 Meta Loop 复用同一 Study、Route、实验图与 Plan → Execute → Review，研究选择和评审策略。固定驱动冻结监督版与候选版，记录配对评估、总预算与作业回执，并独立决定晋升或保留监督版。首个候选仅修改策略配置，减少选择调用与 Review 重复表达。
@@ -65,7 +69,9 @@ uv run research-loop frontiers studies/proof-v2
 
 评价 JSON 使用固定字段：`id`、`comparison_scope`、`protocol`、`data_role`、`allow_feedback`、`objectives`、`constraints`。目标指标包含 `name / direction / unit`，方向为 `maximize` 或 `minimize`；约束包含 `name / operator / value / unit`，运算为 `le` 或 `ge`。开发评价可允许搜索反馈；最终验收评价须明确数据角色与反馈权限，禁止将仅供最终验收的结果回传搜索。Agent 无权修改全局评价或成功条件。
 
-当前格式为 **version 2**。旧格式 study 不自动迁移；保留旧目录，在新目录重新 `init`，并在目标中明确引用仍适用的历史记录。
+当前格式为 **version 3**。旧格式 Study 在任何状态写入前拒绝打开，不自动迁移；保留旧目录，在新目录重新 `init`，并在目标中明确引用仍适用的历史记录。
+
+Plan 的 `markdown` 是权威科学合同，冻结问题、行动、条件、输入路径与版本、证据要求及解释边界。`timeout_seconds` 是控制器实际消费的顶层执行时限；输入声明不另存为结构化字段。`base_experiment`、历史引用和可选局部评价继续承担图关系、工作区恢复和 Frontier 比较职责。
 
 ## 客户端与权限
 

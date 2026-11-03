@@ -182,26 +182,25 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(checked), 2)
         self.assertTrue(study.status()["accepted_calls"]["execute"])
 
-    def test_semantic_rejection_of_completed_response_requires_explicit_retry(self):
+    def test_readonly_report_rejection_is_corrected_with_retained_receipt(self):
         study, harness = self.study()
         response = harness.response
+        first = [True]
 
         def invalid(phase, context, kwargs):
             result = response(phase, context, kwargs)
-            if phase == "proposal":
+            if phase == "proposal" and first:
+                first.pop()
                 result["markdown"] = ""
             return result
 
         harness.response = invalid
-        with self.assertRaisesRegex(StudyError, "nonempty"):
-            study.run()
-        harness.response = response
-        with self.assertRaisesRegex(StudyError, "explicitly retry"):
-            study.run()
-        self.assertEqual(len(harness.calls), 1)
-        study.retry()
         self.assertEqual(study.run()["status"], "stopped")
         self.assertEqual(harness.count("proposal"), 3)
+        attempt = harness.calls[0]["run_dir"]
+        self.assertEqual(read(attempt / "rejection.json")["response"]["markdown"], "")
+        self.assertEqual(read(attempt / "response.json")["markdown"], "")
+        self.assertIn("Stage report must be nonempty", harness.calls[1]["prompt"])
 
     def test_restarted_read_only_attempt_obeys_existing_call_budget(self):
         study, harness = self.study(max_calls=1)

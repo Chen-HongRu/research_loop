@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import fcntl
 import hashlib
 import json
@@ -24,6 +23,7 @@ from research_loop.harness import (
 from research_loop.long_training import admission_path, admitted_round
 from research_loop.tasks import TaskQueue
 from research_loop.protocol import validate_response
+from research_loop.schema import omit_fields
 
 from integrations.protok.agent_output import REPORT_SCHEMA, report_response
 
@@ -239,7 +239,7 @@ class ManualLongHarness:
         )
         allocation = self.request["budget"]["gpu_seconds_per_run"]
         kwargs["prompt"] += (
-            "\nManual long-training controller: contract.timeout_seconds is exactly "
+            "\nManual long-training controller: timeout_seconds is exactly "
             + str(allocation)
             + " Slurm GPU-allocation seconds. Queue waiting has no separate wall cutoff; "
             "authoring and Review retain their configured CLI timeout. Preserve the fixed "
@@ -252,14 +252,13 @@ class ManualLongHarness:
         if phase != "execute":
             if phase != "plan":
                 return self.delegate.run(**kwargs)
-            schema = copy.deepcopy(kwargs["schema"])
-            for name in ("base_experiment", "local_evaluation", "references"):
-                schema["properties"].pop(name, None)
-                if name in schema["required"]:
-                    schema["required"].remove(name)
-            contract = schema["properties"]["contract"]
-            del contract["properties"]["timeout_seconds"]
-            contract["required"].remove("timeout_seconds")
+            schema = omit_fields(
+                kwargs["schema"],
+                "base_experiment",
+                "local_evaluation",
+                "references",
+                "timeout_seconds",
+            )
             outer = Path(kwargs["run_dir"])
             agent = outer / "agent"
             agent.mkdir()
@@ -271,7 +270,7 @@ class ManualLongHarness:
                     "run_dir": agent,
                     "schema": schema,
                     "prompt": kwargs["prompt"]
-                    + "\nPlan output override: omit base_experiment, local_evaluation, references and contract.timeout_seconds. The controller supplies the fixed external source, no local evaluation, no graph references, and the authorized GPU allocation timeout.\n",
+                    + "\nPlan output override: omit base_experiment, local_evaluation, references and timeout_seconds. The controller supplies the fixed external source, no local evaluation, no graph references, and the authorized GPU allocation timeout.\n",
                 }
             )
             validate_response("plan", result, schema=schema)
@@ -279,7 +278,7 @@ class ManualLongHarness:
                 **result,
                 "local_evaluation": None,
                 "references": [],
-                "contract": {**result["contract"], "timeout_seconds": allocation},
+                "timeout_seconds": allocation,
             }
             if "base_experiment" in kwargs["schema"]["properties"]:
                 result["base_experiment"] = None
@@ -351,6 +350,7 @@ class ManualTrainingManager:
         self.root, self.backend, self.delegate = Path(root), backend, delegate
 
     def run_one(self, *, allow_new=True):
+        Study(self.root / "study")
         control = self.root / "control"
         control.mkdir(parents=True, exist_ok=True)
         with (control / "manual-task-runner.lock").open("a") as lock:
@@ -440,6 +440,7 @@ class ManualTrainingManager:
 
     def recover(self, task_id):
         """Reconcile only the original allocation and retain the original Execute attempt."""
+        Study(self.root / "study")
         folder = self.root / "study/tasks" / task_id
         request = TaskQueue(self.root / "study").request(task_id)
         with (self.root / "control/manual-task-runner.lock").open("a") as lock:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
+import copy
 import fcntl
 import hashlib
 import json
@@ -12,6 +14,16 @@ import re
 import shlex
 import shutil
 import time
+from typing import Annotated, Literal
+
+from pydantic import Field, ValidationError
+
+from research_loop.research_contract import (
+    ExecutionEnvelope,
+    ResearchExecution,
+    ResearchInput,
+)
+from research_loop.schema import OutputSchema, choices
 
 from integrations.protok.backend import CANDIDATE_FILES, PROTOCOL, ProTokError
 from integrations.protok.continuation import _load_backend, validate_continuation
@@ -88,21 +100,38 @@ def _relative(value):
     return value
 
 
+class ScriptInput(ResearchInput):
+    name: Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")]
+
+
+ScriptInputs = Annotated[list[ScriptInput], Field(max_length=16)]
+ScriptOutputs = Annotated[list[str], Field(max_length=64)]
+
+
+class ScriptExecution(ExecutionEnvelope):
+    mode: Literal["script"]
+    gpu: choices(True)
+    time_limit_seconds: Annotated[int, Field(ge=1, le=1800)]
+    inputs: ScriptInputs
+    outputs: ScriptOutputs
+
+
+class ProTokPlanExecution(ResearchExecution):
+    gpu: choices(True)
+    inputs: ScriptInputs
+    outputs: ScriptOutputs
+
+
+SCRIPT_EXECUTION = OutputSchema(ScriptExecution)
+
+
 def _execution(value, policy):
-    if (
-        set(value)
-        != {"mode", "entrypoint", "gpu", "time_limit_seconds", "inputs", "outputs"}
-        or value["mode"] != "script"
-    ):
-        raise ProTokError("Invalid research execution envelope")
-    if value["gpu"] is not True:
-        raise ProTokError(
-            "CPU-only scheduling is unverified; use a charged single-GPU allocation even for CPU scripts"
-        )
+    try:
+        SCRIPT_EXECUTION.validate(value)
+    except ValidationError as error:
+        raise ProTokError(str(error)) from error
     limit = value["time_limit_seconds"]
-    if type(limit) is not int or not 1 <= limit <= min(
-        1800, policy["max_time_limit_seconds"]
-    ):
+    if limit > policy["max_time_limit_seconds"]:
         raise ProTokError("Research time exceeds the authorized debug-partition limit")
     allocated = math.ceil(limit / 60) * 60
     if allocated > policy["max_time_limit_seconds"]:
@@ -110,34 +139,11 @@ def _execution(value, policy):
     entry = _relative(value["entrypoint"])
     if not entry.startswith("research/") or not entry.endswith(".py"):
         raise ProTokError("Research entrypoint must be research/*.py")
-    if not isinstance(value["outputs"], list) or len(value["outputs"]) > 64:
-        raise ProTokError("Declare at most 64 research output files")
     for name in value["outputs"]:
         _relative(name)
     if len(set(value["outputs"])) != len(value["outputs"]):
         raise ProTokError("Duplicate research outputs")
-    if not isinstance(value["inputs"], list) or len(value["inputs"]) > 16:
-        raise ProTokError("Declare at most 16 research inputs")
-    names = []
-    for item in value["inputs"]:
-        if (
-            set(item) != {"name", "source", "role"}
-            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", item["name"])
-            or not isinstance(item["role"], str)
-            or not item["role"].strip()
-        ):
-            raise ProTokError("Invalid named research input")
-        allowed_roles = {"development", "exploratory"}
-        if item["source"] == "teacher" or (
-            isinstance(item["source"], str)
-            and item["source"].startswith(("checkpoint:", "long-checkpoint:"))
-        ):
-            allowed_roles |= {"reference", "model"}
-        if item["role"] not in allowed_roles:
-            raise ProTokError(
-                "Research input role is outside development/exploratory or model/reference scope"
-            )
-        names.append(item["name"])
+    names = [item["name"] for item in value["inputs"]]
     if len(set(names)) != len(names):
         raise ProTokError("Duplicate research input name")
     return allocated
@@ -310,7 +316,7 @@ def _inputs(root, config, execution, iteration):
     return result
 
 
-def _input_metadata(fixed, config, inputs):
+def _input_metadata(fixed, config, inputs, *, timeout=120):
     """One bounded root-manifest/stat read per input, no tensor/checkpoint reads."""
     probe = f"""import json,os
 from pathlib import Path
@@ -331,14 +337,14 @@ print(json.dumps(items))
 """
     result = json.loads(
         fixed.ssh(
-            config, shlex.join([config["remote_python"], "-c", probe]), timeout=120
+            config, shlex.join([config["remote_python"], "-c", probe]), timeout=timeout
         )
     )
     if len(result) != len(inputs) or any(
         {k: v for k, v in item.items() if k != "metadata"} != original
         for item, original in zip(result, inputs)
     ):
-        raise ProTokError("Input metadata probe changed its admitted paths/roles")
+        raise ProTokError("Input metadata probe changed its admitted inputs")
     return result
 
 
@@ -503,6 +509,97 @@ print(json.dumps(result))
     return paths, result["errors"]
 
 
+@dataclass(frozen=True)
+class PreparedScript:
+    root: Path
+    iteration: str
+    owner: dict
+    continuation: dict
+    source_identity: str
+    execution: dict
+    deadline: float
+    policy: dict
+    inputs: list[dict]
+    environment: dict | None
+    config: dict
+
+
+def prepare_script(
+    backend, *, root, iteration, source, execution, deadline, cancel_event=None
+):
+    """Validate source and bounded input metadata without retaining effects.
+
+    This is also the dry-run API. It neither stages files nor claims/submits a
+    job. Trusted configuration, input provenance and accounting errors block.
+    """
+    root, source = Path(root).resolve(), Path(source).resolve()
+    if not re.fullmatch(r"[0-9]{4,}", iteration) or not isinstance(execution, dict):
+        raise ProTokError("Invalid research iteration/execution")
+    if type(deadline) not in (int, float) or not math.isfinite(deadline):
+        raise ProTokError("Finite original research deadline required")
+    control = root / "control"
+    policy = _read(control / "research-policy.json")
+    if (
+        policy.get("version") != 1
+        or not isinstance(policy.get("authorization"), str)
+        or not policy["authorization"].strip()
+        or type(policy.get("max_time_limit_seconds")) is not int
+    ):
+        raise ProTokError("Explicit version 1 research policy required")
+    _execution(execution, policy)
+    from .research_execution import authored_source
+
+    authored_source(source, execution["entrypoint"])
+    fixed, config, _ = validate_continuation(
+        backend.project,
+        control,
+        backend.owner_token,
+        backend.project / "autoresearch-run.json",
+    )
+    identity, _ = _source_identity(source, config)
+    if cancel_event is not None and cancel_event.is_set():
+        raise ProTokError("Research preparation cancelled")
+    if time.time() >= deadline:
+        raise ProTokError("Research preparation exceeded the original deadline")
+    inputs = _input_metadata(
+        fixed,
+        config,
+        _inputs(root, config, execution, iteration),
+        timeout=min(120, max(0.001, deadline - time.time())),
+    )
+    environment_path = control / "research-environment.json"
+    environment = None
+    if environment_path.exists():
+        if environment_path.stat().st_size > 256 * 1024:
+            raise ProTokError("Trusted research environment exceeds 256 KiB")
+        environment = _environment(_read(environment_path))
+    remote = (
+        config["remote_root"]
+        + "/research-loop-scripts/"
+        + iteration
+        + "-"
+        + identity[:16]
+    )
+    _batch(
+        config, remote, execution, inputs, _execution(execution, policy), environment
+    )
+    if time.time() >= deadline or (cancel_event is not None and cancel_event.is_set()):
+        raise ProTokError("Research preparation exceeded its original execution window")
+    return PreparedScript(
+        root,
+        iteration,
+        _read(control / "ownership.json"),
+        _read(control / "continuation.json"),
+        identity,
+        copy.deepcopy(execution),
+        deadline,
+        policy,
+        inputs,
+        environment,
+        copy.deepcopy(config),
+    )
+
+
 def run_script(
     backend,
     *,
@@ -513,6 +610,7 @@ def run_script(
     deadline,
     cancel_event=None,
     recover=False,
+    prepared=None,
 ):
     """Run one script allocation or reconcile its same owned Slurm job, never resubmit."""
     root, source = Path(root).resolve(), Path(source).resolve()
@@ -536,7 +634,27 @@ def run_script(
     ):
         raise ProTokError("Explicit version 1 research policy required")
     allocated = _execution(execution, policy)
+    record = control / "research-jobs" / iteration
+    if not recover and prepared is None and not (record / "job.json").exists():
+        prepared = prepare_script(
+            backend,
+            root=root,
+            iteration=iteration,
+            source=source,
+            execution=execution,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
     identity, source_names = _source_identity(source, backend._config())
+    if prepared is not None and (
+        prepared.root != root
+        or prepared.iteration != iteration
+        or prepared.source_identity != identity
+        or prepared.execution != execution
+        or prepared.deadline != deadline
+        or prepared.policy != policy
+    ):
+        raise ProTokError("Research source/contract changed after preparation")
     if not (source / execution["entrypoint"]).is_file():
         raise ProTokError("Research entrypoint missing from frozen source")
     record = control / "research-jobs" / iteration
@@ -547,6 +665,10 @@ def run_script(
         )
         lease = _read(control / "continuation.json")
         owner = _read(control / "ownership.json")
+        if prepared is not None and (
+            prepared.owner != owner or prepared.continuation != lease
+        ):
+            raise ProTokError("Research authorization changed after preparation")
         if existing:
             if (
                 existing["source_identity"] != identity
@@ -623,9 +745,7 @@ def run_script(
                 plan = _read(
                     root / "study" / _read(root / "study/state.json")["plan_ref"]
                 )
-                if deadline > time.time() + min(
-                    3600, plan["contract"]["timeout_seconds"]
-                ):
+                if deadline > time.time() + min(3600, plan["timeout_seconds"]):
                     raise ProTokError(
                         "Research deadline exceeds its frozen Plan timeout"
                     )
@@ -656,14 +776,17 @@ def run_script(
                 raise ProTokError(
                     "Research allocation does not fit the original settled budget/deadline"
                 )
-            inputs = _inputs(root, config, execution, iteration)
-            inputs = _input_metadata(fixed, config, inputs)
+            if prepared.config != config:
+                raise ProTokError("Trusted configuration changed after preparation")
+            inputs, environment = prepared.inputs, prepared.environment
             environment_path = control / "research-environment.json"
-            environment = None
-            if environment_path.exists():
-                if environment_path.stat().st_size > 256 * 1024:
-                    raise ProTokError("Trusted research environment exceeds 256 KiB")
-                environment = _environment(_read(environment_path))
+            current_environment = (
+                _environment(_read(environment_path))
+                if environment_path.exists()
+                else None
+            )
+            if current_environment != environment:
+                raise ProTokError("Trusted environment changed after preparation")
             from .telemetry import writer_source
 
             event_writer, event_writer_identity = writer_source()

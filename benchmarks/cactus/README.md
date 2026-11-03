@@ -1,5 +1,9 @@
 # Cactus smoke
 
+The local controller uses the root project's Pydantic v2 dependency (`uv sync
+--locked` at the repository root). Its report-only model supplies both the CLI
+schema and local validation; remote trainer dependencies and scoring are unchanged.
+
 Controller preparation uses the prepared dataset in the [TIGER-Lab mirror](https://huggingface.co/datasets/TIGER-Lab/mle-bench/commit/01a3db85f9245ba64d87ed2a1170d486ee147e1f), pinned to `01a3db85f9245ba64d87ed2a1170d486ee147e1f`. The ~19 MB archive pair contains actual Kaggle Cactus images. No Kaggle credential was available. Mirror image bytes are not independently verified against Kaggle. The official preparation and grading sources are pinned to [MLE-bench commit 507f92e](https://github.com/openai/mle-bench/tree/507f92e1138bb6e40dac5c6ee7a6758e6424bf97).
 
 Official public/private partition: `train_test_split(original_train, test_size=0.19, random_state=0)`, yielding 14,175 public and 3,325 private rows. Additional project train/dev partition: `train_test_split(public_train, test_size=0.20, random_state=0)` without stratification, yielding 11,340 fitting rows and 2,835 dev rows. The one-time contract check compares exact IDs and labels against the official partition under original sorted IDs, and checks dev isolation. It reads CSV metadata, never image contents. It is not part of training startup.

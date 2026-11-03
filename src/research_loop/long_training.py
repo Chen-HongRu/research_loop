@@ -9,11 +9,35 @@ import json
 import math
 from pathlib import Path
 import time
+from typing import Annotated, Literal
 import uuid
+
+from pydantic import Field
 
 from .evaluation import build_frontier, validate_evaluation
 from .harness import HarnessConfig, HarnessError, publish_completed_response
 from .protocol import validate_response
+from .schema import OutputModel, OutputSchema, choices, omit_fields, with_fields
+
+
+class ObservationReview(OutputModel):
+    step: int
+    valid: bool
+    verified: bool
+    reason: str
+
+
+class Nomination(OutputModel):
+    candidate_id: str
+    comparison_candidate_id: str
+    basis: Literal["significant_frontier_gain", "architecture_gain"]
+    reason: str
+    evidence: list[str]
+
+
+class LongTrainingDecision(OutputModel):
+    reason: str
+    nominations: list[Nomination]
 
 
 def _read(path):
@@ -78,45 +102,21 @@ def stage_schema(phase, context, schema):
     if phase != "review":
         return schema
     result = schema
-    text = {"type": "string"}
     if context.get("long_training_run"):
-        result = copy.deepcopy(result)
-        fields = {
-            "step": {"type": "integer"},
-            "valid": {"type": "boolean"},
-            "verified": {"type": "boolean"},
-            "reason": text,
-        }
-        result["properties"]["observation_reviews"] = {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": fields,
-                "required": list(fields),
-                "additionalProperties": False,
-            },
-        }
-        result["required"].append("observation_reviews")
         steps = [
             point["step"] for point in context["long_training_observations"]["curve"]
         ]
         if steps:
-            fields["step"]["enum"] = steps
+            observation = with_fields(
+                OutputSchema(ObservationReview), step=choices(*steps)
+            )
+            reviews = list[observation.model]
         else:
-            result["properties"]["observation_reviews"]["maxItems"] = 0
+            reviews = Annotated[list[ObservationReview], Field(max_length=0)]
+        result = with_fields(result, observation_reviews=reviews)
     if not context.get("long_training"):
         return result
-    result = copy.deepcopy(result)
-    nomination = {
-        "candidate_id": text,
-        "comparison_candidate_id": text,
-        "basis": {
-            "type": "string",
-            "enum": ["significant_frontier_gain", "architecture_gain"],
-        },
-        "reason": text,
-        "evidence": {"type": "array", "items": text},
-    }
+    nomination = OutputSchema(Nomination)
     current_ids = list(
         dict.fromkeys(
             m["candidate_id"]
@@ -124,27 +124,11 @@ def stage_schema(phase, context, schema):
         )
     )
     if current_ids:
-        nomination["candidate_id"] = {"type": "string", "enum": current_ids}
-    fields = {
-        "reason": text,
-        "nominations": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": nomination,
-                "required": list(nomination),
-                "additionalProperties": False,
-            },
-        },
-    }
-    result["properties"]["long_training_decision"] = {
-        "type": "object",
-        "properties": fields,
-        "required": list(fields),
-        "additionalProperties": False,
-    }
-    result["required"].append("long_training_decision")
-    return result
+        nomination = with_fields(nomination, candidate_id=choices(*current_ids))
+    decision = with_fields(
+        OutputSchema(LongTrainingDecision), nominations=list[nomination.model]
+    )
+    return with_fields(result, long_training_decision=decision.model)
 
 
 def guidance(phase, context):
@@ -594,9 +578,9 @@ class _LongHarness:
         grant = (token or {}).get("authorization") or {}
         gpu_limit = grant.get("policy", {}).get("gpu_seconds_per_run")
         controller_contract = (
-            "\nThis fixed long-training controller defines contract.timeout_seconds as the Slurm GPU allocation time, exactly "
+            "\nThis fixed long-training controller defines timeout_seconds as the Slurm GPU allocation time, exactly "
             + str(gpu_limit)
-            + " seconds. Queue waiting has no additional wall-clock cap and consumes no GPU allocation time. State this explicitly in the contract command and acceptance criteria. Plan and Review agents retain their own configured call timeouts. STOP or identity changes can cancel the job.\n"
+            + " seconds. Queue waiting has no additional wall-clock cap and consumes no GPU allocation time. State this explicitly in markdown with the allowed action and decision criteria. Plan and Review agents retain their own configured call timeouts. STOP or identity changes can cancel the job.\n"
             if gpu_limit
             else ""
         )
@@ -622,10 +606,7 @@ class _LongHarness:
                 "stop_reason": None,
             }
         elif phase == "execute":
-            if (
-                gpu_limit
-                and context["plan"]["contract"]["timeout_seconds"] != gpu_limit
-            ):
+            if gpu_limit and context["plan"]["timeout_seconds"] != gpu_limit:
                 raise ValueError(
                     "Frozen long Plan timeout differs from Slurm allocation contract"
                 )
@@ -640,15 +621,14 @@ class _LongHarness:
         else:
             delegate_kwargs = dict(kwargs)
             if phase == "plan":
-                schema = copy.deepcopy(kwargs["schema"])
-                for name in ("base_experiment", "references", "local_evaluation"):
-                    schema["properties"].pop(name, None)
-                    if name in schema["required"]:
-                        schema["required"].remove(name)
+                schema = omit_fields(
+                    kwargs["schema"],
+                    "base_experiment",
+                    "references",
+                    "local_evaluation",
+                )
                 if gpu_limit:
-                    contract = schema["properties"]["contract"]
-                    del contract["properties"]["timeout_seconds"]
-                    contract["required"].remove("timeout_seconds")
+                    schema = omit_fields(schema, "timeout_seconds")
                 inner = Path(kwargs["run_dir"]) / "agent"
                 inner.mkdir(exist_ok=True)
                 _write(inner / "context.json", context)
@@ -658,7 +638,7 @@ class _LongHarness:
                     "\nThe controller supplies base_experiment=null, references=[], "
                     "local_evaluation=null. Omit those fields from your output."
                     + (
-                        " The controller supplies contract.timeout_seconds; omit that field too."
+                        " The controller supplies timeout_seconds; omit that field too."
                         if gpu_limit
                         else ""
                     )
@@ -682,12 +662,9 @@ class _LongHarness:
                     "local_evaluation": None,
                 }
                 if gpu_limit:
-                    result["contract"] = {
-                        **result["contract"],
-                        "timeout_seconds": gpu_limit,
-                    }
+                    result["timeout_seconds"] = gpu_limit
             if phase == "plan" and result["decision"] == "investigate":
-                if gpu_limit and result["contract"]["timeout_seconds"] != gpu_limit:
+                if gpu_limit and result["timeout_seconds"] != gpu_limit:
                     raise ValueError(
                         "Long Plan must freeze the Slurm GPU allocation timeout"
                     )
@@ -729,7 +706,8 @@ class LongTrainingManager:
     def run_one(self, *, deadline, allow_new=True):
         from .core import Study, initialize
 
-        policy = validate_policy(_read(self.root / "study.json").get("long_training"))
+        parent = Study(self.root)
+        policy = parent.long_training
         if policy is None:
             return None
         lane = self.root / "long-runs"

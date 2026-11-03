@@ -9,6 +9,8 @@ from __future__ import annotations
 from copy import deepcopy
 import math
 
+from .protocol import EVALUATION
+
 
 def _text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
@@ -19,58 +21,24 @@ def _finite(value: object) -> bool:
     return type(value) is int or (type(value) is float and math.isfinite(value))
 
 
-def _keys(value: object, names: set[str], label: str) -> None:
-    if not isinstance(value, dict) or set(value) != names:
-        raise ValueError(f"{label} must contain exactly {sorted(names)}")
-
-
 def validate_evaluation(value: dict) -> dict:
     """Validate a fixed evaluation definition, returning the original dictionary."""
-    _keys(
-        value,
-        {
-            "id",
-            "comparison_scope",
-            "protocol",
-            "data_role",
-            "allow_feedback",
-            "objectives",
-            "constraints",
-        },
-        "evaluation",
-    )
+    EVALUATION.validate(value)
     for name in ("id", "comparison_scope", "protocol"):
         if not _text(value[name]):
             raise ValueError(f"evaluation: invalid {name}")
-    if value["data_role"] not in ("development", "final"):
-        raise ValueError("evaluation: invalid data_role")
-    if type(value["allow_feedback"]) is not bool:
-        raise ValueError("evaluation: allow_feedback must be boolean")
     if value["data_role"] == "final" and value["allow_feedback"]:
         raise ValueError("final evaluation cannot allow feedback")
-    if not isinstance(value["objectives"], list) or not value["objectives"]:
+    if not value["objectives"]:
         raise ValueError("evaluation: objectives must be a nonempty list")
-    if not isinstance(value["constraints"], list):
-        raise ValueError("evaluation: constraints must be a list")
     names = set()
     for kind in ("objectives", "constraints"):
         for metric in value[kind]:
-            fields = (
-                {"name", "direction", "unit"}
-                if kind == "objectives"
-                else {"name", "operator", "value", "unit"}
-            )
-            _keys(metric, fields, kind)
             if not _text(metric["name"]) or not _text(metric["unit"]):
                 raise ValueError(f"{kind}: name and unit must be nonempty strings")
             if metric["name"] in names:
                 raise ValueError(f"duplicate metric name: {metric['name']}")
             names.add(metric["name"])
-            if kind == "objectives":
-                if metric["direction"] not in ("maximize", "minimize"):
-                    raise ValueError("objectives: invalid direction")
-            elif metric["operator"] not in ("le", "ge") or not _finite(metric["value"]):
-                raise ValueError("constraints: invalid operator or finite bound")
     return value
 
 

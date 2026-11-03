@@ -135,7 +135,10 @@ def execution_plan(root, identity, *, evidence_paths=None):
             or not output
             or output.get("decision") != "investigate"
             or output.get("base_experiment") != marker.get("source_iteration")
-            or not isinstance(output.get("contract"), dict)
+            or not (
+                type(output.get("timeout_seconds")) is int
+                or isinstance(output.get("contract"), dict)
+            )
         ):
             return None
         return {
@@ -203,7 +206,10 @@ def execution_plan(root, identity, *, evidence_paths=None):
     if (
         not isinstance(output, dict)
         or output.get("decision") != "investigate"
-        or not isinstance(output.get("contract"), dict)
+        or not (
+            type(output.get("timeout_seconds")) is int
+            or isinstance(output.get("contract"), dict)
+        )
     ):
         return None
     return {

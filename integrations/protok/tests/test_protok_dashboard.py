@@ -1726,7 +1726,7 @@ class ResearchScriptDashboardTests(unittest.TestCase):
         output = {
             "decision": "investigate",
             "contract": {"action": "Collect mechanism evidence"},
-            "research_contract": {"execution": {"mode": "script"}},
+            "execution": {"mode": "script"},
         }
         self.put("study/" + attempt + "/response.json", output)
         self.put(

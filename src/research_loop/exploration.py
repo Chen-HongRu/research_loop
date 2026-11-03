@@ -3,11 +3,36 @@
 from __future__ import annotations
 
 import copy
+from typing import Literal
 
 from . import research_contract
+from .schema import OutputModel, OutputSchema, choices, omit_fields, with_fields
 
 
 KINDS = ("architecture", "diagnostic", "refinement")
+
+
+class ResearchDesign(OutputModel):
+    kind: Literal["architecture", "diagnostic", "refinement"]
+    question: str
+    structural_change: str
+    prior_attempts: list[str]
+    difference_from_prior: str
+    contrasting_predictions: list[str]
+    minimal_test: str
+    scope_requirements: list[str]
+    scout_idea_ids: list[str]
+
+
+class Insight(OutputModel):
+    question: str
+    observed: str
+    supported: str
+    unresolved: str
+    next_discriminating_test: str
+    actual_kind: Literal["architecture", "diagnostic", "refinement"]
+    allocation_respected: bool
+    allocation_reason: str
 
 
 def validate_exploration(value):
@@ -72,40 +97,10 @@ def stage_schema(phase, context, schemas):
     slot = context.get("exploration")
     if not slot or phase not in ("proposal", "review"):
         return schemas[phase]
-    schema = copy.deepcopy(schemas[phase])
     if phase == "proposal":
-        fields = {
-            "kind": {"type": "string", "enum": [slot["kind"]]},
-            "question": {"type": "string"},
-            "structural_change": {"type": "string"},
-            "prior_attempts": {"type": "array", "items": {"type": "string"}},
-            "difference_from_prior": {"type": "string"},
-            "contrasting_predictions": {"type": "array", "items": {"type": "string"}},
-            "minimal_test": {"type": "string"},
-            "scope_requirements": {"type": "array", "items": {"type": "string"}},
-            "scout_idea_ids": {"type": "array", "items": {"type": "string"}},
-        }
-        name = "research_design"
-    else:
-        fields = {
-            "question": {"type": "string"},
-            "observed": {"type": "string"},
-            "supported": {"type": "string"},
-            "unresolved": {"type": "string"},
-            "next_discriminating_test": {"type": "string"},
-            "actual_kind": {"type": "string", "enum": list(KINDS)},
-            "allocation_respected": {"type": "boolean"},
-            "allocation_reason": {"type": "string"},
-        }
-        name = "insight"
-    schema["properties"][name] = {
-        "type": "object",
-        "properties": fields,
-        "required": list(fields),
-        "additionalProperties": False,
-    }
-    schema["required"].append(name)
-    return schema
+        design = with_fields(OutputSchema(ResearchDesign), kind=choices(slot["kind"]))
+        return with_fields(schemas[phase], research_design=design.model)
+    return with_fields(schemas[phase], insight=Insight)
 
 
 def validate_design(phase, value, context):
@@ -133,20 +128,15 @@ def validate_design(phase, value, context):
 def agent_schema(phase, context, schema):
     """Omit allocation and sampled route labels fixed by the controller."""
     if phase == "plan":
-        result = copy.deepcopy(schema)
-        del result["properties"]["base_experiment"]
-        result["required"].remove("base_experiment")
-        return result
+        return omit_fields(schema, "base_experiment")
     if phase != "proposal":
         return schema
-    result = copy.deepcopy(schema)
+    result = schema
     if context.get("route", {}).get("id", "new") != "new":
-        del result["properties"]["route_id"]
-        result["required"].remove("route_id")
+        result = omit_fields(result, "route_id")
     if context.get("exploration"):
-        design = result["properties"]["research_design"]
-        del design["properties"]["kind"]
-        design["required"].remove("kind")
+        design = OutputSchema(result.model.model_fields["research_design"].annotation)
+        result = with_fields(result, research_design=omit_fields(design, "kind").model)
     return result
 
 

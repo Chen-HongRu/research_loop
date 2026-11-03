@@ -2,146 +2,162 @@
 
 from __future__ import annotations
 
-import copy
+from typing import Annotated, Literal, Union
 import json
-import math
-import re
+
+from pydantic import Field, FiniteFloat, StrictInt
+
+from .schema import OutputModel, OutputSchema, choices, with_fields
 
 
-def _object(**fields: dict) -> dict:
-    return {
-        "type": "object",
-        "properties": fields,
-        "required": list(fields),
-        "additionalProperties": False,
-    }
+ExperimentRef = Annotated[str, Field(pattern=r"^[0-9]{4,}$")]
+Number = StrictInt | FiniteFloat
+GoalStatus = Literal["met", "not_met", "undetermined"]
 
 
-def _array(item: dict) -> dict:
-    return {"type": "array", "items": item}
+class Artifact(OutputModel):
+    path: str
+    version: str
 
 
-def _enum(*values: str) -> dict:
-    return {"type": "string", "enum": list(values)}
+class Objective(OutputModel):
+    name: str
+    direction: Literal["maximize", "minimize"]
+    unit: str
 
 
-def _nullable(item: dict) -> dict:
-    return {"anyOf": [item, {"type": "null"}]}
+class Constraint(OutputModel):
+    name: str
+    operator: Literal["le", "ge"]
+    value: Number
+    unit: str
 
 
-TEXT = {"type": "string"}
-EXPERIMENT_REF = {"type": "string", "pattern": r"^[0-9]{4,}$"}
-NUMBER = {"type": "number"}
-BOOLEAN = {"type": "boolean"}
-ARTIFACT = _object(path=TEXT, version=TEXT)
-EVALUATION = _object(
-    id=TEXT,
-    comparison_scope=TEXT,
-    protocol=TEXT,
-    data_role=_enum("development", "final"),
-    allow_feedback=BOOLEAN,
-    objectives=_array(
-        _object(name=TEXT, direction=_enum("maximize", "minimize"), unit=TEXT)
-    ),
-    constraints=_array(
-        _object(name=TEXT, operator=_enum("le", "ge"), value=NUMBER, unit=TEXT)
-    ),
-)
-GOAL_STATUS = _enum("met", "not_met", "undetermined")
+class Evaluation(OutputModel):
+    id: str
+    comparison_scope: str
+    protocol: str
+    data_role: Literal["development", "final"]
+    allow_feedback: bool
+    objectives: list[Objective]
+    constraints: list[Constraint]
+
+
+class MarkdownReport(OutputModel):
+    markdown: str
+
+
+class AuthorReport(MarkdownReport):
+    outcome: Literal["completed", "incomplete"]
+
+
+class Proposal(OutputModel):
+    markdown: str
+    route_id: str
+    route_title: str
+    action: str
+    base_experiment: ExperimentRef | None
+    references: list[ExperimentRef]
+
+
+class Judge(OutputModel):
+    decision: Literal["select", "resample", "stop"]
+    choice: Literal["a", "b"] | None
+    action: str
+    markdown: str
+    goal_status: GoalStatus
+    stop_reason: str | None
+
+
+class Plan(OutputModel):
+    decision: Literal["investigate", "reselect", "stop"]
+    markdown: str
+    route_research: str
+    base_experiment: ExperimentRef | None
+    references: list[ExperimentRef]
+    local_evaluation: Evaluation | None
+    timeout_seconds: int = Field(ge=1)
+    stop_reason: str | None
+
+
+class Metric(OutputModel):
+    name: str
+    value: Number
+
+
+class Measurement(OutputModel):
+    candidate_id: str
+    artifact: Artifact
+    evaluation_id: str
+    comparison_scope: str
+    metrics: list[Metric]
+    evidence: list[str]
+
+
+class Execute(OutputModel):
+    outcome: Literal["completed", "incomplete"]
+    markdown: str
+    artifacts: list[Artifact]
+    measurements: list[Measurement]
+
+
+class CandidateReview(OutputModel):
+    candidate_id: str
+    valid: bool
+    verified: bool
+    reason: str
+
+
+class CandidateCorrection(CandidateReview):
+    candidate_id: Annotated[str, Field(pattern=r"^[0-9]{4,}:\S+$")]
+
+
+class Review(OutputModel):
+    markdown: str
+    route_research: str
+    global_research: str
+    route_status: Literal["active", "paused", "closed"]
+    route_reason: str
+    resume_condition: str | None
+    goal_status: GoalStatus
+    decision: Literal["continue", "stop"]
+    candidate_reviews: list[CandidateReview]
+    candidate_corrections: list[CandidateCorrection]
+    knowledge_changes: list[str]
+
+
+EVALUATION = OutputSchema(Evaluation)
 SCHEMAS = {
-    "proposal": _object(
-        markdown=TEXT,
-        route_id=TEXT,
-        route_title=TEXT,
-        action=TEXT,
-        base_experiment=_nullable(EXPERIMENT_REF),
-        references=_array(EXPERIMENT_REF),
-    ),
-    "critique": _object(markdown=TEXT),
-    "response": _object(markdown=TEXT),
-    "judge": _object(
-        decision=_enum("select", "resample", "stop"),
-        choice=_nullable(_enum("a", "b")),
-        action=TEXT,
-        markdown=TEXT,
-        goal_status=GOAL_STATUS,
-        stop_reason=_nullable(TEXT),
-    ),
-    "plan": _object(
-        decision=_enum("investigate", "reselect", "stop"),
-        markdown=TEXT,
-        route_research=TEXT,
-        base_experiment=_nullable(EXPERIMENT_REF),
-        references=_array(EXPERIMENT_REF),
-        input_artifacts=_array(ARTIFACT),
-        local_evaluation=_nullable(EVALUATION),
-        contract=_object(
-            rationale=TEXT,
-            action=TEXT,
-            evaluation=TEXT,
-            decision_criteria=TEXT,
-            evidence_required=_array(TEXT),
-            timeout_seconds={"type": "integer"},
-        ),
-        stop_reason=_nullable(TEXT),
-    ),
-    "execute": _object(
-        outcome=_enum("completed", "incomplete"),
-        markdown=TEXT,
-        artifacts=_array(ARTIFACT),
-        measurements=_array(
-            _object(
-                candidate_id=TEXT,
-                artifact=ARTIFACT,
-                evaluation_id=TEXT,
-                comparison_scope=TEXT,
-                metrics=_array(_object(name=TEXT, value=NUMBER)),
-                evidence=_array(TEXT),
-            )
-        ),
-    ),
-    "review": _object(
-        markdown=TEXT,
-        route_research=TEXT,
-        global_research=TEXT,
-        route_status=_enum("active", "paused", "closed"),
-        route_reason=TEXT,
-        resume_condition=_nullable(TEXT),
-        goal_status=GOAL_STATUS,
-        decision=_enum("continue", "stop"),
-        candidate_reviews=_array(
-            _object(candidate_id=TEXT, valid=BOOLEAN, verified=BOOLEAN, reason=TEXT)
-        ),
-        candidate_corrections=_array(
-            _object(
-                candidate_id={"type": "string", "pattern": r"^[0-9]{4,}:\S+$"},
-                valid=BOOLEAN,
-                verified=BOOLEAN,
-                reason=TEXT,
-            )
-        ),
-        knowledge_changes=_array(TEXT),
-    ),
+    "proposal": OutputSchema(Proposal),
+    "critique": OutputSchema(MarkdownReport),
+    "response": OutputSchema(MarkdownReport),
+    "judge": OutputSchema(Judge),
+    "plan": OutputSchema(Plan),
+    "execute": OutputSchema(Execute),
+    "review": OutputSchema(Review),
 }
 
 
-def context_schema(phase: str, context: dict, schema: dict) -> dict:
-    """Bind choices to the frozen call without changing controller fields."""
-    result = copy.deepcopy(schema)
-    fields = result["properties"]
+def context_schema(phase: str, context: dict, schema: OutputSchema) -> OutputSchema:
+    """Bind model choices to the frozen call before emitting the CLI schema."""
     if phase == "proposal" and "route" in context:
         route = context["route"]["id"]
         allowed = [route] if route != "new" else ["new", *context["routes"]]
-        fields["route_id"] = _enum(*allowed)
+        schema = with_fields(schema, route_id=choices(*allowed))
     if phase == "review" and "execute" in context:
         ids = list(
             dict.fromkeys(m["candidate_id"] for m in context["execute"]["measurements"])
         )
-        reviews = fields["candidate_reviews"]
         if ids:
-            reviews["items"]["properties"]["candidate_id"] = _enum(*ids)
+            review = with_fields(
+                OutputSchema(CandidateReview), candidate_id=choices(*ids)
+            ).model
+            schema = with_fields(schema, candidate_reviews=list[review])
         else:
-            reviews["maxItems"] = 0
+            schema = with_fields(
+                schema,
+                candidate_reviews=Annotated[list[CandidateReview], Field(max_length=0)],
+            )
     if phase == "execute" and "plan" in context:
         definitions = [
             context.get("global_evaluation"),
@@ -152,65 +168,30 @@ def context_schema(phase: str, context: dict, schema: dict) -> dict:
             for d in definitions
             if d and d["allow_feedback"] and d["data_role"] == "development"
         ]
-        measurements = fields["measurements"]
         if not definitions:
-            measurements["maxItems"] = 0
+            schema = with_fields(
+                schema, measurements=Annotated[list[Measurement], Field(max_length=0)]
+            )
         else:
-            branches = []
-            for definition in definitions:
-                item = copy.deepcopy(measurements["items"])
-                item["properties"]["evaluation_id"] = _enum(definition["id"])
-                item["properties"]["comparison_scope"] = _enum(
-                    definition["comparison_scope"]
-                )
-                branches.append(item)
-            measurements["items"] = {"anyOf": branches}
-    return result
+            pairs = tuple(
+                with_fields(
+                    OutputSchema(Measurement),
+                    evaluation_id=choices(d["id"]),
+                    comparison_scope=choices(d["comparison_scope"]),
+                ).model
+                for d in definitions
+            )
+            schema = with_fields(schema, measurements=list[Union[pairs]])
+    return schema
 
 
-def _validate(schema: dict, value: object, path: str) -> None:
-    if "anyOf" in schema:
-        for branch in schema["anyOf"]:
-            try:
-                _validate(branch, value, path)
-                return
-            except ValueError:
-                pass
-        raise ValueError(f"{path}: does not match an allowed type")
-    kind = schema["type"]
-    valid = {
-        "object": type(value) is dict,
-        "array": type(value) is list,
-        "string": type(value) is str,
-        "boolean": type(value) is bool,
-        "integer": type(value) is int,
-        "number": type(value) is int or (type(value) is float and math.isfinite(value)),
-        "null": value is None,
-    }[kind]
-    if not valid:
-        raise ValueError(f"{path}: expected {kind}")
-    if "enum" in schema and value not in schema["enum"]:
-        raise ValueError(f"{path}: expected one of {schema['enum']}")
-    if "pattern" in schema and not re.fullmatch(schema["pattern"], value):
-        raise ValueError(f"{path}: does not match the required reference format")
-    if kind == "object":
-        fields = schema["properties"]
-        if set(value) != set(fields):
-            raise ValueError(f"{path}: must contain exactly {list(fields)}")
-        for name, field in fields.items():
-            _validate(field, value[name], f"{path}.{name}")
-    elif kind == "array":
-        if "maxItems" in schema and len(value) > schema["maxItems"]:
-            raise ValueError(f"{path}: exceeds maximum item count")
-        for index, item in enumerate(value):
-            _validate(schema["items"], item, f"{path}[{index}]")
-
-
-def validate_response(phase: str, value: object, *, schema: dict | None = None) -> dict:
-    """Validate the complete envelope, without certifying its scientific claims."""
+def validate_response(
+    phase: str, value: object, *, schema: OutputSchema | None = None
+) -> dict:
+    """Validate a model envelope, then its stage relationships, without effects."""
     if phase not in SCHEMAS:
         raise ValueError(f"Unknown research phase: {phase!r}")
-    _validate(schema or SCHEMAS[phase], value, phase)
+    (schema if schema is not None else SCHEMAS[phase]).validate(value)
     if (
         phase == "review"
         and value["candidate_corrections"]
@@ -295,9 +276,11 @@ Read only; do not write files or run experiments. Debate is not new evidence.
 """,
     "plan": """Turn Judge's selected action into a bounded executable contract.
 Verify the starting experiment, precise recoverable input artifact versions, relevant
-conditions and historical limitations. Freeze rationale, allowed action and fixed
+conditions and historical limitations. In markdown, freeze the scientific question,
+rationale, allowed action and fixed
 conditions, evaluation protocol and data roles, decision criteria, required evidence
-and positive timeout within the remaining budget before results are observed.
+and interpretation limits before results are observed. Set a positive top-level
+timeout_seconds within the remaining budget.
 Reference the fixed Study global evaluation; describe its application or why it is
 inapplicable/incomplete. Define local evaluation only when needed, specifying
 objectives, constraints, units, protocol and comparison_scope; diagnostic observations
@@ -307,8 +290,8 @@ Return complete route_research for a new route, containing only its question,
 rationale and existing evidence. Historical references must be published nodes.
 base_experiment and references contain only earlier published DAG IDs such as
 '0001', never file paths or qualified candidate IDs such as '0001:foo'. Put
-recoverable file paths and versions in input_artifacts, and external evidence
-paths in the report; Execute uses evidence for measurement source paths.
+recoverable input file paths and versions, their uses and external evidence paths
+in markdown; Execute uses evidence for measurement source paths.
 If a premise fails or intent/route must change, return reselect with the reason;
 never silently replace the selected action. For stop, give the reason. Read only;
 do not write files, run experiments, change Study definitions, or publish documents.

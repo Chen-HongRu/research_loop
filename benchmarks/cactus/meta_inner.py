@@ -88,32 +88,6 @@ class UsageBudgetHarness:
         return result
 
 
-def run_review_recovery(study):
-    """One structural, read-only retry; never repeat Execute or unknown effects."""
-    from research_loop.core import StudyError
-
-    try:
-        return study.run(iterations=1)
-    except (StudyError, ValueError) as error:
-        structural_error = (
-            "Candidate reviews must match unique current measurements exactly"
-            in str(error)
-            or str(error) == "review.candidate_reviews: exceeds maximum item count"
-        )
-        state = study.status()
-        if (
-            state.get("phase") == "review"
-            and state.get("status") == "needs_attention"
-            and structural_error
-            and state["call_count"] < study.config["max_calls"]
-        ):
-            receipt = study.root / state["calls"]["review"] / "process.json"
-            if receipt.is_file() and read(receipt).get("status") == "succeeded":
-                study.retry()
-                return study.run(iterations=1)
-        raise
-
-
 def baseline(path: Path, text: str, policy: dict) -> None:
     path.mkdir(parents=True, exist_ok=False)
     (path / "README.md").write_text(text)
@@ -148,8 +122,8 @@ There is no training or Meta request bridge in this workspace.
 CANARY_GOAL = """Complete one bounded supervision investigation using README.md.
 Propose the allowed policy configuration in proposal.json, verify its actual contents,
 and publish route and global research. No training, recursive loop, or performance claim.
-Plan base_experiment=null and references=[]; input_artifacts may reference only the
-existing baseline README.md and strategy.json with their actual Git HEAD.
+Plan base_experiment=null and references=[]; describe only existing baseline
+README.md and strategy.json inputs with their actual Git HEAD in markdown.
 Execute returns exactly one artifact: proposal.json in the current workspace,
 version=policy-proposal-v1, measurements=[]. Review reads the actual file and confirms
 scope, updates both memories, then stops after one iteration. Do not name an absent
@@ -268,7 +242,7 @@ def main(argv=None) -> int:
         active_harness = UsageBudgetHarness(
             bridge if is_cactus else CodexHarness(config), output / "study"
         )
-        state = run_review_recovery(Study(output / "study", harness=active_harness))
+        state = Study(output / "study", harness=active_harness).run(iterations=1)
         summary["state"] = state
         if (
             state["phase"] != "done"

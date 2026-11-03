@@ -459,6 +459,8 @@ function agentCard(agent, index) {
   if (Object.keys(output).length) {
     if (phase === 'plan') {
       body += facts(output,['decision','base_experiment','references','inquiry_kind']);
+      if (output.timeout_seconds != null) body += readingField(key+'-timeout','执行上限（秒）',output.timeout_seconds);
+      if (output.execution) body += '<div class="fact-block"><h4>执行约束</h4>'+structured(output.execution)+'</div>';
       if (output.research_contract) body += '<div class="fact-block"><h4>研究问题与验证合同</h4>'+structured(output.research_contract)+'</div>';
       if (output.contract) body += Object.entries(output.contract).map(([name,value])=>readingField(key+'-'+name,LABELS[name] || name,value)).join('');
       else if (output.action) body += '<div class="agent-action">'+esc(output.action)+'</div>';
@@ -483,7 +485,7 @@ function agentCard(agent, index) {
       if (output.markdown) body += disclosure(key+'-full',phase==='judge'?'Judge 的取舍依据':phase==='proposal'?'提案的完整依据':'完整讨论输出',markdown(output.markdown),phase==='judge');
       if (output.stop_reason) body += '<div class="notice">停止原因：'+esc(output.stop_reason)+'</div>';
     }
-    const known = new Set(['markdown','route_research','global_research','decision','choice','goal_status','route_title','route_id','base_experiment','references','action','contract','research_contract','input_artifacts','stop_reason','knowledge_changes','route_reason','resume_condition','candidate_reviews','candidate_corrections','route_status','inquiry_kind','research_design','insight']);
+    const known = new Set(['markdown','route_research','global_research','decision','choice','goal_status','route_title','route_id','base_experiment','references','action','contract','research_contract','input_artifacts','timeout_seconds','execution','stop_reason','knowledge_changes','route_reason','resume_condition','candidate_reviews','candidate_corrections','route_status','inquiry_kind','research_design','insight']);
     const extra = Object.fromEntries(Object.entries(output).filter(([name,value])=>!known.has(name) && value!=null));
     if (Object.keys(extra).length) body += disclosure(key+'-more','其他结构化输出',structured(extra));
   } else body = '<div class="muted">'+(agent.status==='running'?'此调用尚未返回完整输出。': '本次 attempt 没有已完成的输出。')+'</div>';

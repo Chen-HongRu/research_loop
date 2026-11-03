@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from research_loop import Study, initialize
+from research_loop import Study, StudyError, initialize
 from research_loop.protocol import SCHEMAS
 from research_loop.long_training import (
     LongTrainingManager,
@@ -100,10 +100,6 @@ class LongHarness(RecordedHarness):
         result = super().response(phase, context, kwargs)
         if phase == "plan":
             result = {key: result[key] for key in kwargs["schema"]["properties"]}
-            result["contract"] = {
-                key: result["contract"][key]
-                for key in kwargs["schema"]["properties"]["contract"]["properties"]
-            }
         if phase == "review" and context.get("long_training_run"):
             observations = context["long_training_observations"]
             result["observation_reviews"] = [
@@ -218,6 +214,26 @@ class LongTrainingTests(unittest.TestCase):
             }
 
         return execute
+
+    def test_older_parent_format_rejected_before_lane_writes(self):
+        self.nominate()
+        delegate = LongHarness()
+        calls = []
+        manager = LongTrainingManager(self.root, delegate, self.executor(calls))
+        config_path = self.root / "study.json"
+        for version in (1, 2):
+            with self.subTest(version=version):
+                config = read(config_path)
+                config["version"] = version
+                config_path.write_text(json.dumps(config))
+                state = (self.root / "state.json").read_bytes()
+                with self.assertRaisesRegex(StudyError, "Unsupported study format"):
+                    manager.run_one(deadline=time.time() + 1000)
+                self.assertFalse((self.root / "long-runs").exists())
+                self.assertEqual((self.root / "state.json").read_bytes(), state)
+                self.assertEqual(read(config_path), config)
+                self.assertEqual(delegate.calls, [])
+                self.assertEqual(calls, [])
 
     def test_real_child_study_and_boundary_feedback(self):
         request = self.nominate()
@@ -370,6 +386,64 @@ class LongTrainingTests(unittest.TestCase):
         self.assertEqual(completed_results(self.root)[0]["result"], result["result"])
         self.assertEqual(result["result"]["missing_validation_steps"], [8000, 10000])
         self.assertEqual(result["execute"]["measurements"], [])
+
+    def test_observation_step_choices_are_strict_and_empty_curve_stays_empty(self):
+        context = {
+            "long_training_run": {"id": "frozen"},
+            "long_training_observations": {"curve": [{"step": 1}]},
+            "execute": {"measurements": []},
+        }
+        schema = stage_schema("review", context, SCHEMAS["review"])
+        response = RecordedHarness().response("review", context, {})
+        response["observation_reviews"] = [
+            {"step": 1, "valid": True, "verified": True, "reason": "Checked evidence"}
+        ]
+        self.assertIs(schema.validate(response), response)
+        for step in (True, 1.0, "1", 2):
+            with self.subTest(step=step), self.assertRaisesRegex(ValueError, "step"):
+                altered = copy.deepcopy(response)
+                altered["observation_reviews"][0]["step"] = step
+                schema.validate(altered)
+        context["long_training_observations"]["curve"] = []
+        empty_schema = stage_schema("review", context, SCHEMAS["review"])
+        self.assertEqual(
+            empty_schema["properties"]["observation_reviews"]["maxItems"], 0
+        )
+        with self.assertRaisesRegex(ValueError, "observation_reviews"):
+            empty_schema.validate(response)
+        response["observation_reviews"] = []
+        self.assertIs(empty_schema.validate(response), response)
+
+    def test_nomination_choices_bind_current_candidates(self):
+        context = {
+            "long_training": policy(),
+            "execute": {"measurements": [{"candidate_id": "current"}]},
+        }
+        schema = stage_schema("review", context, SCHEMAS["review"])
+        response = RecordedHarness().response("review", context, {})
+        response["long_training_decision"] = {
+            "reason": "Confirm the observed gain.",
+            "nominations": [
+                {
+                    "candidate_id": "current",
+                    "comparison_candidate_id": "0001:baseline",
+                    "basis": "architecture_gain",
+                    "reason": "Changed representation with observed improvement.",
+                    "evidence": ["execute.md"],
+                }
+            ],
+        }
+        self.assertIs(schema.validate(response), response)
+        for candidate in ("absent", 1, True):
+            with (
+                self.subTest(candidate=candidate),
+                self.assertRaisesRegex(ValueError, "candidate_id"),
+            ):
+                altered = copy.deepcopy(response)
+                altered["long_training_decision"]["nominations"][0]["candidate_id"] = (
+                    candidate
+                )
+                schema.validate(altered)
 
     def test_frozen_context_does_not_change_when_child_completes_mid_iteration(self):
         request = self.nominate()
@@ -616,12 +690,33 @@ class LongTrainingTests(unittest.TestCase):
             manager.run_one(deadline=time.time() + 1000)
         self.assertEqual(calls, [])
 
+    def test_fixed_allocation_timeout_is_controller_owned(self):
+        request = self.nominate()
+        calls = []
+        delegate = LongHarness()
+        manager = LongTrainingManager(
+            self.root,
+            delegate,
+            self.executor(calls),
+            admission=lambda request, token: {"policy": {"gpu_seconds_per_run": 10800}},
+        )
+        manager.run_one(deadline=time.time() + 1000)
+        plan_call = next(call for call in delegate.calls if call["phase"] == "plan")
+        self.assertNotIn("timeout_seconds", plan_call["schema"]["properties"])
+        self.assertNotIn(
+            "timeout_seconds", read(plan_call["run_dir"] / "response.json")
+        )
+        review_call = next(call for call in delegate.calls if call["phase"] == "review")
+        self.assertEqual(review_call["context"]["plan"]["timeout_seconds"], 10800)
+        self.assertNotIn("contract", review_call["context"]["plan"])
+        self.assertEqual(calls, [request["id"]])
+
     def test_inconsistent_fixed_controller_plan_cannot_allocate(self):
         class InvalidPlan(LongHarness):
             def response(self, phase, context, kwargs):
                 result = super().response(phase, context, kwargs)
                 if phase == "plan":
-                    result["contract"]["timeout_seconds"] = 60
+                    result["timeout_seconds"] = 60
                 return result
 
         self.nominate()
@@ -632,7 +727,9 @@ class LongTrainingTests(unittest.TestCase):
             self.executor(calls),
             admission=lambda request, token: {"policy": {"gpu_seconds_per_run": 10800}},
         )
-        with self.assertRaisesRegex(ValueError, "contract: must contain exactly"):
+        with self.assertRaisesRegex(
+            ValueError, r"timeout_seconds[\s\S]*extra_forbidden"
+        ):
             manager.run_one(deadline=time.time() + 1000)
         self.assertEqual(calls, [])
 

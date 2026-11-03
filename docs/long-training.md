@@ -114,7 +114,8 @@ Each new allocation must fit the remaining independent GPU allowance. Actual
 `sacct` allocation seconds, including failed and cancelled work and any overrun,
 are charged in `control/long-training-jobs/`; unknown effects do not release
 budget. A child's fixed Plan specifies its Slurm GPU allocation in
-`contract.timeout_seconds`. Queueing does not consume that GPU allowance and has
+top-level `timeout_seconds`, injected by the controller and omitted from the model's
+Plan schema. Queueing does not consume that GPU allowance and has
 no separate wall cutoff. An admitted child can finish and publish Review after
 the entry deadline. `used_gpu_seconds` retains short/research grant accounting;
 `long_training_gpu_seconds` reports the separate charge and `total_gpu_seconds`

@@ -1,19 +1,25 @@
 # Research script execution
 
-`study.json` enables the generic frozen research contract with
+New version-3 Studies enable structured execution bounds with
 `"research_execution": {"version": 1}`. The ProTok controller additionally requires
 `control/research-policy.json` containing `version: 1`, the user's `authorization`,
 and `max_time_limit_seconds` (at most 1800). Enable these only between fully
 published iterations; preserve earlier context snapshots.
 
-Plan defines the question, purpose, observables, measurement inputs/method/timing,
-aggregation, expected cost, interpretation and insufficient-evidence conditions.
-Mechanism work also defines competing explanations and differing predictions.
-The schema checks declarations and references; Judge and Review assess whether
-the observations actually discriminate the explanations. Theory may specify a
-claim, assumptions and derivation instead of competing mechanisms.
+Plan's `markdown` freezes the scientific question, allowed action, exact input
+versions, measurement or derivation, evidence requirements and interpretation.
+These are free text, without required research categories or explanation/observable
+IDs. Judge and independent Review assess the actual design and evidence. The schema
+checks executable paths and bounds; it does not certify scientific meaning.
 
-The frozen `research_contract.execution` selects:
+Pydantic generates the Plan schema and validates the same execution model during
+fresh and cached Plan acceptance. ProTok's model adds its supported GPU profile,
+input-name/count and output-count constraints. The backend uses those same input
+types; it separately checks the current policy, resolves trusted sources and
+settles allocations. Generic Plan limits are whole minutes; the native backend
+retains its scheduler rounding for internal requests.
+
+The frozen top-level `execution` selects:
 
 * `fixed_evaluation`: the existing protected scorer and official RMSD Frontier.
 * `script`: an arbitrary Python entrypoint under `research/`, with named inputs,
@@ -28,8 +34,8 @@ The frozen `research_contract.execution` selects:
   "gpu": true,
   "time_limit_seconds": 180,
   "inputs": [
-    {"name": "cache", "source": "hidden_cache", "role": "development"},
-    {"name": "checkpoint", "source": "checkpoint:0012:2000", "role": "model"}
+    {"name": "cache", "source": "hidden_cache"},
+    {"name": "checkpoint", "source": "checkpoint:0012:2000"}
   ],
   "outputs": ["probe.json", "probe.svg"]
 }
@@ -39,6 +45,24 @@ Execute calls the controller-provided `submission.py submit --workspace . --acti
 research`. The request carries no mutable experiment specification: the controller
 uses the accepted Plan. Repeated submissions observe the same request. Retained
 unknown effects require recovery of the same job; they never trigger a new job.
+
+Before claiming a request, the controller prepares the script: it checks the
+request action, missing authored entrypoint, bounded source policy and Python
+syntax using the controller Python, then reads trusted input metadata. Explicit authoring errors produce
+`status=parameter_error` with feedback in `submission.py status`; the same live
+Execute Agent may repair authorized files or the action and submit again within
+its original timeout and frozen Plan. Rejected requests remain in
+`evaluation-parameter-errors.json`. Preparation allocates no compute and writes
+no frozen-source/job record. Trusted input, protected source, frozen Plan, I/O,
+identity and accounting failures remain blocking.
+
+`research_backend.prepare_script(...)` is the Python dry-run API used by actual
+execution. It reads bounded source/configuration and input metadata; it does not
+stage or submit. The live watcher passes its prepared snapshot to start, which
+checks both live and frozen source identity before remote effects. Preparation
+cannot validate imports or runtime behavior. See the
+[execution backend guide](../../docs/execution-backends.md). No correction clears
+a claimed receipt or permits a new Plan, deadline, budget or allocation.
 
 The controller freezes protected dependencies, candidate files and research source.
 The sandbox exposes `/workspace` and declared `/inputs/<name>` read-only, a manifest
@@ -76,10 +100,17 @@ inside the actual research sandbox. This is an operator environment check, not a
 scientific investigation or an official score.
 
 Supported inputs are `hidden_cache`, `targets`, `teacher` and
-`checkpoint:<published iteration>:<0|1000|2000>`. Data roles are `development` or
-`exploratory`; model inputs may also use `model` or `reference`. The current cache
-exposure is the existing development train/val cache. Final/holdout roles and
-additional hidden cache splits are rejected. No new external data is fetched.
+`checkpoint:<published iteration>:<0|1000|2000>` and independently reviewed long
+checkpoints. Each input has only `name` and `source`; `source` determines the
+trusted path and provenance. There is no input `role` label or declared-use label
+gate. The current cache exposure remains the existing development train/val cache;
+additional test/holdout splits and unknown sources are rejected. Final-only evidence
+must not feed adaptive search. No new external data is fetched.
+
+The research source record binds the entire accepted Plan, including its prose,
+as well as the authored source signatures. A completed result cannot be accepted
+against a changed Plan. Version-1/2 Studies retain their original records and must
+use their original runtime; this format change does not migrate or resume them.
 
 The initial compute profile is the existing H100 debug allocation, 8 CPU / 96 GiB,
 in whole minutes up to 1800 seconds. CPU calculations also work in that profile
@@ -94,6 +125,8 @@ failed script returns that artifact with `outcome=incomplete`. Slurm TIMEOUT is
 one such result. Actual allocated GPU seconds are charged in full even when they
 exceed the requested time limit during termination; the overrun is reported and
 subsequent allocations must still fit the original shared budget and reserve.
+This policy authorizes one research allocation; a settled failure does not
+automatically enter formal candidate debugging or receive another script attempt.
 A reporting Agent failure after a verified failed allocation does not resubmit
 compute: the controller preserves the Agent attempt and publishes the settled
 failure for Review. Unsettled effects or changed identity/source remain blocking.

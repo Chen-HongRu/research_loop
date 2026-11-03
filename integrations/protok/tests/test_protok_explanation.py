@@ -123,6 +123,49 @@ class ExplanationTests(unittest.TestCase):
             },
         }
 
+    def test_schema_retains_title_and_bounded_source_ids(self):
+        self.assertIn("title", ex.SCHEMA["properties"])
+        self.assertIn("title", ex.SCHEMA["required"])
+        ids = ex.SCHEMA["properties"]["overview"]["properties"]["source_ids"]
+        self.assertEqual(ids["items"]["maxLength"], 1800)
+        self.assertEqual((ids["minItems"], ids["maxItems"]), (1, 12))
+        content = self.content()
+        self.assertIs(ex.SCHEMA.validate(content), content)
+        for mutate in (
+            lambda r: r.pop("title"),
+            lambda r: r.update(title="x" * 1801),
+            lambda r: r["overview"].update(source_ids=["x" * 1801]),
+            lambda r: r["overview"].update(source_ids=["s1"] * 13),
+            lambda r: r["overview"].update(source_ids=[]),
+            lambda r: r["overview"].update(source_ids=["<b>source</b>"]),
+            lambda r: r.update(title="<b>title</b>"),
+            lambda r: r.update(observations=[r["overview"]] * 13),
+            lambda r: r.update(title=1),
+            lambda r: r.update(extra="unexpected"),
+        ):
+            bad = copy.deepcopy(content)
+            mutate(bad)
+            with self.subTest(content=bad), self.assertRaises(ValueError):
+                ex.SCHEMA.validate(bad)
+
+    def test_published_markers_are_strict_booleans_and_text_is_unchanged(self):
+        response = self.content()
+        text = "  保留空格与公式 x < y  "
+        response["next_tests"] = [{"text": text, "source_ids": ["s1"]}]
+        published = ex.published_content(response)
+        self.assertEqual(published["next_tests"][0]["text"], text)
+        self.assertNotIn("proposed", response["next_tests"][0])
+        self.assertIs(ex.SCHEMA.validate(published), published)
+        for field in ("proposed", "not_run"):
+            for invalid in (1, False, "true"):
+                bad = copy.deepcopy(published)
+                bad["next_tests"][0][field] = invalid
+                with self.subTest(field=field, value=invalid):
+                    with self.assertRaises(ValueError):
+                        ex.SCHEMA.validate(bad)
+        with self.assertRaises(ValueError):
+            ex.AGENT_SCHEMA.validate(published)
+
     def test_suggestion_markers_are_controller_owned(self):
         response = self.content()
         response["next_tests"] = [copy.deepcopy(response["overview"])]

@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.run import job_path  # noqa: E402
+from research_loop import Study  # noqa: E402
 from research_loop.diagnostics import CommandDiagnostics, diagnostic_view  # noqa: E402
 
 
@@ -365,6 +366,8 @@ def main():
     # A copied archive or pending grant cannot become executable by starting this.
     if (control / "STOP").exists():
         raise SystemExit("Study is stopped; no action taken")
+    if (root / "study/study.json").exists():
+        Study(root / "study")
     owner = read(control / "ownership.json")
     spec = importlib.util.spec_from_file_location("trusted_protok_runner", args.runner)
     runner = importlib.util.module_from_spec(spec)

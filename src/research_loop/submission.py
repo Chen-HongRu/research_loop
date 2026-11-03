@@ -2,6 +2,7 @@
 
 States: absent -> not_submitted; request -> pending; claimed receipt -> accepted;
 result status completed -> completed; error/candidate_failed/failed -> failed.
+Pure preclaim parameter rejection -> parameter_error; corrected request -> pending.
 Terminal responses include the original result. Keep the receipt for the workspace's
 lifetime: an accepted request must never be submitted again, even after a crash.
 """
@@ -21,7 +22,8 @@ RESULT = "evaluation-result.json"
 RECEIPT = "evaluation-submission.json"
 LOCK = ".evaluation-submit.lock"
 STAGING = "evaluation-request.json.tmp"
-INTERFACE_FILES = {REQUEST, RESULT, RECEIPT, LOCK, STAGING}
+REJECTIONS = "evaluation-parameter-errors.json"
+INTERFACE_FILES = {REQUEST, RESULT, RECEIPT, LOCK, STAGING, REJECTIONS}
 
 
 class SubmissionError(RuntimeError):
@@ -86,9 +88,12 @@ def _state(workspace):
     request = _request(_read(workspace / REQUEST), REQUEST)
     receipt = _request(_read(workspace / RECEIPT), RECEIPT)
     result = _read(workspace / RESULT)
+    rejections = _rejections(workspace)
     if request is not None and receipt is not None:
         raise SubmissionError("Both pending request and claimed receipt exist")
     response = {"status": "not_submitted"}
+    if rejections:
+        response = {"status": "parameter_error", "feedback": rejections[-1]}
     current = receipt if receipt is not None else request
     if current is not None:
         response.update(
@@ -105,6 +110,49 @@ def _state(workspace):
             raise SubmissionError("Invalid evaluation result status")
         response["result"] = result
     return response
+
+
+def _rejections(workspace):
+    history = _read(workspace / REJECTIONS)
+    if history is None:
+        return []
+    if set(history) != {"rejections"} or type(history["rejections"]) is not list:
+        raise SubmissionError("Invalid parameter rejection history")
+    for entry in history["rejections"]:
+        if (
+            type(entry) is not dict
+            or set(entry) != {"request", "error"}
+            or type(entry["error"]) is not str
+            or not entry["error"]
+            or type(entry["request"]) is not dict
+        ):
+            raise SubmissionError("Invalid parameter rejection history")
+        _request(entry["request"], REJECTIONS)
+    return history["rejections"]
+
+
+def _reject(workspace, request, error):
+    history = _rejections(workspace)
+    history.append({"request": request, "error": str(error)[:2048]})
+    content = json.dumps({"rejections": history}, ensure_ascii=False) + "\n"
+    if len(content.encode()) > 65536:
+        raise SubmissionError("Parameter rejection history exceeds 65536 bytes")
+    staging = workspace / STAGING
+    fd = _regular_open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staging, workspace / REJECTIONS)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+    # Retain feedback before removing the never-claimed request. A crash here
+    # leaves it pending for pure preflight again, never for computation replay.
+    _sync_directory(workspace)
+    (workspace / REQUEST).unlink()
+    _sync_directory(workspace)
 
 
 def _sync_directory(workspace):
@@ -133,7 +181,7 @@ def submit(workspace, action="evaluate"):
         current = _state(directory)
         if "action" in current and current["action"] != action:
             raise SubmissionError("Conflicting action already submitted")
-        if current["status"] != "not_submitted":
+        if current["status"] not in ("not_submitted", "parameter_error"):
             return current
         staging = directory / STAGING
         fd = _regular_open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
@@ -151,17 +199,29 @@ def submit(workspace, action="evaluate"):
         return {"status": "pending", "action": action}
 
 
-def claim_request(workspace):
+def claim_request(workspace, *, preflight=None):
     """Atomically retain a pending request as a receipt and return it once.
 
     None means no unclaimed request remains. A crash after rename deliberately
     leaves an accepted receipt; recovery must inspect it, never resubmit it.
+    An optional trusted, side-effect-free preflight may raise ParameterError to
+    retain feedback and discard only this never-claimed request. Other errors block.
     """
     with _locked(workspace) as directory:
         current = _state(directory)
         if current["status"] != "pending":
             return None
         request = {"action": current["action"]}
+        if preflight is not None:
+            # Lazy import keeps the standalone submit/status CLI independent
+            # of package discovery in an Agent's isolated workspace.
+            from research_loop.correction import ParameterError
+
+            try:
+                preflight(request)
+            except ParameterError as error:
+                _reject(directory, request, error)
+                return None
         os.replace(directory / REQUEST, directory / RECEIPT)
         _sync_directory(directory)
         return request

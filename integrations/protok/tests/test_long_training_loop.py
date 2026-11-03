@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from integrations.protok import long_training_loop as lane
 from integrations.protok import research_backend, server
-from research_loop import Study, initialize
+from research_loop import Study, StudyError, initialize
 from research_loop.harness import HarnessError
 from research_loop.long_training import LongTrainingManager
 from test_core import RecordedHarness, evaluation
@@ -27,6 +27,27 @@ class LongTrainingLoopTests(unittest.TestCase):
             "deadline": time.time() + 10000,
         }
         lane._write(self.root / "control/long-training-policy.json", self.grant)
+
+    def test_recovery_rejects_older_parent_before_effects(self):
+        initialize(self.root / "study", goal="Parent")
+        config_path = self.root / "study/study.json"
+        for version in (1, 2):
+            with self.subTest(version=version):
+                config = lane._read(config_path)
+                config["version"] = version
+                lane._write(config_path, config)
+                control_files = sorted((self.root / "control").iterdir())
+                with (
+                    patch.object(lane, "execute") as execute,
+                    self.assertRaisesRegex(StudyError, "Unsupported study format"),
+                ):
+                    lane.recover(self.root, Mock(), "L" + "a" * 16)
+                execute.assert_not_called()
+                self.assertFalse((self.root / "study/long-runs").exists())
+                self.assertEqual(
+                    sorted((self.root / "control").iterdir()), control_files
+                )
+                self.assertEqual(lane._read(config_path), config)
 
     def test_policy_keeps_all_three_endpoint_metrics(self):
         policy = lane.study_policy(self.root)
@@ -208,7 +229,7 @@ class LongTrainingLoopTests(unittest.TestCase):
             "entrypoint": "research/probe.py",
             "gpu": True,
             "time_limit_seconds": 60,
-            "inputs": [{"name": "model", "source": source, "role": "model"}],
+            "inputs": [{"name": "model", "source": source}],
             "outputs": ["probe.json"],
         }
         self.assertEqual(

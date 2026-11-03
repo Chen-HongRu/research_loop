@@ -367,7 +367,10 @@ def operator_plan_record(root, folder):
         or any(receipt.get(key) != value for key, value in marker.items())
         or output.get("decision") != "investigate"
         or output.get("base_experiment") != marker["source_iteration"]
-        or not isinstance(output.get("contract"), dict)
+        or not (
+            type(output.get("timeout_seconds")) is int
+            or isinstance(output.get("contract"), dict)
+        )
     ):
         return None
     return {
@@ -1023,9 +1026,11 @@ def snapshot(root, *, snapshot_only=False):
                 "id": identity,
                 "execution_kind": "research_script"
                 if research
-                or (accepted_plan.get("research_contract") or {})
-                .get("execution", {})
-                .get("mode")
+                or (
+                    accepted_plan.get("execution")
+                    or (accepted_plan.get("research_contract") or {}).get("execution")
+                    or {}
+                ).get("mode")
                 == "script"
                 else "fixed_evaluation",
                 "route": meta.get("route_title", "路线选择中"),

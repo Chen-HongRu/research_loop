@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from research_loop import Study, StudyError, initialize
+from research_loop import Study, initialize
 from research_loop.harness import HarnessError
 from research_loop.strategy import validate_strategy
 from test_core import RecordedHarness, evaluation, read
@@ -63,7 +63,8 @@ class StrategyTests(unittest.TestCase):
         self.assertNotIn("proposals", proposals[0])
         self.assertNotIn("proposals", proposals[1])
         review = harness.calls[-1]
-        self.assertTrue(review["context"]["plan"]["contract"])
+        self.assertTrue(review["context"]["plan"]["markdown"])
+        self.assertEqual(review["context"]["plan"]["timeout_seconds"], 60)
         self.assertEqual(len(review["context"]["execute"]["measurements"]), 1)
         self.assertIn("route_research", review["context"])
         self.assertIn("global_research", review["context"])
@@ -98,6 +99,7 @@ class StrategyTests(unittest.TestCase):
         study, harness = self.study(
             {"selection": "direct", "review": "concise"},
             global_evaluation=evaluation("global"),
+            max_calls=12,
         )
         (study.workspace / "result.json").write_text("{}")
         harness.measure = True
@@ -110,10 +112,12 @@ class StrategyTests(unittest.TestCase):
             return result
 
         harness.response = missing_review
-        with self.assertRaisesRegex(StudyError, "Candidate reviews must match"):
-            study.run()
+        self.assertEqual(study.run()["stop_reason"], "call_budget")
         self.assertFalse((self.root / "iterations/0001/publication.json").exists())
-        self.assertEqual(self.observations()["intervals"][-1]["status"], "failed")
+        reviews = [call for call in harness.calls if call["phase"] == "review"]
+        self.assertGreater(len(reviews), 1)
+        self.assertIn("match current measurements exactly", reviews[1]["prompt"])
+        self.assertEqual(harness.count("execute"), 1)
 
     def test_failed_selection_resume_and_multiple_iterations_preserve_intervals(self):
         study, harness = self.study({"selection": "direct", "review": "full"})
