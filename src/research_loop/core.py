@@ -2156,12 +2156,19 @@ class Study:
             return
         if state["phase"] == "plan":
             proposal = state["selected"]["proposal"]
-            context = {
-                **self._context(folder),
-                "selected": state["selected"],
-                "route": self._route_context(folder, proposal["route_id"]),
-                "workspace": str(folder / "workspace"),
-            }
+            context = self._context(folder)
+            isolated_workspace = bool(
+                self.config["allow_write"] or context.get("manual_task")
+            )
+            context.update(
+                selected=state["selected"],
+                route=self._route_context(folder, proposal["route_id"]),
+                workspace=str(
+                    folder / "workspace" if isolated_workspace else self.workspace
+                ),
+                execution_writes_enabled=self.config["allow_write"],
+                execution_workspace_prepared_after_plan=isolated_workspace,
+            )
             result = self._call(
                 state,
                 "plan",

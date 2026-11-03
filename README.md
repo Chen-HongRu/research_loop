@@ -99,7 +99,7 @@ uv run research-loop run studies/proof
 uv run research-loop status studies/proof
 ```
 
-`init` 不调用模型；`run` 会使用账号额度，最多推进一轮并受总预算限制。`status`、`graph`、`frontiers` 和 `knowledge` 为只读命令。支持的请求型号为 `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-luna`；实际可用性取决于客户端和账号，不会自动替换型号。
+`init` 不调用模型；`run` 会使用账号额度，最多推进一轮并受总预算限制。`status`、`graph`、`frontiers` 和 `knowledge` 为只读命令。支持的请求型号为 `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-luna`；实际可用性取决于客户端和账号，不会自动替换型号。
 
 默认只读。需要修改实验代码时，通过 `--workspace` 指定干净的 Git 基线，并显式加 `--allow-write`。每次调查使用独立工作区。仅有 `run` 权限不等于已授权远程计算；训练资源与受保护评价器由任务后端管理。
 

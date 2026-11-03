@@ -281,6 +281,15 @@ routes. Budget exhaustion is not goal completion. Record a stop reason when stop
 Read only; do not write files or run experiments. Debate is not new evidence.
 """,
     "plan": """Turn Judge's selected action into a bounded executable contract.
+This Plan stage is read-only; it does not submit jobs or create execution files.
+The supplied execution_writes_enabled describes the later Execute stage, not your
+current sandbox. If execution_workspace_prepared_after_plan is true, the controller
+creates the isolated workspace only after accepting this Plan. Its absence now is
+expected: inspect the recoverable starting source, not the not-yet-created target.
+Do not stop merely because Plan cannot perform writes reserved for Execute.
+A fixed-source task's allow_changes=false forbids candidate edits, not authorized
+request/result files when execution_writes_enabled is true. If execution writes
+are disabled and the action requires them, report that genuine missing permission.
 Verify the starting experiment, precise recoverable input artifact versions, relevant
 conditions and historical limitations. In markdown, freeze the scientific question,
 rationale, allowed action and fixed

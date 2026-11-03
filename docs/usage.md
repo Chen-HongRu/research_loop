@@ -92,7 +92,7 @@ uv run research-loop init studies/pi-proof \
 uv run research-loop run studies/pi-proof
 ```
 
-允许型号为 `gpt-6-astra / gpt-6.1-sol / gpt-6-luna`，默认 Sol/medium，不自动切换型号。Pi 请求前精确检查本地可用目录；目录缺少指定 provider/model 时停止，不改用其他 provider。两后端均通过 stdin 接收提示词，并使用相同的阶段校验和完成/恢复回执。Pi 仅在最终 `agent_settled` 未中止、最终 assistant 正常结束且 provider/model、有效 `thinkingLevel` 匹配请求后接纳 JSON；旧版缺少这些字段会明确失败。
+允许型号为 `gpt-6-astra / gpt-6.1-sol / gpt-6.1-terra / gpt-6-luna`，默认 Sol/medium，不自动切换型号。Pi 请求前精确检查本地可用目录；目录缺少指定 provider/model 时停止，不改用其他 provider。两后端均通过 stdin 接收提示词，并使用相同的阶段校验和完成/恢复回执。Pi 仅在最终 `agent_settled` 未中止、最终 assistant 正常结束且 provider/model、有效 `thinkingLevel` 匹配请求后接纳 JSON；旧版缺少这些字段会明确失败。
 
 目录匹配与 Pi 的配置回报不证明服务端实际采用该型号或推理强度；`process.json` 保留请求、客户端回报与未核实的服务端信息。真实 CLI 的本地固定响应验证和订阅调用的验证边界见 [Pi 验证记录](pi-harness.md)。后台 Scout 使用 Codex 的原生 web search，Pi 工具白名单不提供这一能力。
 
@@ -174,3 +174,5 @@ PYTHONPATH=src:tests:. uv run python -m unittest discover -s integrations/protok
 ```
 
 固定回复和假 CLI 测试用于验证控制、恢复与协议，不证明研究收益。Harness 选型与登录方式调研见 [调研记录](harness-research.md)。
+
+Plan 的上下文明示后续 `execution_writes_enabled` 和 `execution_workspace_prepared_after_plan`。Plan 自身始终只读；隔离工作区在接受 Plan 后才创建，尚不存在不是执行权限失败。只读 Study 仍不能写请求；固定候选任务允许的请求与结果写入不等于允许修改候选。

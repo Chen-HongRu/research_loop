@@ -224,6 +224,35 @@ class CoreTests(unittest.TestCase):
             (study.workspace / "result.json").write_text("{}")
         return study, harness
 
+    def test_plan_describes_future_execution_permissions_and_workspace(self):
+        for writable in (False, True):
+            with self.subTest(writable=writable), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "study"
+                initialize(root, goal="Run one bounded check", allow_write=writable)
+                harness = RecordedHarness()
+                observed = {}
+
+                def inspect(call):
+                    if call["phase"] == "plan":
+                        observed["exists_during_plan"] = Path(
+                            call["context"]["workspace"]
+                        ).exists()
+                        self.assertFalse(call["writable"])
+
+                harness.before = inspect
+                study = Study(root, harness)
+                study.run()
+                plan = next(c["context"] for c in harness.calls if c["phase"] == "plan")
+                execute = next(
+                    c["context"] for c in harness.calls if c["phase"] == "execute"
+                )
+                self.assertEqual(plan["execution_writes_enabled"], writable)
+                self.assertEqual(
+                    plan["execution_workspace_prepared_after_plan"], writable
+                )
+                self.assertEqual(plan["workspace"], execute["workspace"])
+                self.assertEqual(observed["exists_during_plan"], not writable)
+
     def test_older_study_format_rejected_before_mutation(self):
         study, harness = self.study()
         config_path = self.root / "study.json"
