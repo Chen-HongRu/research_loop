@@ -63,7 +63,8 @@ class StrategyTests(unittest.TestCase):
         self.assertNotIn("proposals", proposals[0])
         self.assertNotIn("proposals", proposals[1])
         review = harness.calls[-1]
-        self.assertTrue(review["context"]["plan"]["contract"])
+        self.assertTrue(review["context"]["plan"]["markdown"])
+        self.assertEqual(review["context"]["plan"]["timeout_seconds"], 60)
         self.assertEqual(len(review["context"]["execute"]["measurements"]), 1)
         self.assertIn("route_research", review["context"])
         self.assertIn("global_research", review["context"])

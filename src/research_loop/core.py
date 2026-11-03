@@ -180,7 +180,7 @@ def initialize(
     _write(
         root / "study.json",
         {
-            "version": 2,
+            "version": 3,
             "workspace": str(workspace),
             "baseline": baseline,
             "harness": asdict(harness or HarnessConfig()),
@@ -226,7 +226,7 @@ class Study:
     def __init__(self, root: Path, harness: AgentHarness | None = None):
         self.root = Path(root).resolve()
         self.config = _read(self.root / "study.json")
-        if self.config.get("version") != 2:
+        if self.config.get("version") != 3:
             raise StudyError(
                 "Unsupported study format; preserve old records and initialize a new study"
             )
@@ -633,7 +633,6 @@ class Study:
                     "route_id": None,
                     "base_experiment": None,
                     "references": [],
-                    "input_artifacts": [],
                     "output_artifacts": [],
                     "evaluation_refs": [],
                     "status": "selecting",
@@ -817,7 +816,6 @@ class Study:
             "route_id": source_metadata["route_id"],
             "base_experiment": plan["base_experiment"],
             "references": plan["references"],
-            "input_artifacts": plan["input_artifacts"],
             "output_artifacts": [],
             "evaluation_refs": owner_publication["metadata"]["evaluation_refs"],
             "workspace": str(workdir),
@@ -1061,7 +1059,7 @@ class Study:
             self._save(state)
             timeout = min(int(remaining), self.config["harness"]["timeout_seconds"])
             if phase == "execute":
-                timeout = min(timeout, context["plan"]["contract"]["timeout_seconds"])
+                timeout = min(timeout, context["plan"]["timeout_seconds"])
             try:
                 result = harness.run(
                     prompt=prompt(phase, context)
@@ -1586,7 +1584,7 @@ class Study:
             if prior["status"] != "reviewed":
                 raise StudyError("Graph reference has no published review")
         local = result["local_evaluation"]
-        if result["contract"]["timeout_seconds"] < 1:
+        if result["timeout_seconds"] < 1:
             raise StudyError("Execution contract timeout must be positive")
         if local:
             validate_evaluation(local)
@@ -1644,7 +1642,6 @@ class Study:
             route_id=route_id,
             base_experiment=result["base_experiment"],
             references=result["references"],
-            input_artifacts=result["input_artifacts"],
             evaluation_refs=[
                 d["id"] for d in (self.config["global_evaluation"], local) if d
             ],

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from research_loop import Study, initialize
 from research_loop.harness import publish_completed_response
-from research_loop.protocol import SCHEMAS, validate_response
+from research_loop.protocol import validate_response
 
 LABEL = "[SCRIPTED OFFLINE DEMO]"
 ACTION = "Derive n(n+1) is even by considering the parity of consecutive integers."
@@ -37,10 +38,11 @@ class ScriptedHarness:
         writable: bool = False,
         timeout_seconds: int | None = None,
     ) -> dict:
-        phase = next(name for name, value in SCHEMAS.items() if value is schema)
+        phase = re.search(r"^Stage: (\w+)$", prompt, re.MULTILINE)[1]
         context = json.loads((run_dir / "context.json").read_text())
-        result = self.response(phase, context)
-        validate_response(phase, result)
+        response = self.response(phase, context)
+        result = {key: response[key] for key in schema["properties"]}
+        validate_response(phase, result, schema=schema)
         (run_dir / "prompt.md").write_text(prompt)
         (run_dir / "response.json").write_text(json.dumps(result, indent=2) + "\n")
         (run_dir / "process.json").write_text(
@@ -84,20 +86,19 @@ class ScriptedHarness:
         if phase == "plan":
             return {
                 "decision": "investigate",
-                "markdown": f"{LABEL} Plan only: split into even and odd cases.",
+                "markdown": (
+                    f"{LABEL} A bounded qualitative derivation demonstrates the loop. "
+                    f"Action: {context['selected']['judge']['action']}. "
+                    "Split into even and odd cases for every integer n≥0, including zero. "
+                    "No external inputs or numeric evaluation are needed. Require explicit "
+                    "algebra in the execution report for a complete argument; this scripted "
+                    "example establishes no model capability or empirical result."
+                ),
                 "route_research": f"{LABEL} Question: is n²+n always even for n≥0?",
                 "base_experiment": None,
                 "references": [],
-                "input_artifacts": [],
                 "local_evaluation": None,
-                "contract": {
-                    "rationale": "A bounded qualitative derivation demonstrates the loop.",
-                    "action": context["selected"]["judge"]["action"],
-                    "evaluation": "Check the two parity cases; no numeric evaluation.",
-                    "decision_criteria": "A complete argument for all n≥0, including zero.",
-                    "evidence_required": ["Explicit algebra in the execution report"],
-                    "timeout_seconds": 30,
-                },
+                "timeout_seconds": 30,
                 "stop_reason": None,
             }
         if phase == "execute":

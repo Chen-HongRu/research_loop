@@ -112,7 +112,14 @@ class RecordedHarness:
         if phase == "plan":
             return {
                 "decision": "investigate",
-                "markdown": "One bounded investigation with fixed evaluation conditions.",
+                "markdown": (
+                    "Resolve a useful empirical uncertainty in one bounded investigation. "
+                    f"Action: {context['selected']['judge']['action']}. "
+                    "Use the frozen evaluation protocol and selected starting version; "
+                    "no additional input artifacts are required. Retain actual output "
+                    "and record missing results explicitly. Interpret practical observations "
+                    "without claiming an established mechanism."
+                ),
                 "route_research": "Question and evidence gap; no mechanism claim.",
                 **(
                     {
@@ -124,16 +131,8 @@ class RecordedHarness:
                     else {}
                 ),
                 "references": context["selected"]["proposal"]["references"],
-                "input_artifacts": [],
                 "local_evaluation": self.local,
-                "contract": {
-                    "rationale": "Resolve a useful empirical uncertainty.",
-                    "action": context["selected"]["judge"]["action"],
-                    "evaluation": "Use the frozen protocol; record missing results explicitly.",
-                    "decision_criteria": "Retain practical observations and unknown mechanisms.",
-                    "evidence_required": ["Actual output"],
-                    "timeout_seconds": 60,
-                },
+                "timeout_seconds": 60,
                 "stop_reason": None,
             }
         if phase == "execute":
@@ -224,6 +223,34 @@ class CoreTests(unittest.TestCase):
         if options.get("global_evaluation"):
             (study.workspace / "result.json").write_text("{}")
         return study, harness
+
+    def test_older_study_format_rejected_before_mutation(self):
+        study, harness = self.study()
+        config_path = self.root / "study.json"
+        self.assertEqual(read(config_path)["version"], 3)
+        retained = self.root / "retained-evidence.txt"
+        retained.write_text("Historical evidence must remain unchanged.")
+        for version in (1, 2):
+            with self.subTest(version=version):
+                config = read(config_path)
+                config["version"] = version
+                config_path.write_text(json.dumps(config))
+                before = {
+                    path.relative_to(self.root): path.read_bytes()
+                    for path in self.root.rglob("*")
+                    if path.is_file()
+                }
+                with self.assertRaisesRegex(StudyError, "Unsupported study format"):
+                    Study(self.root, harness)
+                self.assertEqual(
+                    {
+                        path.relative_to(self.root): path.read_bytes()
+                        for path in self.root.rglob("*")
+                        if path.is_file()
+                    },
+                    before,
+                )
+                self.assertEqual(harness.calls, [])
 
     def test_readonly_retry_retains_rejected_outputs_and_never_repeats_execute(self):
         for failed_phase in ("plan", "review"):
@@ -467,6 +494,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(Path(state["plan_ref"]).name, "canonical-response.json")
         self.assertEqual(read(self.root / state["plan_ref"])["base_experiment"], "0001")
         self.assertEqual(graph[1]["references"], ["0001"])
+        execute_call = [c for c in harness.calls if c["phase"] == "execute"][-1]
+        self.assertEqual(execute_call["timeout_seconds"], 60)
+        self.assertNotIn("input_artifacts", graph[1])
+        self.assertNotIn("contract", execute_call["context"]["plan"])
         self.assertEqual(graph[0]["status"], "reviewed")
         result = read(self.root / state["review_ref"])
         self.assertNotIn("hypothesis_status", result)

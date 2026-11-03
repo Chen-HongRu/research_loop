@@ -66,7 +66,11 @@ class ResearchExecutionTests(unittest.TestCase):
     def write_plan(self):
         RUNNER.write(
             self.plan_path,
-            {"decision": "investigate", "research_contract": self.contract},
+            {
+                "decision": "investigate",
+                "markdown": "Measure paired alignment with the frozen source.",
+                **self.contract,
+            },
         )
 
     def settled_script(
@@ -148,7 +152,7 @@ class ResearchExecutionTests(unittest.TestCase):
             self.assertEqual(self.validate(response), response)
         source = Path(trusted["frozen_source"])
         self.assertEqual((source / "research/main.py").read_bytes(), self.script_source)
-        self.assertEqual(trusted["contract"], self.contract)
+        self.assertEqual(trusted["contract"], RUNNER.read(self.plan_path))
         self.assertEqual(RUNNER.git(source, "status", "--porcelain"), "")
         self.assertFalse(trusted["quality_score_eligible"])
         self.assertEqual(response["measurements"], [])
@@ -217,6 +221,19 @@ class ResearchExecutionTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(HarnessError, "unresolved effects"):
                 self.validate(response)
+
+    def test_changed_plan_prose_blocks_result_without_resubmission(self):
+        trusted, response = self.accepted_response()
+        record = self.control / "research-sources" / self.iteration / "record.json"
+        before = record.read_bytes()
+        plan = RUNNER.read(self.plan_path)
+        plan["markdown"] = "Replace the original scientific interpretation."
+        RUNNER.write(self.plan_path, plan)
+        with self.assertRaisesRegex(ProTokError, "frozen, settled execution"):
+            self.validate(response)
+        self.assertEqual(record.read_bytes(), before)
+        self.assertEqual(self.backend_runs, 1)
+        self.assertNotEqual(trusted["contract"]["markdown"], plan["markdown"])
 
     def test_fixed_plan_cannot_submit_research(self):
         self.contract["execution"].update(mode="fixed_evaluation", entrypoint=None)

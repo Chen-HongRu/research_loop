@@ -37,7 +37,7 @@ class Author(RecordedHarness):
         if phase == "plan":
             result.pop("local_evaluation")
             result.pop("references")
-            result["contract"].pop("timeout_seconds")
+            result.pop("timeout_seconds")
         if phase == "review" and context.get("long_training_run"):
             result["observation_reviews"] = [
                 {
@@ -178,11 +178,11 @@ class ManualExecutionTests(unittest.TestCase):
         self.assertNotIn("references", plan_call["schema"]["properties"])
         self.assertNotIn(
             "timeout_seconds",
-            plan_call["schema"]["properties"]["contract"]["properties"],
+            plan_call["schema"]["properties"],
         )
         raw_plan = tasks._read(plan_call["run_dir"] / "response.json")
         self.assertNotIn("base_experiment", raw_plan)
-        self.assertNotIn("timeout_seconds", raw_plan["contract"])
+        self.assertNotIn("timeout_seconds", raw_plan)
         authored = author.calls[1]
         self.assertEqual(set(authored["schema"]["properties"]), {"outcome", "markdown"})
         self.assertEqual(

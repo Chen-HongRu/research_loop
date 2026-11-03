@@ -208,7 +208,7 @@ class LongTrainingLoopTests(unittest.TestCase):
             "entrypoint": "research/probe.py",
             "gpu": True,
             "time_limit_seconds": 60,
-            "inputs": [{"name": "model", "source": source, "role": "model"}],
+            "inputs": [{"name": "model", "source": source}],
             "outputs": ["probe.json"],
         }
         self.assertEqual(

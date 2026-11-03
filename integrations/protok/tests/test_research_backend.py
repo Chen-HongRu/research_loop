@@ -160,9 +160,7 @@ class ResearchBackendTests(unittest.TestCase):
             "entrypoint": "research/probe.py",
             "gpu": True,
             "time_limit_seconds": 61,
-            "inputs": [
-                {"name": "hidden", "source": "hidden_cache", "role": "development"}
-            ],
+            "inputs": [{"name": "hidden", "source": "hidden_cache"}],
             "outputs": ["result.json"],
         }
         self.backend = Mock()
@@ -378,8 +376,8 @@ class ResearchBackendTests(unittest.TestCase):
             folder / "plan.json",
             {
                 "decision": "investigate",
-                "contract": {"timeout_seconds": 1800},
-                "research_contract": {"execution": self.execution},
+                "timeout_seconds": 1800,
+                "execution": self.execution,
             },
         )
         research._write(
@@ -628,16 +626,19 @@ class ResearchBackendTests(unittest.TestCase):
         self.assertEqual(paths, [])
         self.assertEqual(len(errors), 2)
 
-    def test_roles_and_unknown_research_jobs_rejected_before_effects(self):
-        for role in ("final", "holdout", "model", "reference"):
-            with self.subTest(role=role):
-                self.execution["inputs"][0]["role"] = role
-                with self.assertRaises(ProTokError):
-                    self.run_job()
-        self.execution["inputs"][0]["role"] = "development"
+    def test_unknown_research_jobs_rejected_before_effects(self):
         self.backend.inspect.return_value["research_outstanding"] = ["another-script"]
         with self.assertRaises(ProTokError):
             self.run_job()
+        self.assertFalse((self.control / "research-jobs/0002").exists())
+
+    def test_untrusted_sources_rejected_without_a_role_label_or_allocation(self):
+        for source in ("final", "holdout", "/untrusted/data"):
+            with self.subTest(source=source):
+                self.execution["inputs"][0]["source"] = source
+                with self.assertRaises(ProTokError):
+                    self.run_job()
+        self.assertEqual(self.fixed.submissions, 0)
         self.assertFalse((self.control / "research-jobs/0002").exists())
 
     def test_execution_identity_binds_script_request_and_input_metadata(self):
@@ -710,9 +711,7 @@ class ResearchBackendTests(unittest.TestCase):
         }
         research._write(formal / "state.json", state)
         execution = copy.deepcopy(self.execution)
-        execution["inputs"] = [
-            {"name": "model", "source": "checkpoint:0001:2000", "role": "development"}
-        ]
+        execution["inputs"] = [{"name": "model", "source": "checkpoint:0001:2000"}]
         inputs = research._inputs(self.root, self.config, execution, "0002")
         self.assertTrue(inputs[0]["path"].endswith("/train/checkpoint-step-2000.pt"))
         state["attempts"][0]["terminal_state"] = "FAILED"

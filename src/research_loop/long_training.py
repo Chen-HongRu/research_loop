@@ -594,9 +594,9 @@ class _LongHarness:
         grant = (token or {}).get("authorization") or {}
         gpu_limit = grant.get("policy", {}).get("gpu_seconds_per_run")
         controller_contract = (
-            "\nThis fixed long-training controller defines contract.timeout_seconds as the Slurm GPU allocation time, exactly "
+            "\nThis fixed long-training controller defines timeout_seconds as the Slurm GPU allocation time, exactly "
             + str(gpu_limit)
-            + " seconds. Queue waiting has no additional wall-clock cap and consumes no GPU allocation time. State this explicitly in the contract command and acceptance criteria. Plan and Review agents retain their own configured call timeouts. STOP or identity changes can cancel the job.\n"
+            + " seconds. Queue waiting has no additional wall-clock cap and consumes no GPU allocation time. State this explicitly in markdown with the allowed action and decision criteria. Plan and Review agents retain their own configured call timeouts. STOP or identity changes can cancel the job.\n"
             if gpu_limit
             else ""
         )
@@ -622,10 +622,7 @@ class _LongHarness:
                 "stop_reason": None,
             }
         elif phase == "execute":
-            if (
-                gpu_limit
-                and context["plan"]["contract"]["timeout_seconds"] != gpu_limit
-            ):
+            if gpu_limit and context["plan"]["timeout_seconds"] != gpu_limit:
                 raise ValueError(
                     "Frozen long Plan timeout differs from Slurm allocation contract"
                 )
@@ -646,9 +643,8 @@ class _LongHarness:
                     if name in schema["required"]:
                         schema["required"].remove(name)
                 if gpu_limit:
-                    contract = schema["properties"]["contract"]
-                    del contract["properties"]["timeout_seconds"]
-                    contract["required"].remove("timeout_seconds")
+                    del schema["properties"]["timeout_seconds"]
+                    schema["required"].remove("timeout_seconds")
                 inner = Path(kwargs["run_dir"]) / "agent"
                 inner.mkdir(exist_ok=True)
                 _write(inner / "context.json", context)
@@ -658,7 +654,7 @@ class _LongHarness:
                     "\nThe controller supplies base_experiment=null, references=[], "
                     "local_evaluation=null. Omit those fields from your output."
                     + (
-                        " The controller supplies contract.timeout_seconds; omit that field too."
+                        " The controller supplies timeout_seconds; omit that field too."
                         if gpu_limit
                         else ""
                     )
@@ -682,12 +678,9 @@ class _LongHarness:
                     "local_evaluation": None,
                 }
                 if gpu_limit:
-                    result["contract"] = {
-                        **result["contract"],
-                        "timeout_seconds": gpu_limit,
-                    }
+                    result["timeout_seconds"] = gpu_limit
             if phase == "plan" and result["decision"] == "investigate":
-                if gpu_limit and result["contract"]["timeout_seconds"] != gpu_limit:
+                if gpu_limit and result["timeout_seconds"] != gpu_limit:
                     raise ValueError(
                         "Long Plan must freeze the Slurm GPU allocation timeout"
                     )

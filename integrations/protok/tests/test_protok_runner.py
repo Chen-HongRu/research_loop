@@ -229,15 +229,42 @@ class ProTokRunnerTests(unittest.TestCase):
             {"status": "paused", "error": "previous reconciled failure"},
         )
 
-        def execute(root, backend):
+        def execute(root, backend, study):
             current = RUNNER.read(self.control / "status.json")
             self.assertEqual(current["status"], "running")
             self.assertEqual(current["phase"], "execute")
             self.assertNotIn("error", current)
             return state
 
-        with patch.object(RUNNER, "_run_one", side_effect=execute):
+        with (
+            patch.object(RUNNER, "Study", return_value=Mock()),
+            patch.object(RUNNER, "_run_one", side_effect=execute),
+        ):
             self.assertEqual(RUNNER.run_one(self.root, self.backend), state)
+
+    def test_old_study_rejected_before_overwriting_runner_evidence(self):
+        from research_loop.core import StudyError
+
+        RUNNER.write(self.root / "study/study.json", {"version": 2})
+        RUNNER.write(self.control / "runner.json", {"status": "retained"})
+        RUNNER.write(self.control / "status.json", {"error": "retained failure"})
+        before = {
+            path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()
+        }
+        with (
+            patch.object(RUNNER, "admission") as admission,
+            self.assertRaisesRegex(StudyError, "Unsupported study format"),
+        ):
+            RUNNER.run_one(self.root, self.backend)
+        admission.assert_not_called()
+        self.assertEqual(
+            {
+                path: path.read_bytes()
+                for path in self.root.rglob("*")
+                if path.is_file()
+            },
+            before,
+        )
 
     def request(self, action="import", iteration="0001"):
         return self.harness.evaluate_request(

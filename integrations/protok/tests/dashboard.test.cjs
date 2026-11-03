@@ -177,6 +177,12 @@ test('A script Plan exposes the research contract as a key output', () => {
   assert.doesNotMatch(rendered,/其他结构化输出/);
 });
 
+test('A minimal Plan shows frozen prose and execution bounds', () => {
+  const rendered=ui.agentCard({phase:'plan',accepted:true,output:{decision:'investigate',markdown:'Measure paired gradients; the mechanism remains unresolved.',timeout_seconds:300,execution:{mode:'script',entrypoint:'research/probe.py',inputs:[{name:'model',source:'teacher'}],outputs:['metrics.json']}}},0);
+  for(const text of ['Measure paired gradients','执行约束','research/probe.py','执行上限（秒）','300']) assert.ok(rendered.includes(text),text);
+  assert.doesNotMatch(rendered,/其他结构化输出/);
+});
+
 test('Structured output is labeled prose, with links for exact code and evidence IDs', () => {
   const rendered = ui.structured({decision:'continue',knowledge_changes:['A result'],references:['0001'],verified:true});
   assert.match(rendered, /<dt>决策<\/dt>/);

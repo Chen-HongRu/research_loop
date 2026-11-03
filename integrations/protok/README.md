@@ -1,5 +1,11 @@
 # ProTok adapter
 
+New Studies use the version-3 Plan: scientific intent is frozen in `markdown`,
+`timeout_seconds` bounds Execute, and optional top-level `execution` supplies
+script inputs/outputs and allocation bounds. Inputs use `name` and trusted `source`,
+without a `role` label. See [research execution](research-execution.md). Existing
+version-1/2 Studies and their deployed runtimes are not migrated by this change.
+
 This directory contains the ProTok task boundary: fixed candidate files,
 evaluation protocol, backend receipts, GPU accounting, ownership lease,
 supervisor and deployment. The reusable `research_loop` package has no ProTok

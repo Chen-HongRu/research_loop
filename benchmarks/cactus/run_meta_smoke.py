@@ -500,8 +500,8 @@ Only development feedback is returned. One pair cannot authorize promotion.
 """
     goal = """Run one policy-only Meta investigation to reduce selection and Review overhead.
 Follow README.md exactly; base_experiment=null, references=[], no local_evaluation.
-Plan input_artifacts only existing baseline README.md/strategy.json with actual Git
-HEAD. Plan action creates the exact allowed policy and submits one request. Set
+Plan markdown names only existing baseline README.md/strategy.json inputs with actual
+Git HEAD. Plan action creates the exact allowed policy and submits one request. Set
 timeout_seconds=2700 for the long evaluation. The future iteration workspace need
 not exist during Plan; use the actual path supplied during Execute.
 Execute must await evaluation-result.json and inspect report. On completed report

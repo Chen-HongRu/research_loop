@@ -18,54 +18,12 @@ from test_protocol import plan
 
 def contract():
     return {
-        "purpose": "mechanism",
-        "question": "Does conditioning control the measured representation?",
-        "explanations": [
-            {
-                "id": "signal",
-                "statement": "Representation uses conditioning",
-                "prediction": "Shuffling changes alignment",
-            },
-            {
-                "id": "shortcut",
-                "statement": "Representation uses a shortcut",
-                "prediction": "Shuffling preserves alignment",
-            },
-        ],
-        "observables": [
-            {
-                "id": "alignment",
-                "definition": "Paired alignment difference",
-                "method": "Matched conditioning shuffle",
-                "inputs": "One frozen checkpoint and held-out samples",
-                "timing": "Before any training",
-                "aggregation": "Paired mean with uncertainty",
-                "cost": "One minute",
-            }
-        ],
-        "interpretation": [
-            {
-                "explanation_id": "signal",
-                "observable_ids": ["alignment"],
-                "supports": "Difference interval above 0.1",
-                "refutes": "Difference interval inside [-0.01, 0.01]",
-            },
-            {
-                "explanation_id": "shortcut",
-                "observable_ids": ["alignment"],
-                "supports": "Difference interval inside [-0.01, 0.01]",
-                "refutes": "Difference interval above 0.1",
-            },
-        ],
-        "inconclusive": "Intervals cross the predefined decision regions",
         "execution": {
             "mode": "script",
             "entrypoint": "research/conditioning.py",
             "gpu": False,
             "time_limit_seconds": 60,
-            "inputs": [
-                {"name": "checkpoint", "source": "frozen-model", "role": "analysis"}
-            ],
+            "inputs": [{"name": "checkpoint", "source": "frozen-model"}],
             "outputs": ["research/alignment.json"],
         },
     }
@@ -81,7 +39,10 @@ class ResearchHarness(RecordedHarness):
     def response(self, phase, context, kwargs):
         result = super().response(phase, context, kwargs)
         if phase == "plan":
-            result["research_contract"] = contract()
+            result.update(contract())
+            result["markdown"] = (
+                "Measure paired alignment on the frozen checkpoint before updates. A difference above 0.1 supports conditioning use; an interval crossing zero is inconclusive. No final data may be used."
+            )
         elif phase == "execute":
             path = Path(kwargs["workspace"]) / "research/alignment.json"
             path.parent.mkdir(exist_ok=True)
@@ -94,7 +55,7 @@ class ResearchHarness(RecordedHarness):
 
 
 class ResearchContractTests(unittest.TestCase):
-    def test_legacy_schemas_are_unchanged_and_only_optin_plan_extends(self):
+    def test_only_optin_plan_extends_with_execution(self):
         original = copy.deepcopy(SCHEMAS)
         for phase in SCHEMAS:
             self.assertIs(stage_schema(phase, {}, SCHEMAS), SCHEMAS[phase])
@@ -102,7 +63,7 @@ class ResearchContractTests(unittest.TestCase):
                 phase, {"research_execution": {"version": 1}}, SCHEMAS
             )
             if phase == "plan":
-                self.assertIn("research_contract", enhanced["required"])
+                self.assertIn("execution", enhanced["required"])
             else:
                 self.assertIs(enhanced, SCHEMAS[phase])
         self.assertEqual(SCHEMAS, original)
@@ -119,44 +80,23 @@ class ResearchContractTests(unittest.TestCase):
         self.assertIsNone(validate_research_execution(None))
         self.assertEqual(validate_research_execution({"version": 1}), {"version": 1})
 
-    def test_mechanism_requires_contract_distinct_explanations_and_references(self):
+    def test_scientific_design_is_prose_not_a_required_taxonomy(self):
         context = {"research_execution": {"version": 1}}
-        value = plan()
-        with self.assertRaises(ValueError):
-            validate_design("plan", value, context)
-        value["research_contract"] = contract()
+        schema = stage_schema("plan", context, SCHEMAS)
+        value = {**plan(), **contract()}
+        value["markdown"] = "Observe the frozen model; the mechanism remains unknown."
+        validate_response("plan", value, schema=schema)
         validate_design("plan", value, context)
-        for mutate in (
-            lambda c: c.update(explanations=[]),
-            lambda c: c["explanations"][1].update(
-                prediction=c["explanations"][0]["prediction"]
-            ),
-            lambda c: c.update(observables=[]),
-            lambda c: c["interpretation"][0].update(observable_ids=["unknown"]),
-            lambda c: c["interpretation"][0].update(explanation_id="unknown"),
-            lambda c: c["interpretation"][0].update(supports=" "),
-        ):
-            invalid = {**value, "research_contract": contract()}
-            mutate(invalid["research_contract"])
-            with self.assertRaises(ValueError):
-                validate_contract(invalid)
-
-    def test_observation_theory_performance_need_evidence_not_competing_explanations(
-        self,
-    ):
-        for purpose in ("performance", "observation", "theory"):
-            value = contract()
-            value.update(purpose=purpose, explanations=[], interpretation=[])
-            validate_contract({"decision": "investigate", "research_contract": value})
+        self.assertNotIn("research_contract", schema["properties"])
+        self.assertNotIn(
+            "role",
+            schema["properties"]["execution"]["anyOf"][0]["properties"]["inputs"][
+                "items"
+            ]["properties"],
+        )
         for decision in ("stop", "reselect"):
-            value = {**plan(), "decision": decision, "research_contract": None}
-            validate_response(
-                "plan",
-                value,
-                schema=stage_schema(
-                    "plan", {"research_execution": {"version": 1}}, SCHEMAS
-                ),
-            )
+            value.update(decision=decision, execution=None)
+            validate_response("plan", value, schema=schema)
             validate_contract(value)
 
     def test_execution_bounds_and_paths(self):
@@ -167,18 +107,12 @@ class ResearchContractTests(unittest.TestCase):
             {"outputs": []},
             {"time_limit_seconds": 61},
             {"time_limit_seconds": 1860},
-            {
-                "inputs": [
-                    {"name": "../checkpoint", "source": "frozen", "role": "analysis"}
-                ]
-            },
+            {"inputs": [{"name": "../checkpoint", "source": "frozen"}]},
         ):
             value = contract()
             value["execution"].update(change)
             with self.assertRaises(ValueError):
-                validate_contract(
-                    {"decision": "investigate", "research_contract": value}
-                )
+                validate_contract({"decision": "investigate", **value})
         value = contract()
         value["execution"].update(
             mode="fixed_evaluation",
@@ -188,7 +122,7 @@ class ResearchContractTests(unittest.TestCase):
             gpu=True,
             time_limit_seconds=1800,
         )
-        validate_contract({"decision": "investigate", "research_contract": value})
+        validate_contract({"decision": "investigate", **value})
         for change in (
             {"gpu": False},
             {"time_limit_seconds": 60},
@@ -197,9 +131,7 @@ class ResearchContractTests(unittest.TestCase):
             mismatch = copy.deepcopy(value)
             mismatch["execution"].update(change)
             with self.assertRaisesRegex(ValueError, "Fixed evaluation"):
-                validate_contract(
-                    {"decision": "investigate", "research_contract": mismatch}
-                )
+                validate_contract({"decision": "investigate", **mismatch})
 
     def test_observation_proposal_does_not_require_competing_mechanisms(self):
         proposal = {
@@ -257,10 +189,19 @@ class ResearchContractTests(unittest.TestCase):
                 )
             )
             execute = read(root / study.status()["execution_ref"])
+            accepted = read(root / study.status()["plan_ref"])
+            for phase in ("execute", "review"):
+                call = next(c for c in harness.calls if c["phase"] == phase)
+                self.assertEqual(
+                    call["context"]["plan"]["markdown"], accepted["markdown"]
+                )
+                self.assertNotIn("research_contract", call["context"]["plan"])
+            self.assertIn("supports conditioning", accepted["markdown"])
             self.assertEqual(execute["measurements"], [])
             self.assertEqual(execute["artifacts"][0]["path"], "research/alignment.json")
             self.assertEqual(
-                read(root / study.status()["plan_ref"])["research_contract"], contract()
+                read(root / study.status()["plan_ref"])["execution"],
+                contract()["execution"],
             )
 
     def test_research_submission_is_exact_and_never_republished(self):
