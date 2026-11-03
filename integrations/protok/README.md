@@ -246,6 +246,14 @@ Inspection and cleanup failures are recorded separately. Final summaries use
 `null` for unavailable accounting; the read-only dashboard retains study records
 and labels unavailable totals. Neither service substitutes zero or stale usage.
 
+Initialization is resumable and publishes only complete records. A retained
+`baseline/` is reused only when it is clean at the acknowledged commit; the clone
+and the seeded Study (`initialize`, historical narrative and routes) are staged
+under `.initializing/` in the run root and renamed into place. A crash before
+the rename leaves `study/` absent, so the next supervised attempt resumes instead
+of failing on an existing baseline. Re-running initialization on a published
+Study returns its status without rewriting routes or research notes.
+
 ## Checks
 
 ```sh

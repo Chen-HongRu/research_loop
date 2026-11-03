@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -1081,6 +1082,103 @@ class ProTokRunnerTests(unittest.TestCase):
         self.assertEqual((control / "ownership.json").read_text(), original_owner)
         self.assertEqual(RUNNER.git(self.project, "status", "--porcelain"), "")
         self.assertEqual(backend.evaluations, 0)
+
+    def initialization_root(self):
+        (self.project / "autoresearch-report.md").write_text(
+            "Historical best: 2.6046197081836633 A; 12 records, 11660 GPU s.\n"
+        )
+        RUNNER.git(self.project, "add", "--", "autoresearch-report.md")
+        RUNNER.git(
+            self.project,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "-m",
+            "Historical report",
+        )
+        best = RUNNER.git(self.project, "rev-parse", "HEAD")
+        root = self.directory / "initialized"
+        control = root / "control"
+        for name in ("ownership.json", "continuation.json"):
+            RUNNER.write(control / name, RUNNER.read(self.control / name))
+        return root, FakeBackend(self.project, control), best
+
+    def test_initialization_resumes_after_a_retained_baseline(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+            # Crash after the clone and before the study was published.
+            shutil.rmtree(root / "study")
+            with patch.object(
+                RUNNER.subprocess, "run", wraps=RUNNER.subprocess.run
+            ) as run:
+                state = RUNNER.init_study(root, backend)
+        clones = [
+            call
+            for call in run.call_args_list
+            if isinstance(call.args[0], list) and "clone" in call.args[0]
+        ]
+        self.assertEqual(state["iteration"], 0)
+        self.assertEqual(clones, [])
+        self.assertEqual(RUNNER.git(root / "baseline", "rev-parse", "HEAD"), best)
+        self.assertEqual(len(RUNNER.read(root / "study/routes/index.json")), 3)
+
+    def test_initialization_rejects_a_retained_baseline_at_another_commit(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+        shutil.rmtree(root / "study")
+        with patch.object(RUNNER, "BEST_COMMIT", "0" * 40):
+            with self.assertRaisesRegex(ProTokError, "Retained baseline"):
+                RUNNER.init_study(root, backend)
+        self.assertFalse((root / "study").exists())
+
+    def test_initialization_preserves_an_unrecognized_study_directory(self):
+        root, backend, best = self.initialization_root()
+        (root / "study").mkdir(parents=True)
+        (root / "study/notes.md").write_text("operator notes")
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            with self.assertRaisesRegex(ProTokError, "without study.json"):
+                RUNNER.init_study(root, backend)
+        self.assertTrue((root / "study/notes.md").exists())
+
+    def test_initialization_rebuilds_an_interrupted_staging_study(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+            shutil.rmtree(root / "study")
+            stale = root / ".initializing/study/routes"
+            stale.mkdir(parents=True)
+            (stale / "stale.json").write_text("{}")
+            state = RUNNER.init_study(root, backend)
+        self.assertEqual(state["status"], "ready")
+        self.assertFalse((root / "study/routes/stale.json").exists())
+        self.assertEqual(len(RUNNER.read(root / "study/routes/index.json")), 3)
+
+    def test_initialization_does_not_rewrite_a_complete_study(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            RUNNER.init_study(root, backend)
+            index = RUNNER.read(root / "study/routes/index.json")
+            index["R0001"]["status"] = "paused"
+            RUNNER.write(root / "study/routes/index.json", index)
+            state = RUNNER.init_study(root, backend)
+        self.assertEqual(state["status"], "ready")
+        self.assertEqual(RUNNER.read(root / "study/routes/index.json"), index)
+
+    def test_initialization_publishes_the_study_only_when_complete(self):
+        root, backend, best = self.initialization_root()
+        with patch.object(RUNNER, "BEST_COMMIT", best):
+            with patch.object(RUNNER, "initialize", side_effect=RuntimeError("crash")):
+                with self.assertRaisesRegex(RuntimeError, "crash"):
+                    RUNNER.init_study(root, backend)
+            self.assertFalse((root / "study").exists())
+            self.assertTrue((root / "baseline").is_dir())
+            state = RUNNER.init_study(root, backend)
+        self.assertEqual(state["iteration"], 0)
+        self.assertTrue((root / "study/study.json").exists())
 
     def test_run_one_corrects_rejected_plan_and_publishes_import(self):
         from research_loop import initialize
