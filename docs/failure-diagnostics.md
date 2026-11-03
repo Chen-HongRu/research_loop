@@ -13,6 +13,12 @@ more compute. Reading logs does not authorize a new submission or a budget chang
 The generic correction loop applies to unaccepted read-only stage responses.
 Pydantic representation errors and designated pure cross-field checks are
 correctable; an arbitrary `ValueError` from a controller or harness is not.
+Before Plan acceptance, ProTok also checks backend input references through the
+existing Plan correction path. Unknown, invalid, future or unavailable sources
+are explicit parameter feedback; corruption of published local evidence or trusted
+metadata remains blocking, including Pydantic errors from that metadata. This
+check performs no remote probe or data scan. Accepted Plans remain frozen.
+
 Execute response rejection does not authorize another Execute call. Adapter
 request preparation may reject explicit action, missing entrypoint, authored-source
 policy or syntax errors before claim. Frozen Plan, protected source and trusted

@@ -14,6 +14,8 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from .correction import (
     ParameterCorrection,
     ParameterError,
@@ -1064,6 +1066,20 @@ class Study:
                     parameter_check(validate_response, phase, result, schema=schema)
                 result = complete_output(phase, context, result)
             self._validate_result(phase, result, context, schema=response_schema)
+            validate_plan = getattr(harness, "validate_plan", None)
+            if (
+                phase == "plan"
+                and not state.get("accepted_calls", {}).get(key)
+                and validate_plan
+            ):
+                # Adapter reference checks may reject explicit parameters. Other
+                # adapter failures propagate; never convert arbitrary ValueError.
+                try:
+                    validate_plan(result, iteration=state["iteration"])
+                except ValidationError as error:
+                    raise StudyError(
+                        "Backend Plan check rejected trusted metadata"
+                    ) from error
             return result
 
         def reject(result, error):

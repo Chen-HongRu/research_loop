@@ -65,6 +65,13 @@ Only this API writes the request, staging file and lock; the controller atomical
 claims it into a retained `evaluation-submission.json`. Repeated calls return the
 same pending, accepted or terminal result. `accepted` means claimed, not GPU-started.
 A crash after claiming needs reconciliation; it never permits a second submission.
+Before Plan acceptance, script input references use the backend's existing local
+resolver. Unknown/unsupported/future or genuinely unavailable references return
+feedback to the same Plan stage within its original task, deadline and budgets.
+Published-chain corruption and trusted identity/accounting/I/O failures block.
+This check reads local control metadata only; remote existence remains a later
+preparation check. Accepted Plans are never replaced by this feedback path.
+
 Before claim, an inconsistent action or a script's missing entrypoint, authored
 source-policy violation or Python syntax error returns `parameter_error` through
 `status`, with retained feedback. The same live Agent may correct those authored

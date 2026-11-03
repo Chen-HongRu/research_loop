@@ -261,6 +261,60 @@ class ParameterCorrectionTests(unittest.TestCase):
                     list(self.root.glob("iterations/*/*/attempt-*/rejection.json"))
                 )
 
+    def test_unaccepted_cached_plan_runs_backend_check_and_existing_correction(self):
+        study, harness = self.study(max_calls=12)
+        study.run()
+        state = study.status()
+        state["accepted_calls"].pop("plan-0")
+        plan = next(call for call in harness.calls if call["phase"] == "plan")
+        before = state["call_count"]
+        checks = []
+
+        def validate_plan(result, *, iteration):
+            checks.append(iteration)
+            if len(checks) == 1:
+                raise ParameterError("Backend input reference unavailable")
+
+        harness.validate_plan = validate_plan
+        study._call(state, "plan", "plan-0", plan["context"], plan["run_dir"].parent)
+        self.assertEqual(checks, [1, 1])
+        self.assertEqual(state["call_count"], before + 1)
+        self.assertTrue((plan["run_dir"] / "rejection.json").exists())
+        successor = self.root / state["calls"]["plan-0"]
+        self.assertEqual(read(successor / "context.json"), plan["context"])
+        self.assertEqual(
+            read(successor / "parameter-budget.json"),
+            read(plan["run_dir"] / "parameter-budget.json"),
+        )
+
+    def test_accepted_plan_does_not_recheck_or_replace_backend_references(self):
+        study, harness = self.study()
+        study.run()
+        state = study.status()
+        plan = next(call for call in harness.calls if call["phase"] == "plan")
+        before = (plan["run_dir"] / "response.json").read_bytes()
+        harness.validate_plan = lambda *a, **kw: self.fail(
+            "Accepted Plan was rechecked"
+        )
+        study._call(state, "plan", "plan-0", plan["context"], plan["run_dir"].parent)
+        self.assertEqual((plan["run_dir"] / "response.json").read_bytes(), before)
+        self.assertEqual(harness.count("plan"), 1)
+
+    def test_backend_plan_validation_error_is_blocking_trusted_failure(self):
+        study, harness = self.study()
+        try:
+            SCHEMAS["critique"].validate({"markdown": 1})
+        except ValidationError as error:
+            failure = error
+        harness.validate_plan = lambda *a, **kw: (_ for _ in ()).throw(failure)
+        with self.assertRaisesRegex(StudyError, "trusted metadata"):
+            study.run()
+        self.assertEqual(harness.count("plan"), 1)
+        self.assertEqual(harness.count("execute"), 0)
+        self.assertFalse(
+            list(self.root.glob("iterations/*/plan/attempt-*/rejection.json"))
+        )
+
     def test_schema_hook_validation_error_is_not_caught(self):
         study, harness = self.study()
         try:

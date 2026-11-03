@@ -50,6 +50,24 @@ The backend must recheck the original deadline before claim/start. Local source
 freezing may retain its own record; durable execution identity must precede
 external staging and submission.
 
+An adapter may implement `validate_plan(result, *, iteration)` to check input
+references before Plan acceptance. The controller invokes this optional hook
+within its existing Plan validation and parameter-correction path, including for
+cached unaccepted replies. Only explicit `ParameterError` requests correction;
+other adapter errors, including Pydantic errors from trusted metadata, block.
+The accepted Plan is not rechecked or replaced by this hook. Every correction
+uses the same task/context, original absolute timeout and existing call/time budget.
+
+ProTok reuses the execution input resolver for this check. Unknown source names,
+invalid checkpoint syntax/steps, future sources and genuinely unavailable or
+unpublished checkpoints return Plan feedback. Published evidence of a script or
+incomplete investigation with no fixed measurements also makes that reference
+unavailable. Corrupt or missing evidence in an already published chain, mismatched
+identity/accounting and I/O failures block. The check reads only local trusted
+configuration/publication/receipt metadata; it neither probes remote inputs nor
+scans data or checkpoints. Remote file existence remains an execution-preparation
+check, so Plan acceptance does not guarantee later input availability.
+
 `prepare` is the dry-run boundary and the actual start path uses its result. It
 may inspect small root manifests and file metadata, including through remote
 read-only commands. It does not stage files, reserve compute or submit jobs.

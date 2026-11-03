@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from integrations.protok import long_training as lane
 from integrations.protok.long_train import progress_record
+from research_loop.correction import ParameterError
 from integrations.protok import research_backend
 from integrations.protok.tests import test_long_training as fixture
 
@@ -276,6 +277,27 @@ class PartialResultTests(unittest.TestCase):
         lane._write(run / "review.json", wrapper)
         with self.assertRaises(lane.ProTokError):
             lane.resolve_checkpoint(root, request["id"], 6000)
+
+        with self.assertRaises(ParameterError):
+            lane.resolve_checkpoint(
+                root, request["id"], 6000, reference_error=ParameterError
+            )
+        lane._write(child / "context.json", {"long_training_observations": tampered})
+        with self.assertRaisesRegex(lane.ProTokError, "frozen Review"):
+            lane.resolve_checkpoint(
+                root, request["id"], 6000, reference_error=ParameterError
+            )
+
+        (run / "review.json").unlink()
+        with self.assertRaisesRegex(lane.ProTokError, "lost its Review wrapper"):
+            lane.resolve_checkpoint(
+                root, request["id"], 6000, reference_error=ParameterError
+            )
+        publication.unlink()
+        with self.assertRaisesRegex(lane.ProTokError, "lost its Review wrapper"):
+            lane.resolve_checkpoint(
+                root, request["id"], 6000, reference_error=ParameterError
+            )
 
     def test_real_performance_process_retains_completed_subtests_when_terminated(self):
         remote = self.tmp / "performance"

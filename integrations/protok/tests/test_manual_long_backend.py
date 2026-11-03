@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from integrations.protok import long_training as lane
+from research_loop.correction import ParameterError
 from integrations.protok.backend import CANDIDATE_FILES, ProTokBackend
 from integrations.protok.tests.test_long_training import (
     Transport,
@@ -433,6 +434,13 @@ class ManualLongBackendTests(unittest.TestCase):
             lane.resolve_checkpoint(self.root, self.req["id"], 2000)
         review["observation_reviews"][0]["verified"] = True
         lane._write(self.child / "review-response.json", review)
+        published = lane._read(publication)
+        publication.unlink()
+        with self.assertRaisesRegex(lane.ProTokError, "lost its child publication"):
+            lane.resolve_checkpoint(
+                self.root, self.req["id"], 2000, reference_error=ParameterError
+            )
+        lane._write(publication, published)
         lane._write(
             publication.parent / "iteration.json", metadata | {"status": "executed"}
         )

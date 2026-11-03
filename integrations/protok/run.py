@@ -808,6 +808,25 @@ class ProTokHarness:
             return with_fields(schema, execution=ProTokPlanExecution | None)
         return schema
 
+    def validate_plan(self, result, *, iteration):
+        execution = result.get("execution")
+        if (
+            result["decision"] != "investigate"
+            or not execution
+            or execution["mode"] != "script"
+            or not execution["inputs"]
+        ):
+            return
+        from integrations.protok.research_backend import _inputs
+
+        _inputs(
+            self.root,
+            read(self.backend.project / "autoresearch-run.json"),
+            execution,
+            f"{iteration:04d}",
+            reference_error=ParameterError,
+        )
+
     def admit_iteration(self, iteration):
         from integrations.protok.round_admission import admit
 

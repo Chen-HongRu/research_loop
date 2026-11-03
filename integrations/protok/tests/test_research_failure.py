@@ -100,6 +100,81 @@ class ResearchFailureTests(unittest.TestCase):
             )
         )
 
+    def plan_sources(self, sources):
+        RUNNER.write(
+            self.project / "autoresearch-run.json", {"cache_root": "/trusted/cache"}
+        )
+        original = self.delegate.response
+
+        def response(phase, context, kwargs):
+            result = original(phase, context, kwargs)
+            if phase == "plan":
+                source = sources.pop(0) if len(sources) > 1 else sources[0]
+                result["execution"]["inputs"] = [{"name": "cache", "source": source}]
+            return result
+
+        self.delegate.response = response
+
+    def test_invalid_input_corrects_plan_before_one_execute_and_review(self):
+        self.initialize()
+        self.plan_sources(["hidden_cach", "hidden_cache"])
+        self.initial_calls = self.study.status()["call_count"]
+        with patch(
+            "integrations.protok.research_backend._input_metadata",
+            side_effect=AssertionError("Plan must not probe remote inputs"),
+        ):
+            state = self.run_one()
+        self.assert_reviewed(state)
+        plans = [call for call in self.delegate.calls if call["phase"] == "plan"]
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(plans[0]["context"], plans[1]["context"])
+        rejected = RUNNER.read(plans[0]["run_dir"] / "rejection.json")
+        self.assertIn("Unknown research input", rejected["errors"][0]["message"])
+        self.assertEqual(
+            RUNNER.read(plans[1]["run_dir"] / "parameter-budget.json")["deadline"],
+            RUNNER.read(plans[0]["run_dir"] / "parameter-budget.json")["deadline"],
+        )
+        accepted = RUNNER.read(self.study.root / state["plan_ref"])
+        self.assertEqual(accepted["execution"]["inputs"][0]["source"], "hidden_cache")
+        self.assertEqual(self.delegate.count("execute"), 1)
+        self.assertEqual(self.delegate.count("review"), 1)
+        self.assertEqual(
+            state["call_count"],
+            self.initial_calls + len(self.delegate.calls),
+        )
+
+    def test_invalid_input_exhausts_original_plan_budget_without_execute(self):
+        self.initialize()
+        self.plan_sources(["hidden_cach"])
+        config = RUNNER.read(self.study.root / "study.json")
+        config["max_calls"] = self.study.status()["call_count"] + 12
+        RUNNER.write(self.study.root / "study.json", config)
+        with self.assertRaisesRegex(
+            RUNNER.ProTokError, "no published independent Review"
+        ):
+            self.run_one()
+        state = self.study.status()
+        self.assertEqual(state["stop_reason"], "call_budget")
+        self.assertEqual(state["call_count"], config["max_calls"])
+        self.assertGreater(self.delegate.count("plan"), 1)
+        self.assertEqual(self.delegate.count("execute"), 0)
+        self.assertEqual(self.allocations, 0)
+        self.assertFalse((self.control / "research-sources").exists())
+
+    def test_trusted_plan_input_failure_blocks_without_parameter_retry(self):
+        self.initialize()
+        self.plan_sources(["teacher"])
+        RUNNER.write(self.project / "autoresearch-run.json", {})
+        with self.assertRaises(KeyError):
+            self.run_one()
+        self.assertEqual(self.delegate.count("plan"), 1)
+        self.assertEqual(self.delegate.count("execute"), 0)
+        self.assertEqual(self.allocations, 0)
+        plan_call = next(
+            call for call in self.delegate.calls if call["phase"] == "plan"
+        )
+        self.assertFalse((plan_call["run_dir"] / "rejection.json").exists())
+
     def script(self, backend, *, root, iteration, **kwargs):
         self.allocations += 1
         directory = root / "control/research-jobs" / iteration

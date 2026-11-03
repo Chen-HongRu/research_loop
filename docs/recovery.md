@@ -41,6 +41,12 @@ when an adapter supplies a per-call allowance. Rejected responses and bounded,
 redacted field errors are retained in `rejection.json`. A successor's `feedback.json`
 preserves the correction link before it becomes active, including across interruption.
 
+An optional backend `validate_plan` hook checks input references before acceptance
+through this same correction path, including cached unaccepted replies. Explicit
+reference `ParameterError` is correctable; trusted-metadata Pydantic errors and
+other infrastructure failures block. Accepted Plans remain frozen. The ProTok
+hook reuses its local execution resolver without remote probes or data reads.
+
 An adapter can explicitly certify a settled candidate-code rejection with
 `RecoverableExecutionError(details=...)`. The controller retains that failure and
 enters the adapter's `recover_execution` handler. Repair Agent calls go through

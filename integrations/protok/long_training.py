@@ -1111,10 +1111,20 @@ def execute(
         return _envelope(request, workspace / "result.json", result)
 
 
-def resolve_checkpoint(root, run_id, step):
+def _publication_claimed(run):
+    """Read only local witnesses that a long checkpoint's Review was published."""
+    run = Path(run)
+    child = run / "study/iterations/0001"
+    if (run / "review.json").exists() or (child / "publication.json").exists():
+        return True
+    metadata = child / "iteration.json"
+    return metadata.exists() and _read(metadata).get("status") == "reviewed"
+
+
+def resolve_checkpoint(root, run_id, step, *, reference_error=ProTokError):
     """Resolve only independently reviewed complete checkpoint observations."""
     if type(step) is not int or step not in STEPS:
-        raise ProTokError("Unsupported long checkpoint step")
+        raise reference_error("Unsupported long checkpoint step")
     run = _directory(root, run_id)
     allocation = Path(root) / "control" / "long-training-jobs" / run_id
     manual_allocation = Path(root) / "control/manual-training-jobs" / run_id
@@ -1148,11 +1158,19 @@ def resolve_checkpoint(root, run_id, step):
         _validate_request(request)
         wrapper = None
     else:
+        if not (run / "review.json").exists():
+            if _publication_claimed(run):
+                raise ProTokError("Published long checkpoint lost its Review wrapper")
+            raise reference_error("Long checkpoint has no published Review")
         job = _read(allocation / "job.json")
         wrapper = _read(run / "review.json")
     receipt = _retained_result(job, _read(allocation / "receipt.json"))
     child = run / "study"
     publication_path = child / "iterations/0001/publication.json"
+    if manual and not publication_path.exists():
+        if _publication_claimed(run):
+            raise ProTokError("Reviewed long checkpoint lost its child publication")
+        raise reference_error("Long checkpoint has no published child Review")
     if wrapper is not None and wrapper.get("publication_ref") != str(publication_path):
         raise ProTokError("Long Review publication does not belong to its child Study")
     publication = _read(publication_path)
@@ -1186,23 +1204,21 @@ def resolve_checkpoint(root, run_id, step):
     ):
         raise ProTokError("Long checkpoint needs its independently published Review")
     reviews = review.get("observation_reviews")
+    unavailable = None
     if manual or reviews is not None or receipt["status"] != "completed":
-        if (
-            not isinstance(reviews, list)
-            or len(
-                [
-                    row
-                    for row in reviews
-                    if row.get("step") == step
-                    and row.get("valid") is True
-                    and row.get("verified") is True
-                ]
-            )
-            != 1
-        ):
-            raise ProTokError(
-                "Checkpoint observation has no independent accepting Review"
-            )
+        if not isinstance(reviews, list):
+            raise ProTokError("Checkpoint observation Review is malformed")
+        accepting = [
+            row
+            for row in reviews
+            if row.get("step") == step
+            and row.get("valid") is True
+            and row.get("verified") is True
+        ]
+        if not accepting:
+            unavailable = "Checkpoint observation has no independent accepting Review"
+        if len(accepting) > 1:
+            raise ProTokError("Checkpoint observation Review is ambiguous")
     if reviews is not None:
         frozen_context = child / Path(state["review_ref"]).with_name("context.json")
         if _read(frozen_context).get("long_training_observations") != receipt:
@@ -1228,15 +1244,17 @@ def resolve_checkpoint(root, run_id, step):
     if receipt["status"] != "completed":
         if execute.get("outcome") != "incomplete" or execute.get("measurements"):
             raise ProTokError("Partial observations cannot supply a complete endpoint")
-    elif reviews is None and not any(
-        row.get("candidate_id") == candidate_id
-        and row.get("valid") is True
-        and row.get("verified") is True
-        for row in review.get("candidate_reviews", [])
-    ):
-        raise ProTokError(
-            "Completed long checkpoint needs independent accepting Review"
-        )
+    elif reviews is None:
+        candidates = review.get("candidate_reviews")
+        if not isinstance(candidates, list):
+            raise ProTokError("Long candidate Review is malformed")
+        if not any(
+            row.get("candidate_id") == candidate_id
+            and row.get("valid") is True
+            and row.get("verified") is True
+            for row in candidates
+        ):
+            unavailable = "Completed long checkpoint needs independent accepting Review"
     measurements = [
         row
         for row in execute.get("measurements", [])
@@ -1260,9 +1278,13 @@ def resolve_checkpoint(root, run_id, step):
             or len(measurement["metrics"]) != len(expected)
         ):
             raise ProTokError("Reviewed long output differs from allocation evidence")
+    if unavailable is not None:
+        raise reference_error(unavailable)
     point = next((row for row in receipt["curve"] if row["step"] == step), None)
     if point is None:
-        raise ProTokError("Checkpoint not present in accepted full-validation curve")
+        raise reference_error(
+            "Checkpoint not present in accepted full-validation curve"
+        )
     return {
         "source": f"long-checkpoint:{run_id}:{step}",
         "path": point["checkpoint_path"],

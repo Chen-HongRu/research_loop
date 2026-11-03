@@ -20,6 +20,13 @@ that model. Budget, source identity, external effects and accounting remain
 controller checks. CLI harnesses, Study version and the field set are unchanged
 by the Pydantic migration.
 
+Before accepting a fresh or cached unaccepted Plan, the optional `validate_plan`
+hook reuses ProTok's local execution input resolver. Explicit unknown, invalid or
+unavailable references use existing Plan correction within the original task,
+deadline and budgets. Trusted publication/receipt corruption blocks. The check
+reads local metadata only; remote input existence remains execution preparation.
+Accepted Plans are not rechecked or replaced by the hook.
+
 | Retained field | Concrete consumer |
 | --- | --- |
 | `decision`, `stop_reason` | Core chooses execution, reselection or stop and records the reason. |
@@ -31,7 +38,7 @@ by the Pydantic migration.
 | `timeout_seconds` | Core bounds Execute; fixed long-training controllers supply their authorized allocation value. |
 | `execution.mode`, `entrypoint` | Adapter routes fixed evaluation versus an authored script and selects its entrypoint. |
 | `execution.gpu`, `time_limit_seconds` | Generic declaration and ProTok admission enforce the supported allocation profile and limit. |
-| `execution.inputs[].name`, `.source` | Adapter resolves trusted inputs, mounts their named paths and records provenance. |
+| `execution.inputs[].name`, `.source` | Adapter validates references before Plan acceptance, then resolves trusted inputs, mounts named paths and records provenance during preparation. |
 | `execution.outputs` | Adapter collects only declared bounded output files. |
 
 The removed `contract` prose fields and research purpose/question/explanations/

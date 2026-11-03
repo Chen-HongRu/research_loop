@@ -19,6 +19,20 @@ types; it separately checks the current policy, resolves trusted sources and
 settles allocations. Generic Plan limits are whole minutes; the native backend
 retains its scheduler rounding for internal requests.
 
+Before accepting Plan, the controller checks script input references with the
+same local resolver used during execution. Unknown source names, unsupported
+checkpoint syntax/steps, future sources, unpublished references and investigations
+without a fixed checkpoint return explicit errors to the same Plan stage through
+its existing correction path. Cached unaccepted replies are checked too. Every
+correction consumes the original call/time budget and retains the original task,
+context and absolute timeout; an accepted Plan cannot be replaced this way.
+
+This check reads local configuration and publication/receipt metadata only.
+Malformed or missing committed evidence, identity/accounting inconsistencies and
+I/O failures block. It does not contact the remote host or inspect data/checkpoint
+contents. A valid reference may still fail the later remote existence/metadata
+check during execution preparation.
+
 The frozen top-level `execution` selects:
 
 * `fixed_evaluation`: the existing protected scorer and official RMSD Frontier.

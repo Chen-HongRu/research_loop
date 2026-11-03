@@ -205,46 +205,99 @@ def _source_identity(source, config):
     ).hexdigest(), sorted(names)
 
 
-def _inputs(root, config, execution, iteration):
+def _input_reference(source, iteration, error_type):
+    """Parse the references supported by this backend for Plan and execution."""
+    if source in {"hidden_cache", "targets", "teacher"}:
+        return source, None, None
+    match = re.fullmatch(r"checkpoint:([0-9]{4,}):([0-9]+)", source)
+    if match:
+        source_id, step = match.groups()
+        if int(step) not in {0, 1000, 2000}:
+            raise error_type("Checkpoint save step must be 0, 1000 or 2000")
+        if int(source_id) >= int(iteration):
+            raise error_type(
+                "Checkpoint inputs require an earlier published Study iteration"
+            )
+        return "checkpoint", source_id, int(step)
+    match = re.fullmatch(r"long-checkpoint:(L[a-f0-9]{16}):([0-9]+)", source)
+    if match:
+        from .long_training import STEPS
+
+        run_id, step = match.groups()
+        if int(step) not in STEPS:
+            raise error_type("Unsupported reviewed long checkpoint step")
+        return "long-checkpoint", run_id, int(step)
+    raise error_type("Unknown research input source or invalid checkpoint reference")
+
+
+def _inputs(root, config, execution, iteration, *, reference_error=ProTokError):
     result = []
     for item in execution["inputs"]:
         source = item["source"]
+        kind, reference, step = _input_reference(source, iteration, reference_error)
         provenance = {"source": source}
-        if source in {"hidden_cache", "targets"}:
+        if kind in {"hidden_cache", "targets"}:
             path = config["cache_root" if source == "hidden_cache" else "target_root"]
-        elif isinstance(source, str) and source.startswith("long-checkpoint:"):
-            match = re.fullmatch(r"long-checkpoint:(L[a-f0-9]{16}):([0-9]+)", source)
-            if not match:
-                raise ProTokError("Invalid reviewed long checkpoint reference")
-            from integrations.protok.long_training import resolve_checkpoint
+        elif kind == "long-checkpoint":
+            from integrations.protok.long_training import (
+                _publication_claimed,
+                resolve_checkpoint,
+            )
 
-            run_id, step = match.groups()
-            request = _read(root / "study/long-runs" / run_id / "request.json")
+            run_id = reference
+            request_path = root / "study/long-runs" / run_id / "request.json"
+            if not request_path.exists() and not _publication_claimed(
+                request_path.parent
+            ):
+                raise reference_error("Long checkpoint source is unavailable")
+            request = _read(request_path)
             if int(request["source_iteration"]) >= int(iteration):
-                raise ProTokError(
+                raise reference_error(
                     "Long checkpoint source must precede this investigation"
                 )
-            resolved = resolve_checkpoint(root, run_id, int(step))
+            resolved = resolve_checkpoint(
+                root, run_id, step, reference_error=reference_error
+            )
             path = resolved["path"]
             provenance.update(resolved)
-        elif source == "teacher":
+        elif kind == "teacher":
             path = _read(Path(config["template"]) / config["fixed_config"])[
                 "teacher_checkpoint"
             ]
         else:
-            match = re.fullmatch(r"checkpoint:([0-9]{4,}):([0-9]+)", source)
-            if not match or int(match[1]) >= int(iteration):
-                raise ProTokError(
-                    "Checkpoint inputs require an earlier published Study iteration"
-                )
-            source_id, step = match.groups()
+            source_id = reference
             folder = root / "study/iterations" / source_id
-            metadata = _read(folder / "iteration.json")
+            publication_path = folder / "publication.json"
+            metadata_path = folder / "iteration.json"
+            if not publication_path.exists():
+                if (
+                    metadata_path.exists()
+                    and _read(metadata_path).get("status") == "reviewed"
+                ):
+                    raise ProTokError("Reviewed checkpoint source lost its publication")
+                raise reference_error("Checkpoint source has no published Review")
+            metadata, publication = _read(metadata_path), _read(publication_path)
+            if metadata["status"] != "reviewed" or publication["metadata"] != metadata:
+                raise ProTokError(
+                    "Published checkpoint metadata differs from its Review"
+                )
+            execution_ref = Path(publication["state_after"]["execution_ref"])
             if (
-                metadata["status"] != "reviewed"
-                or not (folder / "publication.json").is_file()
+                execution_ref.is_absolute()
+                or ".." in execution_ref.parts
+                or execution_ref.parts[:2] != ("iterations", source_id)
             ):
-                raise ProTokError("Checkpoint source has no published Review")
+                raise ProTokError(
+                    "Published checkpoint Execute reference leaves its iteration"
+                )
+            published = _read(root / "study" / execution_ref)
+            from research_loop.protocol import SCHEMAS
+
+            SCHEMAS["execute"].validate(published)
+            if not published["measurements"]:
+                raise reference_error(
+                    "Published investigation has no fixed-evaluation checkpoint"
+                )
             from integrations.protok.run import job_path
 
             job = job_path(root, source_id)
@@ -281,7 +334,6 @@ def _inputs(root, config, execution, iteration):
                 or not re.fullmatch(
                     r"[1-9][0-9]*", str(attempt.get("owned_job_id", ""))
                 )
-                or int(step) not in {0, 1000, 2000}
             ):
                 raise ProTokError(
                     "Checkpoint allocation or requested save step is unverified"
