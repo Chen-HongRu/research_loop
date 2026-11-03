@@ -6,6 +6,20 @@ evidence. Text should specify the question, allowed action and fixed conditions,
 input paths/versions, measurement or derivation, evidence and interpretation as
 needed. Scientific correctness is judged from evidence, not string completeness.
 
+Pydantic v2 models define the structured fields. `OutputSchema` projects each
+model into the existing CLI JSON interface and uses that model for strict local
+validation. Dynamic choices and controller-owned omissions derive models before
+schema generation; there is no schema-to-model reconstruction. Validation returns
+the original JSON dictionary, retaining its numeric representation and receipts.
+Cross-field Python validators are local checks, not promises that every condition
+can be encoded in the model-facing JSON Schema.
+
+ProTok supplies its execution-model constraints through the controller's
+`response_schema` hook. Both initial calls and cached completion acceptance use
+that model. Budget, source identity, external effects and accounting remain
+controller checks. CLI harnesses, Study version and the field set are unchanged
+by the Pydantic migration.
+
 | Retained field | Concrete consumer |
 | --- | --- |
 | `decision`, `stop_reason` | Core chooses execution, reselection or stop and records the reason. |

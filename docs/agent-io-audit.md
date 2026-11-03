@@ -2,6 +2,14 @@
 
 Scope: tracked research-loop source and benchmark/integration wrappers. Schemas constrain representation; scientific truth and successful execution still require independent evidence and Review. Raw CLI receipts remain evidence, not controller authority.
 
+Stage, research-execution, Scout, explanation and reduced author-report structures
+come from Pydantic v2 models. The same models generate CLI schemas and validate
+local responses, including cached acceptance. Extra keys, coercion, nonfinite
+numbers and boolean/integer choice confusion are rejected. Context-bound choices
+and field omission use derived models; no recursive handwritten schema validator
+or reverse compilation of saved schemas remains. External effects, exact source
+identity, budgets, accounting and scientific judgments remain separate checks.
+
 | Role / entry point | Actual inputs | Model output / schema | Controller-owned fields and checks |
 | --- | --- | --- | --- |
 | Advocate / proposal: core.Study._select → _call | Frozen goal/research/evaluation/frontiers/routes; sampled route; opt-in research/scout evidence | Question, action, base/reference choices and research design; protocol.context_schema + exploration.agent_schema | For an existing sampled route, controller supplies route_id; new opportunities retain the authored new/resume choice. Controller supplies research_design.kind from allocation; raw author receipt omits it. New route IDs, sampling, iteration IDs, workspace/checkpoint refs and publication are controller-owned |

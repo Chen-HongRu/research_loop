@@ -15,70 +15,54 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import urlsplit
 
+from pydantic import Field
+
 from .harness import CodexHarness, HarnessConfig
-from .protocol import _validate
-
-
-def _object(**fields):
-    return {
-        "type": "object",
-        "properties": fields,
-        "required": list(fields),
-        "additionalProperties": False,
-    }
+from .schema import OutputModel, OutputSchema, choices
 
 
 REPORT_MAX_BYTES = 131072
-TEXT = {"type": "string", "maxLength": 2000}
-TEXTS = {"type": "array", "maxItems": 8, "items": TEXT}
-SCOUT_SCHEMA = _object(
-    summary=TEXT,
-    search_status={"type": "string", "enum": ["completed", "partial", "unavailable"]},
-    search_notes=TEXT,
-    sources={
-        "type": "array",
-        "maxItems": 20,
-        "items": _object(
-            id=TEXT,
-            title=TEXT,
-            url=TEXT,
-            kind={
-                "type": "string",
-                "enum": ["paper", "official_code", "community_code", "prior_record"],
-            },
-            accessed={
-                "type": "string",
-                "enum": ["full_text", "abstract", "code", "context_only"],
-            },
-        ),
-    },
-    insights={
-        "type": "array",
-        "maxItems": 3,
-        "items": _object(
-            title=TEXT,
-            kind={
-                "type": "string",
-                "enum": ["explanation", "challenge", "new_direction", "synthesis"],
-            },
-            question=TEXT,
-            local_observations=TEXTS,
-            external_findings=TEXTS,
-            interpretation=TEXT,
-            applicability=TEXT,
-            relation_to_goal=TEXT,
-            implications=TEXT,
-            source_ids=TEXTS,
-            follow_up=TEXT,
-            execution_conditions=TEXTS,
-            scope_requirements=TEXTS,
-        ),
-    },
-    open_questions=TEXTS,
-)
+Text = Annotated[str, Field(max_length=2000)]
+Texts = Annotated[list[Text], Field(max_length=8)]
 
+
+class ScoutSource(OutputModel):
+    id: Text
+    title: Text
+    url: Text
+    kind: choices("paper", "official_code", "community_code", "prior_record")
+    accessed: choices("full_text", "abstract", "code", "context_only")
+
+
+class ScoutInsight(OutputModel):
+    title: Text
+    kind: choices("explanation", "challenge", "new_direction", "synthesis")
+    question: Text
+    local_observations: Texts
+    external_findings: Texts
+    interpretation: Text
+    applicability: Text
+    relation_to_goal: Text
+    implications: Text
+    source_ids: Texts
+    follow_up: Text
+    execution_conditions: Texts
+    scope_requirements: Texts
+
+
+class ScoutReport(OutputModel):
+    summary: Text
+    search_status: choices("completed", "partial", "unavailable")
+    search_notes: Text
+    sources: Annotated[list[ScoutSource], Field(max_length=20)]
+    insights: Annotated[list[ScoutInsight], Field(max_length=3)]
+    open_questions: Texts
+
+
+SCOUT_SCHEMA = OutputSchema(ScoutReport)
 
 SCOUT_PROMPT = """You are the independent, read-only external researcher for this study.
 Return one JSON object matching the schema, in the research goal's language.
@@ -334,19 +318,7 @@ def snapshot(root: Path, state: dict, *, source_files=()) -> dict:
 
 
 def validate_result(result, *, local_evidence=()):
-    _validate(SCOUT_SCHEMA, result, "scout")
-
-    def bounded_strings(value):
-        if isinstance(value, str) and len(value) > 2000:
-            raise ValueError("Scout strings exceed 2000 characters")
-        if isinstance(value, dict):
-            for item in value.values():
-                bounded_strings(item)
-        elif isinstance(value, list):
-            for item in value:
-                bounded_strings(item)
-
-    bounded_strings(result)
+    SCOUT_SCHEMA.validate(result)
     source_ids = set()
     local_evidence = set(local_evidence)
     for source in result["sources"]:

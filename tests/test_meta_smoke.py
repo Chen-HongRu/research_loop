@@ -211,7 +211,7 @@ class MetaSmokeTests(unittest.TestCase):
                 self.assertEqual(study.status()["call_count"], 6)
                 self.assertEqual(state["status"], "needs_attention")
                 self.assertIn(
-                    "review.candidate_reviews",
+                    "candidate_reviews",
                     state["error"],
                 )
                 self.assertFalse(
@@ -222,13 +222,30 @@ class MetaSmokeTests(unittest.TestCase):
         study, harness = self.recovery_fixture(malformed_reviews=2)
         with self.assertRaisesRegex(
             (StudyError, ValueError),
-            "review.candidate_reviews|Candidate reviews must match unique current measurements exactly",
+            "candidate_reviews|Candidate reviews must match unique current measurements exactly",
         ):
             INNER.run_review_recovery(study)
         self.assertEqual(harness.count("execute"), 1)
         self.assertEqual(harness.count("review"), 2)
         self.assertEqual(study.status()["call_count"], 7)
         self.assertFalse((study.root / "iterations/0001/publication.json").exists())
+
+    def test_review_recovery_does_not_retry_additional_model_errors(self):
+        study, harness = self.recovery_fixture()
+        response = harness.response
+
+        def additional_error(phase, context, kwargs):
+            result = response(phase, context, kwargs)
+            if phase == "review":
+                result["route_status"] = "invalid"
+            return result
+
+        harness.response = additional_error
+        with self.assertRaises(ValueError):
+            INNER.run_review_recovery(study)
+        self.assertEqual(harness.count("execute"), 1)
+        self.assertEqual(harness.count("review"), 1)
+        self.assertEqual(study.status()["call_count"], 6)
 
     def outer_fixture(self):
         temporary = tempfile.TemporaryDirectory()

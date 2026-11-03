@@ -91,15 +91,23 @@ class UsageBudgetHarness:
 def run_review_recovery(study):
     """One structural, read-only retry; never repeat Execute or unknown effects."""
     from research_loop.core import StudyError
+    from pydantic import ValidationError
 
     try:
         return study.run(iterations=1)
     except (StudyError, ValueError) as error:
         structural_error = (
-            "Candidate reviews must match unique current measurements exactly"
-            in str(error)
-            or str(error) == "review.candidate_reviews: exceeds maximum item count"
+            str(error)
+            == "Candidate reviews must match unique current measurements exactly"
         )
+        if isinstance(error, ValidationError):
+            details = error.errors(include_input=False)
+            structural_error = (
+                len(details) == 1
+                and details[0]["loc"] == ("candidate_reviews",)
+                and details[0]["type"] == "too_long"
+                and details[0].get("ctx", {}).get("max_length") == 0
+            )
         state = study.status()
         if (
             state.get("phase") == "review"

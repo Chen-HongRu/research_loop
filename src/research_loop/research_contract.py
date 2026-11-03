@@ -4,17 +4,79 @@ import copy
 from pathlib import PurePosixPath
 import re
 
-from .protocol import BOOLEAN, TEXT, _array, _enum, _nullable, _object, _validate
+from typing import Annotated, Literal
+
+from pydantic import Field, model_validator
+
+from .schema import OutputModel, OutputSchema, with_fields
 
 
-EXECUTION = _object(
-    mode=_enum("fixed_evaluation", "script"),
-    entrypoint=_nullable(TEXT),
-    gpu=BOOLEAN,
-    time_limit_seconds={"type": "integer"},
-    inputs=_array(_object(name=TEXT, source=TEXT)),
-    outputs=_array(TEXT),
-)
+class ResearchInput(OutputModel):
+    name: str
+    source: str
+
+
+class ExecutionEnvelope(OutputModel):
+    mode: Literal["fixed_evaluation", "script"]
+    entrypoint: str | None
+    gpu: bool
+    time_limit_seconds: int
+    inputs: list[ResearchInput]
+    outputs: list[str]
+
+
+class ResearchExecution(ExecutionEnvelope):
+    time_limit_seconds: Annotated[int, Field(ge=60, le=1800, multiple_of=60)]
+
+    @model_validator(mode="after")
+    def executable_bounds(self):
+        seconds = self.time_limit_seconds
+        names = []
+        for item in self.inputs:
+            if (
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", item.name)
+                or ".." in item.name
+            ):
+                raise ValueError(
+                    "Research input name must be a simple name without traversal"
+                )
+            if not item.source.strip():
+                raise ValueError("Empty research input source")
+            names.append(item.name)
+        if len(set(names)) != len(names):
+            raise ValueError("Duplicate research input name")
+        for output in self.outputs:
+            _relative_file(output)
+        if len(set(self.outputs)) != len(self.outputs):
+            raise ValueError("Duplicate research output")
+        if self.mode == "script":
+            if self.entrypoint is None:
+                raise ValueError("Script research needs an entrypoint")
+            path = _relative_file(self.entrypoint)
+            if (
+                len(path.parts) < 2
+                or path.parts[0] != "research"
+                or path.suffix != ".py"
+            ):
+                raise ValueError(
+                    "Script entrypoint must be a Python file under research/"
+                )
+            if not self.outputs:
+                raise ValueError("Script research needs declared output evidence files")
+        elif (
+            self.entrypoint is not None
+            or self.gpu is not True
+            or seconds != 1800
+            or self.inputs
+            or self.outputs
+        ):
+            raise ValueError(
+                "Fixed evaluation uses its original GPU/1800s profile and no script inputs/outputs"
+            )
+        return self
+
+
+EXECUTION = OutputSchema(ResearchExecution)
 
 
 def validate_research_execution(value):
@@ -31,15 +93,7 @@ def validate_research_execution(value):
 
 
 def plan_schema(schema):
-    result = copy.deepcopy(schema)
-    result["properties"]["execution"] = _nullable(EXECUTION)
-    result["required"].append("execution")
-    return result
-
-
-def _text(value, name):
-    if not value.strip():
-        raise ValueError(f"Empty research contract {name}")
+    return with_fields(schema, execution=ResearchExecution | None)
 
 
 def _relative_file(value):
@@ -55,52 +109,9 @@ def _relative_file(value):
 
 
 def validate_contract(plan):
-    """Check executable paths and resource bounds, not scientific meaning."""
-    if plan["decision"] != "investigate":
-        return
-    execution = plan.get("execution")
-    _validate(EXECUTION, execution, "execution")
-    seconds = execution["time_limit_seconds"]
-    if not 1 <= seconds <= 1800 or seconds % 60:
-        raise ValueError(
-            "Research time limit must be whole minutes within 1..1800 seconds"
-        )
-    names = []
-    for item in execution["inputs"]:
-        if (
-            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", item["name"])
-            or ".." in item["name"]
-        ):
-            raise ValueError(
-                "Research input name must be a simple name without traversal"
-            )
-        names.append(item["name"])
-        _text(item["source"], "input source")
-    if len(set(names)) != len(names):
-        raise ValueError("Duplicate research input name")
-    for output in execution["outputs"]:
-        _relative_file(output)
-    if len(set(execution["outputs"])) != len(execution["outputs"]):
-        raise ValueError("Duplicate research output")
-    if execution["mode"] == "script":
-        entrypoint = execution["entrypoint"]
-        if entrypoint is None:
-            raise ValueError("Script research needs an entrypoint")
-        path = _relative_file(entrypoint)
-        if len(path.parts) < 2 or path.parts[0] != "research" or path.suffix != ".py":
-            raise ValueError("Script entrypoint must be a Python file under research/")
-        if not execution["outputs"]:
-            raise ValueError("Script research needs declared output evidence files")
-    elif (
-        execution["entrypoint"] is not None
-        or execution["gpu"] is not True
-        or seconds != 1800
-        or execution["inputs"]
-        or execution["outputs"]
-    ):
-        raise ValueError(
-            "Fixed evaluation uses its original GPU/1800s profile and no script inputs/outputs"
-        )
+    """Validate the same executable model emitted to the research agent."""
+    if plan["decision"] == "investigate":
+        EXECUTION.validate(plan.get("execution"))
 
 
 def guidance(phase):

@@ -779,6 +779,14 @@ class ProTokHarness:
         self.recoverable_failure = None
         self.pipeline_diagnostics = None
 
+    def response_schema(self, phase, context, schema):
+        if phase == "plan" and "execution" in schema["properties"]:
+            from research_loop.schema import with_fields
+            from integrations.protok.research_backend import ProTokPlanExecution
+
+            return with_fields(schema, execution=ProTokPlanExecution | None)
+        return schema
+
     def admit_iteration(self, iteration):
         from integrations.protok.round_admission import admit
 

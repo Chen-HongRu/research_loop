@@ -1161,11 +1161,14 @@ class Study:
         return result
 
     def _response_schema(self, phase, context):
-        return context_schema(
+        schema = context_schema(
             phase,
             context,
             long_training_schema(phase, context, stage_schema(phase, context, SCHEMAS)),
         )
+
+        adapter_schema = getattr(self.harness, "response_schema", None)
+        return adapter_schema(phase, context, schema) if adapter_schema else schema
 
     def _agent_schema(self, phase, context):
         return agent_schema(phase, context, self._response_schema(phase, context))

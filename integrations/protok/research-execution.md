@@ -12,6 +12,13 @@ These are free text, without required research categories or explanation/observa
 IDs. Judge and independent Review assess the actual design and evidence. The schema
 checks executable paths and bounds; it does not certify scientific meaning.
 
+Pydantic generates the Plan schema and validates the same execution model during
+fresh and cached Plan acceptance. ProTok's model adds its supported GPU profile,
+input-name/count and output-count constraints. The backend uses those same input
+types; it separately checks the current policy, resolves trusted sources and
+settles allocations. Generic Plan limits are whole minutes; the native backend
+retains its scheduler rounding for internal requests.
+
 The frozen top-level `execution` selects:
 
 * `fixed_evaluation`: the existing protected scorer and official RMSD Frontier.

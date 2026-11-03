@@ -53,11 +53,9 @@ class _RepairDelegate:
         )
         kwargs["prompt"] = REPAIR + "\n" + kwargs["prompt"] + "\n" + REPAIR
         # Repair status and absence of measurements are controller-owned facts.
-        kwargs["schema"] = {
-            **REPORT_SCHEMA,
-            "properties": {"markdown": {"type": "string"}},
-            "required": ["markdown"],
-        }
+        from research_loop.schema import omit_fields
+
+        kwargs["schema"] = omit_fields(REPORT_SCHEMA, "outcome")
         kwargs["prompt"] += (
             "\nFinal output overrides the ordinary Execute envelope: return only "
             "markdown describing the repair. The controller supplies incomplete "

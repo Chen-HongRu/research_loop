@@ -307,7 +307,7 @@ class CoreTests(unittest.TestCase):
             return result
 
         harness.response = injected
-        with self.assertRaisesRegex(ValueError, "plan: must contain exactly"):
+        with self.assertRaisesRegex(ValueError, "base_experiment"):
             study.run()
         self.assertEqual(harness.count("execute"), 0)
         call = next(c for c in harness.calls if c["phase"] == "plan")
@@ -714,7 +714,7 @@ class CoreTests(unittest.TestCase):
         final.update(data_role="final", allow_feedback=False)
         study, harness = self.study(global_evaluation=final)
         harness.measure = True
-        with self.assertRaisesRegex(ValueError, "execute.measurements"):
+        with self.assertRaisesRegex(ValueError, "measurements"):
             study.run()
         self.assertEqual(study.status()["phase"], "execute")
         self.assertEqual(harness.count("review"), 0)

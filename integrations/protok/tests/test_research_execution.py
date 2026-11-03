@@ -10,10 +10,15 @@ from unittest.mock import Mock, patch
 from integrations.protok.backend import CANDIDATE_FILES, ProTokBackend, ProTokError
 from integrations.protok.continuation import install_hooks
 from integrations.protok.research_execution import research_usage
-from research_loop.harness import HarnessError
+from research_loop import Study, initialize
+from research_loop.harness import HarnessError, publish_completed_response
+from research_loop.exploration import agent_schema
+from research_loop.protocol import SCHEMAS
+from research_loop.research_contract import plan_schema
 from research_loop.submission import claim_request, submit
 import test_protok_runner as runner_tests
 from test_research_contract import contract
+from test_protocol import plan
 
 RUNNER = runner_tests.RUNNER
 
@@ -141,6 +146,63 @@ class ResearchExecutionTests(unittest.TestCase):
         return self.harness.validate_completed(
             response, workspace=self.workspace, run_dir=self.directory / "attempt"
         )
+
+    def test_plan_cli_and_backend_share_restricted_research_input_model(self):
+        from integrations.protok.research_backend import SCRIPT_EXECUTION
+
+        schema = agent_schema(
+            "plan",
+            {},
+            self.harness.response_schema("plan", {}, plan_schema(SCHEMAS["plan"])),
+        )
+        result = plan()
+        result.pop("base_experiment")
+        result["execution"] = copy.deepcopy(self.contract["execution"])
+        result["execution"]["inputs"] = [{"name": "cache", "source": "hidden_cache"}]
+        self.assertIs(schema.validate(result), result)
+        request = schema["properties"]["execution"]["anyOf"][0]
+        self.assertEqual(
+            request["properties"]["inputs"], SCRIPT_EXECUTION["properties"]["inputs"]
+        )
+        self.assertEqual(request["properties"]["gpu"]["enum"], [True])
+        result["execution"]["inputs"][0]["name"] = "not.admitted"
+        with self.assertRaises(ValueError):
+            schema.validate(result)
+        self.assertEqual(self.backend_runs, 0)
+        self.assertEqual(self.backend.evaluations, 0)
+        self.assertFalse((self.control / "research-jobs").exists())
+
+    def test_cached_plan_cannot_bypass_adapter_model(self):
+        root = self.directory / "cached-study"
+        initialize(
+            root, goal="Check cached Plan admission", research_execution={"version": 1}
+        )
+        study = Study(root, self.harness)
+        context = {
+            "research_execution": {"version": 1},
+            "selected": {"proposal": {"base_experiment": None}},
+        }
+        raw = plan()
+        raw.pop("base_experiment")
+        raw["execution"] = copy.deepcopy(self.contract["execution"])
+        raw["execution"]["inputs"] = [
+            {"name": "not.admitted", "source": "hidden_cache"}
+        ]
+        attempt = root / "plan/attempt-001"
+        attempt.mkdir(parents=True)
+        publish_completed_response(attempt, raw)
+        RUNNER.write(attempt / "schema.json", study._agent_schema("plan", context))
+        before = (attempt / "response.json").read_bytes()
+        state = study.status()
+        state["calls"]["plan-0"] = "plan/attempt-001"
+        state["call_count"] = 1
+        with self.assertRaises(ValueError):
+            study._call(state, "plan", "plan-0", context, attempt.parent)
+        self.assertFalse(state.get("accepted_calls", {}).get("plan-0"))
+        self.assertEqual(state["call_count"], 1)
+        self.assertEqual((attempt / "response.json").read_bytes(), before)
+        self.harness.delegate.run.assert_not_called()
+        self.assertEqual(self.backend_runs, 0)
 
     def test_freezes_exact_source_and_accepts_only_unscored_artifact(self):
         with patch.object(

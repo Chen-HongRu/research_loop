@@ -387,6 +387,64 @@ class LongTrainingTests(unittest.TestCase):
         self.assertEqual(result["result"]["missing_validation_steps"], [8000, 10000])
         self.assertEqual(result["execute"]["measurements"], [])
 
+    def test_observation_step_choices_are_strict_and_empty_curve_stays_empty(self):
+        context = {
+            "long_training_run": {"id": "frozen"},
+            "long_training_observations": {"curve": [{"step": 1}]},
+            "execute": {"measurements": []},
+        }
+        schema = stage_schema("review", context, SCHEMAS["review"])
+        response = RecordedHarness().response("review", context, {})
+        response["observation_reviews"] = [
+            {"step": 1, "valid": True, "verified": True, "reason": "Checked evidence"}
+        ]
+        self.assertIs(schema.validate(response), response)
+        for step in (True, 1.0, "1", 2):
+            with self.subTest(step=step), self.assertRaisesRegex(ValueError, "step"):
+                altered = copy.deepcopy(response)
+                altered["observation_reviews"][0]["step"] = step
+                schema.validate(altered)
+        context["long_training_observations"]["curve"] = []
+        empty_schema = stage_schema("review", context, SCHEMAS["review"])
+        self.assertEqual(
+            empty_schema["properties"]["observation_reviews"]["maxItems"], 0
+        )
+        with self.assertRaisesRegex(ValueError, "observation_reviews"):
+            empty_schema.validate(response)
+        response["observation_reviews"] = []
+        self.assertIs(empty_schema.validate(response), response)
+
+    def test_nomination_choices_bind_current_candidates(self):
+        context = {
+            "long_training": policy(),
+            "execute": {"measurements": [{"candidate_id": "current"}]},
+        }
+        schema = stage_schema("review", context, SCHEMAS["review"])
+        response = RecordedHarness().response("review", context, {})
+        response["long_training_decision"] = {
+            "reason": "Confirm the observed gain.",
+            "nominations": [
+                {
+                    "candidate_id": "current",
+                    "comparison_candidate_id": "0001:baseline",
+                    "basis": "architecture_gain",
+                    "reason": "Changed representation with observed improvement.",
+                    "evidence": ["execute.md"],
+                }
+            ],
+        }
+        self.assertIs(schema.validate(response), response)
+        for candidate in ("absent", 1, True):
+            with (
+                self.subTest(candidate=candidate),
+                self.assertRaisesRegex(ValueError, "candidate_id"),
+            ):
+                altered = copy.deepcopy(response)
+                altered["long_training_decision"]["nominations"][0]["candidate_id"] = (
+                    candidate
+                )
+                schema.validate(altered)
+
     def test_frozen_context_does_not_change_when_child_completes_mid_iteration(self):
         request = self.nominate()
         self.harness.base = "0002"
@@ -669,7 +727,9 @@ class LongTrainingTests(unittest.TestCase):
             self.executor(calls),
             admission=lambda request, token: {"policy": {"gpu_seconds_per_run": 10800}},
         )
-        with self.assertRaisesRegex(ValueError, "must contain exactly"):
+        with self.assertRaisesRegex(
+            ValueError, r"timeout_seconds[\s\S]*extra_forbidden"
+        ):
             manager.run_one(deadline=time.time() + 1000)
         self.assertEqual(calls, [])
 

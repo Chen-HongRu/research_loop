@@ -12,6 +12,16 @@ import re
 import shlex
 import shutil
 import time
+from typing import Annotated, Literal
+
+from pydantic import Field, ValidationError
+
+from research_loop.research_contract import (
+    ExecutionEnvelope,
+    ResearchExecution,
+    ResearchInput,
+)
+from research_loop.schema import OutputSchema, choices
 
 from integrations.protok.backend import CANDIDATE_FILES, PROTOCOL, ProTokError
 from integrations.protok.continuation import _load_backend, validate_continuation
@@ -88,21 +98,38 @@ def _relative(value):
     return value
 
 
+class ScriptInput(ResearchInput):
+    name: Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")]
+
+
+ScriptInputs = Annotated[list[ScriptInput], Field(max_length=16)]
+ScriptOutputs = Annotated[list[str], Field(max_length=64)]
+
+
+class ScriptExecution(ExecutionEnvelope):
+    mode: Literal["script"]
+    gpu: choices(True)
+    time_limit_seconds: Annotated[int, Field(ge=1, le=1800)]
+    inputs: ScriptInputs
+    outputs: ScriptOutputs
+
+
+class ProTokPlanExecution(ResearchExecution):
+    gpu: choices(True)
+    inputs: ScriptInputs
+    outputs: ScriptOutputs
+
+
+SCRIPT_EXECUTION = OutputSchema(ScriptExecution)
+
+
 def _execution(value, policy):
-    if (
-        set(value)
-        != {"mode", "entrypoint", "gpu", "time_limit_seconds", "inputs", "outputs"}
-        or value["mode"] != "script"
-    ):
-        raise ProTokError("Invalid research execution envelope")
-    if value["gpu"] is not True:
-        raise ProTokError(
-            "CPU-only scheduling is unverified; use a charged single-GPU allocation even for CPU scripts"
-        )
+    try:
+        SCRIPT_EXECUTION.validate(value)
+    except ValidationError as error:
+        raise ProTokError(str(error)) from error
     limit = value["time_limit_seconds"]
-    if type(limit) is not int or not 1 <= limit <= min(
-        1800, policy["max_time_limit_seconds"]
-    ):
+    if limit > policy["max_time_limit_seconds"]:
         raise ProTokError("Research time exceeds the authorized debug-partition limit")
     allocated = math.ceil(limit / 60) * 60
     if allocated > policy["max_time_limit_seconds"]:
@@ -110,21 +137,11 @@ def _execution(value, policy):
     entry = _relative(value["entrypoint"])
     if not entry.startswith("research/") or not entry.endswith(".py"):
         raise ProTokError("Research entrypoint must be research/*.py")
-    if not isinstance(value["outputs"], list) or len(value["outputs"]) > 64:
-        raise ProTokError("Declare at most 64 research output files")
     for name in value["outputs"]:
         _relative(name)
     if len(set(value["outputs"])) != len(value["outputs"]):
         raise ProTokError("Duplicate research outputs")
-    if not isinstance(value["inputs"], list) or len(value["inputs"]) > 16:
-        raise ProTokError("Declare at most 16 research inputs")
-    names = []
-    for item in value["inputs"]:
-        if set(item) != {"name", "source"} or not re.fullmatch(
-            r"[A-Za-z][A-Za-z0-9_-]{0,63}", item["name"]
-        ):
-            raise ProTokError("Invalid named research input")
-        names.append(item["name"])
+    names = [item["name"] for item in value["inputs"]]
     if len(set(names)) != len(names):
         raise ProTokError("Duplicate research input name")
     return allocated

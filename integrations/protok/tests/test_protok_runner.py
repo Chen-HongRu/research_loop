@@ -1062,7 +1062,7 @@ class ProTokRunnerTests(unittest.TestCase):
         delegate = InterfaceHarness()
         delegate.stop_after = 3
         with patch.object(RUNNER, "CodexHarness", return_value=delegate):
-            with self.assertRaisesRegex(ValueError, "reference format"):
+            with self.assertRaisesRegex(ValueError, "references"):
                 RUNNER.run_one(self.root, self.backend)
             interrupted = RUNNER.Study(self.root / "study")
             self.assertEqual(interrupted.status()["status"], "needs_attention")

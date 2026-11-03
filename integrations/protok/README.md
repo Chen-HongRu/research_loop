@@ -6,6 +6,12 @@ script inputs/outputs and allocation bounds. Inputs use `name` and trusted `sour
 without a `role` label. See [research execution](research-execution.md). Existing
 version-1/2 Studies and their deployed runtimes are not migrated by this change.
 
+The controller environment requires the root project's Pydantic v2 dependency;
+provision it with `uv sync --locked` before using this runtime. Agent reports,
+research requests and presentation outputs use models for CLI schemas and local
+validation. Actual leases, job effects, source identity and accounting remain
+controller-owned. Installing the dependency does not upgrade an active service.
+
 This directory contains the ProTok task boundary: fixed candidate files,
 evaluation protocol, backend receipts, GPU accounting, ownership lease,
 supervisor and deployment. The reusable `research_loop` package has no ProTok

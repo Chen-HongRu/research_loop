@@ -56,6 +56,8 @@ uv run research-loop graph studies/demo
 
 新 Study 使用 version 3。Plan 在 `markdown` 冻结科学合同，以顶层 `timeout_seconds` 限制执行；字段用途见[消费者审计](docs/plan-field-audit.md)。旧格式目录保留原样，不自动迁移，详见[使用说明](docs/usage.md)。
 
+结构化输入输出由 Pydantic v2 模型统一定义，生成给现有 CLI 的 JSON Schema 并执行本地严格校验；安装或更新依赖使用 `uv sync --locked`。预算、作业、源码身份和核账仍由控制器判断。
+
 先安装并登录本机 Codex 或 Pi CLI，再创建新 Study：
 
 ```bash
