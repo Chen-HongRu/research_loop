@@ -154,7 +154,7 @@ def readonly_resume(root, state):
     return True
 
 
-def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
+def drive(root, runner, backend, *, clock=time.time, wait=time.sleep, escalate_after=5):
     from integrations.protok.round_admission import active_round
 
     control = root / "control"
@@ -175,6 +175,9 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
         secrets=(owner_token,) if isinstance(owner_token, str) else (),
     )
     last_error = (previous.get("stage"), previous.get("error"))
+    consecutive = previous.get("consecutive_failures")
+    consecutive = consecutive if type(consecutive) is int and consecutive >= 0 else 0
+    blocked_since = previous.get("blocked_since")
     delay = 5
     repaired = False
     while not (control / "STOP").exists():
@@ -227,6 +230,8 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
                 supervisor_path,
                 {"status": "running", "at": clock(), "first_error": first_error},
             )
+            consecutive = 0
+            blocked_since = None
             stage = "iteration"
             state = runner.run_one(root, backend)
             failed_state = None
@@ -238,7 +243,15 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
         except Exception as error:
             message = f"{type(error).__name__}: {error}"
             first_error = first_error or message
-            if (stage, message) != last_error:
+            if (stage, message) == last_error:
+                if consecutive:
+                    consecutive += 1
+                else:
+                    consecutive = 1
+                    blocked_since = clock()
+            else:
+                consecutive = 1
+                blocked_since = clock()
                 diagnostics.record_error(error, stage=stage, owner="pipeline")
                 last_error = (stage, message)
             if stage in {"iteration", "initialization"}:
@@ -257,14 +270,27 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
                     "first_error": first_error,
                     "error": message,
                     "failed_state": failed_state,
+                    "consecutive_failures": consecutive,
+                    "blocked_since": blocked_since,
+                    "escalated": consecutive >= escalate_after,
                     "diagnostics": diagnostics.view(owner="pipeline"),
                 },
             )
-            # Polling only reads receipts. Execute remains blocked until explicit
-            # reconciliation changes its retained state; core budgets bound retries.
+            if consecutive >= escalate_after:
+                # Polling only reads receipts. An unchanged condition will not
+                # clear by waiting, so stop and leave the retained state for an
+                # explicit operator decision instead of idling to the deadline.
+                return "attention"
+            # Execute remains blocked until explicit reconciliation changes its
+            # retained state; core budgets bound retries.
             wait(delay if clock() >= deadline else min(delay, deadline - clock()))
             delay = min(delay * 2, 60)
     return "user_stop"
+
+
+def exit_status(reason):
+    """Return the process status; escalated blocking needs an operator."""
+    return 2 if reason == "attention" else 0
 
 
 def finish_long_training(root, scheduler, reason, *, wait=time.sleep):
@@ -478,7 +504,8 @@ def main():
                         {"error": str(recovery_error), "at": time.time()},
                     )
             final_summary(root, runner, backend, reason, first_error=first_error)
+        return exit_status(reason)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

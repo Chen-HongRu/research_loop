@@ -47,7 +47,10 @@ receipts remain authoritative for identity, terminal state and GPU accounting.
 Supervisor inspection failures retain a public diagnostic in
 `control/supervisor-status.json` and operator evidence in
 `control/pipeline-diagnostics`. Identical blocked polls reuse the same failure
-record rather than recording the same error on every poll.
+record rather than recording the same error on every poll. `supervisor-status.json`
+also records `blocked_since`, `consecutive_failures` and `escalated`; five
+consecutive identical failures stop the supervisor with `attention` and a
+non-zero exit instead of polling until the lease deadline.
 
 Each diagnostic directory has `diagnostic-manifest.json`, operator-only `raw/`
 streams and redacted `public/` streams. Explicit controller credentials and common

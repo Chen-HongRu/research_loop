@@ -274,6 +274,87 @@ class ProTokServerTests(unittest.TestCase):
         self.assertEqual(len(waits), 3)
         self.runner.run_one.assert_not_called()
 
+    def test_identical_blocked_polls_escalate_to_attention(self):
+        self.backend.inspect.side_effect = RuntimeError("receipts unavailable")
+        waits = []
+        result = SERVER.drive(
+            self.root,
+            self.runner,
+            self.backend,
+            clock=lambda: 0,
+            wait=waits.append,
+        )
+        self.assertEqual(result, "attention")
+        self.assertEqual(waits, [5, 10, 20, 40])
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual(status["consecutive_failures"], 5)
+        self.assertEqual(status["blocked_since"], 0)
+        self.assertTrue(status["escalated"])
+        self.assertEqual(status["diagnostics"]["failure_count"], 1)
+        self.assertNotIn("escalated", SERVER.read(self.root / "study/state.json"))
+        self.runner.run_one.assert_not_called()
+
+    def test_successful_poll_resets_the_identical_failure_count(self):
+        self.backend.inspect.side_effect = [
+            RuntimeError("receipts unavailable"),
+            RuntimeError("receipts unavailable"),
+            {"outstanding": [], "used_gpu_seconds": 100},
+        ]
+
+        def finish(*args):
+            (self.root / "control/STOP").touch()
+            return {"status": "ready"}
+
+        self.runner.run_one.side_effect = finish
+        waits = []
+        result = SERVER.drive(
+            self.root,
+            self.runner,
+            self.backend,
+            clock=lambda: 0,
+            wait=waits.append,
+        )
+        self.assertEqual(result, "user_stop")
+        self.assertEqual(waits, [5, 10])
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["status"], "running")
+        self.assertNotIn("consecutive_failures", status)
+        self.runner.run_one.assert_called_once()
+
+    def test_restart_continues_an_identical_failure_count(self):
+        self.write(
+            "control/supervisor-status.json",
+            {
+                "status": "blocked",
+                "stage": "inspection",
+                "error": "RuntimeError: receipts unavailable",
+                "first_error": "RuntimeError: receipts unavailable",
+                "consecutive_failures": 4,
+                "blocked_since": 123,
+            },
+        )
+        self.backend.inspect.side_effect = RuntimeError("receipts unavailable")
+        waits = []
+        result = SERVER.drive(
+            self.root,
+            self.runner,
+            self.backend,
+            clock=lambda: 0,
+            wait=waits.append,
+        )
+        self.assertEqual(result, "attention")
+        self.assertEqual(waits, [])
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["consecutive_failures"], 5)
+        self.assertEqual(status["blocked_since"], 123)
+        self.runner.run_one.assert_not_called()
+
+    def test_attention_exit_status_differs_from_a_normal_end(self):
+        self.assertEqual(SERVER.exit_status("attention"), 2)
+        for reason in ("budget", "deadline", "review_stop", "user_stop", "handoff"):
+            self.assertEqual(SERVER.exit_status(reason), 0)
+
     def test_rejected_readonly_response_uses_locked_core_retry(self):
         for phase in ("selection", "plan", "review"):
             with self.subTest(phase=phase):
@@ -453,7 +534,13 @@ class ProTokServerTests(unittest.TestCase):
 
         self.assertEqual(
             SERVER.drive(
-                self.root, self.runner, self.backend, clock=lambda: now[0], wait=wait
+                self.root,
+                self.runner,
+                self.backend,
+                clock=lambda: now[0],
+                wait=wait,
+                # Isolate backoff/deadline behavior from blocked escalation.
+                escalate_after=10**6,
             ),
             "deadline",
         )

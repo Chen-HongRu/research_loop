@@ -236,7 +236,12 @@ ownership and budget files and records the previous service configuration.
 Settled timeouts and failed research scripts enter independent Review as incomplete
 experiments with real resource charges and no invented measurement. The supervisor
 keeps admission/effect failures observable in `control/supervisor-status.json`,
-with bounded polling and no automatic Execute replay. Only core-authorized read-only
+with bounded polling and no automatic Execute replay. Identical blocked polls are
+counted in `consecutive_failures`; after five consecutive polls with the same
+stage and error the supervisor stops with `attention`, writes `control/STOP` and
+the final summary, and exits non-zero instead of polling until the lease
+deadline. Any poll that gets past the blocked check resets the count, so a
+transient interruption does not end the run. Only core-authorized read-only
 calls retry within persisted call/time budgets. The short lease deadline is an
 entry cutoff: a durably admitted investigation may finish after it, while no new
 investigation may start. User STOP cancels owned work; handoff drains the active
