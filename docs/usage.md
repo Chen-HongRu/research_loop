@@ -47,6 +47,8 @@ Study 可选启用长训策略。Review 为有实质 Frontier 改善或较大架
 
 Codex 可通过 `research-loop task submit STUDY --request FILE` 提交讨论确定的实验。人工主调查在轮次边界优先进入 Plan → Execute → Review；人工长训支持新改动直接训练及既有候选复验，通过独立子 Study 与自动探索、自动提名长训并行，费用计入每项人工任务的独立预算。结果照常评审归档，并在后续轮次回流知识。CLI、预算字段、调度和恢复语义见[人工实验与任务调度](task-queue.md)。
 
+ProTok supervisor 为各长训子 Study 分别调度；阻塞只保留在对应子 Study，独立人工任务可并发执行，自动长训共享分配槽和已结算预算门槛。父 Study 的主调查仍逐轮发布。
+
 ## 运行
 
 要求 Python 3.11+、`uv`、已登录的 Codex 或 Pi。进程锁与取消机制面向 macOS/Linux。

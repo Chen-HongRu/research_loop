@@ -77,7 +77,11 @@ ProTok 人工长训采用已有 `se3-long-v1-10k-full4491-seed42` 协议：fresh
 }
 ```
 
-调度器管理主调查、自动提名长训和人工长训三个通道。每个通道内部串行，三个通道可异步并行；Slurm 决定真实资源可用性和排队时间。人工长训使用 `control/manual-training-jobs/` 和任务自己的预算，自动长训继续使用 `control/long-training-jobs/` 及原预算。短训 `used_gpu_seconds` 和自动长训 `long_training_gpu_seconds` 不包含人工长训；`manual_training_gpu_seconds` 单列实际人工费用，`total_gpu_seconds` 包含所有通道。失败、取消和分配超时的实际费用均保留。
+调度器管理主调查、自动提名长训和人工长训三个通道。父 Study 的主调查按轮次串行发布；每个长训子 Study 有独立异步 worker，内部串行执行 Plan → Execute → Review。独立预算的人工长训可同时执行。自动提名的 Plan/Review 可重叠，GPU 分配共用一个槽；未知或未结算费用继续阻止该池的新分配，等待不等于重新授权。Slurm 决定真实资源可用性和排队时间。
+
+某个子 Study 出错后，调度器保留其状态、attempt、作业和费用，并继续调度其他可运行任务。初始化前的错误保存在该任务目录的 `scheduler-error.json`；重启不自动重试。只要其他 worker 仍在推进，汇总状态保持 running 并单列 blocked 子任务；排空所有可运行任务后才报告需要处理的剩余错误。未完成的父 Study 主调查不因此跳到下一轮。
+
+人工长训使用 `control/manual-training-jobs/` 和任务自己的预算，自动长训继续使用 `control/long-training-jobs/` 及原预算。短训 `used_gpu_seconds` 和自动长训 `long_training_gpu_seconds` 不包含人工长训；`manual_training_gpu_seconds` 单列实际人工费用，`total_gpu_seconds` 包含所有通道。失败、取消和分配超时的实际费用均保留。
 
 入轮截止只阻止新调查。已接纳的调查可以在截止后完成训练和 Review；Slurm 分配及单次模型调用仍有自己的上限。排队等待不消耗 GPU 分配秒数。准备基线时过期、尚无调用或入轮记录的请求标为过期，后续有效任务仍可执行。已开始或效果未知的任务保留原身份等待核对。
 
@@ -116,5 +120,13 @@ uv run python -m integrations.protok.tasks --root /path/to/run --recover readout
 已存在作业时仅核对原作业，保留原 Execute attempt、费用与请求；不会申请第二次分配。候选已经完成 authoring、但尚未形成作业记录的中断，可在核对原 attempt、源码签名和无作业准备记录后完成首次提交，保留旧源码快照。STOP 未解除时只允许核对已存在作业，不允许首次提交或开始 Review。
 
 恢复检查仅读取小型控制记录和候选/受保护源码：候选源码签名在 authoring 结束及显式恢复各检查一次，保护原候选不被后续编辑替换；该故障在本地注入测试中复现。数据集和 checkpoint 内容不被扫描、哈希或预热。检查耗时及生产源码字节数未测量，不重复到数据加载 worker。
+
+恢复与普通推进使用同一个子任务锁，始终指向指定 ID。失败的只读阶段经检查后可先对 `study/tasks/<ID>/study/` 执行 `research-loop retry`，再显式推进该任务；仅初始化准备失败时，修复原因后直接指定 ID：
+
+```sh
+uv run python -m integrations.protok.tasks --root /path/to/run --task-id readout-long-001
+```
+
+指定 ID 不会清除未知 Execute 效果；这类执行仍使用上面的 `--recover` 核对原作业。调度器只在显式重试改变子 Study 状态或指定任务成功推进后解除保留的错误。STOP 仍取消全部自有工作；HANDOFF 阻止新入轮并等待所有已接纳子 Study 退出。
 
 本地验证覆盖真实临时 Git/Study 发布、CLI 持久化、并发调度、预算隔离、恢复和看板。Slurm/容器/H100 真实执行及活动 runtime 升级仍需对应授权和实机验证。

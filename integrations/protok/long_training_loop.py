@@ -5,15 +5,15 @@ from __future__ import annotations
 import fcntl
 import json
 from pathlib import Path
-import threading
-import time
 
 from research_loop import Study
+from research_loop.scheduling import AsyncStudyScheduler, child_run
 from research_loop.harness import CodexHarness, HarnessConfig
-from research_loop.long_training import LongTrainingManager, validate_policy, snapshot
+from research_loop.long_training import LongTrainingManager, validate_policy
 from integrations.protok.backend import ProTokError
 from integrations.protok.long_training import (
     METRICS,
+    automatic_slot,
     RECIPE,
     _policy,
     _run_id,
@@ -110,30 +110,38 @@ def enable(root, backend):
             return policy
 
 
-def manager(root, backend):
+def manager(root, backend, *, wait_for_slot=False):
     root = Path(root)
     study = _read(root / "study/study.json")
     delegate = CodexHarness(HarnessConfig(**study["harness"]))
 
     def executor(request, workspace, *, deadline):
-        return execute(backend, root, request, workspace, deadline=deadline)
+        return execute(
+            backend,
+            root,
+            request,
+            workspace,
+            deadline=deadline,
+            wait_for_slot=wait_for_slot,
+        )
 
-    return LongTrainingManager(
-        root / "study",
-        delegate,
-        executor,
-        admission=lambda request, token: round_authorization(
-            backend, root, request, token
-        ),
-    )
+    def admission(request, token):
+        if token or not wait_for_slot:
+            return round_authorization(backend, root, request, token)
+        # The lock covers the settled-budget admission check only. Plan/Review
+        # run independently; allocation itself takes the same shared slot.
+        with automatic_slot(root / "control", admission=True):
+            return round_authorization(backend, root, request)
+
+    return LongTrainingManager(root / "study", delegate, executor, admission=admission)
 
 
-def run_one(root, backend):
+def run_one(root, backend, *, run_id=None):
     root = Path(root)
     if (root / "control/STOP").exists():
         raise ProTokError("Parent Study is stopped")
     return manager(root, backend).run_one(
-        deadline=_policy(root / "control")["deadline"]
+        deadline=_policy(root / "control")["deadline"], run_id=run_id
     )
 
 
@@ -150,8 +158,7 @@ def recover(root, backend, run_id):
         raise ProTokError("Recovery run identity differs")
     run = root / "study/long-runs" / run_id
     child = Study(run / "study")
-    with (root / "study/long-runs/lane.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with child_run(run):
         with child._lock():
             state = child.status()
             if state["phase"] != "execute" or not state["calls"].get("execute"):
@@ -173,103 +180,46 @@ def recover(root, backend, run_id):
             child.retry()
     # Ordinary Study recovery retains this successful receipt; no new allocation.
     return (
-        run_one(root, backend)
+        run_one(root, backend, run_id=run_id)
         if not (root / "control/STOP").exists()
         else {"reconciled": run_id, "review_pending": True}
     )
 
 
-class LongTrainingScheduler:
+class LongTrainingScheduler(AsyncStudyScheduler):
     def __init__(self, root, backend, *, lane_manager=None, interval=3):
-        self.root = Path(root)
         self.backend = backend
         self.manager = lane_manager
-        self.interval = interval
-        self.stopped = threading.Event()
-        self.nominations_finished = threading.Event()
-        self._status = {"status": "idle", "reason": None}
-        self.thread = threading.Thread(
-            target=self._run, daemon=True, name="long-training"
+        self._provided_manager = lane_manager is not None
+        super().__init__(
+            root,
+            pending=self._pending,
+            run_one=self._run_one,
+            name="long-training",
+            interval=interval,
+        )
+        self.nominations_finished = self.draining
+
+    def _pending(self, *, allow_new):
+        study = self.root / "study/study.json"
+        if not study.exists() or not _read(study).get("long_training"):
+            return []
+        if self.manager is None:
+            self.manager = manager(self.root, self.backend)
+        return self.manager.pending(
+            deadline=_policy(self.root / "control")["deadline"], allow_new=allow_new
         )
 
-    def status(self):
-        return dict(self._status)
-
-    def finish_nominations(self):
-        """No more parent nominations will arrive; drain the existing legal queue."""
-        self.nominations_finished.set()
-
-    def _run(self):
-        try:
-            while not self.stopped.is_set():
-                study = self.root / "study/study.json"
-                if (self.root / "control/STOP").exists():
-                    self._status = {"status": "finished", "reason": "user_stop"}
-                    return
-                enabled = study.exists() and _read(study).get("long_training")
-                handoff = (self.root / "control/HANDOFF").exists()
-                if enabled:
-                    if self.manager is None:
-                        self.manager = manager(self.root, self.backend)
-                    self._status = {"status": "running", "reason": None}
-                    result = self.manager.run_one(
-                        deadline=_policy(self.root / "control")["deadline"],
-                        allow_new=not handoff,
-                    )
-                    if result is not None and result.get("status") in {
-                        "needs_attention",
-                        "stopped",
-                    }:
-                        raise ProTokError("Long child requires reconciliation")
-                    cutoff = time.time() >= _policy(self.root / "control")["deadline"]
-                    rows = snapshot(self.root / "study")
-                    pending = any(
-                        row["status"] not in {"reviewed", "withdrawn"} for row in rows
-                    )
-                    if (
-                        result is None
-                        and pending
-                        and not any(row["status"] == "queued" for row in rows)
-                        and not (cutoff or handoff)
-                    ):
-                        raise ProTokError(
-                            "Retained long child cannot make progress; inspect its state"
-                        )
-                    if result is None and (
-                        (self.nominations_finished.is_set() and not pending)
-                        or cutoff
-                        or handoff
-                    ):
-                        self._status = {
-                            "status": "finished",
-                            "reason": "handoff"
-                            if handoff
-                            else "admission_cutoff"
-                            if cutoff
-                            else "no_pending",
-                        }
-                        return
-                elif self.nominations_finished.is_set() or handoff:
-                    self._status = {"status": "finished", "reason": "disabled"}
-                    return
-                self._status = {"status": "idle", "reason": None}
-                self.stopped.wait(self.interval)
-        except (Exception, KeyboardInterrupt) as error:
-            message = f"{type(error).__name__}: {error}"
-            budget = "GPU budget exhausted" in str(error)
-            self._status = {
-                "status": "finished" if budget else "blocked",
-                "reason": "budget_exhausted" if budget else message,
-            }
-            _write(
-                self.root / "control/long-training-error.json",
-                {"error": message, "at": time.time()},
-            )
-
-    def start(self):
-        self.thread.start()
-
-    def shutdown(self):
-        self.stopped.set()
-        if self.thread.ident is not None:
-            self.thread.join()
+    def _run_one(self, identity, *, allow_new):
+        # Harness calls temporarily adjust their timeout config; do not share
+        # one mutable Harness instance between child threads.
+        current = (
+            self.manager
+            if self._provided_manager
+            else manager(self.root, self.backend, wait_for_slot=True)
+        )
+        return current.run_one(
+            deadline=_policy(self.root / "control")["deadline"],
+            allow_new=allow_new,
+            run_id=identity,
+        )

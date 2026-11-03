@@ -2,11 +2,13 @@ import copy
 import json
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
 
 from research_loop import Study, StudyError, initialize
+from research_loop.scheduling import AsyncStudyScheduler, child_blocked
 from research_loop.protocol import SCHEMAS
 from research_loop.long_training import (
     LongTrainingManager,
@@ -494,10 +496,159 @@ class LongTrainingTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "Unknown"):
             manager.run_one(deadline=time.time() + 1000)
-        with self.assertRaises(Exception):
-            manager.run_one(deadline=time.time() + 1000)
+        self.assertIsNone(manager.run_one(deadline=time.time() + 1000))
         self.assertEqual(len(calls), 1)
         self.assertEqual(completed_results(self.root), [])
+
+    def test_blocked_child_is_skipped_without_repeating_its_execute(self):
+        request = self.nominate()
+        calls = []
+        failing = LongTrainingManager(
+            self.root, LongHarness(), self.executor(calls, fail=True)
+        )
+        with self.assertRaisesRegex(RuntimeError, "Unknown"):
+            failing.run_one(deadline=time.time() + 1000)
+        first = self.root / "long-runs" / request["id"]
+        retained = read(first / "study/state.json")
+        second = {**request, "id": "L" + "f" * 16}
+        folder = self.root / "long-runs" / second["id"]
+        folder.mkdir()
+        (folder / "request.json").write_text(json.dumps(second))
+        restarted = LongTrainingManager(self.root, LongHarness(), self.executor(calls))
+        result = restarted.run_one(deadline=time.time() + 1000)
+        self.assertEqual(result["id"], second["id"])
+        self.assertIsNotNone(child_blocked(first))
+        self.assertEqual(read(first / "study/state.json"), retained)
+        self.assertEqual(calls.count(request["id"]), 1)
+
+    def test_failed_preparation_does_not_consume_max_runs(self):
+        request = self.nominate()
+        config = read(self.root / "study.json")
+        config["long_training"]["max_runs"] = 1
+        (self.root / "study.json").write_text(json.dumps(config))
+        manager = LongTrainingManager(self.root, LongHarness(), self.executor([]))
+        with (
+            patch(
+                "research_loop.core.initialize",
+                side_effect=OSError("Preparation unavailable"),
+            ),
+            self.assertRaisesRegex(OSError, "Preparation unavailable"),
+        ):
+            manager.run_one(deadline=time.time() + 1000)
+        second = {**request, "id": "L" + "f" * 16}
+        folder = self.root / "long-runs" / second["id"]
+        folder.mkdir()
+        (folder / "request.json").write_text(json.dumps(second))
+        self.assertEqual(
+            manager.run_one(deadline=time.time() + 1000)["id"], second["id"]
+        )
+
+    def test_concurrent_new_nomination_cannot_exceed_max_runs_during_initialization(
+        self,
+    ):
+        request = self.nominate()
+        config = read(self.root / "study.json")
+        config["long_training"]["max_runs"] = 1
+        (self.root / "study.json").write_text(json.dumps(config))
+        entered, release = threading.Event(), threading.Event()
+        calls, errors = [], []
+
+        def initialize_first(child, **kwargs):
+            if Path(child).parent.name == request["id"]:
+                entered.set()
+                release.wait(5)
+            return initialize(child, **kwargs)
+
+        def first():
+            try:
+                LongTrainingManager(
+                    self.root, LongHarness(), self.executor(calls)
+                ).run_one(deadline=time.time() + 1000, run_id=request["id"])
+            except Exception as error:
+                errors.append(error)
+
+        with patch("research_loop.core.initialize", side_effect=initialize_first):
+            worker = threading.Thread(target=first)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                second = {**request, "id": "L" + "0" * 16}
+                folder = self.root / "long-runs" / second["id"]
+                folder.mkdir()
+                (folder / "request.json").write_text(json.dumps(second))
+                other = LongTrainingManager(
+                    self.root, LongHarness(), self.executor(calls)
+                )
+                self.assertIsNone(
+                    other.run_one(deadline=time.time() + 1000, run_id=second["id"])
+                )
+            finally:
+                release.set()
+                worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(calls, [request["id"]])
+
+    def test_settled_child_review_does_not_block_second_real_study(self):
+        request = self.nominate()
+        discovery = LongTrainingManager(self.root, LongHarness(), self.executor([]))
+        discovery.sync_requests()
+        second = {**request, "id": "L" + "f" * 16}
+        folder = self.root / "long-runs" / second["id"]
+        folder.mkdir()
+        (folder / "request.json").write_text(json.dumps(second))
+        entered, release, finished = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        calls, phases = [], {}
+
+        def run(identity, *, allow_new):
+            delegate = LongHarness()
+
+            def gate(call):
+                if identity == request["id"] and call["phase"] == "review":
+                    entered.set()
+                    release.wait(5)
+                elif identity == second["id"] and call["phase"] == "plan":
+                    self.assertTrue(entered.wait(3))
+
+            delegate.before = gate
+            result = LongTrainingManager(
+                self.root, delegate, self.executor(calls)
+            ).run_one(deadline=time.time() + 1000, run_id=identity, allow_new=allow_new)
+            phases[identity] = [call["phase"] for call in delegate.calls]
+            if identity == second["id"]:
+                finished.set()
+            return result
+
+        scheduler = AsyncStudyScheduler(
+            self.root,
+            pending=lambda **kwargs: discovery.pending(
+                deadline=time.time() + 1000, **kwargs
+            ),
+            run_one=run,
+            name="automatic-test",
+            interval=0.001,
+        )
+        scheduler.start()
+        try:
+            self.assertTrue(entered.wait(3))
+            self.assertTrue(finished.wait(3))
+            self.assertFalse(
+                (self.root / "long-runs" / request["id"] / "result.json").exists()
+            )
+            self.assertTrue((folder / "result.json").exists())
+        finally:
+            release.set()
+            scheduler.finish_nominations()
+            scheduler.thread.join(3)
+            scheduler.shutdown()
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(
+            all(sequence == ["plan", "review"] for sequence in phases.values())
+        )
 
     def test_queued_candidate_is_withdrawn_after_eligibility_correction(self):
         request = self.nominate()

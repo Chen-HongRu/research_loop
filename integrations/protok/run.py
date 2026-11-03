@@ -2149,7 +2149,7 @@ def main(argv=None):
         "recover-long-run",
     ):
         modes.add_argument("--" + mode, action="store_true")
-    parser.add_argument("--long-run-id", help="Retained long run to reconcile")
+    parser.add_argument("--long-run-id", help="Exact long run to advance or reconcile")
     args = parser.parse_args(argv)
     if args.project is None:
         parser.error("--project or PROTOK_PROJECT is required")
@@ -2174,7 +2174,7 @@ def main(argv=None):
                 parser.error("--recover-long-run requires --long-run-id")
             result = long_training_loop.recover(root, backend, args.long_run_id)
         else:
-            result = long_training_loop.run_one(root, backend)
+            result = long_training_loop.run_one(root, backend, run_id=args.long_run_id)
     elif args.init:
         result = init_study(root, backend)
     elif args.reconcile_execute:

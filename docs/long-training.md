@@ -129,10 +129,18 @@ restarting the tested runtime:
 uv run python integrations/protok/run.py --root RUN_ROOT --project PROJECT --enable-long-training
 ```
 
-The supervisor schedules the lane independently. `--run-long-one` provides the
-same bounded manual operation. If short work ends first, the long lane can finish
+The supervisor dispatches each child asynchronously. A failed child is retained
+for explicit handling while other eligible children progress; failures before
+initialization are retained in its `scheduler-error.json`. Each child keeps its
+own runner/recovery lock and serial Plan → Execute → Review. Automatic children
+claim `max_runs` capacity before preparation; failed preparation releases its
+unused slot. They share one allocation slot: unsettled costs block new allocations in that pool,
+while settled children can finish Review alongside another child's work.
+`--run-long-one` provides the same bounded manual operation, skipping retained
+failures; add `--long-run-id ID` to explicitly advance an inspected child.
+If short work ends first, the long lane can finish
 eligible published nominations within its own entry deadline and allowance.
-HANDOFF prevents new children and drains the current one. User STOP/signals
+HANDOFF prevents new admission and drains all admitted children. User STOP/signals
 cancel owned GPU work through the existing polling path. Runtime handoff refuses
 unsettled long effects. A Slurm allocation is released when its batch exits.
 
@@ -142,6 +150,7 @@ and advances it to Review. It never resubmits an uncertain/prepared job or reset
 the grant. STOP can remain set for reconciliation; Review then remains pending
 until the parent is explicitly resumed. A read-only Review interruption can be
 retried with ordinary `research-loop retry` against the child Study.
+Then explicitly advance that same ID; recovery never selects another pending child.
 
 The dashboard places automatic and manual long-training tasks in its horizontal
 Work tree, with a fitted global relationship graph and node-triggered task cards.

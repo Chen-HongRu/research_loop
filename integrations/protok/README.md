@@ -62,6 +62,12 @@ remote checkpoints, and returns reviewed evidence to the parent at iteration
 boundaries. Configuration, scheduling, knowledge, dashboard and checkpoint
 interfaces are specified in [Parallel long training](../../docs/long-training.md).
 
+Automatic and manual children have independent asynchronous workers and keyed
+runner/recovery locks. A blocked child retains its attempts and costs while other
+eligible children continue. Manual tasks also have independent allocation locks;
+automatic children share one allocation slot and must wait for settled accounting.
+Their Plan/Review calls can overlap. See [task dispatch and recovery](../../docs/task-queue.md).
+
 ## Recovery
 
 Evaluation submission uses the reusable `research_loop.submission` API:

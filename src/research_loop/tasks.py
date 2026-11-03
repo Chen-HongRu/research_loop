@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from research_loop.scheduling import child_blocked, recorded_child_error
+
 
 def _read(path):
     return json.loads(Path(path).read_text())
@@ -288,6 +290,14 @@ class TaskQueue:
                     and pristine
                 ):
                     row.update(status="expired", phase="done")
+            if (
+                request["kind"] == "long_training"
+                and row["status"] not in {"reviewed", "cancelled", "expired"}
+                and (error := recorded_child_error(folder))
+            ):
+                row.update(
+                    status="needs_attention", error=error, scheduling_error=error
+                )
             rows.append(row)
         return sorted(
             rows,
@@ -320,13 +330,27 @@ class TaskQueue:
             _write(folder / "scheduling.json", {"priority": priority})
         return next(row for row in self.snapshot() if row["id"] == identity)
 
-    def claim(self, kind, *, iteration=None, allow_new=True):
+    def claim(self, kind, *, iteration=None, allow_new=True, identity=None):
         if kind not in {"investigation", "long_training"}:
             raise ValueError("Unknown task kind")
         if kind == "investigation" and (type(iteration) is not int or iteration < 1):
             raise ValueError("Investigation claim requires a positive iteration")
+        if identity is not None:
+            _identifier(identity)
+            if kind != "long_training":
+                raise ValueError("Exact task claims require long_training")
         with self._lock():
-            rows = [row for row in self.snapshot() if row["request"]["kind"] == kind]
+            rows = [
+                row
+                for row in self.snapshot()
+                if row["request"]["kind"] == kind
+                and (identity is None or row["id"] == identity)
+                and (
+                    kind != "long_training"
+                    or identity is not None
+                    or not child_blocked(self._folder(row["id"]))
+                )
+            ]
             for row in rows:
                 binding = row["binding"]
                 if binding and (
