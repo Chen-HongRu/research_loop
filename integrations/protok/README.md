@@ -65,6 +65,11 @@ Only this API writes the request, staging file and lock; the controller atomical
 claims it into a retained `evaluation-submission.json`. Repeated calls return the
 same pending, accepted or terminal result. `accepted` means claimed, not GPU-started.
 A crash after claiming needs reconciliation; it never permits a second submission.
+Before claim, an action inconsistent with the iteration/frozen Plan returns
+`parameter_error` through `status`, with retained feedback. The same live Agent
+may correct that action within its original Execute timeout. The controller keeps
+the rejected requests in `evaluation-parameter-errors.json`; pipeline, source,
+identity and accounting failures remain blocking and no job is automatically retried.
 The controller clears unchanged parent-checkpoint interfaces once before Execute,
 and retains all current-iteration submission evidence on reentry.
 

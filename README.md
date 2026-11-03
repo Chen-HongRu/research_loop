@@ -58,6 +58,8 @@ uv run research-loop graph studies/demo
 
 结构化输入输出由 Pydantic v2 模型统一定义，生成给现有 CLI 的 JSON Schema 并执行本地严格校验；安装或更新依赖使用 `uv sync --locked`。预算、作业、源码身份和核账仍由控制器判断。
 
+尚未接纳的只读阶段输出若存在明确的参数错误，控制器保留原回复，将校验反馈返回同一阶段，在原任务和剩余调用/时间预算内修正。管线故障、身份或核账异常以及效果未知的作业继续阻断；输出校验失败不会自动重跑 Execute。
+
 先安装并登录本机 Codex 或 Pi CLI，再创建新 Study：
 
 ```bash

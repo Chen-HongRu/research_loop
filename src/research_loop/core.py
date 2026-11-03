@@ -14,6 +14,13 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .correction import (
+    ParameterCorrection,
+    ParameterError,
+    feedback_prompt,
+    parameter_check,
+    safe_errors,
+)
 from .diagnostics import diagnostic_view
 from .evaluation import build_frontier, validate_evaluation
 from .long_training import (
@@ -991,9 +998,161 @@ class Study:
         harness: AgentHarness | None = None,
     ) -> dict:
         harness = harness or self.harness
+        # Schema construction can run adapter hooks. It is controller work, not
+        # output validation, and must remain outside the correction catcher.
+        schema = self._agent_schema(phase, context)
+        response_schema = self._response_schema(phase, context)
+        legacy_schema = long_training_schema(
+            phase, context, stage_schema(phase, context, SCHEMAS)
+        )
+        feedback = None
+        if key in state["calls"]:
+            attempt = self.root / state["calls"][key]
+            if (attempt / "rejection.json").exists():
+                feedback = _read(attempt / "rejection.json")
+            elif (attempt / "feedback.json").exists() and completed_response(
+                attempt
+            ) is None:
+                feedback = _read(attempt / "feedback.json")
+            if feedback is not None:
+                frozen = _read(attempt / "context.json")
+                ignored = {"budget"}
+                if {k: v for k, v in frozen.items() if k not in ignored} != {
+                    k: v for k, v in context.items() if k not in ignored
+                }:
+                    raise StudyError("Rejected call context changed")
+                context = frozen
+        attempted = {}
+
+        def invoke(previous):
+            result, attempt, cached = self._call_once(
+                state,
+                phase,
+                key,
+                context,
+                directory,
+                workspace=workspace,
+                harness=harness,
+                feedback=previous,
+            )
+            attempted.update(attempt=attempt, cached=cached)
+            return result
+
+        def validate(result):
+            attempt = attempted["attempt"]
+            if phase in {"proposal", "plan"}:
+                if (
+                    attempted["cached"]
+                    and legacy_schema != schema
+                    and (attempt / "schema.json").exists()
+                    and _read(attempt / "schema.json") == legacy_schema
+                ):
+                    frozen = _read(attempt / "context.json")
+                    ignored = {"budget"} if phase == "proposal" else set()
+                    if {k: v for k, v in frozen.items() if k not in ignored} != {
+                        k: v for k, v in context.items() if k not in ignored
+                    }:
+                        raise StudyError("Completed legacy call context changed")
+                    if complete_output(phase, context, result) != result:
+                        raise StudyError(
+                            "Completed legacy call changed controller fields"
+                        )
+                    parameter_check(
+                        validate_response, phase, result, schema=response_schema
+                    )
+                else:
+                    parameter_check(validate_response, phase, result, schema=schema)
+                result = complete_output(phase, context, result)
+            self._validate_result(phase, result, context, schema=response_schema)
+            return result
+
+        def reject(result, error):
+            if phase not in {
+                "proposal",
+                "critique",
+                "response",
+                "judge",
+                "plan",
+                "review",
+            } or state.get("accepted_calls", {}).get(key):
+                raise error
+            attempt = attempted["attempt"]
+            self._check_correction_receipt(attempt, result)
+            budget = attempt / "parameter-budget.json"
+            if budget.exists():
+                deadline = _read(budget)["deadline"]
+            else:
+                # Old completed calls predate the per-call deadline receipt.
+                # Their one correction window uses remaining persisted Study
+                # time, never an adapter allowance that can renew indefinitely.
+                self._save(state)
+                remaining = self.config["max_seconds"] - state["elapsed_seconds"]
+                deadline = time.time() + max(
+                    0, min(remaining, self.config["harness"]["timeout_seconds"])
+                )
+                _write(budget, {"deadline": deadline})
+            record = {
+                "version": 1,
+                "phase": phase,
+                "key": key,
+                "attempt": str(attempt.relative_to(self.root)),
+                "deadline": deadline,
+                "response": result,
+                "errors": safe_errors(
+                    error, secrets=getattr(harness, "diagnostic_secrets", ())
+                ),
+            }
+            _write(attempt / "rejection.json", record)
+            self._save(state)
+            return record
+
+        result = ParameterCorrection().run(invoke, validate, reject, feedback=feedback)
+        state.setdefault("accepted_calls", {})[key] = True
+        state.update(status="ready", active_attempt=None)
+        self._save(state)
+        return result
+
+    def _check_correction_receipt(self, attempt, result):
+        self._check_attempt_stopped(attempt)
+        process = attempt / "process.json"
+        if completed_response(attempt) != result or (
+            process.exists() and _read(process).get("status") != "succeeded"
+        ):
+            raise StudyError(
+                "Parameter correction requires a successful stopped call receipt"
+            )
+
+    def _call_once(
+        self,
+        state: dict,
+        phase: str,
+        key: str,
+        context: dict,
+        directory: Path,
+        *,
+        workspace: Path | None = None,
+        harness: AgentHarness | None = None,
+        feedback: dict | None = None,
+    ) -> tuple:
+        harness = harness or self.harness
         state["last_call_key"] = key
         cached = False
-        if key in state["calls"]:
+        if feedback is not None:
+            if phase == "execute" or state.get("accepted_calls", {}).get(key):
+                raise StudyError(
+                    "Accepted or effectful calls cannot be corrected automatically"
+                )
+            self._check_attempt_stopped(self.root / state["calls"][key])
+            attempt = self.root / feedback["attempt"]
+            if (
+                feedback.get("version") != 1
+                or feedback.get("phase") != phase
+                or feedback.get("key") != key
+                or _read(attempt / "rejection.json") != feedback
+            ):
+                raise StudyError("Invalid parameter rejection receipt")
+            self._check_correction_receipt(attempt, feedback["response"])
+        if key in state["calls"] and feedback is None:
             attempt = self.root / state["calls"][key]
             failure = attempt / "failure.json"
             if phase == "execute" and failure.exists():
@@ -1030,7 +1189,7 @@ class Study:
                 # consumes the same persisted call and time budgets as any new call.
                 del state["calls"][key]
                 self._save(state)
-        if key not in state["calls"]:
+        if key not in state["calls"] or feedback is not None:
             if (
                 self.config["max_calls"] is not None
                 and state["call_count"] >= self.config["max_calls"]
@@ -1041,14 +1200,29 @@ class Study:
             call_allowance = getattr(self.harness, "call_allowance", None)
             if call_allowance is not None:
                 remaining = call_allowance(remaining)
+            if feedback is not None:
+                remaining = min(remaining, feedback["deadline"] - time.time())
             if remaining < 1:
                 raise BudgetExhausted("time_budget")
+            timeout = min(int(remaining), self.config["harness"]["timeout_seconds"])
+            if phase == "execute":
+                timeout = min(timeout, context["plan"]["timeout_seconds"])
             attempt = (
                 directory / f"attempt-{len(list(directory.glob('attempt-*'))) + 1:03d}"
             )
             attempt.mkdir(parents=True)
             _write(attempt / "context.json", context)
             _write(attempt / "schema.json", self._agent_schema(phase, context))
+            if feedback is not None:
+                _write(attempt / "feedback.json", feedback)
+            _write(
+                attempt / "parameter-budget.json",
+                {
+                    "deadline": feedback["deadline"]
+                    if feedback
+                    else time.time() + max(1, timeout)
+                },
+            )
             relative = str(attempt.relative_to(self.root))
             state["calls"][key] = relative
             state.update(
@@ -1057,9 +1231,6 @@ class Study:
                 call_count=state["call_count"] + 1,
             )
             self._save(state)
-            timeout = min(int(remaining), self.config["harness"]["timeout_seconds"])
-            if phase == "execute":
-                timeout = min(timeout, context["plan"]["timeout_seconds"])
             try:
                 result = harness.run(
                     prompt=prompt(phase, context)
@@ -1078,6 +1249,13 @@ class Study:
                     + (
                         "\n\n" + review_guidance(self.strategy)
                         if phase == "review" and review_guidance(self.strategy)
+                        else ""
+                    )
+                    + (
+                        feedback_prompt(
+                            feedback, secrets=getattr(harness, "diagnostic_secrets", ())
+                        )
+                        if feedback
                         else ""
                     ),
                     schema=self._agent_schema(phase, context),
@@ -1126,39 +1304,7 @@ class Study:
                         },
                     )
                 raise
-        if phase in {"proposal", "plan"}:
-            schema = self._agent_schema(phase, context)
-            # Before controller-owned fields were omitted, calls persisted this
-            # complete schema. Only those completed calls may reuse full output.
-            legacy_schema = long_training_schema(
-                phase, context, stage_schema(phase, context, SCHEMAS)
-            )
-            if (
-                cached
-                and legacy_schema != schema
-                and (attempt / "schema.json").exists()
-                and _read(attempt / "schema.json") == legacy_schema
-            ):
-                frozen = _read(attempt / "context.json")
-                # Selection budgets change when earlier calls are replayed;
-                # every scientific input and controller choice stays frozen.
-                ignored = {"budget"} if phase == "proposal" else set()
-                if {k: v for k, v in frozen.items() if k not in ignored} != {
-                    k: v for k, v in context.items() if k not in ignored
-                }:
-                    raise StudyError("Completed legacy call context changed")
-                schema = self._response_schema(phase, context)
-                validate_response(phase, result, schema=schema)
-                if complete_output(phase, context, result) != result:
-                    raise StudyError("Completed legacy call changed controller fields")
-            else:
-                validate_response(phase, result, schema=schema)
-            result = complete_output(phase, context, result)
-        self._validate_result(phase, result, context)
-        state.setdefault("accepted_calls", {})[key] = True
-        state.update(status="ready", active_attempt=None)
-        self._save(state)
-        return result
+        return result, attempt, cached
 
     def _response_schema(self, phase, context):
         schema = context_schema(
@@ -1173,15 +1319,32 @@ class Study:
     def _agent_schema(self, phase, context):
         return agent_schema(phase, context, self._response_schema(phase, context))
 
-    def _validate_result(self, phase: str, result: dict, context: dict) -> None:
-        validate_response(
+    def _validate_result(
+        self, phase: str, result: dict, context: dict, *, schema=None
+    ) -> None:
+        schema = self._response_schema(phase, context) if schema is None else schema
+        if phase == "review":
+            measured_ids = [
+                m["candidate_id"] for m in context["execute"]["measurements"]
+            ]
+            if len(set(measured_ids)) != len(measured_ids):
+                raise StudyError("Current measurements contain duplicate candidate IDs")
+        parameter_check(
+            validate_response,
             phase,
             result,
-            schema=self._response_schema(phase, context),
+            schema=schema,
         )
-        validate_design(phase, result, context)
+        parameter_check(validate_design, phase, result, context)
         if not result["markdown"].strip():
-            raise StudyError("Stage report must be nonempty")
+            raise ParameterError("Stage report must be nonempty")
+        if phase == "review":
+            if {r["candidate_id"] for r in result["candidate_reviews"]} != set(
+                measured_ids
+            ):
+                raise ParameterError(
+                    "Candidate reviews must match current measurements exactly"
+                )
 
     def _recover_execution(self, state: dict, folder: Path, context: dict) -> dict:
         failure_ref = state["debugging"]
@@ -1811,15 +1974,6 @@ class Study:
         validate_observation_reviews(context, result)
         execute = context["execute"]
         reviews = {r["candidate_id"]: r for r in result["candidate_reviews"]}
-        if len(reviews) != len(result["candidate_reviews"]):
-            raise StudyError("Duplicate candidate reviews")
-        measured_ids = [m["candidate_id"] for m in execute["measurements"]]
-        if len(set(measured_ids)) != len(measured_ids) or set(reviews) != set(
-            measured_ids
-        ):
-            raise StudyError(
-                "Candidate reviews must match unique current measurements exactly"
-            )
         plan = context["plan"]
         definitions = [
             d for d in (self.config["global_evaluation"], plan["local_evaluation"]) if d

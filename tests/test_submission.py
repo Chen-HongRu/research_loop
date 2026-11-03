@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from research_loop import submission
+from research_loop.correction import ParameterError
 
 
 class SubmissionTests(unittest.TestCase):
@@ -51,6 +52,86 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual(submission.submit(self.workspace)["status"], "accepted")
         self.assertIsNone(submission.claim_request(self.workspace))
         self.assertFalse((self.workspace / submission.REQUEST).exists())
+
+    def test_parameter_rejection_allows_correction_only_before_claim(self):
+        submission.submit(self.workspace, "import")
+
+        def preflight(request):
+            if request["action"] != "evaluate":
+                raise ParameterError("Use evaluate for this frozen Plan")
+
+        self.assertIsNone(submission.claim_request(self.workspace, preflight=preflight))
+        rejected = submission.status(self.workspace)
+        self.assertEqual(rejected["status"], "parameter_error")
+        self.assertEqual(rejected["feedback"]["request"], {"action": "import"})
+        self.assertFalse((self.workspace / submission.RECEIPT).exists())
+        self.assertFalse((self.workspace / submission.RESULT).exists())
+        self.assertEqual(submission.submit(self.workspace)["status"], "pending")
+        self.assertEqual(
+            submission.claim_request(self.workspace, preflight=preflight),
+            {"action": "evaluate"},
+        )
+        history = (self.workspace / submission.REJECTIONS).read_bytes()
+        callback = unittest.mock.Mock(side_effect=ParameterError("not retried"))
+        self.assertIsNone(submission.claim_request(self.workspace, preflight=callback))
+        callback.assert_not_called()
+        self.assertEqual(submission.submit(self.workspace)["status"], "accepted")
+        self.assertEqual((self.workspace / submission.REJECTIONS).read_bytes(), history)
+
+    def test_nonparameter_preflight_failure_preserves_pending_request(self):
+        submission.submit(self.workspace)
+        for error in (ValueError("unknown argument origin"), OSError("disk failure")):
+            with self.subTest(error=error):
+                expected = (
+                    submission.SubmissionError
+                    if isinstance(error, OSError)
+                    else type(error)
+                )
+                with self.assertRaises(expected):
+                    submission.claim_request(
+                        self.workspace,
+                        preflight=unittest.mock.Mock(side_effect=error),
+                    )
+                self.assertEqual(submission.status(self.workspace)["status"], "pending")
+                self.assertFalse((self.workspace / submission.RECEIPT).exists())
+                self.assertFalse((self.workspace / submission.REJECTIONS).exists())
+
+    def test_rejection_sync_failure_never_claims_or_discards_request(self):
+        submission.submit(self.workspace)
+        with (
+            patch.object(submission, "_sync_directory", side_effect=OSError("disk")),
+            self.assertRaises(submission.SubmissionError),
+        ):
+            submission.claim_request(
+                self.workspace,
+                preflight=unittest.mock.Mock(side_effect=ParameterError("Use import")),
+            )
+        self.assertTrue((self.workspace / submission.REJECTIONS).exists())
+        self.assertTrue((self.workspace / submission.REQUEST).exists())
+        self.assertFalse((self.workspace / submission.RECEIPT).exists())
+        # The retained pending request must still pass pure preflight after a crash.
+        with self.assertRaisesRegex(RuntimeError, "still validated"):
+            submission.claim_request(
+                self.workspace,
+                preflight=unittest.mock.Mock(
+                    side_effect=RuntimeError("still validated")
+                ),
+            )
+        self.assertTrue((self.workspace / submission.REQUEST).exists())
+
+    def test_rejection_history_write_failure_preserves_original_request(self):
+        submission.submit(self.workspace)
+        with (
+            patch.object(submission.os, "fsync", side_effect=OSError("disk")),
+            self.assertRaises(submission.SubmissionError),
+        ):
+            submission.claim_request(
+                self.workspace,
+                preflight=unittest.mock.Mock(side_effect=ParameterError("Use import")),
+            )
+        self.assertEqual(submission.status(self.workspace)["status"], "pending")
+        self.assertFalse((self.workspace / submission.REJECTIONS).exists())
+        self.assertFalse((self.workspace / submission.RECEIPT).exists())
 
     def test_repeated_and_concurrent_submission_is_idempotent(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:

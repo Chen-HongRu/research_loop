@@ -171,7 +171,7 @@ class MetaSmokeTests(unittest.TestCase):
 
     def test_review_recovery_publishes_without_repeating_execute(self):
         study, harness = self.recovery_fixture()
-        state = INNER.run_review_recovery(study)
+        state = study.run(iterations=1)
         self.assertEqual(state["phase"], "done")
         self.assertEqual(harness.count("execute"), 1)
         self.assertEqual(harness.count("review"), 2)
@@ -188,22 +188,20 @@ class MetaSmokeTests(unittest.TestCase):
         )
         observations = read(study.root / "observations.json")
         reviews = [r for r in observations["intervals"] if r["phase"] == "review"]
-        self.assertEqual([r["status"] for r in reviews], ["failed", "succeeded"])
+        self.assertEqual([r["status"] for r in reviews], ["succeeded"])
         self.assertTrue(all(r["wall_seconds"] > 0 for r in reviews))
         self.assertAlmostEqual(
             observations["totals"]["review_wall_seconds"],
             sum(r["wall_seconds"] for r in reviews),
         )
-        self.assertEqual(
-            [r["status"] for r in observations["runs"]], ["failed", "succeeded"]
-        )
+        self.assertEqual([r["status"] for r in observations["runs"]], ["succeeded"])
 
     def test_review_recovery_requires_a_successful_process_receipt(self):
         for receipt_status in (None, "failed", "running"):
             with self.subTest(receipt_status=receipt_status):
                 study, harness = self.recovery_fixture(receipt_status)
                 try:
-                    state = INNER.run_review_recovery(study)
+                    state = study.run(iterations=1)
                 except (StudyError, ValueError, OSError):
                     state = study.status()
                 self.assertEqual(harness.count("execute"), 1)
@@ -211,41 +209,39 @@ class MetaSmokeTests(unittest.TestCase):
                 self.assertEqual(study.status()["call_count"], 6)
                 self.assertEqual(state["status"], "needs_attention")
                 self.assertIn(
-                    "candidate_reviews",
+                    "successful stopped call receipt",
                     state["error"],
                 )
                 self.assertFalse(
                     (study.root / "iterations/0001/publication.json").exists()
                 )
 
-    def test_review_recovery_retries_at_most_once(self):
-        study, harness = self.recovery_fixture(malformed_reviews=2)
-        with self.assertRaisesRegex(
-            (StudyError, ValueError),
-            "candidate_reviews|Candidate reviews must match unique current measurements exactly",
-        ):
-            INNER.run_review_recovery(study)
+    def test_review_corrections_use_existing_call_budget(self):
+        study, harness = self.recovery_fixture(malformed_reviews=100)
+        state = study.run(iterations=1)
+        self.assertEqual(state["status"], "stopped")
+        self.assertEqual(state["call_count"], study.config["max_calls"])
         self.assertEqual(harness.count("execute"), 1)
-        self.assertEqual(harness.count("review"), 2)
-        self.assertEqual(study.status()["call_count"], 7)
         self.assertFalse((study.root / "iterations/0001/publication.json").exists())
 
-    def test_review_recovery_does_not_retry_additional_model_errors(self):
+    def test_multiple_output_errors_return_to_review_without_execute_replay(self):
         study, harness = self.recovery_fixture()
         response = harness.response
 
         def additional_error(phase, context, kwargs):
             result = response(phase, context, kwargs)
-            if phase == "review":
+            if phase == "review" and harness.review_count == 1:
                 result["route_status"] = "invalid"
             return result
 
         harness.response = additional_error
-        with self.assertRaises(ValueError):
-            INNER.run_review_recovery(study)
+        state = study.run(iterations=1)
+        self.assertEqual(state["phase"], "done")
         self.assertEqual(harness.count("execute"), 1)
-        self.assertEqual(harness.count("review"), 1)
-        self.assertEqual(study.status()["call_count"], 6)
+        self.assertEqual(harness.count("review"), 2)
+        self.assertTrue(
+            (study.root / "iterations/0001/review/attempt-001/rejection.json").exists()
+        )
 
     def outer_fixture(self):
         temporary = tempfile.TemporaryDirectory()

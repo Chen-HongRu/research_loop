@@ -16,13 +16,29 @@ Downstream state and document publication can be retried from these receipts.
 | Persisted CLI process still alive | Stops to prevent overlapping attempts |
 | Incomplete Execute or unknown external effects | Stops for explicit reconciliation |
 | Prepared Review publication | Completes the same publication |
-| Completed response rejected by schema, scope or trusted adapter checks | Preserves the failure for explicit correction |
+| Unaccepted read-only response rejected by pure output validation | Retains the rejected response and returns field errors to the same stage in a new budgeted attempt |
+| Response rejected by source, scope, identity, accounting or trusted-effect checks | Preserves the failure for explicit reconciliation |
 
 An interrupted model generation does not resume at its last token. Partial JSON
 and final-looking text without a completion receipt are evidence, not completed
 results. Execute is never automatically repeated on this basis. A task adapter
 may validate existing external receipts and create a separately labeled operator
 reconciliation attempt; it must preserve the original Agent attempt.
+
+Parameter correction keeps the original task and frozen context. Each new Agent
+call consumes the existing Study call/time budget; rejection does not reset either
+budget or make an additional experiment. The correction policy catches only errors
+from designated pure output validators. CLI failures, controller failures and
+unknown effects remain blocking. An invalid Execute response cannot trigger a new
+Execute invocation, even if its shape could be corrected.
+
+`ParameterCorrection` owns only invocation → pure validation → rejection feedback.
+Its caller supplies invocation, validation and rejection callbacks, and admits every
+new call through the existing budgets. The original invocation's absolute timeout
+is retained in `parameter-budget.json`; corrections cannot renew that window even
+when an adapter supplies a per-call allowance. Rejected responses and bounded,
+redacted field errors are retained in `rejection.json`. A successor's `feedback.json`
+preserves the correction link before it becomes active, including across interruption.
 
 An adapter can explicitly certify a settled candidate-code rejection with
 `RecoverableExecutionError(details=...)`. The controller retains that failure and

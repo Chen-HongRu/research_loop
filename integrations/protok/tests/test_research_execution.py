@@ -175,7 +175,10 @@ class ResearchExecutionTests(unittest.TestCase):
     def test_cached_plan_cannot_bypass_adapter_model(self):
         root = self.directory / "cached-study"
         initialize(
-            root, goal="Check cached Plan admission", research_execution={"version": 1}
+            root,
+            goal="Check cached Plan admission",
+            research_execution={"version": 1},
+            max_calls=1,
         )
         study = Study(root, self.harness)
         context = {
@@ -191,16 +194,20 @@ class ResearchExecutionTests(unittest.TestCase):
         attempt = root / "plan/attempt-001"
         attempt.mkdir(parents=True)
         publish_completed_response(attempt, raw)
+        RUNNER.write(attempt / "context.json", context)
         RUNNER.write(attempt / "schema.json", study._agent_schema("plan", context))
         before = (attempt / "response.json").read_bytes()
         state = study.status()
         state["calls"]["plan-0"] = "plan/attempt-001"
         state["call_count"] = 1
-        with self.assertRaises(ValueError):
+        from research_loop.core import BudgetExhausted
+
+        with self.assertRaisesRegex(BudgetExhausted, "call_budget"):
             study._call(state, "plan", "plan-0", context, attempt.parent)
         self.assertFalse(state.get("accepted_calls", {}).get("plan-0"))
         self.assertEqual(state["call_count"], 1)
         self.assertEqual((attempt / "response.json").read_bytes(), before)
+        self.assertEqual(RUNNER.read(attempt / "rejection.json")["response"], raw)
         self.harness.delegate.run.assert_not_called()
         self.assertEqual(self.backend_runs, 0)
 

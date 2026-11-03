@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from research_loop import Study, initialize
+from research_loop import Study, StudyError, initialize
 from research_loop.exploration import (
     allocation,
     route_candidates,
@@ -239,7 +239,9 @@ class ExplorationTests(unittest.TestCase):
                     )
                     self.assertEqual(result["research_design"]["kind"], kind)
                 else:
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(
+                        StudyError, "changed controller fields"
+                    ):
                         resumed._call(state, "proposal", key, context, attempt.parent)
                 self.assertEqual((attempt / "completed.json").read_bytes(), raw)
                 self.assertEqual(state["call_count"], 1)

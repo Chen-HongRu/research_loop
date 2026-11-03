@@ -76,7 +76,7 @@ class Plan(OutputModel):
     base_experiment: ExperimentRef | None
     references: list[ExperimentRef]
     local_evaluation: Evaluation | None
-    timeout_seconds: int
+    timeout_seconds: int = Field(ge=1)
     stop_reason: str | None
 
 

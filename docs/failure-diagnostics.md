@@ -5,9 +5,17 @@ more compute. Reading logs does not authorize a new submission or a budget chang
 
 | Responsibility | Evidence | Controller action |
 | --- | --- | --- |
+| Parameter | A designated pure validator rejects an unaccepted Agent output or an unclaimed request | Retain the rejection and return corrective feedback to its originating stage/Agent within the original task and remaining budgets. No computation is replayed. |
 | Workspace | Authorized source/configuration or execution failed; identity and effects are reconciled | Return diagnostics to the same investigation's Agent. Use its original Plan, scope and remaining budgets. Publish an incomplete result for independent Review when bounded repair cannot finish. |
 | Pipeline | Controller, protected evaluation, permissions, identity or accounting failed | Retain a blocking diagnostic for user/developer intervention. |
 | Unknown | Submission, job identity, terminal state or accounting is unresolved | Preserve the original attempt and reconcile it. Do not submit a replacement or assume zero cost. |
+
+The generic correction loop applies to unaccepted read-only stage responses.
+Pydantic representation errors and designated pure cross-field checks are
+correctable; an arbitrary `ValueError` from a controller or harness is not.
+Execute response rejection does not authorize another Execute call. Adapter
+request preflight may reject explicit parameter errors before claim; after claim,
+the durable submission and existing effect-reconciliation rules remain authoritative.
 
 A successful Agent response with `outcome=incomplete` and no measurements can enter
 Review after the controller verifies scope and absence of submission effects. A

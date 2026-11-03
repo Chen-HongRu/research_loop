@@ -34,8 +34,8 @@ The frozen top-level `execution` selects:
   "gpu": true,
   "time_limit_seconds": 180,
   "inputs": [
-    {"name": "cache", "source": "hidden_cache", "role": "development"},
-    {"name": "checkpoint", "source": "checkpoint:0012:2000", "role": "model"}
+    {"name": "cache", "source": "hidden_cache"},
+    {"name": "checkpoint", "source": "checkpoint:0012:2000"}
   ],
   "outputs": ["probe.json", "probe.svg"]
 }
@@ -45,6 +45,14 @@ Execute calls the controller-provided `submission.py submit --workspace . --acti
 research`. The request carries no mutable experiment specification: the controller
 uses the accepted Plan. Repeated submissions observe the same request. Retained
 unknown effects require recovery of the same job; they never trigger a new job.
+
+Before claiming a request, the controller checks its action against the iteration
+and frozen execution mode. A wrong action produces `status=parameter_error` with
+feedback in `submission.py status`; the live Execute Agent may submit the corrected
+action within its original timeout. Rejected requests remain in
+`evaluation-parameter-errors.json`. This path cannot edit the accepted Plan, clear
+a claimed receipt, retry a job, or bypass source/identity/accounting checks. An
+I/O or controller failure remains blocking.
 
 The controller freezes protected dependencies, candidate files and research source.
 The sandbox exposes `/workspace` and declared `/inputs/<name>` read-only, a manifest

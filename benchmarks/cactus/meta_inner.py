@@ -88,40 +88,6 @@ class UsageBudgetHarness:
         return result
 
 
-def run_review_recovery(study):
-    """One structural, read-only retry; never repeat Execute or unknown effects."""
-    from research_loop.core import StudyError
-    from pydantic import ValidationError
-
-    try:
-        return study.run(iterations=1)
-    except (StudyError, ValueError) as error:
-        structural_error = (
-            str(error)
-            == "Candidate reviews must match unique current measurements exactly"
-        )
-        if isinstance(error, ValidationError):
-            details = error.errors(include_input=False)
-            structural_error = (
-                len(details) == 1
-                and details[0]["loc"] == ("candidate_reviews",)
-                and details[0]["type"] == "too_long"
-                and details[0].get("ctx", {}).get("max_length") == 0
-            )
-        state = study.status()
-        if (
-            state.get("phase") == "review"
-            and state.get("status") == "needs_attention"
-            and structural_error
-            and state["call_count"] < study.config["max_calls"]
-        ):
-            receipt = study.root / state["calls"]["review"] / "process.json"
-            if receipt.is_file() and read(receipt).get("status") == "succeeded":
-                study.retry()
-                return study.run(iterations=1)
-        raise
-
-
 def baseline(path: Path, text: str, policy: dict) -> None:
     path.mkdir(parents=True, exist_ok=False)
     (path / "README.md").write_text(text)
@@ -276,7 +242,7 @@ def main(argv=None) -> int:
         active_harness = UsageBudgetHarness(
             bridge if is_cactus else CodexHarness(config), output / "study"
         )
-        state = run_review_recovery(Study(output / "study", harness=active_harness))
+        state = Study(output / "study", harness=active_harness).run(iterations=1)
         summary["state"] = state
         if (
             state["phase"] != "done"
