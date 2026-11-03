@@ -40,46 +40,82 @@ def policy(root):
 
 def research_usage(control):
     """Small controller receipts only; never read computational inputs/outputs."""
-    used, outstanding, overruns = 0, [], []
-    for path in sorted((Path(control) / "research-jobs").glob("*/job.json")):
-        job = read(path)
-        receipt = path.parent / "receipt.json"
-        if not receipt.exists():
-            outstanding.append(str(path.parent))
-            continue
-        settled = read(receipt)
-        seconds = settled.get("gpu_seconds")
-        if settled.get("status") == "not_started":
-            from integrations.protok.research_settlement import (
-                verify_not_started_receipt,
-            )
+    used, outstanding, overruns, errors = 0, [], [], []
+    directory = Path(control) / "research-jobs"
+    try:
+        if directory.is_symlink():
+            raise ProTokError("Research ledger must be anchored in control")
+        folders = sorted(directory.iterdir()) if directory.exists() else []
+    except (OSError, ProTokError) as error:
+        folders = []
+        outstanding.append(str(directory))
+        errors.append(
+            {"record": str(directory), "error": f"{type(error).__name__}: {error}"}
+        )
+    for folder in folders:
+        try:
+            if (
+                folder.is_symlink()
+                or not folder.is_dir()
+                or (folder / "job.json").is_symlink()
+                or (folder / "receipt.json").is_symlink()
+            ):
+                raise ProTokError("Research allocation ledger identity is not anchored")
+            job = read(folder / "job.json")
+            settled = read(folder / "receipt.json")
+            seconds = settled.get("gpu_seconds")
+            if settled.get("status") == "not_started":
+                from integrations.protok.research_settlement import (
+                    verify_not_started_receipt,
+                )
 
-            verify_not_started_receipt(Path(control).parent, path.parent.name, settled)
-        if (
-            settled.get("purpose") != "research"
-            or settled.get("quality_score_eligible") is not False
-            or settled.get("status") not in {"completed", "failed", "not_started"}
-            or type(seconds) is not int
-            or seconds < 0
-            or type(job.get("allocated_seconds")) is not int
-            or job["allocated_seconds"] < 0
-            or settled.get("allocated_seconds", job["allocated_seconds"])
-            != job["allocated_seconds"]
-            or settled.get("execution_identity") != job.get("execution_identity")
-            or settled.get("source_identity") != job["source_identity"]
-        ):
-            raise ProTokError("Research accounting is unresolved or inconsistent")
-        used += seconds
-        if seconds > job["allocated_seconds"]:
-            overruns.append(
-                {
-                    "iteration": path.parent.name,
-                    "allocated_seconds": job["allocated_seconds"],
-                    "gpu_seconds": seconds,
-                    "overrun_seconds": seconds - job["allocated_seconds"],
-                }
+                verify_not_started_receipt(Path(control).parent, folder.name, settled)
+            if (
+                settled.get("purpose") != "research"
+                or settled.get("quality_score_eligible") is not False
+                or settled.get("status") not in {"completed", "failed", "not_started"}
+                or type(seconds) is not int
+                or seconds < 0
+                or type(job.get("allocated_seconds")) is not int
+                or job["allocated_seconds"] < 0
+                or settled.get("allocated_seconds", job["allocated_seconds"])
+                != job["allocated_seconds"]
+                or settled.get("execution_identity") != job.get("execution_identity")
+                or settled.get("source_identity") != job["source_identity"]
+            ):
+                raise ProTokError("Research accounting is unresolved or inconsistent")
+            used += seconds
+            if seconds > job["allocated_seconds"]:
+                overruns.append(
+                    {
+                        "iteration": folder.name,
+                        "allocated_seconds": job["allocated_seconds"],
+                        "gpu_seconds": seconds,
+                        "overrun_seconds": seconds - job["allocated_seconds"],
+                    }
+                )
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            ProTokError,
+        ) as error:
+            outstanding.append(str(folder))
+            errors.append(
+                {"record": str(folder), "error": f"{type(error).__name__}: {error}"}
             )
-    return {"gpu_seconds": used, "outstanding": outstanding, "overruns": overruns}
+    result = {
+        "gpu_seconds": None if outstanding else used,
+        "outstanding": outstanding,
+        "overruns": overruns,
+    }
+    if outstanding:
+        result.update(
+            known_gpu_seconds=used, accounting_status="partial", errors=errors
+        )
+    return result
 
 
 def research_files(workspace, *, error_type=ProTokError):

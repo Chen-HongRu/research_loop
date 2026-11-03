@@ -176,7 +176,45 @@ class ProTokBackend:
         session = (
             _read(root / "session.json") if (root / "session.json").exists() else None
         )
-        states = [(p.parent.name, _read(p)) for p in sorted(root.glob("*/state.json"))]
+        states, accounting_errors = [], []
+        try:
+            folders = sorted(root.iterdir()) if root.exists() else []
+        except OSError as error:
+            folders = []
+            states.append(("unreadable-ledger", {"status": "unknown"}))
+            accounting_errors.append(
+                {
+                    "pool": "short",
+                    "record": str(root),
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
+        for folder in folders:
+            if not folder.is_dir() and not folder.is_symlink():
+                continue
+            path = folder / "state.json"
+            try:
+                if folder.is_symlink() or path.is_symlink():
+                    raise ProTokError(
+                        "Formal allocation ledger identity is not anchored"
+                    )
+                state = _read(path)
+                if not isinstance(state, dict) or not isinstance(
+                    state.get("attempts", []), list
+                ):
+                    raise ProTokError("Invalid formal accounting state")
+                if any(not isinstance(a, dict) for a in state.get("attempts", [])):
+                    raise ProTokError("Invalid formal accounting attempt")
+            except (OSError, ValueError, TypeError, ProTokError) as error:
+                state = {"status": "unknown"}
+                accounting_errors.append(
+                    {
+                        "pool": "short",
+                        "record": str(path),
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                )
+            states.append((path.parent.name, state))
         receipts, outstanding, used = [], [], 0
         for name, state in states:
             attempts = [
@@ -194,7 +232,9 @@ class ProTokBackend:
                 }
                 for a in state.get("attempts", [])
             ]
-            summary = state.get("summary", {})
+            summary = state.get("summary") or {}
+            if not isinstance(summary, dict):
+                summary = {}
             row = dict(
                 record=name,
                 fingerprint=state.get("fingerprint"),
@@ -221,7 +261,9 @@ class ProTokBackend:
             if _outstanding(state):
                 outstanding.append(row)
             used += sum(
-                a["gpu_seconds"] for a in attempts if _finite(a.get("gpu_seconds"))
+                a["gpu_seconds"]
+                for a in attempts
+                if _finite(a.get("gpu_seconds")) and a["gpu_seconds"] >= 0
             )
         continuation = {}
         for name in (
@@ -234,13 +276,29 @@ class ProTokBackend:
         debug_used = 0
         debug_outstanding = []
         for path in sorted((self.control / "debug").glob("*/debug-budget.json")):
-            budget = _read(path)
-            seconds = budget.get("used_gpu_seconds")
-            if type(seconds) is not int or seconds < 0:
-                raise ProTokError("Invalid debug accounting; preserve the ledger")
-            debug_used += seconds
-            if budget.get("active_attempt") is not None:
+            try:
+                budget = _read(path)
+                seconds = budget.get("used_gpu_seconds")
+                if type(seconds) is not int or seconds < 0:
+                    raise ProTokError("Invalid debug accounting; preserve the ledger")
+                debug_used += seconds
+                if budget.get("active_attempt") is not None:
+                    debug_outstanding.append(str(path))
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                AttributeError,
+                ProTokError,
+            ) as error:
                 debug_outstanding.append(str(path))
+                accounting_errors.append(
+                    {
+                        "pool": "debug",
+                        "record": str(path),
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                )
         from integrations.protok.research_execution import research_usage
 
         research = research_usage(self.control)
@@ -248,6 +306,33 @@ class ProTokBackend:
 
         long_training = long_usage(self.control)
         manual_training = long_usage(self.control, pool="manual")
+        formal = None if outstanding else used
+        short = (
+            formal + research["gpu_seconds"]
+            if formal is not None and research["gpu_seconds"] is not None
+            else None
+        )
+        debug = None if debug_outstanding else debug_used
+        subtotals = [
+            short,
+            debug,
+            long_training["gpu_seconds"],
+            manual_training["gpu_seconds"],
+        ]
+        known = (
+            used
+            + research.get("known_gpu_seconds", research["gpu_seconds"])
+            + debug_used
+            + sum(
+                report.get("known_gpu_seconds", report["gpu_seconds"])
+                for report in (long_training, manual_training)
+            )
+        )
+        accounting_errors.extend(
+            {"pool": "short", **error} for error in research.get("errors", [])
+        )
+        accounting_errors.extend(long_training.get("errors", []))
+        accounting_errors.extend(manual_training.get("errors", []))
         return dict(
             project=str(self.project),
             protocol=PROTOCOL,
@@ -256,21 +341,33 @@ class ProTokBackend:
             record_count=len(states),
             records=receipts,
             scored_records=sum(s.get("mode") == "scored" for _, s in states),
-            formal_gpu_seconds=used,
+            formal_gpu_seconds=formal,
+            formal_known_gpu_seconds=used,
             research_gpu_seconds=research["gpu_seconds"],
             research_outstanding=research["outstanding"],
             research_overruns=research["overruns"],
-            used_gpu_seconds=used + research["gpu_seconds"],
-            debug_gpu_seconds=debug_used,
+            used_gpu_seconds=short,
+            short_known_gpu_seconds=used
+            + research.get("known_gpu_seconds", research["gpu_seconds"]),
+            debug_gpu_seconds=debug,
             long_training_gpu_seconds=long_training["gpu_seconds"],
             long_training_outstanding=long_training["outstanding"],
             manual_training_gpu_seconds=manual_training["gpu_seconds"],
             manual_training_outstanding=manual_training["outstanding"],
-            total_gpu_seconds=used
-            + research["gpu_seconds"]
-            + debug_used
-            + long_training["gpu_seconds"]
-            + manual_training["gpu_seconds"],
+            total_gpu_seconds=sum(subtotals)
+            if all(value is not None for value in subtotals)
+            else None,
+            known_gpu_seconds=known,
+            long_training_known_gpu_seconds=long_training.get(
+                "known_gpu_seconds", long_training["gpu_seconds"]
+            ),
+            manual_training_known_gpu_seconds=manual_training.get(
+                "known_gpu_seconds", manual_training["gpu_seconds"]
+            ),
+            accounting_status="known"
+            if all(value is not None for value in subtotals)
+            else "partial",
+            accounting_errors=accounting_errors,
             debug_outstanding=debug_outstanding,
             outstanding=outstanding,
             off=(self.project / ".autoresearch-off").exists(),
@@ -463,12 +560,14 @@ class ProTokBackend:
                     raise ProTokError(
                         "Recovery must reconcile an existing allocation; no new submission"
                     )
-        if recover and continuation:
+        if recover:
             if not preparing and not status["outstanding"]:
                 raise ProTokError(
                     "Receipt recovery requires a matching outstanding allocation"
                 )
             return
+        if status["used_gpu_seconds"] is None:
+            raise ProTokError("Short allocation accounting is unknown")
         bound = 1800 * len(config["seeds"])
         if control and control.get("schema") == 2:
             if not admitted_round and control["effective_deadline"] - now < bound:

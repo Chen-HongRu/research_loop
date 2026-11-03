@@ -284,6 +284,124 @@ class ManualLongBackendTests(unittest.TestCase):
         self.assertEqual(status["manual_training_outstanding"], [])
         self.assertEqual(status["total_gpu_seconds"], 3017)
 
+    def test_partial_manual_accounting_uses_job_identity_not_receipt_claim(self):
+        self.execute()
+        other = "independent"
+        self.ledger("manual", "Lfedcba9876543210", 17, task_id=other)
+        receipt = lane._read(self.record / "receipt.json")
+        receipt.update(gpu_seconds=-1, manual_task_id=other)
+        lane._write(self.record / "receipt.json", receipt)
+        report = lane.usage(self.control, pool="manual")
+        self.assertIsNone(report["gpu_seconds"])
+        self.assertEqual(report["known_gpu_seconds"], 17)
+        self.assertEqual(report["errors"][0]["task_id"], self.task_id)
+        self.assertEqual(
+            lane.usage(self.control, pool="manual", task_id=other)["gpu_seconds"], 17
+        )
+        self.assertIsNone(
+            lane.usage(self.control, pool="manual", task_id=self.task_id)["gpu_seconds"]
+        )
+        backend = ProTokBackend(self.backend.project, self.control)
+        with patch.object(backend, "_config", return_value=self.config):
+            report = backend.inspect()
+        self.assertEqual(report["accounting_status"], "partial")
+        self.assertIsNone(report["total_gpu_seconds"])
+        self.assertEqual(report["known_gpu_seconds"], 17)
+        self.assertEqual(report["used_gpu_seconds"], 0)
+        self.assertEqual(report["long_training_gpu_seconds"], 0)
+        with patch.object(lane.time, "time", return_value=100.0):
+            with self.assertRaisesRegex(lane.ProTokError, "unresolved"):
+                lane.round_authorization(
+                    self.backend, self.root, {"manual_task_id": self.task_id}
+                )
+
+    def test_unknown_job_identity_blocks_every_manual_grant_not_automatic(self):
+        self.execute()
+        job = lane._read(self.record / "job.json")
+        job["request"]["manual_task_id"] = "contradictory"
+        lane._write(self.record / "job.json", job)
+        for identity in (self.task_id, "independent", "new-task"):
+            report = lane.usage(self.control, pool="manual", task_id=identity)
+            self.assertIsNone(report["gpu_seconds"])
+            self.assertEqual(report["outstanding"], [str(self.record)])
+            self.assertIsNone(report["errors"][0]["task_id"])
+        self.assertEqual(lane.usage(self.control)["gpu_seconds"], 0)
+
+    def test_corrupt_job_missing_job_and_conflicting_pool_remain_unknown(self):
+        self.execute()
+        path = self.record / "job.json"
+        job = lane._read(path)
+        for content in ("{", None):
+            if content is None:
+                path.unlink()
+            else:
+                path.write_text(content)
+            self.assertIsNone(
+                lane.usage(self.control, pool="manual", task_id="independent")[
+                    "gpu_seconds"
+                ]
+            )
+        lane._write(path, job | {"budget_pool": "automatic"})
+        self.assertIsNone(lane.usage(self.control)["gpu_seconds"])
+        self.assertIsNone(
+            lane.usage(self.control, pool="manual", task_id="independent")[
+                "gpu_seconds"
+            ]
+        )
+
+    def test_unreadable_or_non_directory_ledger_is_unknown_not_empty(self):
+        directory = self.control / "manual-training-jobs"
+        directory.mkdir()
+        entry = directory / "Lfedcba9876543210"
+        entry.write_text("damaged allocation directory")
+        self.assertIsNone(
+            lane.usage(self.control, pool="manual", task_id="independent")[
+                "gpu_seconds"
+            ]
+        )
+        self.assertEqual(lane.usage(self.control)["gpu_seconds"], 0)
+        entry.unlink()
+        original = Path.iterdir
+
+        def inaccessible(path):
+            if path == directory:
+                raise PermissionError("synthetic ledger inaccessible")
+            return original(path)
+
+        with patch.object(Path, "iterdir", inaccessible):
+            report = lane.usage(self.control, pool="manual", task_id="independent")
+            self.assertIsNone(report["gpu_seconds"])
+            self.assertEqual(report["outstanding"], [str(directory)])
+        entry.symlink_to(self.control / "missing-allocation")
+        self.assertIsNone(lane.usage(self.control, pool="manual")["gpu_seconds"])
+
+    def test_explicit_preallocation_archive_does_not_invent_unresolved_allocation(self):
+        archive = (
+            self.control
+            / "manual-training-jobs"
+            / ("Lfedcba9876543210.pre-allocation." + "a" * 32)
+        )
+        archive.mkdir(parents=True)
+        (archive / "source").mkdir()
+        self.assertEqual(lane.usage(self.control, pool="manual")["gpu_seconds"], 0)
+        lane._write(archive / "state.json", {"attempts": [{"status": "submitting"}]})
+        self.assertIsNone(
+            lane.usage(self.control, pool="manual", task_id="independent")[
+                "gpu_seconds"
+            ]
+        )
+
+    def test_unknown_automatic_accounting_does_not_consume_manual_grant(self):
+        self.ledger("automatic", "Lfedcba9876543210", -1)
+        report = lane.usage(self.control)
+        self.assertIsNone(report["gpu_seconds"])
+        self.assertEqual(report["known_gpu_seconds"], 0)
+        with patch.object(lane.time, "time", return_value=100.0):
+            with self.assertRaisesRegex(lane.ProTokError, "unresolved"):
+                lane.round_authorization(self.backend, self.root, {})
+        self.assertEqual(self.execute()["outcome"], "completed")
+        self.assertEqual(self.transport.submissions, 1)
+
     def test_source_tamper_and_fingerprint_change_rejected_before_submission(self):
         path = self.source / CANDIDATE_FILES[0]
         original = path.read_bytes()

@@ -42,13 +42,17 @@ def command(*args):
 def check_idle(backend):
     """A runtime replacement affects all lanes, including independent long jobs."""
     status = backend.inspect()
-    if status["outstanding"] or any(
-        status.get(key)
-        for key in (
-            "debug_outstanding",
-            "research_outstanding",
-            "long_training_outstanding",
-            "manual_training_outstanding",
+    if (
+        status.get("accounting_status", "known") != "known"
+        or status["outstanding"]
+        or any(
+            status.get(key)
+            for key in (
+                "debug_outstanding",
+                "research_outstanding",
+                "long_training_outstanding",
+                "manual_training_outstanding",
+            )
         )
     ):
         raise RuntimeError("Outstanding evaluation effects prevent a handoff")

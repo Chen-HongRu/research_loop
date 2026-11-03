@@ -136,6 +136,14 @@ own runner/recovery lock and serial Plan → Execute → Review. Automatic child
 claim `max_runs` capacity before preparation; failed preparation releases its
 unused slot. They share one allocation slot: unsettled costs block new allocations in that pool,
 while settled children can finish Review alongside another child's work.
+Accounting inspection is partial when any allocation is unresolved: affected
+`gpu_seconds` subtotals and the overall total are null, while known costs remain
+in `known_gpu_seconds`. A known subtotal is not available budget. A malformed
+manual receipt is attributed against the original job and blocks only its task;
+unverifiable identity blocks all grants that cannot be excluded. Automatic
+unknown costs block automatic allocations, not independent manual grants or safe
+Plan/Review work. A parent's local retry threshold never widens that scope or
+cancels independently authorized children. See [supervisor state](../integrations/protok/README.md#supervisor-state).
 `--run-long-one` provides the same bounded manual operation, skipping retained
 failures; add `--long-run-id ID` to explicitly advance an inspected child.
 If short work ends first, the long lane can finish

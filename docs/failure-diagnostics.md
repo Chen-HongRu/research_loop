@@ -48,9 +48,18 @@ Supervisor inspection failures retain a public diagnostic in
 `control/supervisor-status.json` and operator evidence in
 `control/pipeline-diagnostics`. Identical blocked polls reuse the same failure
 record rather than recording the same error on every poll. `supervisor-status.json`
-also records `blocked_since`, `consecutive_failures` and `escalated`; five
-consecutive identical failures stop the supervisor with `attention` and a
-non-zero exit instead of polling until the lease deadline.
+also records `scope`, `target`, `blocked_since`, `consecutive_failures`,
+`escalated`, and a persistent `failures` list keyed by scope/target/stage/error.
+Five observations mark the affected object `needs_attention` and stop its automatic
+operation retries, not the scheduler or independent children. Read-only accounting
+and readiness observations continue to detect reconciliation; these polls never
+replay Execute. An operation's count resets only on that operation's success,
+not because an earlier check passed. Counts and the first error survive restart.
+A retained Execute is never automatically replayed, even below the threshold.
+Shared ownership/authorization/control invalidity instead publishes STOP before
+worker shutdown and exits nonzero (`global_attention`); a local threshold does not
+make a failure global. Partial inspection reports retain known usage and mark
+unknown subtotals/totals as null; report availability is not allocation authority.
 
 Each diagnostic directory has `diagnostic-manifest.json`, operator-only `raw/`
 streams and redacted `public/` streams. Explicit controller credentials and common

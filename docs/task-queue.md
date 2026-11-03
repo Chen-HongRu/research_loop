@@ -81,7 +81,9 @@ ProTok 人工长训采用已有 `se3-long-v1-10k-full4491-seed42` 协议：fresh
 
 某个子 Study 出错后，调度器保留其状态、attempt、作业和费用，并继续调度其他可运行任务。初始化前的错误保存在该任务目录的 `scheduler-error.json`；重启不自动重试。只要其他 worker 仍在推进，汇总状态保持 running 并单列 blocked 子任务；排空所有可运行任务后才报告需要处理的剩余错误。未完成的父 Study 主调查不因此跳到下一轮。
 
-人工长训使用 `control/manual-training-jobs/` 和任务自己的预算，自动长训继续使用 `control/long-training-jobs/` 及原预算。短训 `used_gpu_seconds` 和自动长训 `long_training_gpu_seconds` 不包含人工长训；`manual_training_gpu_seconds` 单列实际人工费用，`total_gpu_seconds` 包含所有通道。失败、取消和分配超时的实际费用均保留。
+父调查连续五次相同故障只结束该对象的自动重试，记录 `needs_attention`；调度器仍发现新任务，独立冻结输入的子任务不因父 Execute 等待核对而停止。费用按原 `job.json` 核对归属，不信任损坏回执声称的 task ID。A 的费用异常只隔离 A 及其依赖；任务身份无法核实时，所有不能排除的人工预算都保持未知。自动池未知费用只阻止该池分配，安全 Plan/Review 和独立人工授权继续有效。共享 ownership/授权/控制无效才发布全局 STOP，且先于等待 worker 退出。
+
+人工长训使用 `control/manual-training-jobs/` 和任务自己的预算，自动长训继续使用 `control/long-training-jobs/` 及原预算。短训 `used_gpu_seconds` 和自动长训 `long_training_gpu_seconds` 不包含人工长训；`manual_training_gpu_seconds` 单列实际人工费用，`total_gpu_seconds` 包含所有通道。失败、取消和分配超时的实际费用均保留。核账不完整时 `accounting_status` 为 `partial`，受影响小计和总额为 `null`；`known_gpu_seconds` 仅为已知费用小计，不代表可用额度，也不释放未知作业预留。
 
 入轮截止只阻止新调查。已接纳的调查可以在截止后完成训练和 Review；Slurm 分配及单次模型调用仍有自己的上限。排队等待不消耗 GPU 分配秒数。准备基线时过期、尚无调用或入轮记录的请求标为过期，后续有效任务仍可执行。已开始或效果未知的任务保留原身份等待核对。
 
