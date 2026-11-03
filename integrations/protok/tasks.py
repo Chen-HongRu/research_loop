@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import fcntl
 import hashlib
 import json
@@ -24,6 +23,7 @@ from research_loop.harness import (
 from research_loop.long_training import admission_path, admitted_round
 from research_loop.tasks import TaskQueue
 from research_loop.protocol import validate_response
+from research_loop.schema import omit_fields
 
 from integrations.protok.agent_output import REPORT_SCHEMA, report_response
 
@@ -252,13 +252,13 @@ class ManualLongHarness:
         if phase != "execute":
             if phase != "plan":
                 return self.delegate.run(**kwargs)
-            schema = copy.deepcopy(kwargs["schema"])
-            for name in ("base_experiment", "local_evaluation", "references"):
-                schema["properties"].pop(name, None)
-                if name in schema["required"]:
-                    schema["required"].remove(name)
-            del schema["properties"]["timeout_seconds"]
-            schema["required"].remove("timeout_seconds")
+            schema = omit_fields(
+                kwargs["schema"],
+                "base_experiment",
+                "local_evaluation",
+                "references",
+                "timeout_seconds",
+            )
             outer = Path(kwargs["run_dir"])
             agent = outer / "agent"
             agent.mkdir()

@@ -17,7 +17,7 @@ from integrations.protok.backend import CANDIDATE_FILES, ProTokError
 from integrations.protok.continuation import _load_backend
 from integrations.protok.research_backend import _source_identity, _launcher
 from research_loop.long_training import admitted_round
-from research_loop.protocol import EVALUATION, _validate, validate_response
+from research_loop.protocol import EVALUATION, validate_response
 
 RECIPE = {
     "total_steps": 10000,
@@ -190,7 +190,7 @@ def _validate_request(request):
     _run_id(request.get("id"))
     if request.get("recipe") != RECIPE:
         raise ProTokError("Only fresh seed42 10k/full-validation recipe is authorized")
-    _validate(EVALUATION, request["evaluation"], "long-training.evaluation")
+    EVALUATION.validate(request["evaluation"])
     names = [item["name"] for item in request["evaluation"]["objectives"]]
     if (
         set(names) != set(METRICS)

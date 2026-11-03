@@ -252,7 +252,7 @@ class CoreTests(unittest.TestCase):
                 )
                 self.assertEqual(harness.calls, [])
 
-    def test_readonly_retry_retains_rejected_outputs_and_never_repeats_execute(self):
+    def test_readonly_feedback_retains_rejected_outputs_and_never_repeats_execute(self):
         for failed_phase in ("plan", "review"):
             with self.subTest(phase=failed_phase):
                 self.root = self.root.parent / failed_phase
@@ -272,32 +272,27 @@ class CoreTests(unittest.TestCase):
                     return value
 
                 harness.response = response
-                with self.assertRaises((StudyError, ValueError)):
-                    study.run()
-                before = study.status()
-                attempt = study.root / before["active_attempt"]
+                state = study.run()
+                calls = [
+                    call for call in harness.calls if call["phase"] == failed_phase
+                ]
+                attempt = calls[0]["run_dir"]
                 raw = (attempt / "response.json").read_bytes()
-                executes = harness.count("execute")
-                with patch.object(
-                    study,
-                    "_check_attempt_stopped",
-                    side_effect=StudyError("retained CLI is live"),
-                ):
-                    with self.assertRaisesRegex(StudyError, "CLI is live"):
-                        study.retry(readonly=True)
-                self.assertEqual(study.status(), before)
-                retried = study.retry(readonly=True)
-                self.assertEqual(retried["call_count"], before["call_count"])
-                self.assertEqual(retried["elapsed_seconds"], before["elapsed_seconds"])
+                self.assertEqual(
+                    read(attempt / "rejection.json")["response"], json.loads(raw)
+                )
+                self.assertEqual(calls[0]["context"], calls[1]["context"])
+                self.assertIn("previous reply was rejected", calls[1]["prompt"])
                 self.assertEqual((attempt / "response.json").read_bytes(), raw)
-                study.run()
+                self.assertEqual(state["call_count"], len(harness.calls))
                 self.assertEqual(harness.count(failed_phase), 2)
                 self.assertEqual(harness.count("execute"), 1)
-                if failed_phase == "review":
-                    self.assertEqual(executes, 1)
+                self.assertTrue(
+                    (self.root / "iterations/0001/publication.json").exists()
+                )
 
     def test_plan_rejects_model_supplied_base_before_execute(self):
-        study, harness = self.study()
+        study, harness = self.study(max_calls=12)
         original = harness.response
 
         def injected(phase, context, kwargs):
@@ -307,11 +302,14 @@ class CoreTests(unittest.TestCase):
             return result
 
         harness.response = injected
-        with self.assertRaisesRegex(ValueError, "plan: must contain exactly"):
-            study.run()
+        self.assertEqual(study.run()["stop_reason"], "call_budget")
         self.assertEqual(harness.count("execute"), 0)
         call = next(c for c in harness.calls if c["phase"] == "plan")
         self.assertIn("base_experiment", read(call["run_dir"] / "response.json"))
+        self.assertIn(
+            "base_experiment",
+            json.dumps(read(call["run_dir"] / "rejection.json")["errors"]),
+        )
 
     def legacy_completed_call(self, phase, *, accepted=False):
         study, harness = self.study()
@@ -714,7 +712,7 @@ class CoreTests(unittest.TestCase):
         final.update(data_role="final", allow_feedback=False)
         study, harness = self.study(global_evaluation=final)
         harness.measure = True
-        with self.assertRaisesRegex(ValueError, "execute.measurements"):
+        with self.assertRaisesRegex(ValueError, "measurements"):
             study.run()
         self.assertEqual(study.status()["phase"], "execute")
         self.assertEqual(harness.count("review"), 0)

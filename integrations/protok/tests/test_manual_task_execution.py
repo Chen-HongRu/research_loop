@@ -251,7 +251,7 @@ class ManualExecutionTests(unittest.TestCase):
         with (
             patch.object(tasks, "_load_backend", return_value=(self.fixed, None)),
             patch.object(tasks, "execute", side_effect=self.allocate),
-            self.assertRaisesRegex(ValueError, "must contain exactly"),
+            self.assertRaisesRegex(ValueError, "measurements"),
         ):
             manager.run_one()
         self.assertEqual(self.allocations, [])

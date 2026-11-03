@@ -746,7 +746,10 @@ class DebugFlowTests(unittest.TestCase):
     def test_real_study_without_debug_grant_repairs_same_plan_then_reviews(self):
         self._real_study_review(no_grant=True)
 
-    def _real_study_review(self, *, no_grant=False):
+    def test_real_study_repeated_failure_preserves_review_call(self):
+        self._real_study_review(exhaust_calls=True)
+
+    def _real_study_review(self, *, no_grant=False, exhaust_calls=False):
         spec = importlib.util.spec_from_file_location(
             "debug_flow_core_fixture",
             Path(__file__).resolve().parents[3] / "tests/test_core.py",
@@ -777,6 +780,7 @@ class DebugFlowTests(unittest.TestCase):
             workspace=base,
             allow_write=True,
             max_iterations=None,
+            max_calls=7 if exhaust_calls else 100,
             global_evaluation=definition,
             strategy={"selection": "direct", "review": "full"},
         )
@@ -789,7 +793,7 @@ class DebugFlowTests(unittest.TestCase):
                 run.read(self.root / "control/debug-policy.json"),
             )
         backend = self.backend
-        backend.smokes = ["completed"]
+        backend.smokes = ["failed", "failed"] if exhaust_calls else ["completed"]
         evaluate, settled = backend.evaluate, backend.settled_failure
 
         def initial_failure(
@@ -883,7 +887,8 @@ class DebugFlowTests(unittest.TestCase):
         self.assertEqual(agent.count("execute"), 2)
         self.assertEqual(agent.count("review"), 1)
         self.assertEqual(
-            backend.formal_calls, [] if no_grant else [("debug-0009-formal-001", False)]
+            backend.formal_calls,
+            [] if no_grant or exhaust_calls else [("debug-0009-formal-001", False)],
         )
         if no_grant:
             self.assertEqual(backend.smoke_calls, [])
@@ -893,7 +898,10 @@ class DebugFlowTests(unittest.TestCase):
         self.assertTrue((live / "control/debug/0009/decision.json").exists())
         self.assertTrue((live / "study/iterations/0009/publication.json").exists())
         execution = run.read(live / "study" / result["execution_ref"])
-        if no_grant:
+        if no_grant or exhaust_calls:
+            if exhaust_calls:
+                self.assertEqual(len(backend.smoke_calls), 1)
+                self.assertEqual(len(backend.smokes), 1)
             self.assertEqual(
                 (execution["outcome"], execution["measurements"]), ("incomplete", [])
             )

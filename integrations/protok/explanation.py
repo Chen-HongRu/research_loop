@@ -15,6 +15,9 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
+
+from pydantic import AfterValidator, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -23,6 +26,7 @@ from integrations.protok.backend import CANDIDATE_FILES, METRIC
 from integrations.protok.plan_provenance import accepted_plan_response, execution_plan
 from integrations.protok.run import job_path
 from research_loop.harness import CodexHarness, HarnessConfig, completed_response
+from research_loop.schema import OutputModel, OutputSchema, choices, with_fields
 
 VERSION = "research-explanation-2"
 CONTINUATION_VERSION = VERSION + "-execution-continuation-1"
@@ -35,81 +39,90 @@ TIMEOUT = 240
 MAX_CONTENT_BYTES = 60_000
 
 
-def _obj(**fields):
-    return {
-        "type": "object",
-        "properties": fields,
-        "required": list(fields),
-        "additionalProperties": False,
-    }
+def _plain_text(value):
+    if re.search(r"<\s*/?\s*[A-Za-z][^>]*>", value):
+        raise ValueError("Invalid explanation text/HTML")
+    return value
 
 
-TEXT = {"type": "string", "maxLength": 1800}
-IDS = {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 12}
-STATEMENT = _obj(text=TEXT, source_ids=IDS)
+Text = Annotated[str, Field(max_length=1800), AfterValidator(_plain_text)]
+SourceIds = Annotated[list[Text], Field(min_length=1, max_length=12)]
 
 
-def _arr(item):
-    return {"type": "array", "items": item, "maxItems": 12}
+class Statement(OutputModel):
+    text: Text
+    source_ids: SourceIds
 
 
-SCHEMA = _obj(
-    title=TEXT,
-    overview=STATEMENT,
-    question=STATEMENT,
-    goal_connection=STATEMENT,
-    change=STATEMENT,
-    observations=_arr(STATEMENT),
-    supported=_arr(STATEMENT),
-    hypotheses=_arr(STATEMENT),
-    unmeasured=_arr(STATEMENT),
-    next_tests=_arr(
-        _obj(
-            text=TEXT,
-            source_ids=IDS,
-            proposed={"type": "boolean", "enum": [True]},
-            not_run={"type": "boolean", "enum": [True]},
-        )
-    ),
-    technical=_obj(
-        kind={
-            "type": "string",
-            "enum": [
-                "architecture",
-                "loss",
-                "data",
-                "optimization",
-                "diagnostic",
-                "import",
-                "other",
-            ],
-        },
-        before=STATEMENT,
-        after=STATEMENT,
-        formulas=_arr(
-            _obj(
-                before_latex=TEXT,
-                after_latex=TEXT,
-                scope=TEXT,
-                variables=_arr(_obj(symbol_latex=TEXT, meaning=TEXT, shape=TEXT)),
-                source_ids=IDS,
-            )
-        ),
-        flow=_arr(_obj(label=TEXT, shape=TEXT, source_ids=IDS)),
-        unchanged=_arr(STATEMENT),
-        missing=_arr(TEXT),
-    ),
-    glossary=_arr(_obj(internal=TEXT, plain=TEXT, source_ids=IDS)),
-    missing_material=_arr(TEXT),
-)
+class ProposedTest(Statement):
+    proposed: choices(True)
+    not_run: choices(True)
 
+
+class Variable(OutputModel):
+    symbol_latex: Text
+    meaning: Text
+    shape: Text
+
+
+class Formula(OutputModel):
+    before_latex: Text
+    after_latex: Text
+    scope: Text
+    variables: Annotated[list[Variable], Field(max_length=12)]
+    source_ids: SourceIds
+
+
+class Flow(OutputModel):
+    label: Text
+    shape: Text
+    source_ids: SourceIds
+
+
+Statements = Annotated[list[Statement], Field(max_length=12)]
+
+
+class Technical(OutputModel):
+    kind: choices(
+        "architecture", "loss", "data", "optimization", "diagnostic", "import", "other"
+    )
+    before: Statement
+    after: Statement
+    formulas: Annotated[list[Formula], Field(max_length=12)]
+    flow: Annotated[list[Flow], Field(max_length=12)]
+    unchanged: Statements
+    missing: Annotated[list[Text], Field(max_length=12)]
+
+
+class GlossaryEntry(OutputModel):
+    internal: Text
+    plain: Text
+    source_ids: SourceIds
+
+
+class Explanation(OutputModel):
+    title: Text
+    overview: Statement
+    question: Statement
+    goal_connection: Statement
+    change: Statement
+    observations: Statements
+    supported: Statements
+    hypotheses: Statements
+    unmeasured: Statements
+    next_tests: Annotated[list[ProposedTest], Field(max_length=12)]
+    technical: Technical
+    glossary: Annotated[list[GlossaryEntry], Field(max_length=12)]
+    missing_material: Annotated[list[Text], Field(max_length=12)]
+
+
+SCHEMA = OutputSchema(Explanation)
 # Fixed suggestion markers belong to the publisher, not the author.
-AGENT_SCHEMA = deepcopy(SCHEMA)
-AGENT_SCHEMA["properties"]["next_tests"] = _arr(STATEMENT)
+AGENT_SCHEMA = with_fields(SCHEMA, next_tests=Statements)
 
 
 def published_content(response):
-    _validate(response, AGENT_SCHEMA)
+    AGENT_SCHEMA.validate(response)
     content = deepcopy(response)
     content["next_tests"] = [
         {**item, "proposed": True, "not_run": True} for item in content["next_tests"]
@@ -671,37 +684,10 @@ def _write(path, value):
     temporary.replace(path)
 
 
-def _validate(value, schema=SCHEMA):
-    kind = schema["type"]
-    if kind == "object":
-        if not isinstance(value, dict) or set(value) != set(schema["properties"]):
-            raise ValueError("Invalid explanation fields")
-        for key, item in value.items():
-            _validate(item, schema["properties"][key])
-    elif kind == "array":
-        if not isinstance(value, list) or not schema.get("minItems", 0) <= len(
-            value
-        ) <= schema.get("maxItems", 12):
-            raise ValueError("Invalid explanation array")
-        for item in value:
-            _validate(item, schema["items"])
-    elif kind == "string":
-        if (
-            not isinstance(value, str)
-            or len(value) > schema.get("maxLength", 1800)
-            or re.search(r"<\s*/?\s*[A-Za-z][^>]*>", value)
-        ):
-            raise ValueError("Invalid explanation text/HTML")
-    elif kind == "boolean" and type(value) is not bool:
-        raise ValueError("Invalid boolean")
-    if "enum" in schema and value not in schema["enum"]:
-        raise ValueError("Invalid enum")
-
-
 def validate_content(content, material):
     if len(json.dumps(content, ensure_ascii=False).encode()) > MAX_CONTENT_BYTES:
         raise ValueError("Explanation content exceeds byte limit")
-    _validate(content)
+    SCHEMA.validate(content)
     sources = {s["id"]: s for s in material["sources"]}
     facts = material.get("facts", {})
     known_ids = {

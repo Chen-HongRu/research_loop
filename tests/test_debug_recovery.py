@@ -307,6 +307,41 @@ class DebugRecoveryTests(unittest.TestCase):
         self.assertEqual(len(harness.repair.calls), 0)
         self.assertEqual(harness.count("review"), 0)
 
+    def test_every_repair_refreshes_budget_and_reserves_one_review_call(self):
+        from research_loop.core import BudgetExhausted
+
+        study, harness = self.study(max_calls=7)
+        remaining_calls = []
+
+        def recover(failure, *, workspace, run_dir, context, invoke):
+            for index in range(2):
+                remaining_calls.append(invoke.budget_status()["calls_left"])
+                try:
+                    invoke(
+                        f"repair-{index}",
+                        {},
+                        run_dir / f"repair-{index}",
+                        harness.repair,
+                    )
+                except BudgetExhausted:
+                    return {
+                        "outcome": "incomplete",
+                        "markdown": "Retain failed evidence for Review.",
+                        "artifacts": [],
+                        "measurements": [],
+                    }
+            self.fail("A second repair consumed the reserved Review call")
+
+        harness.recover_execution = recover
+        state = study.run()
+        self.assertEqual(remaining_calls, [2, 1])
+        self.assertEqual(len(harness.repair.calls), 1)
+        self.assertEqual(harness.count("review"), 1)
+        self.assertEqual(state["call_count"], 7)
+        context = read(harness.repair.calls[0]["run_dir"] / "context.json")
+        self.assertEqual(context["budget"]["calls_left"], 2)
+        self.assertIsNone(state["debugging"])
+
     def test_repair_agent_call_obeys_existing_wall_budget(self):
         study, harness = self.study(max_seconds=10)
         clock = [0.0]

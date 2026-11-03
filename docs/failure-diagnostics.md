@@ -5,9 +5,19 @@ more compute. Reading logs does not authorize a new submission or a budget chang
 
 | Responsibility | Evidence | Controller action |
 | --- | --- | --- |
+| Parameter | A designated pure validator rejects an unaccepted Agent output or an unclaimed request | Retain the rejection and return corrective feedback to its originating stage/Agent within the original task and remaining budgets. No computation is replayed. |
 | Workspace | Authorized source/configuration or execution failed; identity and effects are reconciled | Return diagnostics to the same investigation's Agent. Use its original Plan, scope and remaining budgets. Publish an incomplete result for independent Review when bounded repair cannot finish. |
 | Pipeline | Controller, protected evaluation, permissions, identity or accounting failed | Retain a blocking diagnostic for user/developer intervention. |
 | Unknown | Submission, job identity, terminal state or accounting is unresolved | Preserve the original attempt and reconcile it. Do not submit a replacement or assume zero cost. |
+
+The generic correction loop applies to unaccepted read-only stage responses.
+Pydantic representation errors and designated pure cross-field checks are
+correctable; an arbitrary `ValueError` from a controller or harness is not.
+Execute response rejection does not authorize another Execute call. Adapter
+request preparation may reject explicit action, missing entrypoint, authored-source
+policy or syntax errors before claim. Frozen Plan, protected source and trusted
+input failures remain blocking. Preparation allocates no compute; after claim,
+the durable submission and existing effect-reconciliation rules remain authoritative.
 
 A successful Agent response with `outcome=incomplete` and no measurements can enter
 Review after the controller verifies scope and absence of submission effects. A
@@ -64,7 +74,9 @@ not the complete evidence.
 
 Repair uses existing call, time and GPU grants. A CPU-only repair does not grant a
 smoke or formal allocation. Exhausted repair capacity produces incomplete evidence;
-Review still obeys the Study's own remaining call/time budget. An expired execution
+New repair calls use fresh Study budgets and reserve one call for independent
+Review. Review still obeys the remaining time budget and original wall deadline;
+its completion time is not guaranteed. An expired execution
 window prevents new work and does not invalidate already-settled receipts.
 
 Diagnostics do not change candidate eligibility, fixed evaluation, data roles or

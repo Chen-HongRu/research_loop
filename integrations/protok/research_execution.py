@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import stat
 import time
 
 from integrations.protok.backend import ProTokError
+from research_loop.correction import ParameterError
 
 
 def read(path):
@@ -68,7 +70,7 @@ def research_usage(control):
     return {"gpu_seconds": used, "outstanding": outstanding, "overruns": overruns}
 
 
-def research_files(workspace):
+def research_files(workspace, *, error_type=ProTokError):
     """Read only bounded code/configuration authored for this investigation."""
     workspace = Path(workspace)
     directory = workspace / "research"
@@ -81,7 +83,7 @@ def research_files(workspace):
         mode = path.lstat().st_mode
         if stat.S_ISDIR(mode):
             if len(pending) + len(result) > 256:
-                raise ProTokError("Research source has too many entries")
+                raise error_type("Research source has too many entries")
             pending.extend(path.iterdir())
             continue
         if (
@@ -91,12 +93,12 @@ def research_files(workspace):
             or path.stat().st_size > 1024 * 1024
             or len(result) >= 128
         ):
-            raise ProTokError(
+            raise error_type(
                 "Research files must be small regular source/configuration files"
             )
         total += path.stat().st_size
         if total > 4 * 1024 * 1024:
-            raise ProTokError(
+            raise error_type(
                 "Research source exceeds 4 MiB; keep outputs outside source"
             )
         result[path.relative_to(workspace).as_posix()] = path.read_bytes()
@@ -120,36 +122,130 @@ def frozen_contract(root, iteration, *, required=True):
     return plan
 
 
-def execute_script(harness, workspace, iteration, stop, deadline):
+def authored_source(workspace, entrypoint):
+    """Validate only source Execute may repair; never catch backend exceptions."""
+    from integrations.protok import run
+
+    contents = {
+        **run.candidate_bytes(workspace, error_type=ParameterError),
+        **research_files(workspace, error_type=ParameterError),
+    }
+    if entrypoint not in contents:
+        raise ParameterError("Declared research entrypoint is missing")
+    for name, content in contents.items():
+        if name.endswith(".py"):
+            try:
+                compile(content, name, "exec")
+            except (SyntaxError, UnicodeError) as error:
+                raise ParameterError(
+                    f"Invalid Python source in {name}: {error}"
+                ) from error
+    return contents
+
+
+@dataclass(frozen=True)
+class PreparedInvestigation:
+    contract: dict
+    signatures: dict
+    script: object
+
+
+class ScriptExecutionBackend:
+    """The live submission boundary for one frozen research investigation."""
+
+    def __init__(self, harness, workspace, iteration, stop, deadline):
+        self.harness = harness
+        self.workspace = Path(workspace)
+        self.iteration, self.stop, self.deadline = iteration, stop, deadline
+
+    def matches(self, workspace, iteration, stop, deadline):
+        return (self.workspace, self.iteration, self.stop, self.deadline) == (
+            Path(workspace),
+            iteration,
+            stop,
+            deadline,
+        )
+
+    def prepare(self):
+        from integrations.protok import run
+        from integrations.protok.research_backend import prepare_script
+
+        harness, workspace = self.harness, self.workspace
+        root, iteration = harness.root, self.iteration
+        authorization = policy(root)
+        if authorization is None:
+            raise ProTokError("This Study has not authorized research scripts")
+        contract = frozen_contract(root, iteration)
+        execution = contract["execution"]
+        if execution["mode"] != "script":
+            raise ProTokError("Research submission differs from frozen execution mode")
+        if execution["time_limit_seconds"] > authorization["max_time_limit_seconds"]:
+            raise ProTokError("Script exceeds the admitted per-allocation limit")
+        if self.stop.is_set() or time.time() >= self.deadline:
+            raise ProTokError("Execution ended before research admission")
+        run.admission(root, harness.backend)
+        run.check_fixed_candidate(root, workspace, iteration)
+        baseline = read(root / "study/study.json")["baseline"]
+        # Only files Execute may legally repair produce parameter feedback.
+        # Git, trusted configuration and frozen contract failures remain blocking.
+        run.check_scope(
+            workspace, baseline, allow_research=True, error_type=ParameterError
+        )
+        contents = authored_source(workspace, execution["entrypoint"])
+        script = prepare_script(
+            harness.backend,
+            root=root,
+            iteration=iteration,
+            source=workspace,
+            execution=execution,
+            deadline=self.deadline,
+            cancel_event=self.stop,
+        )
+        return PreparedInvestigation(contract, run.signatures(contents), script)
+
+    def start(self, prepared):
+        return execute_script(
+            self.harness,
+            self.workspace,
+            self.iteration,
+            self.stop,
+            self.deadline,
+            prepared=prepared,
+        )
+
+    def inspect(self):
+        return completed_script(self.harness.root, self.workspace, self.iteration)
+
+
+def execute_script(harness, workspace, iteration, stop, deadline, *, prepared=None):
     from integrations.protok import run
     from integrations.protok.research_backend import run_script
 
     root, workspace = harness.root, Path(workspace)
-    authorization = policy(root)
-    if authorization is None:
-        raise ProTokError("This Study has not authorized research scripts")
-    contract = frozen_contract(root, iteration)
-    execution = contract["execution"]
-    if execution["mode"] != "script":
-        raise ProTokError("Research submission differs from the frozen execution mode")
-    if execution["time_limit_seconds"] > authorization["max_time_limit_seconds"]:
-        raise ProTokError("Script exceeds the admitted per-allocation limit")
+    folder = root / "control/research-sources" / iteration
+    if (folder / "record.json").exists():
+        return ScriptExecutionBackend(
+            harness, workspace, iteration, stop, deadline
+        ).inspect()
+    if prepared is None:
+        prepared = ScriptExecutionBackend(
+            harness, workspace, iteration, stop, deadline
+        ).prepare()
+    contract, identity = prepared.contract, prepared.signatures
+    if frozen_contract(root, iteration) != contract:
+        raise ProTokError("Frozen Plan changed after preparation")
     if stop.is_set() or time.time() >= deadline:
-        raise ProTokError("Execution ended before research admission")
-    run.admission(root, harness.backend)
+        raise ProTokError("Execution ended after preparation")
     baseline = read(root / "study/study.json")["baseline"]
     run.check_scope(workspace, baseline, allow_research=True)
     contents = {**run.candidate_bytes(workspace), **research_files(workspace)}
-    if execution["entrypoint"] not in contents:
-        raise ProTokError("Declared research entrypoint is missing")
-    identity = run.signatures(contents)
+    if run.signatures(contents) != identity:
+        raise ProTokError("Authored source changed after preparation; no job started")
+    execution = contract["execution"]
     folder = root / "control/research-sources" / iteration
     record_path = folder / "record.json"
     if record_path.exists():
-        saved = read(record_path)
-        if saved["contract"] != contract or saved["source_signatures"] != identity:
-            raise ProTokError("Cannot replace a submitted research investigation")
-        return completed_script(root, workspace, iteration)
+        raise ProTokError("Research source record appeared during preparation")
     folder.mkdir(parents=True, exist_ok=False)
     run.write(record_path, {"contract": contract, "source_signatures": identity})
     commit, _ = run.freeze_source(
@@ -161,6 +257,16 @@ def execute_script(harness, workspace, iteration, stop, deadline):
         include_research=True,
     )
     run.check_fixed_candidate(root, workspace, iteration, folder / "source")
+    if (
+        run.signatures(
+            {
+                **run.candidate_bytes(folder / "source"),
+                **research_files(folder / "source"),
+            }
+        )
+        != identity
+    ):
+        raise ProTokError("Frozen source differs from prepared source; no job started")
     receipt = run_script(
         harness.backend,
         root=root,
@@ -169,6 +275,7 @@ def execute_script(harness, workspace, iteration, stop, deadline):
         execution=execution,
         deadline=deadline,
         cancel_event=stop,
+        prepared=prepared.script,
     )
     if receipt.get("status") not in {"completed", "failed"}:
         raise ProTokError(

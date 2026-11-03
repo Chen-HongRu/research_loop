@@ -12,6 +12,13 @@ These are free text, without required research categories or explanation/observa
 IDs. Judge and independent Review assess the actual design and evidence. The schema
 checks executable paths and bounds; it does not certify scientific meaning.
 
+Pydantic generates the Plan schema and validates the same execution model during
+fresh and cached Plan acceptance. ProTok's model adds its supported GPU profile,
+input-name/count and output-count constraints. The backend uses those same input
+types; it separately checks the current policy, resolves trusted sources and
+settles allocations. Generic Plan limits are whole minutes; the native backend
+retains its scheduler rounding for internal requests.
+
 The frozen top-level `execution` selects:
 
 * `fixed_evaluation`: the existing protected scorer and official RMSD Frontier.
@@ -27,8 +34,8 @@ The frozen top-level `execution` selects:
   "gpu": true,
   "time_limit_seconds": 180,
   "inputs": [
-    {"name": "cache", "source": "hidden_cache", "role": "development"},
-    {"name": "checkpoint", "source": "checkpoint:0012:2000", "role": "model"}
+    {"name": "cache", "source": "hidden_cache"},
+    {"name": "checkpoint", "source": "checkpoint:0012:2000"}
   ],
   "outputs": ["probe.json", "probe.svg"]
 }
@@ -38,6 +45,24 @@ Execute calls the controller-provided `submission.py submit --workspace . --acti
 research`. The request carries no mutable experiment specification: the controller
 uses the accepted Plan. Repeated submissions observe the same request. Retained
 unknown effects require recovery of the same job; they never trigger a new job.
+
+Before claiming a request, the controller prepares the script: it checks the
+request action, missing authored entrypoint, bounded source policy and Python
+syntax using the controller Python, then reads trusted input metadata. Explicit authoring errors produce
+`status=parameter_error` with feedback in `submission.py status`; the same live
+Execute Agent may repair authorized files or the action and submit again within
+its original timeout and frozen Plan. Rejected requests remain in
+`evaluation-parameter-errors.json`. Preparation allocates no compute and writes
+no frozen-source/job record. Trusted input, protected source, frozen Plan, I/O,
+identity and accounting failures remain blocking.
+
+`research_backend.prepare_script(...)` is the Python dry-run API used by actual
+execution. It reads bounded source/configuration and input metadata; it does not
+stage or submit. The live watcher passes its prepared snapshot to start, which
+checks both live and frozen source identity before remote effects. Preparation
+cannot validate imports or runtime behavior. See the
+[execution backend guide](../../docs/execution-backends.md). No correction clears
+a claimed receipt or permits a new Plan, deadline, budget or allocation.
 
 The controller freezes protected dependencies, candidate files and research source.
 The sandbox exposes `/workspace` and declared `/inputs/<name>` read-only, a manifest
@@ -100,6 +125,8 @@ failed script returns that artifact with `outcome=incomplete`. Slurm TIMEOUT is
 one such result. Actual allocated GPU seconds are charged in full even when they
 exceed the requested time limit during termination; the overrun is reported and
 subsequent allocations must still fit the original shared budget and reserve.
+This policy authorizes one research allocation; a settled failure does not
+automatically enter formal candidate debugging or receive another script attempt.
 A reporting Agent failure after a verified failed allocation does not resubmit
 compute: the controller preserves the Agent attempt and publishes the settled
 failure for Review. Unsettled effects or changed identity/source remain blocking.

@@ -17,7 +17,8 @@ from research_loop.harness import (
     HarnessError,
     publish_completed_response,
 )
-from research_loop.protocol import validate_response
+from research_loop.protocol import MarkdownReport, validate_response
+from research_loop.schema import OutputSchema
 
 _JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _FILES = (
@@ -59,14 +60,8 @@ def _publish(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
-REPORT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "markdown": {"type": "string"},
-    },
-    "required": ["markdown"],
-    "additionalProperties": False,
-}
+REPORT_SCHEMA = OutputSchema(MarkdownReport)
+
 REPORT_INSTRUCTIONS = """
 Final Execute output: return ONLY markdown under the supplied JSON schema.
 Describe actual actions, evidence and limitations. The trusted bridge constructs

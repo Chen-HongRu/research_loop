@@ -44,6 +44,8 @@ uv run research-loop init studies/aeroarm-check \
 3. 返回绑定精确产物的测量与证据；重复请求返回同一作业状态。
 4. 未知外部效果先停留并核对，不能用重试重新提交。
 
+采用 prepare → start → inspect 的最小边界：prepare 在 claim 前验证可修改源码和可信输入元数据，start 绑定同一准备快照并在副作用前保存执行身份，inspect 核对已有执行。明确可修正的作者参数错误可反馈给同一 Execute；未知提交效果不重试。接口、dry-run 与最小验收见[执行后端指南](execution-backends.md)。
+
 参考 [Cactus 请求桥](../benchmarks/cactus/bridge.py) 的有限请求接口和 [ProTok 适配器](../integrations/protok/README.md) 的固定评价边界。它们的任务指标、数据及科学合同不属于 AeroArm 协议。通用接口为 [AgentHarness](../src/research_loop/harness.py)、[阶段 schema](../src/research_loop/protocol.py) 和 [提交协议](../src/research_loop/submission.py)。
 
 ## 最小验收

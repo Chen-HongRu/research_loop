@@ -12,8 +12,10 @@ from unittest.mock import Mock, patch
 
 from integrations.protok.backend import CANDIDATE_FILES, METRIC, PROTOCOL, ProTokError
 from research_loop.harness import HarnessError
+from research_loop.correction import ParameterError
 from research_loop.submission import (
     RECEIPT,
+    REJECTIONS,
     REQUEST,
     claim_request,
     status as submission_status,
@@ -270,6 +272,117 @@ class ProTokRunnerTests(unittest.TestCase):
         return self.harness.evaluate_request(
             self.workspace, iteration, {"action": action}, self.stop, self.deadline
         )
+
+    def test_live_watcher_corrects_action_before_one_claim_with_same_deadline(self):
+        submit(self.workspace, "import")
+        stop = Mock()
+
+        def waiting(_seconds):
+            state = submission_status(self.workspace)
+            if state["status"] == "parameter_error":
+                self.assertEqual(state["feedback"]["request"], {"action": "import"})
+                self.assertFalse((self.workspace / RECEIPT).exists())
+                submit(self.workspace, "evaluate")
+            return False
+
+        stop.wait.side_effect = waiting
+        stop.is_set.return_value = False
+        with patch.object(
+            self.harness, "evaluate_request", return_value={"status": "completed"}
+        ) as evaluate:
+            self.harness._watch(self.workspace, "0002", stop, self.deadline)
+        evaluate.assert_called_once_with(
+            self.workspace, "0002", {"action": "evaluate"}, stop, self.deadline
+        )
+        self.assertEqual(submission_status(self.workspace)["status"], "completed")
+        self.assertTrue((self.workspace / REJECTIONS).exists())
+        self.assertEqual(self.backend.evaluations, 0)
+
+    def test_action_preflight_uses_frozen_script_mode_without_changing_plan(self):
+        contract = {"execution": {"mode": "script"}}
+        with (
+            patch.object(RUNNER, "research_policy", return_value={"version": 1}),
+            patch(
+                "integrations.protok.research_execution.frozen_contract",
+                return_value=contract,
+            ),
+        ):
+            with self.assertRaisesRegex(ParameterError, "research"):
+                self.harness._preflight_request(
+                    "0002", {"action": "evaluate"}, self.stop, self.deadline
+                )
+            self.harness._preflight_request(
+                "0002", {"action": "research"}, self.stop, self.deadline
+            )
+        self.assertEqual(contract, {"execution": {"mode": "script"}})
+
+    def test_preclaim_deadline_and_unknown_failures_never_allow_requeue(self):
+        for error in (ProTokError("unknown policy state"), OSError("read failure")):
+            with self.subTest(error=error):
+                for name in (REQUEST, RECEIPT, REJECTIONS, "evaluation-result.json"):
+                    (self.workspace / name).unlink(missing_ok=True)
+                submit(self.workspace)
+                with (
+                    patch.object(self.harness, "_preflight_request", side_effect=error),
+                    patch.object(self.harness, "evaluate_request") as evaluate,
+                    patch.object(
+                        RUNNER,
+                        "certify_candidate_failure",
+                        side_effect=ProTokError("none"),
+                    ),
+                    patch.object(
+                        RUNNER, "timed_out_job", side_effect=ProTokError("none")
+                    ),
+                ):
+                    self.harness._watch(
+                        self.workspace, "0002", threading.Event(), self.deadline
+                    )
+                evaluate.assert_not_called()
+                self.assertEqual(submission_status(self.workspace)["status"], "failed")
+                self.assertEqual(submit(self.workspace)["status"], "failed")
+                self.assertFalse((self.workspace / REJECTIONS).exists())
+        with self.assertRaisesRegex(ProTokError, "Execute ended"):
+            self.harness._preflight_request(
+                "0002", {"action": "import"}, self.stop, time.time() - 1
+            )
+
+    def test_rejection_only_history_is_not_a_computation_effect(self):
+        submit(self.workspace, "import")
+        claim_request(
+            self.workspace,
+            preflight=Mock(side_effect=ParameterError("Use evaluate")),
+        )
+        response = {
+            "outcome": "incomplete",
+            "markdown": "No evaluation was run.",
+            "artifacts": [],
+            "measurements": [],
+        }
+        RUNNER.local_incomplete(
+            self.root, self.backend, self.workspace, "0002", response
+        )
+        self.assertEqual(self.backend.evaluations, 0)
+
+    def test_parameter_error_after_claim_is_terminal_without_requeue(self):
+        submit(self.workspace)
+        with (
+            patch.object(
+                self.harness,
+                "evaluate_request",
+                side_effect=ParameterError("late error with possible effects"),
+            ) as evaluate,
+            patch.object(
+                RUNNER, "certify_candidate_failure", side_effect=ProTokError("none")
+            ),
+            patch.object(RUNNER, "timed_out_job", side_effect=ProTokError("none")),
+        ):
+            self.harness._watch(
+                self.workspace, "0002", threading.Event(), self.deadline
+            )
+        evaluate.assert_called_once()
+        self.assertTrue((self.workspace / RECEIPT).exists())
+        self.assertFalse((self.workspace / REJECTIONS).exists())
+        self.assertEqual(submit(self.workspace)["status"], "failed")
 
     def test_operator_environment_reaches_readonly_and_writable_delegate_prompts(self):
         environment = {
@@ -967,7 +1080,7 @@ class ProTokRunnerTests(unittest.TestCase):
         self.assertEqual(RUNNER.git(self.project, "status", "--porcelain"), "")
         self.assertEqual(backend.evaluations, 0)
 
-    def test_run_one_resumes_explicitly_retried_plan_and_publishes_import(self):
+    def test_run_one_corrects_rejected_plan_and_publishes_import(self):
         from research_loop import initialize
         from research_loop.harness import HarnessConfig
 
@@ -1062,18 +1175,12 @@ class ProTokRunnerTests(unittest.TestCase):
         delegate = InterfaceHarness()
         delegate.stop_after = 3
         with patch.object(RUNNER, "CodexHarness", return_value=delegate):
-            with self.assertRaisesRegex(ValueError, "reference format"):
-                RUNNER.run_one(self.root, self.backend)
-            interrupted = RUNNER.Study(self.root / "study")
-            self.assertEqual(interrupted.status()["status"], "needs_attention")
-            self.assertEqual(interrupted.status()["phase"], "plan")
-            self.assertEqual(delegate.count("execute"), 0)
-            self.assertEqual(self.backend.evaluations, 0)
-            self.assertFalse((self.control / "STOP").exists())
-            # Operator reconciliation is explicit; the runner performs neither action.
-            retried = interrupted.retry()
-            self.assertEqual((retried["phase"], retried["status"]), ("plan", "ready"))
             state = RUNNER.run_one(self.root, self.backend)
+        plans = [call for call in delegate.calls if call["phase"] == "plan"]
+        rejection = RUNNER.read(plans[0]["run_dir"] / "rejection.json")
+        self.assertIn("references", json.dumps(rejection["errors"]))
+        self.assertIn("previous reply was rejected", plans[1]["prompt"])
+        self.assertEqual(plans[0]["context"], plans[1]["context"])
         self.assertEqual(delegate.count("proposal"), 2)
         self.assertEqual(delegate.count("judge"), 1)
         self.assertEqual(delegate.count("plan"), 2)

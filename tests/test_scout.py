@@ -15,6 +15,7 @@ from unittest.mock import patch
 from research_loop.harness import HarnessConfig
 from research_loop.scout import (
     REPORT_MAX_BYTES,
+    SCOUT_SCHEMA,
     ScoutManager,
     retrieval_events,
     snapshot,
@@ -543,6 +544,23 @@ class ScoutTests(unittest.TestCase):
         valid["sources"][0]["kind"] = "community_code"
         valid["sources"][0]["accessed"] = "code"
         validate_result(valid)
+
+    def test_output_schema_and_validation_share_bounded_strict_fields(self):
+        source = SCOUT_SCHEMA["properties"]["sources"]["items"]
+        self.assertIn("title", source["properties"])
+        self.assertIn("title", source["required"])
+        self.assertEqual(source["properties"]["id"]["maxLength"], 2000)
+        for mutate in (
+            lambda r: r["sources"][0].pop("title"),
+            lambda r: r["sources"][0].update(id="x" * 2001),
+            lambda r: r["insights"][0].update(local_observations=["x"] * 9),
+            lambda r: r.update(summary=1),
+            lambda r: r.update(extra="unexpected"),
+        ):
+            response = result()
+            mutate(response)
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                validate_result(response)
 
     def test_oversize_utf8_report_is_observable_and_keeps_previous_advice(self):
         previous = {"id": "earlier-useful-report"}

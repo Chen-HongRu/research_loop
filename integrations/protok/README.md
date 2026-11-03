@@ -6,6 +6,12 @@ script inputs/outputs and allocation bounds. Inputs use `name` and trusted `sour
 without a `role` label. See [research execution](research-execution.md). Existing
 version-1/2 Studies and their deployed runtimes are not migrated by this change.
 
+The controller environment requires the root project's Pydantic v2 dependency;
+provision it with `uv sync --locked` before using this runtime. Agent reports,
+research requests and presentation outputs use models for CLI schemas and local
+validation. Actual leases, job effects, source identity and accounting remain
+controller-owned. Installing the dependency does not upgrade an active service.
+
 This directory contains the ProTok task boundary: fixed candidate files,
 evaluation protocol, backend receipts, GPU accounting, ownership lease,
 supervisor and deployment. The reusable `research_loop` package has no ProTok
@@ -59,6 +65,15 @@ Only this API writes the request, staging file and lock; the controller atomical
 claims it into a retained `evaluation-submission.json`. Repeated calls return the
 same pending, accepted or terminal result. `accepted` means claimed, not GPU-started.
 A crash after claiming needs reconciliation; it never permits a second submission.
+Before claim, an inconsistent action or a script's missing entrypoint, authored
+source-policy violation or Python syntax error returns `parameter_error` through
+`status`, with retained feedback. The same live Agent may correct those authored
+files/action within its original Execute timeout and frozen Plan. Preparation also
+checks trusted input metadata without allocating compute. The controller keeps
+rejected requests in `evaluation-parameter-errors.json`; protected source, frozen
+Plan, pipeline, identity and accounting failures remain blocking. No job is
+replayed. The [backend guide](../../docs/execution-backends.md) describes the
+prepare/start/inspect contract and native dry-run API.
 The controller clears unchanged parent-checkpoint interfaces once before Execute,
 and retains all current-iteration submission evidence on reentry.
 
@@ -171,7 +186,10 @@ continue a debug checkpoint. The original failed records remain intact.
 Exhausted or unsuccessful certified recovery produces incomplete Execute with
 no measurements and proceeds to independent Review. Unknown effects,
 infrastructure failures, missing accounting and overspend remain blocking.
-The original ownership and absolute wall deadline continue to apply.
+Each new repair uses fresh Study call/time budgets and reserves one call for
+independent Review. The original ownership and absolute wall deadline continue
+to apply; time for Review completion is not guaranteed. Research scripts retain
+their single-allocation policy and do not use these formal debug grants.
 
 For a failure retained by an older runtime, `--begin-debug` certifies and archives
 the original failure/interface, prepares the recovery state, and retains STOP.

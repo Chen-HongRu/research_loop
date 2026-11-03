@@ -22,7 +22,6 @@ from meta_inner import (
     read,
     usage,
     write,
-    run_review_recovery,
 )
 
 
@@ -548,12 +547,10 @@ evidence, update both route/global research, and stop. No production promotion c
         "supervisor_ref": frozen["ref"],
     }
     try:
-        result["state"] = run_review_recovery(
-            Study(
-                root / "research",
-                harness=UsageBudgetHarness(harness, root / "research"),
-            )
-        )
+        result["state"] = Study(
+            root / "research",
+            harness=UsageBudgetHarness(harness, root / "research"),
+        ).run(iterations=1)
         measured = usage(root / "research")
         elapsed = time.monotonic() - started
         complete = (

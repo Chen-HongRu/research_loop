@@ -31,11 +31,13 @@ from research_loop.harness import (
     publish_completed_response,
 )
 from research_loop.diagnostics import diagnostic_secrets, diagnostic_view
+from research_loop.correction import ParameterError
 from research_loop.protocol import validate_response
 from research_loop.submission import (
     INTERFACE_FILES,
     LOCK,
     RECEIPT,
+    REJECTIONS,
     claim_request,
     status as submission_status,
 )
@@ -77,7 +79,7 @@ def require_baseline():
         )
 
 
-SUBMISSION_EFFECT_FILES = INTERFACE_FILES - {LOCK}
+SUBMISSION_EFFECT_FILES = INTERFACE_FILES - {LOCK, REJECTIONS}
 
 
 def submission_instructions():
@@ -94,9 +96,14 @@ Repeated API submit calls return the same submission; they do not launch a secon
 not_submitted means nothing was published; after a local publication failure you may
 retry the API once only if status confirms not_submitted. pending means published;
 accepted means the controller claimed it, not that GPU execution has started. For
-pending/accepted wait quietly for evaluation-result.json within the frozen timeout.
+pending/accepted poll this status API quietly within the frozen timeout.
 completed/failed return the original result. An unknown state requires reconciliation,
-not a new submission. The controller constructs structured artifacts and measurements
+not a new submission. parameter_error means a request parameter was rejected before
+claiming or computation: read feedback, correct the action or authored source, and
+submit again under the SAME
+frozen Plan and remaining Execute timeout. Never edit the retained feedback history.
+No correction permits a new Plan, changed scientific scope or another allocation.
+The controller constructs structured artifacts and measurements
 from its verified result; your final response is the execution report described below.
 """
 
@@ -175,7 +182,7 @@ def git(path, *args):
     return result.stdout.strip()
 
 
-def candidate_bytes(workspace):
+def candidate_bytes(workspace, *, error_type=ProTokError):
     workspace = Path(workspace)
     result = {}
     for name in CANDIDATE_FILES:
@@ -190,7 +197,7 @@ def candidate_bytes(workspace):
                 if parent != workspace and parent.is_relative_to(workspace)
             )
         ):
-            raise ProTokError("Candidate must be a small regular source file: " + name)
+            raise error_type("Candidate must be a small regular source file: " + name)
         result[name] = path.read_bytes()
     return result
 
@@ -199,7 +206,7 @@ def signatures(contents):
     return {name: hashlib.sha256(value).hexdigest() for name, value in contents.items()}
 
 
-def check_scope(workspace, baseline, *, allow_research=False):
+def check_scope(workspace, baseline, *, allow_research=False, error_type=ProTokError):
     changed = set(
         git(workspace, "diff", "--name-only", "-z", baseline, "--").split("\0")
     )
@@ -208,13 +215,23 @@ def check_scope(workspace, baseline, *, allow_research=False):
     if allow_research:
         from integrations.protok.research_execution import research_files
 
-        allowed.update(research_files(workspace))
+        protected = {
+            name
+            for name in changed - allowed
+            if name != "research" and not name.startswith("research/")
+        }
+        if protected:
+            raise ProTokError(
+                "Agent changed files outside candidate scope: "
+                + ", ".join(sorted(protected))
+            )
+        allowed.update(research_files(workspace, error_type=error_type))
     extra = changed - allowed
     if extra:
         raise ProTokError(
             "Agent changed files outside candidate scope: " + ", ".join(sorted(extra))
         )
-    return candidate_bytes(workspace)
+    return candidate_bytes(workspace, error_type=error_type)
 
 
 def freeze_source(
@@ -379,6 +396,10 @@ def local_incomplete(
         raise ProTokError(
             "An existing evaluation job requires explicit backend reconciliation"
         )
+    if os.path.lexists(Path(workspace) / REJECTIONS):
+        # Feedback records only preclaim validation. It cannot certify absence
+        # of jobs, claimed submissions or remote effects checked independently.
+        submission_status(workspace)
     for name in SUBMISSION_EFFECT_FILES:
         path = Path(workspace) / name
         if path.exists() or path.is_symlink():
@@ -779,6 +800,14 @@ class ProTokHarness:
         self.recoverable_failure = None
         self.pipeline_diagnostics = None
 
+    def response_schema(self, phase, context, schema):
+        if phase == "plan" and "execution" in schema["properties"]:
+            from research_loop.schema import with_fields
+            from integrations.protok.research_backend import ProTokPlanExecution
+
+            return with_fields(schema, execution=ProTokPlanExecution | None)
+        return schema
+
     def admit_iteration(self, iteration):
         from integrations.protok.round_admission import admit
 
@@ -797,11 +826,54 @@ class ProTokHarness:
             return 3600
         return remaining
 
+    def _preflight_request(self, iteration, request, stop, deadline, *, workspace=None):
+        """Check request arguments only, before retaining any claimed receipt."""
+        if stop.is_set() or time.time() >= deadline:
+            raise ProTokError("Execute ended; no evaluation may launch")
+        expected = "import" if iteration == "0001" else "evaluate"
+        if research_policy(self.root) is not None:
+            from integrations.protok.research_execution import frozen_contract
+
+            contract = frozen_contract(self.root, iteration, required=False)
+            if contract:
+                mode = contract["execution"]["mode"]
+                if mode not in ("script", "fixed_evaluation"):
+                    raise ProTokError("Frozen Plan has an unknown execution mode")
+                if mode == "script":
+                    expected = "research"
+        if stop.is_set() or time.time() >= deadline:
+            raise ProTokError("Execute ended; no evaluation may launch")
+        if request != {"action": expected}:
+            raise ParameterError(
+                f"Request action must be {expected!r} for this iteration and frozen Plan; "
+                "correct only the action within the current Execute timeout"
+            )
+        if expected == "research" and workspace is not None:
+            from research_loop.execution import ExecutionBackend
+            from integrations.protok.research_execution import ScriptExecutionBackend
+
+            execution_backend: ExecutionBackend = ScriptExecutionBackend(
+                self, workspace, iteration, stop, deadline
+            )
+            self.prepared_execution = (execution_backend, execution_backend.prepare())
+            if stop.is_set() or time.time() >= deadline:
+                self.prepared_execution = None
+                raise ProTokError(
+                    "Execute ended during preparation; no request claimed"
+                )
+
     def evaluate_request(self, workspace, iteration, request, stop, deadline):
         check_fixed_candidate(self.root, workspace, iteration)
         if request == {"action": "research"}:
             from integrations.protok.research_execution import execute_script
 
+            prepared = getattr(self, "prepared_execution", None)
+            self.prepared_execution = None
+            if prepared is not None:
+                execution_backend, preparation = prepared
+                if not execution_backend.matches(workspace, iteration, stop, deadline):
+                    raise ProTokError("Prepared execution belongs to another request")
+                return execution_backend.start(preparation)
             return execute_script(self, workspace, iteration, stop, deadline)
         if request not in ({"action": "import"}, {"action": "evaluate"}):
             raise ProTokError("Request must contain exactly action=import or evaluate")
@@ -953,7 +1025,12 @@ class ProTokHarness:
             if not request_path.exists():
                 continue
             try:
-                request = claim_request(workspace)
+                request = claim_request(
+                    workspace,
+                    preflight=lambda request: self._preflight_request(
+                        iteration, request, stop, deadline, workspace=workspace
+                    ),
+                )
                 if request is None:
                     continue
                 result = self.evaluate_request(
