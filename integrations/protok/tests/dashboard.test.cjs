@@ -132,7 +132,7 @@ test('Timeline follows recorded creation time, with stable ties and an explicit 
   assert.deepEqual(plain(ui.gitLayout([...nodes].reverse()).positions),plain(model.positions));
 });
 
-test('Eight sibling branches expand past two tracks and keep every card separate', () => {
+test('Eight sibling branches expand past two compact tracks and keep nodes distinct', () => {
   const root={id:'0001',created_at:1};
   const branches=Array.from({length:8},(_,index)=>({id:'branch-'+index,base:root.id,created_at:2+index}));
   const long={id:'long',validation_of:root.id,created_at:20};
@@ -144,9 +144,47 @@ test('Eight sibling branches expand past two tracks and keep every card separate
   assert.equal(model.lanes,9);
   const points=Object.values(model.positions);
   for(const [index,point] of points.entries())for(const other of points.slice(index+1)) {
-    assert.ok(Math.abs(point.left-other.left)>=232 || Math.abs(point.top-other.top)>=150,'cards overlap');
+    assert.ok(Math.abs(point.x-other.x)>=44 || Math.abs(point.y-other.y)>=44,'node targets overlap');
   }
-  assert.ok(model.height>Math.max(...points.map(point=>point.top+150)));
+  assert.ok(model.height>Math.max(...points.map(point=>point.y+28)));
+  assert.ok(model.height<700,'relationship tracks do not reserve experiment-card height');
+});
+
+test('Relationship nodes and experiment cards render in separate aligned regions', () => {
+  context.separateFixture=[{id:'active:0001',local_id:'0001',source_id:'active',created_at:1,action_summary:'A card-only research summary'},
+    {id:'active:0002',local_id:'0002',source_id:'active',created_at:2,base:'active:0001',action_summary:'Another experiment'}];
+  try {
+    vm.runInContext("data={nodes:separateFixture};selected='active:0002';following=false;treeLayout=null;",context);
+    elements.get('routeFilter').value='';elements.get('sourceFilter').value='';elements.get('taskFilter').value='';
+    ui.drawGraph();
+    const graph=elements.get('graph').innerHTML,cards=elements.get('treeCards').innerHTML;
+    assert.match(graph,/class="tree-node selected /);
+    assert.doesNotMatch(graph,/class="git-row|A card-only research summary/);
+    assert.match(cards,/class="git-row selected /);
+    assert.match(cards,/A card-only research summary/);
+    assert.doesNotMatch(cards,/<svg|class="tree-node/);
+    assert.equal(elements.get('graph').style.width,elements.get('treeCards').style.width);
+    const model=ui.gitLayout(context.separateFixture);
+    for(const node of context.separateFixture) {
+      assert.equal(graph.split('data-node="'+node.id+'"').length,2);
+      assert.equal(cards.split('data-node="'+node.id+'"').length,2);
+      const card=cards.match(new RegExp('data-node="'+node.id+'"[^>]*'))[0];
+      assert.match(card,new RegExp('left:'+model.positions[node.id].left+'px'));
+      assert.match(graph,new RegExp('left:'+(model.positions[node.id].x-22)+'px'));
+    }
+  } finally {vm.runInContext('data=null;selected=null;following=true;treeLayout=null;',context);}
+});
+
+test('Dragging either region synchronizes horizontal scroll without changing branch scroll', () => {
+  const graph=document.getElementById('graphWrap'),cards=document.getElementById('treeCardsWrap');
+  graph.scrollTop=90;graph.scrollLeft=600;
+  graph.onscroll();
+  assert.equal(cards.scrollLeft,600);
+  cards.scrollLeft=950;cards.onscroll();
+  assert.equal(graph.scrollLeft,950);
+  assert.equal(graph.scrollTop,90);
+  ui.panTree(-1);
+  assert.equal(cards.scrollLeft,graph.scrollLeft);
 });
 
 test('Forks clear unrelated task circles and reverse edges approach the destination', () => {
@@ -181,8 +219,11 @@ test('Forks clear unrelated task circles and reverse edges approach the destinat
 
 test('Refreshing and inserting earlier records preserve the panned timeline anchor', () => {
   const prior=elements.get('graphWrap');
-  const wrap={clientWidth:600,clientHeight:400,scrollLeft:0,scrollTop:0,scrollIntoView(){this.revealed=true;}};
+  const wrap={clientWidth:600,clientHeight:220,scrollLeft:0,scrollTop:0};
+  const priorView=elements.get('treeView');
+  const treeView={scrollIntoView(){this.revealed=true;}};
   elements.set('graphWrap',wrap);
+  elements.set('treeView',treeView);
   context.timelineFixture=Array.from({length:8},(_,index)=>({id:String(index+1).padStart(4,'0'),source_id:'active',created_at:100+index}));
   try {
     vm.runInContext("data={nodes:timelineFixture};selected='0008';following=false;treeLayout=null;treeFollowed=null;",context);
@@ -197,15 +238,17 @@ test('Refreshing and inserting earlier records preserve the panned timeline anch
     vm.runInContext("timelineFixture.push({id:'earlier',source_id:'active',created_at:1});",context);
     ui.drawGraph();
     assert.equal(wrap.scrollLeft,before+272,'same visible tasks stay at the same viewport offset');
+    assert.equal(elements.get('treeCardsWrap').scrollLeft,wrap.scrollLeft,'cards preserve the same anchor');
     assert.equal(vm.runInContext('selected',context),'0008');
-    assert.equal(wrap.revealed,undefined,'ordinary refresh never scrolls the page to the tree');
+    assert.equal(treeView.revealed,undefined,'ordinary refresh never scrolls the page to the tree');
     document.getElementById('treeLocate').onclick();
-    assert.equal(wrap.revealed,true,'explicit locate also reveals the tree in the page viewport');
+    assert.equal(treeView.revealed,true,'explicit locate also reveals both regions in the page viewport');
     ui.focusTreeTask('0001');
     assert.ok(wrap.scrollLeft<before);
     assert.match(elements.get('graph').innerHTML,/timeline-axis/);
   } finally {
     if(prior)elements.set('graphWrap',prior);else elements.delete('graphWrap');
+    if(priorView)elements.set('treeView',priorView);else elements.delete('treeView');
     vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeFollowed=null;',context);
   }
 });
@@ -674,8 +717,8 @@ test('Work tree shows concurrent lifecycles and labels long validation as its ow
   assert.match(markup,/data-node="active:long:L0123456789abcdef"/);
   assert.match(markup,/data-node="active:0002"/);
   assert.match(markup,/● 进行中/);
-  assert.match(markup,/归档 · ● 进行中/);
-  assert.match(markup,/资格已排除 · 历史导入 · 已完成/);
+  assert.match(elements.get('treeCards').innerHTML,/归档 · ● 进行中/);
+  assert.match(elements.get('treeCards').innerHTML,/资格已排除 · 历史导入 · 已完成/);
   assert.doesNotMatch(markup,/代码继承：#undefined → #active:long/);
   vm.runInContext('data=null;selected=null;',context);
 });

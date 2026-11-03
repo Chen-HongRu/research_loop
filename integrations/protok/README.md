@@ -22,9 +22,10 @@ experiment reports and deployment snapshots are not distributed here.
 See [Deployment configuration](deployment.md) for the required settings.
 
 The [read-only dashboard](dashboard.md#阅读方式) uses a horizontal task timeline
-with expanding branch tracks. Select a task to read its progress and evidence
-below the tree. Scrolling stays inside the tree; mobile filters and details stay
-within the page width.
+with expanding branch tracks above a separate, column-aligned experiment-card
+strip. Both regions scroll horizontally together. Select a node or card to read
+its progress and evidence below. Scrolling stays inside the tree and card regions;
+mobile filters and details stay within the page width.
 
 ## Tagged live observations
 
