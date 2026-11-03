@@ -350,6 +350,7 @@ class ManualTrainingManager:
         self.root, self.backend, self.delegate = Path(root), backend, delegate
 
     def run_one(self, *, allow_new=True):
+        Study(self.root / "study")
         control = self.root / "control"
         control.mkdir(parents=True, exist_ok=True)
         with (control / "manual-task-runner.lock").open("a") as lock:
@@ -439,6 +440,7 @@ class ManualTrainingManager:
 
     def recover(self, task_id):
         """Reconcile only the original allocation and retain the original Execute attempt."""
+        Study(self.root / "study")
         folder = self.root / "study/tasks" / task_id
         request = TaskQueue(self.root / "study").request(task_id)
         with (self.root / "control/manual-task-runner.lock").open("a") as lock:

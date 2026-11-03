@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from research_loop import StudyError, initialize
+
 SPEC = importlib.util.spec_from_file_location(
     "server", Path(__file__).resolve().parents[3] / "integrations/protok/server.py"
 )
@@ -15,6 +17,43 @@ SPEC.loader.exec_module(SERVER)
 
 
 class ServerTests(unittest.TestCase):
+    def test_main_rejects_older_parent_before_startup_or_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root / "study", goal="Parent")
+            (root / "control").mkdir()
+            config_path = root / "study/study.json"
+            for version in (1, 2):
+                with self.subTest(version=version):
+                    config = SERVER.read(config_path)
+                    config["version"] = version
+                    SERVER.write(config_path, config)
+                    with (
+                        patch.object(
+                            SERVER.sys,
+                            "argv",
+                            ["server", "--root", str(root), "--runner", "/runner.py"],
+                        ),
+                        patch.object(
+                            SERVER.importlib.util, "spec_from_file_location"
+                        ) as load_runner,
+                        patch.object(SERVER.signal, "signal") as signals,
+                        patch.object(SERVER, "ScoutScheduler") as scout,
+                        patch(
+                            "integrations.protok.tasks.ExperimentScheduler"
+                        ) as scheduler,
+                        patch.object(SERVER, "recover_owned") as recovery,
+                        self.assertRaisesRegex(StudyError, "Unsupported study format"),
+                    ):
+                        SERVER.main()
+                    load_runner.assert_not_called()
+                    signals.assert_not_called()
+                    scout.assert_not_called()
+                    scheduler.assert_not_called()
+                    recovery.assert_not_called()
+                    self.assertEqual(list((root / "control").iterdir()), [])
+                    self.assertEqual(SERVER.read(config_path), config)
+
     def test_recovery_matches_fresh_record_identity_not_only_source_fingerprint(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -126,7 +165,7 @@ class ProTokServerTests(unittest.TestCase):
                 "additional_gpu_seconds": 86400,
             },
         )
-        self.write("study/study.json", {})
+        initialize(self.root / "study", goal="Parent")
         self.write("study/state.json", {"status": "ready", "phase": "done"})
         self.backend = SimpleNamespace(
             inspect=Mock(return_value={"outstanding": [], "used_gpu_seconds": 100}),
@@ -481,6 +520,7 @@ class ProTokServerTests(unittest.TestCase):
         long_training = Mock()
         long_training.shutdown.side_effect = RuntimeError("long shutdown failed")
         with (
+            patch.object(SERVER, "Study"),
             patch.object(
                 SERVER.sys,
                 "argv",

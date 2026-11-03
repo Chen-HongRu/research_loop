@@ -722,7 +722,8 @@ class LongTrainingManager:
     def run_one(self, *, deadline, allow_new=True):
         from .core import Study, initialize
 
-        policy = validate_policy(_read(self.root / "study.json").get("long_training"))
+        parent = Study(self.root)
+        policy = parent.long_training
         if policy is None:
             return None
         lane = self.root / "long-runs"

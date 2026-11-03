@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from research_loop import Study, initialize
+from research_loop import Study, StudyError, initialize
 from research_loop.protocol import SCHEMAS
 from research_loop.long_training import (
     LongTrainingManager,
@@ -214,6 +214,26 @@ class LongTrainingTests(unittest.TestCase):
             }
 
         return execute
+
+    def test_older_parent_format_rejected_before_lane_writes(self):
+        self.nominate()
+        delegate = LongHarness()
+        calls = []
+        manager = LongTrainingManager(self.root, delegate, self.executor(calls))
+        config_path = self.root / "study.json"
+        for version in (1, 2):
+            with self.subTest(version=version):
+                config = read(config_path)
+                config["version"] = version
+                config_path.write_text(json.dumps(config))
+                state = (self.root / "state.json").read_bytes()
+                with self.assertRaisesRegex(StudyError, "Unsupported study format"):
+                    manager.run_one(deadline=time.time() + 1000)
+                self.assertFalse((self.root / "long-runs").exists())
+                self.assertEqual((self.root / "state.json").read_bytes(), state)
+                self.assertEqual(read(config_path), config)
+                self.assertEqual(delegate.calls, [])
+                self.assertEqual(calls, [])
 
     def test_real_child_study_and_boundary_feedback(self):
         request = self.nominate()
