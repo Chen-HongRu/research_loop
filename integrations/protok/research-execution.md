@@ -19,6 +19,20 @@ types; it separately checks the current policy, resolves trusted sources and
 settles allocations. Generic Plan limits are whole minutes; the native backend
 retains its scheduler rounding for internal requests.
 
+Before accepting Plan, the controller checks script input references with the
+same local resolver used during execution. Unknown source names, unsupported
+checkpoint syntax/steps, future sources, unpublished references and investigations
+without a fixed checkpoint return explicit errors to the same Plan stage through
+its existing correction path. Cached unaccepted replies are checked too. Every
+correction consumes the original call/time budget and retains the original task,
+context and absolute timeout; an accepted Plan cannot be replaced this way.
+
+This check reads local configuration and publication/receipt metadata only.
+Malformed or missing committed evidence, identity/accounting inconsistencies and
+I/O failures block. It does not contact the remote host or inspect data/checkpoint
+contents. A valid reference may still fail the later remote existence/metadata
+check during execution preparation.
+
 The frozen top-level `execution` selects:
 
 * `fixed_evaluation`: the existing protected scorer and official RMSD Frontier.
@@ -143,9 +157,17 @@ fixed random cotangents. It checks CUDA, read-only inputs, forward parity and gr
 path removal. It does not measure an actual training-loss gradient or establish
 that the path improves reconstruction.
 
-For a failed script retained by an older runtime, use
-`run.py --reconcile-research-execute --authorization TEXT` to prepare a separate
-controller completion from the unchanged frozen Plan, source and settled receipt.
-It retains the original attempt and STOP, consumes no new Agent call or allocation,
-and preserves call/time counters. `deploy_runtime.py --resume-research` verifies
-that preparation and the unchanged system-attention STOP before restoring service.
+For a fresh interrupted script, use
+`run.py --reconcile-execute --authorization TEXT`. The controller verifies the
+original execution journal and either the frozen source with its settled receipt,
+or positive proof that submission was never reached. It publishes completion in
+the original Execute attempt, retains Agent evidence and STOP, and consumes no new
+Agent call or allocation. Unknown submission effects stay blocked. Extra post-run
+reports do not change the frozen artifact; modifying an originally executed file
+or protected workspace file still blocks acceptance. A not-started closure has no fabricated
+job identity, measurements or Slurm terminal accounting.
+
+`deploy_runtime.py --resume-execution` checks that preparation and the unchanged
+system-attention STOP before restoring service, under the original authorization
+and deadlines. Every execution lane must be idle for runtime replacement. No
+historical execution-state migration or incident-specific reconcile flags remain.

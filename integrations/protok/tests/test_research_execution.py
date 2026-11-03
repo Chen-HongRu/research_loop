@@ -327,6 +327,28 @@ class ResearchExecutionTests(unittest.TestCase):
         self.assertEqual(self.backend.evaluations, 0)
         self.assertFalse((self.control / "research-jobs").exists())
 
+    def test_plan_rejects_paths_that_execution_cannot_prepare(self):
+        schema = agent_schema(
+            "plan",
+            {},
+            self.harness.response_schema("plan", {}, plan_schema(SCHEMAS["plan"])),
+        )
+        for change in (
+            {"entrypoint": "research/a+b.py"},
+            {"outputs": ["result space.json"]},
+            {"outputs": ["résultat.json"]},
+        ):
+            with self.subTest(change=change):
+                result = plan()
+                result.pop("base_experiment")
+                result["execution"] = copy.deepcopy(self.contract["execution"])
+                result["execution"].update(change)
+                with self.assertRaises(ValueError):
+                    schema.validate(result)
+        self.prepare_script.assert_not_called()
+        self.assertEqual(self.backend_runs, 0)
+        self.assertFalse((self.control / "research-jobs").exists())
+
     def test_cached_plan_cannot_bypass_adapter_model(self):
         root = self.directory / "cached-study"
         initialize(
@@ -477,6 +499,52 @@ class ResearchExecutionTests(unittest.TestCase):
             "Do not re-prepare settled work"
         )
         self.assertEqual(self.evaluate(), first)
+        self.assertEqual(self.backend_runs, 1)
+
+    def test_settled_receipt_reconstructs_missing_projection_without_compute(self):
+        from integrations.protok.research_execution import settled_script
+
+        trusted, _ = self.accepted_response()
+        projection = self.control / "research-sources" / self.iteration / "result.json"
+        projection.unlink()
+        self.assertEqual(
+            settled_script(self.root, self.workspace, self.iteration), trusted
+        )
+        self.assertEqual(RUNNER.read(projection), trusted)
+        self.assertEqual(
+            settled_script(self.root, self.workspace, self.iteration), trusted
+        )
+        self.assertEqual(self.backend_runs, 1)
+
+    def test_settlement_checks_original_files_without_reading_added_report(self):
+        from integrations.protok.research_execution import settled_script
+
+        trusted, _ = self.accepted_response()
+        (self.workspace / "research/scratch.bin").write_bytes(b"report output")
+        self.assertEqual(
+            settled_script(self.root, self.workspace, self.iteration), trusted
+        )
+        source = self.workspace / "research/main.py"
+        original = source.read_bytes()
+        for modification in ("changed", "deleted", "symlink"):
+            with self.subTest(modification=modification):
+                if source.exists() or source.is_symlink():
+                    source.unlink()
+                if modification == "changed":
+                    source.write_text("print('different computation')\n")
+                elif modification == "symlink":
+                    source.symlink_to(self.workspace / "research/scratch.bin")
+                with self.assertRaisesRegex(ProTokError, "changed after submission"):
+                    settled_script(self.root, self.workspace, self.iteration)
+                if source.exists() or source.is_symlink():
+                    source.unlink()
+                source.write_bytes(original)
+        candidate = self.workspace / CANDIDATE_FILES[0]
+        candidate.write_bytes(
+            candidate.read_bytes() + b"\n# changed original candidate\n"
+        )
+        with self.assertRaisesRegex(ProTokError, "changed after submission"):
+            settled_script(self.root, self.workspace, self.iteration)
         self.assertEqual(self.backend_runs, 1)
 
     def test_changed_source_rejected_on_repeat_and_completed_validation(self):

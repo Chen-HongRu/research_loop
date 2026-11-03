@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 
 from integrations.protok import research_backend as research
 from integrations.protok.backend import CANDIDATE_FILES, PROTOCOL, ProTokError
+from research_loop.correction import ParameterError
 
 
 class Fixed:
@@ -507,6 +508,28 @@ class ResearchBackendTests(unittest.TestCase):
             self.run_job(recover=True)
         self.assertEqual(self.fixed.submissions, 1)
 
+    def test_submit_hook_failure_before_status_update_stays_unresolved(self):
+        def fail_before_status(config, record, state, attempt):
+            self.fixed.submissions += 1
+            self.assertIs(
+                research._read(record / "job.json")["submission_intent"], True
+            )
+            raise subprocess.CalledProcessError(
+                1, ["ssh", "sbatch"], output="", stderr="No owned submission response"
+            )
+
+        with patch.object(self.fixed, "submit", side_effect=fail_before_status):
+            receipt = self.run_job()
+        self.assertEqual(receipt["status"], "blocked")
+        self.assertIsNone(receipt["gpu_seconds"])
+        self.assertIsNone(receipt["owned_job_id"])
+        self.assertFalse((self.control / "research-jobs/0002/receipt.json").exists())
+        with self.assertRaises(ProTokError):
+            self.run_job()
+        with self.assertRaisesRegex(ProTokError, "prepared"):
+            self.run_job(recover=True)
+        self.assertEqual(self.fixed.submissions, 1)
+
     def test_pre_submission_failure_is_settled_zero_cost(self):
         self.fixed.behavior = "stage-failure"
         receipt = self.run_job()
@@ -718,11 +741,110 @@ class ResearchBackendTests(unittest.TestCase):
         self.assertEqual(self.fixed.submissions, 0)
         self.assertFalse((self.control / "research-jobs/0002").exists())
 
+    def test_plan_and_execution_share_reference_rejections_without_remote_probe(self):
+        for source in (
+            "hidden_cach",
+            "checkpoint:bad",
+            "checkpoint:0002:2000",
+            "checkpoint:0001:3000",
+            "checkpoint:0001:2000",
+            "long-checkpoint:L0123456789abcdef:2000",
+            "long-checkpoint:L0123456789abcdef:3000",
+        ):
+            with self.subTest(source=source), patch.object(self.fixed, "ssh") as remote:
+                execution = {
+                    **self.execution,
+                    "inputs": [{"name": "model", "source": source}],
+                }
+                for error_type in (ProTokError, ParameterError):
+                    with self.assertRaises(error_type):
+                        research._inputs(
+                            self.root,
+                            self.config,
+                            execution,
+                            "0002",
+                            reference_error=error_type,
+                        )
+                remote.assert_not_called()
+        self.assertEqual(self.fixed.submissions, 0)
+
+    def test_published_long_reference_missing_request_blocks_as_trusted_failure(self):
+        witnesses = (
+            ("review.json", {}),
+            ("study/iterations/0001/publication.json", {}),
+            ("study/iterations/0001/iteration.json", {"status": "reviewed"}),
+        )
+        for index, (marker, value) in enumerate(witnesses):
+            with self.subTest(marker=marker):
+                run_id = f"L{index:016x}"
+                run = self.root / "study/long-runs" / run_id
+                path = run / marker
+                path.parent.mkdir(parents=True)
+                research._write(path, value)
+                execution = {
+                    **self.execution,
+                    "inputs": [
+                        {"name": "model", "source": f"long-checkpoint:{run_id}:2000"}
+                    ],
+                }
+                with self.assertRaises(FileNotFoundError):
+                    research._inputs(
+                        self.root,
+                        self.config,
+                        execution,
+                        "0002",
+                        reference_error=ParameterError,
+                    )
+
+    def test_builtin_plan_references_resolve_identically_to_execution(self):
+        for source in ("hidden_cache", "targets", "teacher"):
+            with self.subTest(source=source):
+                execution = {
+                    **self.execution,
+                    "inputs": [{"name": "input", "source": source}],
+                }
+                self.assertEqual(
+                    research._inputs(
+                        self.root,
+                        self.config,
+                        execution,
+                        "0002",
+                        reference_error=ParameterError,
+                    ),
+                    research._inputs(self.root, self.config, execution, "0002"),
+                )
+
     def test_resolved_checkpoint_requires_matching_completed_receipts(self):
         folder = self.root / "study/iterations/0001"
         folder.mkdir(parents=True)
-        research._write(folder / "iteration.json", {"status": "reviewed"})
-        research._write(folder / "publication.json", {})
+        metadata = {"status": "reviewed"}
+        research._write(folder / "iteration.json", metadata)
+        research._write(
+            folder / "publication.json",
+            {
+                "metadata": metadata,
+                "state_after": {
+                    "execution_ref": "iterations/0001/execute/response.json"
+                },
+            },
+        )
+        (folder / "execute").mkdir()
+        completed = {
+            "outcome": "completed",
+            "markdown": "Published fixed measurement.",
+            "artifacts": [],
+            "measurements": [
+                {
+                    "candidate_id": "fixed",
+                    "artifact": {"path": "result", "version": "v1"},
+                    "evaluation_id": PROTOCOL,
+                    "comparison_scope": PROTOCOL,
+                    "metrics": [],
+                    "evidence": [],
+                }
+            ],
+        }
+        research._write(folder / "execute/response.json", completed)
         job = self.control / "jobs/0001"
         job.mkdir(parents=True)
         research._write(
@@ -753,10 +875,91 @@ class ResearchBackendTests(unittest.TestCase):
         execution["inputs"] = [{"name": "model", "source": "checkpoint:0001:2000"}]
         inputs = research._inputs(self.root, self.config, execution, "0002")
         self.assertTrue(inputs[0]["path"].endswith("/train/checkpoint-step-2000.pt"))
+        self.assertEqual(
+            inputs,
+            research._inputs(
+                self.root,
+                self.config,
+                execution,
+                "0002",
+                reference_error=ParameterError,
+            ),
+        )
+        published = folder / "execute/response.json"
+        research._write(
+            published,
+            {
+                "outcome": "incomplete",
+                "markdown": "No checkpoint.",
+                "artifacts": [],
+                "measurements": [],
+            },
+        )
+        with self.assertRaisesRegex(ParameterError, "no fixed-evaluation checkpoint"):
+            research._inputs(
+                self.root,
+                self.config,
+                execution,
+                "0002",
+                reference_error=ParameterError,
+            )
+        research._write(published, completed)
+        result = research._read(job / "result.json")
+        (job / "result.json").unlink()
+        with self.assertRaises(FileNotFoundError):
+            research._inputs(
+                self.root,
+                self.config,
+                execution,
+                "0002",
+                reference_error=ParameterError,
+            )
+        research._write(job / "result.json", result)
+        publication = research._read(folder / "publication.json")
+        (folder / "publication.json").unlink()
+        with self.assertRaises(ProTokError):
+            research._inputs(
+                self.root,
+                self.config,
+                execution,
+                "0002",
+                reference_error=ParameterError,
+            )
+        research._write(folder / "publication.json", publication)
+        publication["state_after"]["execution_ref"] = "../outside.json"
+        research._write(folder / "publication.json", publication)
+        with self.assertRaisesRegex(ProTokError, "leaves its iteration"):
+            research._inputs(
+                self.root,
+                self.config,
+                execution,
+                "0002",
+                reference_error=ParameterError,
+            )
+        publication["state_after"]["execution_ref"] = (
+            "iterations/0001/execute/response.json"
+        )
+        research._write(folder / "publication.json", publication)
         state["attempts"][0]["terminal_state"] = "FAILED"
         research._write(formal / "state.json", state)
-        with self.assertRaises(ProTokError):
-            research._inputs(self.root, self.config, execution, "0002")
+        for error_type in (ProTokError, ParameterError):
+            with self.assertRaises(ProTokError):
+                research._inputs(
+                    self.root,
+                    self.config,
+                    execution,
+                    "0002",
+                    reference_error=error_type,
+                )
+        (job / "result.json").unlink()
+        with self.assertRaises(FileNotFoundError):
+            research._inputs(
+                self.root,
+                self.config,
+                execution,
+                "0002",
+                reference_error=ParameterError,
+            )
 
 
 if __name__ == "__main__":

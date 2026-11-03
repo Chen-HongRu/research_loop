@@ -246,7 +246,9 @@ class LongTrainingLoopTests(unittest.TestCase):
             return_value=resolved,
         ) as resolver:
             inputs = research_backend._inputs(self.root, {}, execution, "0002")
-        resolver.assert_called_once_with(self.root, identity, 6000)
+        resolver.assert_called_once_with(
+            self.root, identity, 6000, reference_error=research_backend.ProTokError
+        )
         self.assertEqual(inputs[0]["path"], resolved["path"])
         self.assertEqual(inputs[0]["provenance"]["source_identity"], "frozen")
         self.assertEqual(inputs[0]["mount"], "/inputs/model")

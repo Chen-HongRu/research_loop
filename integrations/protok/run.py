@@ -206,7 +206,14 @@ def signatures(contents):
     return {name: hashlib.sha256(value).hexdigest() for name, value in contents.items()}
 
 
-def check_scope(workspace, baseline, *, allow_research=False, error_type=ProTokError):
+def check_scope(
+    workspace,
+    baseline,
+    *,
+    allow_research=False,
+    error_type=ProTokError,
+    check_research_files=True,
+):
     changed = set(
         git(workspace, "diff", "--name-only", "-z", baseline, "--").split("\0")
     )
@@ -225,7 +232,14 @@ def check_scope(workspace, baseline, *, allow_research=False, error_type=ProTokE
                 "Agent changed files outside candidate scope: "
                 + ", ".join(sorted(protected))
             )
-        allowed.update(research_files(workspace, error_type=error_type))
+        if check_research_files:
+            allowed.update(research_files(workspace, error_type=error_type))
+        else:
+            allowed.update(
+                name
+                for name in changed
+                if name == "research" or name.startswith("research/")
+            )
     extra = changed - allowed
     if extra:
         raise ProTokError(
@@ -808,6 +822,32 @@ class ProTokHarness:
             return with_fields(schema, execution=ProTokPlanExecution | None)
         return schema
 
+    def validate_plan(self, result, *, iteration):
+        execution = result.get("execution")
+        if (
+            result["decision"] != "investigate"
+            or not execution
+            or execution["mode"] != "script"
+        ):
+            return
+        from integrations.protok.research_backend import _execution, _inputs
+
+        trusted_policy = research_policy(self.root)
+        if trusted_policy is None:
+            raise ParameterError(
+                "Script execution is not authorized; choose fixed_evaluation"
+            )
+        _execution(execution, trusted_policy, parameter_error=ParameterError)
+        if not execution["inputs"]:
+            return
+        _inputs(
+            self.root,
+            read(self.backend.project / "autoresearch-run.json"),
+            execution,
+            f"{iteration:04d}",
+            reference_error=ParameterError,
+        )
+
     def admit_iteration(self, iteration):
         from integrations.protok.round_admission import admit
 
@@ -1167,83 +1207,120 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
         result_path = workspace / "evaluation-result.json"
         request_path = workspace / "evaluation-request.json"
         iteration = workspace.parent.name
-        initialize_submission_workspace(self.root, workspace, iteration)
-        if submission_status(workspace)["status"] != "not_submitted":
-            raise HarnessError("Existing evaluation submission requires reconciliation")
-        stop = threading.Event()
-        deadline = min(deadline, time.time() + kwargs["timeout_seconds"] - 5)
-        thread = threading.Thread(
-            target=self._watch, args=(workspace, iteration, stop, deadline)
+        from integrations.protok.research_execution import (
+            begin_script_execution,
+            close_script_execution,
         )
-        thread.start()
-        delegate_error = None
-        try:
-            result = report_response(self.delegate.run(**kwargs))
-        except (HarnessError, OSError) as error:
-            delegate_error = error
-            result = None
-        finally:
-            stop.set()
-            # evaluate has the same finite deadline; settle effects before returning.
-            thread.join()
-        if self.errors:
-            if self.recoverable_failure is not None:
-                self.recoverable_failure = certify_candidate_failure(
-                    self.root, self.backend, workspace, iteration
-                )
-                raise RecoverableExecutionError(
-                    self.recoverable_failure["cause"], details=self.recoverable_failure
-                )
-            failure = HarnessError(self.errors[-1])
-            failure.diagnostics = self.pipeline_diagnostics
-            raise failure
-        if self.trusted_result and self.trusted_result.get("status") == "failed":
-            # The controller result, not Agent availability, defines a settled failure.
-            if self.trusted_result.get("purpose") == "research":
-                from integrations.protok.research_execution import completed_script
 
-                trusted = completed_script(self.root, workspace, iteration)
-            else:
-                trusted = timed_out_job(self.root, self.backend, workspace, iteration)
-            if trusted != self.trusted_result or read(result_path) != trusted:
-                raise HarnessError("Settled failure interface differs from its receipt")
-            result = settled_failure_response(trusted, agent_error=delegate_error)
-        elif delegate_error is not None:
-            raise delegate_error
-        if result.get("outcome") == "incomplete" and self.trusted_result is None:
-            retain_local_incomplete(
-                self.root,
-                self.backend,
-                workspace,
-                iteration,
-                result,
-                run_dir=outer,
-                completed=True,
+        script_enabled = research_policy(self.root) is not None
+        attempt_ref = (
+            str(outer.relative_to(self.root / "study"))
+            if outer is not None and script_enabled
+            else None
+        )
+        deadline = min(deadline, time.time() + kwargs["timeout_seconds"] - 5)
+        if script_enabled:
+            begin_script_execution(
+                self.root, workspace, iteration, attempt_ref, deadline
             )
+        execution_error = None
+        try:
+            initialize_submission_workspace(self.root, workspace, iteration)
+            if submission_status(workspace)["status"] != "not_submitted":
+                raise HarnessError(
+                    "Existing evaluation submission requires reconciliation"
+                )
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=self._watch, args=(workspace, iteration, stop, deadline)
+            )
+            thread.start()
+            delegate_error = None
+            try:
+                result = report_response(self.delegate.run(**kwargs))
+            except (HarnessError, OSError) as error:
+                delegate_error = error
+                result = None
+            finally:
+                stop.set()
+                # evaluate has the same finite deadline; settle effects before returning.
+                thread.join()
+            if self.errors:
+                if self.recoverable_failure is not None:
+                    self.recoverable_failure = certify_candidate_failure(
+                        self.root, self.backend, workspace, iteration
+                    )
+                    raise RecoverableExecutionError(
+                        self.recoverable_failure["cause"],
+                        details=self.recoverable_failure,
+                    )
+                failure = HarnessError(self.errors[-1])
+                failure.diagnostics = self.pipeline_diagnostics
+                raise failure
+            if self.trusted_result and self.trusted_result.get("status") == "failed":
+                # The controller result, not Agent availability, defines a settled failure.
+                if self.trusted_result.get("purpose") == "research":
+                    from integrations.protok.research_execution import completed_script
+
+                    trusted = completed_script(self.root, workspace, iteration)
+                else:
+                    trusted = timed_out_job(
+                        self.root, self.backend, workspace, iteration
+                    )
+                if trusted != self.trusted_result or read(result_path) != trusted:
+                    raise HarnessError(
+                        "Settled failure interface differs from its receipt"
+                    )
+                result = settled_failure_response(trusted, agent_error=delegate_error)
+            elif delegate_error is not None:
+                raise delegate_error
+            if result.get("outcome") == "incomplete" and self.trusted_result is None:
+                retain_local_incomplete(
+                    self.root,
+                    self.backend,
+                    workspace,
+                    iteration,
+                    result,
+                    run_dir=outer,
+                    completed=True,
+                )
+                if outer is not None:
+                    publish_completed_response(outer, result)
+                return result
+            if request_path.exists():
+                raise HarnessError(
+                    "A duplicate evaluation request was left after Execute"
+                )
+            if not result_path.exists() or (
+                read(result_path).get("status") != "completed"
+                and not (
+                    self.trusted_result
+                    and self.trusted_result.get("purpose") in {"research", "formal"}
+                    and self.trusted_result.get("status") == "failed"
+                )
+            ):
+                raise HarnessError(
+                    "Execute ended without a completed trusted evaluation"
+                )
+            trusted = self.trusted_result
+            if trusted is None or read(result_path) != trusted:
+                raise HarnessError(
+                    "Agent altered the trusted evaluation interface result"
+                )
+            # Model prose is evidence/interpretation; candidate identity and measurements
+            # are constructed by the controller and then independently revalidated below.
+            result = receipt_response(trusted, result["markdown"])
+            result = self.validate_completed(result, workspace=workspace, run_dir=outer)
             if outer is not None:
                 publish_completed_response(outer, result)
             return result
-        if request_path.exists():
-            raise HarnessError("A duplicate evaluation request was left after Execute")
-        if not result_path.exists() or (
-            read(result_path).get("status") != "completed"
-            and not (
-                self.trusted_result
-                and self.trusted_result.get("purpose") in {"research", "formal"}
-                and self.trusted_result.get("status") == "failed"
+        except BaseException as error:
+            execution_error = error
+            raise
+        finally:
+            close_script_execution(
+                self.root, workspace, iteration, attempt_ref, error=execution_error
             )
-        ):
-            raise HarnessError("Execute ended without a completed trusted evaluation")
-        trusted = self.trusted_result
-        if trusted is None or read(result_path) != trusted:
-            raise HarnessError("Agent altered the trusted evaluation interface result")
-        # Model prose is evidence/interpretation; candidate identity and measurements
-        # are constructed by the controller and then independently revalidated below.
-        result = receipt_response(trusted, result["markdown"])
-        result = self.validate_completed(result, workspace=workspace, run_dir=outer)
-        if outer is not None:
-            publish_completed_response(outer, result)
-        return result
 
     def diagnostic_context(self, iteration):
         """Return retained public diagnostics for this iteration, without execution."""
@@ -1292,6 +1369,24 @@ Individual Agent, frozen Plan and Slurm allocation time limits remain in force.
         validate_response("execute", result)
         workspace = Path(workspace)
         iteration = workspace.parent.name
+        reconciliation = Path(run_dir) / "reconciliation.json" if run_dir else None
+        if reconciliation is not None and reconciliation.exists():
+            record = read(reconciliation)
+            attempt_ref = str(Path(run_dir).relative_to(self.root / "study"))
+            trusted, proof = _execute_settlement(
+                self.root, self.backend, workspace, iteration, attempt_ref
+            )
+            if (
+                record.get("operator_action") != "reconcile-execute"
+                or record["trusted_result"] != trusted
+                or record["settlement_proof"] != proof
+                or record["response"] != result
+            ):
+                raise HarnessError(
+                    "Execute reconciliation differs from retained settlement"
+                )
+            _validate_settlement_response(result, trusted, workspace)
+            return result
         fixed = check_fixed_candidate(self.root, workspace, iteration)
         if fixed is not None:
             job = job_path(self.root, iteration)
@@ -1813,109 +1908,72 @@ def reconcile_debug_allocations(root, backend):
             raise ProTokError("Debug allocation is still unaccounted")
 
 
-def reconcile_completed_execute(root, backend):
-    """Operator reconciliation of an interrupted agent using real backend evidence.
+def _execute_settlement(root, backend, workspace, iteration, attempt_ref):
+    """Inspect the retained execution through its purpose-specific validator."""
+    from integrations.protok.research_execution import (
+        frozen_contract,
+        settle_script_execution,
+    )
 
-    A new retained attempt explicitly records the operator action. The partial
-    agent response/process are never promoted to a successful agent execution.
-    Independent Review remains the next ordinary stage; STOP remains set.
+    contract = frozen_contract(root, iteration, required=False)
+    if contract and contract["execution"]["mode"] == "script":
+        settled = settle_script_execution(root, workspace, iteration, attempt_ref)
+        if settled.status == "not_started":
+            check_fixed_candidate(root, workspace, iteration)
+            check_scope(
+                workspace,
+                read(Path(root) / "study/study.json")["baseline"],
+                allow_research=True,
+                check_research_files=False,
+            )
+        return settled.result, settled.proof
+    job = job_path(root, iteration)
+    record = read(job / "job.json")
+    result = read(job / "result.json") if (job / "result.json").exists() else {}
+    effects = backend.inspect()
+    completed = (
+        record.get("request") == {"action": "import"}
+        or record.get("status") == "completed"
+        or result.get("status") == "completed"
+        or any(
+            row.get("fingerprint") == record.get("fingerprint")
+            and (
+                not record.get("record_name")
+                or row.get("record") == record["record_name"]
+            )
+            and row.get("status") in {"complete", "completed"}
+            for row in effects.get("records", [])
+        )
+    )
+    failed = (
+        (job / "timeout.json").exists()
+        or result.get("status") == "failed"
+        or record.get("status") == "failed"
+    )
+    validator = completed_job if completed and not failed else timed_out_job
+    trusted = validator(root, backend, workspace, iteration)
+    return trusted, {"purpose": "formal", "backend_result": str(job / "result.json")}
+
+
+def _validate_settlement_response(response, trusted, workspace):
+    validate_response("execute", response)
+    if (
+        response != receipt_response(trusted, response["markdown"])
+        or read(Path(workspace) / "evaluation-result.json") != trusted
+        or (Path(workspace) / "evaluation-request.json").exists()
+        or (Path(workspace) / "evaluation-request.json").is_symlink()
+    ):
+        raise ProTokError("Reconciled Execute differs from its settled execution")
+
+
+def reconcile_execute(root, backend, *, authorization):
+    """Publish a verified settlement on the original interrupted Execute attempt.
+
+    This operation neither invokes an Agent nor submits compute. Publication is
+    restartable from its immutable record; independent Review remains next.
     """
-    root = Path(root)
-    study = Study(root / "study")
-    with (root / "control/runner.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with study._lock():
-            state = study.status()
-            relative = state.get("active_attempt")
-            if (
-                state["phase"] != "execute"
-                or state["status"] not in {"running", "needs_attention"}
-                or not relative
-                or state["calls"].get("execute") != relative
-                or state.get("accepted_calls", {}).get("execute")
-            ):
-                raise ProTokError(
-                    "Only an unaccepted interrupted Execute can be reconciled"
-                )
-            previous = study.root / relative
-            for path in (previous, previous / "agent"):
-                study._check_attempt_stopped(path)
-            iteration = f"{state['iteration']:04d}"
-            metadata = read(study.root / "iterations" / iteration / "iteration.json")
-            workspace = Path(metadata["workspace"])
-            trusted = completed_job(root, backend, workspace, iteration)
-            response = {
-                "outcome": "completed",
-                "markdown": (
-                    "Operator reconciliation of an interrupted Execute, using a verified "
-                    "completed fixed-backend receipt; no agent completion is asserted. "
-                    f"Observed {METRIC}={trusted['value']} under {PROTOCOL}; "
-                    f"candidate {trusted['fingerprint']}. No new evaluation or agent call. "
-                    "The original partial attempt is retained. Independent Review must "
-                    "assess source, evidence and limitations; mechanism remains unverified."
-                ),
-                "artifacts": [trusted["artifact"]],
-                "measurements": [
-                    {
-                        "candidate_id": trusted["fingerprint"],
-                        "artifact": trusted["artifact"],
-                        "evaluation_id": PROTOCOL,
-                        "comparison_scope": PROTOCOL,
-                        "metrics": [{"name": METRIC, "value": trusted["value"]}],
-                        "evidence": trusted["evidence"],
-                    }
-                ],
-            }
-            ProTokHarness(backend, root, None, 0).validate_completed(
-                response, workspace=workspace, run_dir=previous
-            )
-            directory = previous.parent
-            attempt = (
-                directory / f"attempt-{len(list(directory.glob('attempt-*'))) + 1:03d}"
-            )
-            attempt.mkdir()
-            if (previous / "context.json").exists():
-                shutil.copyfile(previous / "context.json", attempt / "context.json")
-            record = {
-                "operator_action": "reconcile-completed-backend-without-replay",
-                "previous_attempt": relative,
-                "backend_result": str(
-                    root / "control/jobs" / iteration / "result.json"
-                ),
-                "source_signatures": signatures(candidate_bytes(workspace)),
-                "call_count": state["call_count"],
-                "elapsed_seconds": state["elapsed_seconds"],
-            }
-            write(attempt / "reconciliation.json", record)
-            write(attempt / "response.json", response)
-            publish_completed_response(attempt, response)
-            state["calls"]["execute"] = str(attempt.relative_to(study.root))
-            state.get("accepted_calls", {}).pop("execute", None)
-            state.update(status="ready", active_attempt=None, error=None)
-            study._save(state)
-            return state
-
-
-def reconcile_timed_out_execute(root, backend, *, authorization):
-    """Record a settled formal timeout without repeating its Execute or Plan."""
-    return _reconcile_settled_execute(root, backend, authorization=authorization)
-
-
-def reconcile_research_execute(root, backend, *, authorization):
-    """Accept the retained settled research failure without resubmitting compute."""
-    return _reconcile_settled_execute(
-        root, backend, authorization=authorization, research=True
-    )
-
-
-def _reconcile_settled_execute(root, backend, *, authorization, research=False):
-    action = (
-        "reconcile-settled-research-result"
-        if research
-        else "reconcile-settled-formal-timeout"
-    )
     if not isinstance(authorization, str) or not authorization.strip():
-        raise ProTokError("Explicit timeout reconciliation authorization required")
+        raise ProTokError("Explicit execution reconciliation authorization required")
     root = Path(root)
     study = Study(root / "study")
     with (root / "control/runner.lock").open("a") as lock:
@@ -1923,185 +1981,151 @@ def _reconcile_settled_execute(root, backend, *, authorization, research=False):
         with study._lock():
             state = study.status()
             relative = state["calls"].get("execute")
-            if not relative or state.get("accepted_calls", {}).get("execute"):
-                raise ProTokError("Timeout has no unaccepted Execute to reconcile")
-            previous = study.root / relative
-            replay = previous / "reconciliation.json"
-            if state["status"] == "ready" and replay.exists():
-                saved = read(replay)
-                if saved.get("operator_action") != action:
-                    raise ProTokError("Execute belongs to another reconciliation")
-                if saved.get("prepared_state") != state or any(
+            if (
+                state["phase"] != "execute"
+                or not relative
+                or state.get("accepted_calls", {}).get("execute")
+            ):
+                raise ProTokError("There is no unaccepted Execute to reconcile")
+            attempt = study.root / relative
+            for directory in (attempt, attempt / "agent"):
+                study._check_attempt_stopped(directory)
+            record_path = attempt / "reconciliation.json"
+            saved = read(record_path) if record_path.exists() else None
+            if saved:
+                if saved.get("operator_action") != "reconcile-execute" or state not in (
+                    saved["state_before"],
+                    saved["prepared_state"],
+                ):
+                    raise ProTokError("Execution reconciliation preparation changed")
+                if any(
                     (root / name).read_text() != value
                     for name, value in saved["protected"].items()
                 ):
-                    raise ProTokError(
-                        "Timeout preparation or protected contract changed"
-                    )
-                response = completed_response(previous)
-                ProTokHarness(backend, root, None, 0).validate_completed(
-                    response, workspace=Path(saved["workspace"]), run_dir=previous
-                )
-                return state
-            if (
-                state["phase"] != "execute"
-                or state["status"] != "needs_attention"
+                    raise ProTokError("Reconciliation protected contract changed")
+                stop = root / "control/STOP"
+                if (stop.read_text() if stop.exists() else None) != saved[
+                    "stop_before"
+                ]:
+                    raise ProTokError("STOP changed after reconciliation preparation")
+            elif (
+                state["status"] not in {"running", "needs_attention"}
                 or state.get("active_attempt") != relative
             ):
-                raise ProTokError("Only an interrupted Execute may reconcile a timeout")
-            for directory in (previous, previous / "agent"):
-                study._check_attempt_stopped(directory)
+                raise ProTokError("Only an interrupted Execute may be reconciled")
             iteration = f"{state['iteration']:04d}"
             metadata = read(study.root / "iterations" / iteration / "iteration.json")
             workspace = Path(metadata["workspace"])
-            if research:
-                from integrations.protok.research_execution import completed_script
+            from integrations.protok.research_execution import close_script_execution
 
-                trusted = completed_script(root, workspace, iteration)
-                if trusted["status"] != "failed":
-                    raise ProTokError(
-                        "Only a settled research failure may be reconciled"
-                    )
-                record_root = root / "control/research-jobs" / iteration
-                backend_result = (
-                    root / "control/research-sources" / iteration / "result.json"
-                )
-            else:
-                trusted = timed_out_job(root, backend, workspace, iteration)
-                record_root = job_path(root, iteration)
-                backend_result = record_root / "result.json"
+            close_script_execution(
+                root,
+                workspace,
+                iteration,
+                relative,
+                error="Controller reconciliation after stopped Execute",
+            )
+            trusted, proof = _execute_settlement(
+                root, backend, workspace, iteration, relative
+            )
             effects = backend.inspect()
             if any(
                 effects.get(key)
                 for key in ("outstanding", "research_outstanding", "debug_outstanding")
             ):
-                raise ProTokError(
-                    "Unresolved effects prevent settled-result reconciliation"
-                )
+                raise ProTokError("Unresolved effects prevent execution reconciliation")
+            if saved and (
+                saved["trusted_result"] != trusted or saved["settlement_proof"] != proof
+            ):
+                raise ProTokError("Retained execution settlement changed")
             result_path = workspace / "evaluation-result.json"
+            request_path = workspace / "evaluation-request.json"
+            if trusted["status"] == "not_started" and (
+                request_path.exists() or request_path.is_symlink()
+            ):
+                if request_path.is_symlink() or read(request_path) != {
+                    "action": "research"
+                }:
+                    raise ProTokError(
+                        "Unstarted execution request differs from its Plan"
+                    )
+                immutable_record(
+                    attempt / "reconciliation.previous-request.json", read(request_path)
+                )
+                request_path.unlink()
+            if result_path.is_symlink():
+                raise ProTokError(
+                    "Evaluation result must be a regular controller receipt"
+                )
             if result_path.exists() and read(result_path) != trusted:
                 old = read(result_path)
                 if old.get("status") != "error" or any(
                     name in old for name in ("value", "metric", "measurements")
                 ):
                     raise ProTokError(
-                        "Existing evaluation interface is not the retained failure"
+                        "Existing evaluation interface differs from settlement"
                     )
-                immutable_record(record_root / "recovery.previous-interface.json", old)
+                immutable_record(
+                    attempt / "reconciliation.previous-interface.json", old
+                )
             write(result_path, trusted)
-            response = settled_failure_response(trusted)
-            response["markdown"] = (
-                "Controller reconciliation of a retained settled result; no new "
-                "Execute call or allocation. Original Agent attempt retained.\n\n"
-                + response["markdown"]
+            response = receipt_response(
+                trusted,
+                "Controller reconciliation of a retained execution settlement "
+                f"({trusted['status']}); no new Agent call or allocation. "
+                "The original Execute attempt, Plan, deadlines and usage remain "
+                "unchanged. Independent Review must assess the retained evidence "
+                "and its limitations; execution status alone is no scientific conclusion.",
             )
-            ProTokHarness(backend, root, None, 0).validate_completed(
-                response, workspace=workspace, run_dir=previous
-            )
-            directory = previous.parent
-            attempt = (
-                directory / f"attempt-{len(list(directory.glob('attempt-*'))) + 1:03d}"
-            )
-            attempt.mkdir()
-            if (previous / "context.json").exists():
-                shutil.copyfile(previous / "context.json", attempt / "context.json")
-            stop = root / "control/STOP"
-            prepared = {
-                **state,
-                "calls": {
-                    **state["calls"],
-                    "execute": str(attempt.relative_to(study.root)),
-                },
-                "status": "ready",
-                "active_attempt": None,
-                "error": None,
-            }
-            plan = Path("study") / state["plan_ref"]
-            if plan.is_absolute() or ".." in plan.parts:
-                raise ProTokError("Frozen Plan reference leaves the Study")
-            record = {
-                "operator_action": action,
-                "authorization": authorization,
-                "previous_attempt": relative,
-                "workspace": str(workspace),
-                "backend_result": str(backend_result),
-                "source_signatures": signatures(candidate_bytes(workspace)),
-                "stop_before": stop.read_text() if stop.exists() else None,
-                "call_count": state["call_count"],
-                "elapsed_seconds": state["elapsed_seconds"],
-                "previous_error": state.get("error"),
-                "prepared_state": prepared,
-                "protected": {
-                    name: (root / name).read_text()
-                    for name in (
-                        "control/ownership.json",
-                        "control/continuation.json",
-                        "study/study.json",
-                        str(plan),
-                    )
-                },
-            }
-            immutable_record(attempt / "reconciliation.json", record)
-            publish_completed_response(attempt, response)
+            _validate_settlement_response(response, trusted, workspace)
+            if saved:
+                if saved["response"] != response:
+                    raise ProTokError("Reconciliation response changed")
+                prepared = saved["prepared_state"]
+            else:
+                plan = Path("study") / state["plan_ref"]
+                if plan.is_absolute() or ".." in plan.parts:
+                    raise ProTokError("Frozen Plan reference leaves the Study")
+                stop = root / "control/STOP"
+                prepared = {
+                    **state,
+                    "status": "ready",
+                    "active_attempt": None,
+                    "error": None,
+                }
+                record = {
+                    "operator_action": "reconcile-execute",
+                    "authorization": authorization,
+                    "previous_attempt": relative,
+                    "workspace": str(workspace),
+                    "backend_result": trusted["artifact"]["path"],
+                    "trusted_result": trusted,
+                    "settlement_proof": proof,
+                    "response": response,
+                    "source_signatures": signatures(candidate_bytes(workspace)),
+                    "stop_before": stop.read_text() if stop.exists() else None,
+                    "call_count": state["call_count"],
+                    "elapsed_seconds": state["elapsed_seconds"],
+                    "previous_error": state.get("error"),
+                    "state_before": state,
+                    "prepared_state": prepared,
+                    "protected": {
+                        name: (root / name).read_text()
+                        for name in (
+                            "control/ownership.json",
+                            "control/continuation.json",
+                            "study/study.json",
+                            str(plan),
+                        )
+                    },
+                }
+                immutable_record(record_path, record)
+            # The outer receipt belongs to the controller. Raw Agent evidence stays
+            # untouched under attempt/agent, including process and partial output.
+            if completed_response(attempt) != response:
+                publish_completed_response(attempt, response)
             study._save(prepared)
             return prepared
-
-
-def reconcile_local_incomplete(root, backend):
-    """Operator-only acceptance of the retained successful local rejection receipt."""
-    root = Path(root)
-    study = Study(root / "study")
-    with (root / "control/runner.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with study._lock():
-            state = study.status()
-            if (
-                state["phase"] != "execute"
-                or state["status"] != "needs_attention"
-                or "Execute ended without a completed trusted evaluation"
-                not in state.get("error", "")
-            ):
-                raise ProTokError(
-                    "Only the known local incomplete wrapper rejection can be reconciled"
-                )
-            relative = state["calls"].get("execute")
-            if not relative or state.get("active_attempt") != relative:
-                raise ProTokError("Execute receipt does not match the active attempt")
-            attempt = study.root / relative
-            if read(attempt / "process.json").get("status") != "succeeded":
-                raise ProTokError(
-                    "Local reconciliation requires a successful process receipt"
-                )
-            response = read(attempt / "response.json")
-            iteration = f"{state['iteration']:04d}"
-            metadata = read(study.root / "iterations" / iteration / "iteration.json")
-            diagnostic = retain_local_incomplete(
-                root,
-                backend,
-                Path(metadata["workspace"]),
-                iteration,
-                response,
-                run_dir=attempt,
-            )
-            record = {
-                **diagnostic,
-                "process_receipt": str(attempt / "process.json"),
-                "response_receipt": str(attempt / "response.json"),
-                "call_count": state["call_count"],
-                "elapsed_seconds": state["elapsed_seconds"],
-                "error": state["error"],
-                "operator_action": "accept-successful-incomplete-without-replay",
-            }
-            immutable_record(
-                root
-                / "control/reconciliations"
-                / f"local-incomplete-{iteration}-{attempt.name}.json",
-                record,
-            )
-            state.setdefault("accepted_calls", {})["execute"] = True
-            study._save(state)
-        # retry now retains the accepted successful Execute call; it launches nothing.
-        return study.retry()
 
 
 def main(argv=None):
@@ -2116,10 +2140,7 @@ def main(argv=None):
         "init",
         "run-one",
         "status",
-        "reconcile-local-incomplete",
-        "reconcile-completed-execute",
-        "reconcile-timed-out-execute",
-        "reconcile-research-execute",
+        "reconcile-execute",
         "repair-completed-control",
         "begin-debug",
         "resume-unsubmitted",
@@ -2156,16 +2177,8 @@ def main(argv=None):
             result = long_training_loop.run_one(root, backend)
     elif args.init:
         result = init_study(root, backend)
-    elif args.reconcile_local_incomplete:
-        result = reconcile_local_incomplete(root, backend)
-    elif args.reconcile_completed_execute:
-        result = reconcile_completed_execute(root, backend)
-    elif args.reconcile_timed_out_execute:
-        result = reconcile_timed_out_execute(
-            root, backend, authorization=args.authorization or ""
-        )
-    elif args.reconcile_research_execute:
-        result = reconcile_research_execute(
+    elif args.reconcile_execute:
+        result = reconcile_execute(
             root, backend, authorization=args.authorization or ""
         )
     elif args.repair_completed_control:

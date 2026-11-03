@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 from integrations.protok import long_training as lane
+from research_loop.correction import ParameterError
 
 
 def request():
@@ -534,6 +535,13 @@ class LongTrainingTests(unittest.TestCase):
             lane.resolve_checkpoint(root, req["id"], 2000)["path"]
             == remote + "/train/checkpoint-step-2000.pt"
         )
+        published = lane._read(publication)
+        publication.unlink()
+        with self.assertRaises(FileNotFoundError):
+            lane.resolve_checkpoint(
+                root, req["id"], 2000, reference_error=ParameterError
+            )
+        lane._write(publication, published)
         lane._write(publication.parent / "iteration.json", {"status": "executed"})
         with self.assertRaisesRegex(lane.ProTokError, "not been published"):
             lane.resolve_checkpoint(root, req["id"], 2000)

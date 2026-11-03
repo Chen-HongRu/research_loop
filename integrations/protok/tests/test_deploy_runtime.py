@@ -84,6 +84,24 @@ class RuntimeDeployTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Outstanding"):
             DEPLOY.check_boundary(self.root, self.backend)
 
+    def test_runtime_replacement_checks_every_lane(self):
+        for lane in (
+            "outstanding",
+            "research_outstanding",
+            "debug_outstanding",
+            "long_training_outstanding",
+            "manual_training_outstanding",
+        ):
+            with self.subTest(lane=lane):
+                self.backend.inspect.return_value = {
+                    "outstanding": [],
+                    lane: ["owned job"],
+                }
+                with self.assertRaisesRegex(RuntimeError, "Outstanding"):
+                    DEPLOY.check_idle(self.backend)
+        self.backend.inspect.return_value = {"outstanding": []}
+        DEPLOY.check_idle(self.backend)
+
     def test_debug_upgrade_requires_certified_preparation_and_unchanged_stop(self):
         failure = {
             "version": 1,

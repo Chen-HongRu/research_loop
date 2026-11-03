@@ -23,8 +23,9 @@ Downstream state and document publication can be retried from these receipts.
 An interrupted model generation does not resume at its last token. Partial JSON
 and final-looking text without a completion receipt are evidence, not completed
 results. Execute is never automatically repeated on this basis. A task adapter
-may validate existing external receipts and create a separately labeled operator
-reconciliation attempt; it must preserve the original Agent attempt.
+may validate existing external receipts and publish a separately labeled controller
+reconciliation receipt in the original Execute attempt. It must preserve the raw
+Agent evidence and must not count reconciliation as another Agent invocation.
 
 Parameter correction keeps the original task and frozen context. Each new Agent
 call consumes the existing Study call/time budget; rejection does not reset either
@@ -40,6 +41,12 @@ is retained in `parameter-budget.json`; corrections cannot renew that window eve
 when an adapter supplies a per-call allowance. Rejected responses and bounded,
 redacted field errors are retained in `rejection.json`. A successor's `feedback.json`
 preserves the correction link before it becomes active, including across interruption.
+
+An optional backend `validate_plan` hook checks input references before acceptance
+through this same correction path, including cached unaccepted replies. Explicit
+reference `ParameterError` is correctable; trusted-metadata Pydantic errors and
+other infrastructure failures block. Accepted Plans remain frozen. The ProTok
+hook reuses its local execution resolver without remote probes or data reads.
 
 An adapter can explicitly certify a settled candidate-code rejection with
 `RecoverableExecutionError(details=...)`. The controller retains that failure and
