@@ -143,7 +143,8 @@ until the parent is explicitly resumed. A read-only Review interruption can be
 retried with ordinary `research-loop retry` against the child Study.
 
 The dashboard places automatic and manual long-training tasks in its horizontal
-Work tree, with the relationship graph above aligned experiment cards. Select a
+Work tree, with a fitted global relationship graph above separate experiment cards.
+Zoom or switch to the compact local view to inspect dense branches. Select a
 node or card to read nominations, status, reviewed curves, aligned
 metrics, knowledge and source/checkpoint references below the tree. Long-training
 measurements keep their independent protocol and do not enter the short-run Frontier.

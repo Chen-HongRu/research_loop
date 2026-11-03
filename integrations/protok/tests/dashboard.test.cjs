@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, tensorboardTaskURL, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, treeEdge, graphParent, drawGraph, focusTreeTask, panTree, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, tensorboardTaskURL, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, treeEdge, graphParent, drawGraph, focusTreeTask, panTree, setTreeZoom, zoomTree, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -146,15 +146,15 @@ test('Eight sibling branches expand past two compact tracks and keep nodes disti
   for(const [index,point] of points.entries())for(const other of points.slice(index+1)) {
     assert.ok(Math.abs(point.x-other.x)>=44 || Math.abs(point.y-other.y)>=44,'node targets overlap');
   }
-  assert.ok(model.height>Math.max(...points.map(point=>point.y+28)));
+  assert.ok(model.height>=Math.max(...points.map(point=>point.y+28)));
   assert.ok(model.height<700,'relationship tracks do not reserve experiment-card height');
 });
 
-test('Relationship nodes and experiment cards render in separate aligned regions', () => {
+test('Relationship nodes and cards have independent widths with the same selected identity', () => {
   context.separateFixture=[{id:'active:0001',local_id:'0001',source_id:'active',created_at:1,action_summary:'A card-only research summary'},
     {id:'active:0002',local_id:'0002',source_id:'active',created_at:2,base:'active:0001',action_summary:'Another experiment'}];
   try {
-    vm.runInContext("data={nodes:separateFixture};selected='active:0002';following=false;treeLayout=null;",context);
+    vm.runInContext("data={nodes:separateFixture};selected='active:0002';following=false;treeLayout=null;treeZoom=1;",context);
     elements.get('routeFilter').value='';elements.get('sourceFilter').value='';elements.get('taskFilter').value='';
     ui.drawGraph();
     const graph=elements.get('graph').innerHTML,cards=elements.get('treeCards').innerHTML;
@@ -163,7 +163,7 @@ test('Relationship nodes and experiment cards render in separate aligned regions
     assert.match(cards,/class="git-row selected /);
     assert.match(cards,/A card-only research summary/);
     assert.doesNotMatch(cards,/<svg|class="tree-node/);
-    assert.equal(elements.get('graph').style.width,elements.get('treeCards').style.width);
+    assert.notEqual(elements.get('graph').style.width,elements.get('treeCards').style.width);
     const model=ui.gitLayout(context.separateFixture);
     for(const node of context.separateFixture) {
       assert.equal(graph.split('data-node="'+node.id+'"').length,2);
@@ -172,19 +172,57 @@ test('Relationship nodes and experiment cards render in separate aligned regions
       assert.match(card,new RegExp('left:'+model.positions[node.id].left+'px'));
       assert.match(graph,new RegExp('left:'+(model.positions[node.id].x-22)+'px'));
     }
-  } finally {vm.runInContext('data=null;selected=null;following=true;treeLayout=null;',context);}
+  } finally {vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeZoom=null;',context);}
 });
 
-test('Dragging either region synchronizes horizontal scroll without changing branch scroll', () => {
+test('Browsing earlier cards does not move the relationship graph', () => {
   const graph=document.getElementById('graphWrap'),cards=document.getElementById('treeCardsWrap');
   graph.scrollTop=90;graph.scrollLeft=600;
-  graph.onscroll();
-  assert.equal(cards.scrollLeft,600);
-  cards.scrollLeft=950;cards.onscroll();
-  assert.equal(graph.scrollLeft,950);
-  assert.equal(graph.scrollTop,90);
+  cards.scrollLeft=950;
   ui.panTree(-1);
-  assert.equal(cards.scrollLeft,graph.scrollLeft);
+  assert.ok(cards.scrollLeft<950);
+  assert.equal(graph.scrollLeft,600);
+  assert.equal(graph.scrollTop,90);
+});
+
+test('Overview fits 120 tasks and all fork tracks inside a phone viewport', () => {
+  const nodes=Array.from({length:120},(_,index)=>({id:'node-'+index,created_at:index+1,base:index?'node-0':null}));
+  const model=ui.gitLayout(nodes,{overview:true,width:335,height:300});
+  assert.equal(model.ordered.length,120);
+  assert.equal(model.lanes,119);
+  assert.ok(model.width<=335 && model.height<=300);
+  for(const point of Object.values(model.positions)) {
+    assert.ok(point.x>=5 && point.x<=330,'node is horizontally outside the overview');
+    assert.ok(point.y>=40 && point.y<=295,'branch is vertically outside the overview');
+  }
+  assert.ok(model.cardWidth>335*50,'card width does not determine overview width');
+  const detail=ui.gitLayout(nodes);
+  assert.ok(detail.columnWidth<252/4,'local view can show several tasks per card-width slot');
+  assert.deepEqual(plain(model.ordered.map(node=>node.id)),plain(detail.ordered.map(node=>node.id)));
+  const larger=ui.gitLayout(Array.from({length:600},(_,i)=>({id:'large-'+i,created_at:i+1,base:i?'large-0':null})),{overview:true,width:335,height:300});
+  assert.equal(larger.ordered.length,600);
+  assert.ok(larger.width<=335 && larger.height<=300,'global view stays fitted as the loop grows');
+});
+
+test('Zooming focuses the selection, retains mode on refresh and returns to the whole tree', () => {
+  context.zoomFixture=Array.from({length:30},(_,index)=>({id:'zoom-'+index,created_at:index+1,base:index?'zoom-0':null}));
+  try {
+    vm.runInContext("data={nodes:zoomFixture};selected='zoom-29';following=false;treeLayout=null;treeZoom=null;",context);
+    ui.drawGraph();
+    assert.equal(elements.get('treeScale').textContent,'全局概览');
+    ui.setTreeZoom(1);
+    assert.equal(elements.get('treeScale').textContent,'100%');
+    assert.ok(elements.get('graphWrap').scrollLeft>0);
+    const cardPosition=elements.get('treeCardsWrap').scrollLeft;
+    ui.zoomTree(1);ui.drawGraph();
+    assert.equal(elements.get('treeScale').textContent,'160%');
+    assert.equal(elements.get('treeCardsWrap').scrollLeft,cardPosition);
+    ui.setTreeZoom(null);
+    assert.equal(elements.get('treeScale').textContent,'全局概览');
+    assert.equal(elements.get('graphWrap').scrollLeft,0);
+    assert.equal(elements.get('graphWrap').scrollTop,0);
+    assert.equal(vm.runInContext('selected',context),'zoom-29');
+  } finally {vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeZoom=null;',context);}
 });
 
 test('Forks clear unrelated task circles and reverse edges approach the destination', () => {
@@ -224,22 +262,26 @@ test('Refreshing and inserting earlier records preserve the panned timeline anch
   const treeView={scrollIntoView(){this.revealed=true;}};
   elements.set('graphWrap',wrap);
   elements.set('treeView',treeView);
-  context.timelineFixture=Array.from({length:8},(_,index)=>({id:String(index+1).padStart(4,'0'),source_id:'active',created_at:100+index}));
+  context.timelineFixture=Array.from({length:20},(_,index)=>({id:String(index+1).padStart(4,'0'),source_id:'active',created_at:100+index}));
   try {
-    vm.runInContext("data={nodes:timelineFixture};selected='0008';following=false;treeLayout=null;treeFollowed=null;",context);
+    vm.runInContext("data={nodes:timelineFixture};selected='0020';following=false;treeLayout=null;treeFollowed=null;treeZoom=1;",context);
     elements.get('routeFilter').value='';elements.get('sourceFilter').value='';elements.get('taskFilter').value='';
     ui.drawGraph();
     assert.ok(wrap.scrollLeft>0,'initial view locates the selected task');
     ui.panTree(-1);wrap.scrollTop=40;
-    const before=wrap.scrollLeft;
+    const before=wrap.scrollLeft,cardBefore=elements.get('treeCardsWrap').scrollLeft;
     ui.drawGraph();
     assert.equal(wrap.scrollLeft,before);
     assert.equal(wrap.scrollTop,40);
     vm.runInContext("timelineFixture.push({id:'earlier',source_id:'active',created_at:1});",context);
     ui.drawGraph();
-    assert.equal(wrap.scrollLeft,before+272,'same visible tasks stay at the same viewport offset');
-    assert.equal(elements.get('treeCardsWrap').scrollLeft,wrap.scrollLeft,'cards preserve the same anchor');
-    assert.equal(vm.runInContext('selected',context),'0008');
+    assert.equal(wrap.scrollLeft,before+56,'tree preserves its compact timeline anchor');
+    assert.equal(elements.get('treeCardsWrap').scrollLeft,cardBefore+252,'cards preserve their own anchor');
+    vm.runInContext("timelineFixture.push({id:'middle',source_id:'active',created_at:115.5});",context);
+    ui.drawGraph();
+    assert.equal(wrap.scrollLeft,before+56,'insertion after the tree anchor does not pan the tree');
+    assert.equal(elements.get('treeCardsWrap').scrollLeft,cardBefore+504,'an independent card anchor survives a middle insertion');
+    assert.equal(vm.runInContext('selected',context),'0020');
     assert.equal(treeView.revealed,undefined,'ordinary refresh never scrolls the page to the tree');
     document.getElementById('treeLocate').onclick();
     assert.equal(treeView.revealed,true,'explicit locate also reveals both regions in the page viewport');
@@ -249,7 +291,7 @@ test('Refreshing and inserting earlier records preserve the panned timeline anch
   } finally {
     if(prior)elements.set('graphWrap',prior);else elements.delete('graphWrap');
     if(priorView)elements.set('treeView',priorView);else elements.delete('treeView');
-    vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeFollowed=null;',context);
+    vm.runInContext('data=null;selected=null;following=true;treeLayout=null;treeFollowed=null;treeZoom=null;',context);
   }
 });
 

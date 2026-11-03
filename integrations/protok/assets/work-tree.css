@@ -26,7 +26,7 @@
   border: 1px solid var(--line);
   border-radius: 8px;
 }
-.git-scroll { overflow: auto; max-height: min(38vh, 300px); min-height: 180px; scroll-padding: 80px 12px 32px; }
+.git-scroll { overflow: auto; height: clamp(260px, 44vh, 380px); max-height: none; min-height: 260px; scroll-padding: 58px 12px 28px; }
 .tree-cards-scroll { overflow-x: auto; overflow-y: hidden; }
 .git-scroll:focus-visible, .tree-cards-scroll:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 .git-log { min-width: 0; position: relative; }
@@ -35,20 +35,20 @@
   position: sticky;
   top: 0;
   z-index: 3;
-  height: 54px;
+  height: 40px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   color: var(--muted);
   font-size: 11px;
 }
-.timeline-tick { position: absolute; top: 5px; width: 232px; text-align: center; }
+.timeline-tick { position: absolute; top: 3px; width: 100px; text-align: center; }
 .timeline-tick span { display: block; font-size: 10px; color: #788ca7; }
 .timeline-lane { position: absolute; left: 0; right: 0; height: 1px; border-top: 1px solid #243148; }
-.timeline-lane-label { position: absolute; left: 7px; top: -20px; font-size: 10px; color: var(--muted); }
-.timeline-selection { position: absolute; top: 54px; bottom: 0; width: 232px; background: #72dfb30b; border-left: 1px dashed #396052; border-right: 1px dashed #396052; }
+.timeline-selection { position: absolute; top: 40px; bottom: 0; width: 1px; border-left: 1px dashed #396052; }
 .git-rail { pointer-events: none; }
 .tree-node, .tree-node:hover, .tree-node[aria-pressed="true"] { position: absolute; width: 44px; height: 44px; padding: 0; border: 0; background: transparent; color: var(--blue); }
-.tree-node-label { position: absolute; left: 50%; top: 34px; transform: translateX(-50%); width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10px/1.4 ui-monospace,SFMono-Regular,monospace; }
+.tree-node-label { position: absolute; left: 50%; top: calc(50% + 12px); transform: translateX(-50%); width: 54px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 9px/1.4 ui-monospace,SFMono-Regular,monospace; }
+.tree-node.compact .tree-node-label { display: none; }
 .tree-node.selected { color: var(--green); }
 .tree-node.selected .tree-node-label { font-weight: 700; }
 .tree-node.other-route { opacity: .45; }
@@ -79,6 +79,7 @@
 .git-row .graph-frontier { overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
 .git-row.other-route { opacity: .45; }
 .tree-totals { font-size: 11px; color: var(--muted); }
+.tree-selection { margin: 7px 0; font-size: 11px; color: var(--green); overflow-wrap: anywhere; }
 @media (max-width: 620px) {
   .tree-filter, .tree-filter.route-filter { flex: 1 1 100%; max-width: 100%; }
   .tree-controls { align-items: start; }
