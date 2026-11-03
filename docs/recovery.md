@@ -17,7 +17,8 @@ Downstream state and document publication can be retried from these receipts.
 | Incomplete Execute or unknown external effects | Stops for explicit reconciliation |
 | Prepared Review publication | Completes the same publication |
 | Unaccepted read-only response rejected by pure output validation | Retains the rejected response and returns field errors to the same stage in a new budgeted attempt |
-| Response rejected by source, scope, identity, accounting or trusted-effect checks | Preserves the failure for explicit reconciliation |
+| Unclaimed script request rejected by explicit authored-source/entrypoint/syntax validation | Returns feedback to the same live Execute within its original Plan/deadline, without allocation |
+| Response rejected by protected source, scope, identity, accounting or trusted-effect checks | Preserves the failure for explicit reconciliation |
 
 An interrupted model generation does not resume at its last token. Partial JSON
 and final-looking text without a completion receipt are evidence, not completed
@@ -44,7 +45,10 @@ An adapter can explicitly certify a settled candidate-code rejection with
 `RecoverableExecutionError(details=...)`. The controller retains that failure and
 enters the adapter's `recover_execution` handler. Repair Agent calls go through
 the ordinary call/time budgets and have separate Study-contained receipts. The
-handler's final response is independently validated before normal Review.
+handler's final response is independently validated before normal Review. Every
+new repair admission refreshes the persisted Study budgets and leaves one call
+for independent Review; it does not extend the original wall deadline or guarantee
+Review completion time.
 Resource limits and task-specific debug checks belong to the adapter; the generic
 controller never infers recoverability from an error string or job failure alone.
 
@@ -67,3 +71,7 @@ the most recent unsaved elapsed-time interval; `max_seconds` is not an exact
 crash-time meter. Task hosts requiring an absolute deadline enforce and persist
 that deadline independently. The ProTok adapter retains its existing absolute
 lease and GPU accounting across recovery.
+
+Backend preparation, start and retained-execution inspection are specified in the
+[execution backend guide](execution-backends.md). Preparation is shared with the
+dry-run API; only explicit, legally repairable authoring errors return feedback.

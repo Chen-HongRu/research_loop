@@ -46,13 +46,23 @@ research`. The request carries no mutable experiment specification: the controll
 uses the accepted Plan. Repeated submissions observe the same request. Retained
 unknown effects require recovery of the same job; they never trigger a new job.
 
-Before claiming a request, the controller checks its action against the iteration
-and frozen execution mode. A wrong action produces `status=parameter_error` with
-feedback in `submission.py status`; the live Execute Agent may submit the corrected
-action within its original timeout. Rejected requests remain in
-`evaluation-parameter-errors.json`. This path cannot edit the accepted Plan, clear
-a claimed receipt, retry a job, or bypass source/identity/accounting checks. An
-I/O or controller failure remains blocking.
+Before claiming a request, the controller prepares the script: it checks the
+request action, missing authored entrypoint, bounded source policy and Python
+syntax using the controller Python, then reads trusted input metadata. Explicit authoring errors produce
+`status=parameter_error` with feedback in `submission.py status`; the same live
+Execute Agent may repair authorized files or the action and submit again within
+its original timeout and frozen Plan. Rejected requests remain in
+`evaluation-parameter-errors.json`. Preparation allocates no compute and writes
+no frozen-source/job record. Trusted input, protected source, frozen Plan, I/O,
+identity and accounting failures remain blocking.
+
+`research_backend.prepare_script(...)` is the Python dry-run API used by actual
+execution. It reads bounded source/configuration and input metadata; it does not
+stage or submit. The live watcher passes its prepared snapshot to start, which
+checks both live and frozen source identity before remote effects. Preparation
+cannot validate imports or runtime behavior. See the
+[execution backend guide](../../docs/execution-backends.md). No correction clears
+a claimed receipt or permits a new Plan, deadline, budget or allocation.
 
 The controller freezes protected dependencies, candidate files and research source.
 The sandbox exposes `/workspace` and declared `/inputs/<name>` read-only, a manifest
@@ -115,6 +125,8 @@ failed script returns that artifact with `outcome=incomplete`. Slurm TIMEOUT is
 one such result. Actual allocated GPU seconds are charged in full even when they
 exceed the requested time limit during termination; the overrun is reported and
 subsequent allocations must still fit the original shared budget and reserve.
+This policy authorizes one research allocation; a settled failure does not
+automatically enter formal candidate debugging or receive another script attempt.
 A reporting Agent failure after a verified failed allocation does not resubmit
 compute: the controller preserves the Agent attempt and publishes the settled
 failure for Review. Unsettled effects or changed identity/source remain blocking.

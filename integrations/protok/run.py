@@ -99,7 +99,8 @@ accepted means the controller claimed it, not that GPU execution has started. Fo
 pending/accepted poll this status API quietly within the frozen timeout.
 completed/failed return the original result. An unknown state requires reconciliation,
 not a new submission. parameter_error means a request parameter was rejected before
-claiming or computation: read feedback and submit the corrected action under the SAME
+claiming or computation: read feedback, correct the action or authored source, and
+submit again under the SAME
 frozen Plan and remaining Execute timeout. Never edit the retained feedback history.
 No correction permits a new Plan, changed scientific scope or another allocation.
 The controller constructs structured artifacts and measurements
@@ -181,7 +182,7 @@ def git(path, *args):
     return result.stdout.strip()
 
 
-def candidate_bytes(workspace):
+def candidate_bytes(workspace, *, error_type=ProTokError):
     workspace = Path(workspace)
     result = {}
     for name in CANDIDATE_FILES:
@@ -196,7 +197,7 @@ def candidate_bytes(workspace):
                 if parent != workspace and parent.is_relative_to(workspace)
             )
         ):
-            raise ProTokError("Candidate must be a small regular source file: " + name)
+            raise error_type("Candidate must be a small regular source file: " + name)
         result[name] = path.read_bytes()
     return result
 
@@ -205,7 +206,7 @@ def signatures(contents):
     return {name: hashlib.sha256(value).hexdigest() for name, value in contents.items()}
 
 
-def check_scope(workspace, baseline, *, allow_research=False):
+def check_scope(workspace, baseline, *, allow_research=False, error_type=ProTokError):
     changed = set(
         git(workspace, "diff", "--name-only", "-z", baseline, "--").split("\0")
     )
@@ -214,13 +215,23 @@ def check_scope(workspace, baseline, *, allow_research=False):
     if allow_research:
         from integrations.protok.research_execution import research_files
 
-        allowed.update(research_files(workspace))
+        protected = {
+            name
+            for name in changed - allowed
+            if name != "research" and not name.startswith("research/")
+        }
+        if protected:
+            raise ProTokError(
+                "Agent changed files outside candidate scope: "
+                + ", ".join(sorted(protected))
+            )
+        allowed.update(research_files(workspace, error_type=error_type))
     extra = changed - allowed
     if extra:
         raise ProTokError(
             "Agent changed files outside candidate scope: " + ", ".join(sorted(extra))
         )
-    return candidate_bytes(workspace)
+    return candidate_bytes(workspace, error_type=error_type)
 
 
 def freeze_source(
@@ -815,7 +826,7 @@ class ProTokHarness:
             return 3600
         return remaining
 
-    def _preflight_request(self, iteration, request, stop, deadline):
+    def _preflight_request(self, iteration, request, stop, deadline, *, workspace=None):
         """Check request arguments only, before retaining any claimed receipt."""
         if stop.is_set() or time.time() >= deadline:
             raise ProTokError("Execute ended; no evaluation may launch")
@@ -837,12 +848,32 @@ class ProTokHarness:
                 f"Request action must be {expected!r} for this iteration and frozen Plan; "
                 "correct only the action within the current Execute timeout"
             )
+        if expected == "research" and workspace is not None:
+            from research_loop.execution import ExecutionBackend
+            from integrations.protok.research_execution import ScriptExecutionBackend
+
+            execution_backend: ExecutionBackend = ScriptExecutionBackend(
+                self, workspace, iteration, stop, deadline
+            )
+            self.prepared_execution = (execution_backend, execution_backend.prepare())
+            if stop.is_set() or time.time() >= deadline:
+                self.prepared_execution = None
+                raise ProTokError(
+                    "Execute ended during preparation; no request claimed"
+                )
 
     def evaluate_request(self, workspace, iteration, request, stop, deadline):
         check_fixed_candidate(self.root, workspace, iteration)
         if request == {"action": "research"}:
             from integrations.protok.research_execution import execute_script
 
+            prepared = getattr(self, "prepared_execution", None)
+            self.prepared_execution = None
+            if prepared is not None:
+                execution_backend, preparation = prepared
+                if not execution_backend.matches(workspace, iteration, stop, deadline):
+                    raise ProTokError("Prepared execution belongs to another request")
+                return execution_backend.start(preparation)
             return execute_script(self, workspace, iteration, stop, deadline)
         if request not in ({"action": "import"}, {"action": "evaluate"}):
             raise ProTokError("Request must contain exactly action=import or evaluate")
@@ -997,7 +1028,7 @@ class ProTokHarness:
                 request = claim_request(
                     workspace,
                     preflight=lambda request: self._preflight_request(
-                        iteration, request, stop, deadline
+                        iteration, request, stop, deadline, workspace=workspace
                     ),
                 )
                 if request is None:

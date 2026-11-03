@@ -369,7 +369,9 @@ def recover_execution(harness, failure, *, workspace, run_dir, context, invoke):
                 return finish(
                     "debug budget exhausted or original wall deadline reached"
                 )
-            remaining = context.get("budget", {})
+            remaining = vars(invoke).get(
+                "budget_status", lambda: context.get("budget", {})
+            )()
             if not attempts and (
                 (
                     remaining.get("calls_left") is not None

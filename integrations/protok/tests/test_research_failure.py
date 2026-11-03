@@ -9,7 +9,7 @@ from unittest.mock import patch
 from integrations.protok import deploy_runtime
 from integrations.protok.research_execution import research_usage
 from research_loop.harness import HarnessError, completed_response
-from research_loop.submission import submit
+from research_loop.submission import submit, status as submission_status
 from test_core import RecordedHarness
 from test_research_contract import contract
 import test_formal_timeout as formal
@@ -19,16 +19,26 @@ RUNNER = formal.RUNNER
 
 class ScriptDelegate(RecordedHarness):
     fail_reporting = False
+    repair_missing_source = False
+    source_corrections = 0
+    before_correction = None
 
     def response(self, phase, context, kwargs):
         if phase == "execute":
             workspace = Path(kwargs["workspace"])
             source = workspace / "research/main.py"
             source.parent.mkdir(exist_ok=True)
-            source.write_text('print("bounded experiment")\n')
+            if not self.repair_missing_source:
+                source.write_text('print("bounded experiment")\n')
             submit(workspace, "research")
             deadline = time.monotonic() + 5
             while not (workspace / "evaluation-result.json").exists():
+                if submission_status(workspace)["status"] == "parameter_error":
+                    if self.before_correction:
+                        self.before_correction(workspace)
+                    self.source_corrections += 1
+                    source.write_text('print("bounded experiment")\n')
+                    submit(workspace, "research")
                 if time.monotonic() >= deadline:
                     raise AssertionError("Controller did not return")
                 time.sleep(0.01)
@@ -79,6 +89,12 @@ class ResearchFailureTests(unittest.TestCase):
         self.allocations = 0
         self.enterContext(
             patch(
+                "integrations.protok.research_backend.prepare_script",
+                return_value=object(),
+            )
+        )
+        self.enterContext(
+            patch(
                 "integrations.protok.research_backend.run_script",
                 side_effect=self.script,
             )
@@ -121,6 +137,34 @@ class ResearchFailureTests(unittest.TestCase):
         self.assertTrue((self.study.root / "iterations/0002/publication.json").exists())
         frontier = self.study.frontiers()["global"][RUNNER.PROTOCOL]["candidates"]
         self.assertEqual([row["experiment_id"] for row in frontier], ["0001"])
+
+    def test_missing_entrypoint_corrects_in_same_execute_then_reaches_review(self):
+        self.initialize()
+        self.delegate.repair_missing_source = True
+        frozen = []
+
+        def before_correction(workspace):
+            self.assertEqual(self.allocations, 0)
+            self.assertFalse((workspace / "evaluation-submission.json").exists())
+            self.assertFalse((self.control / "research-sources").exists())
+            state = self.study.status()
+            frozen.append((self.study.root / state["plan_ref"]).read_bytes())
+
+        self.delegate.before_correction = before_correction
+        state = self.run_one()
+        self.assert_reviewed(state)
+        self.assertEqual(self.delegate.source_corrections, 1)
+        self.assertEqual(self.delegate.count("execute"), 1)
+        self.assertEqual(self.delegate.count("review"), 1)
+        self.assertEqual((self.study.root / state["plan_ref"]).read_bytes(), frozen[0])
+        workspace = Path(
+            json.loads(
+                (
+                    self.study.root / state["calls"]["execute"] / "context.json"
+                ).read_text()
+            )["workspace"]
+        )
+        self.assertTrue((workspace / "evaluation-parameter-errors.json").exists())
 
     def test_timeout_is_reviewed_and_next_investigation_can_start(self):
         self.initialize()

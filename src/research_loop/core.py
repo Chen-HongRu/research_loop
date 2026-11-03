@@ -1355,16 +1355,20 @@ class Study:
         if recover is None:
             raise StudyError("Harness has no execution recovery handler")
         workspace = Path(context["workspace"])
-        self._save(state)
-        context = {
-            **context,
-            "diagnostics": self._execution_diagnostics(folder),
-            "budget": {
+
+        def fresh_budget():
+            self._save(state)
+            return {
                 "calls_left": self.config["max_calls"] - state["call_count"]
                 if self.config["max_calls"] is not None
                 else None,
                 "seconds_left": self.config["max_seconds"] - state["elapsed_seconds"],
-            },
+            }
+
+        context = {
+            **context,
+            "diagnostics": self._execution_diagnostics(folder),
+            "budget": fresh_budget(),
         }
         run_dir = folder / "execute/recovery"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1380,6 +1384,17 @@ class Study:
             else:
 
                 def invoke(key, context, directory, harness):
+                    remaining = fresh_budget()
+                    execution_context["budget"] = remaining
+                    if f"debug:{key}" not in state["calls"]:
+                        # A repair consumes one call; retain one for independent Review.
+                        if (
+                            remaining["calls_left"] is not None
+                            and remaining["calls_left"] <= 1
+                        ):
+                            raise BudgetExhausted("call_budget")
+                        if remaining["seconds_left"] < 1:
+                            raise BudgetExhausted("time_budget")
                     result = self._call(
                         state,
                         "execute",
@@ -1400,6 +1415,7 @@ class Study:
                     return result
 
                 execution_context = context
+                invoke.budget_status = fresh_budget
                 result = recover(
                     record["details"],
                     workspace=workspace,

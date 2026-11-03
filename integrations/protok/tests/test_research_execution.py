@@ -15,7 +15,8 @@ from research_loop.harness import HarnessError, publish_completed_response
 from research_loop.exploration import agent_schema
 from research_loop.protocol import SCHEMAS
 from research_loop.research_contract import plan_schema
-from research_loop.submission import claim_request, submit
+from research_loop.submission import claim_request, submit, status as submission_status
+from research_loop.correction import ParameterError
 import test_protok_runner as runner_tests
 from test_research_contract import contract
 from test_protocol import plan
@@ -61,6 +62,14 @@ class ResearchExecutionTests(unittest.TestCase):
         self.script_source = source.read_bytes()
         self.backend_runs = 0
         self.receipt_status = "completed"
+        # External preparation is covered with a local metadata transport in
+        # test_research_backend. This suite keeps real source/claim/freezing.
+        self.prepare_script = self.enterContext(
+            patch(
+                "integrations.protok.research_backend.prepare_script",
+                return_value=object(),
+            )
+        )
         self.run_script = self.enterContext(
             patch(
                 "integrations.protok.research_backend.run_script",
@@ -79,7 +88,16 @@ class ResearchExecutionTests(unittest.TestCase):
         )
 
     def settled_script(
-        self, backend, *, root, iteration, source, execution, deadline, cancel_event
+        self,
+        backend,
+        *,
+        root,
+        iteration,
+        source,
+        execution,
+        deadline,
+        cancel_event,
+        prepared,
     ):
         self.backend_runs += 1
         self.assertIs(backend, self.backend)
@@ -146,6 +164,143 @@ class ResearchExecutionTests(unittest.TestCase):
         return self.harness.validate_completed(
             response, workspace=self.workspace, run_dir=self.directory / "attempt"
         )
+
+    def preflight(self, request):
+        return self.harness._preflight_request(
+            self.iteration, request, self.stop, self.deadline, workspace=self.workspace
+        )
+
+    def test_live_watcher_repairs_missing_source_before_one_claim(self):
+        source = self.workspace / "research/main.py"
+        source.unlink()
+        submit(self.workspace, "research")
+        stop = Mock()
+
+        def waiting(_seconds):
+            status = submission_status(self.workspace)
+            if status["status"] == "parameter_error":
+                self.assertIn("entrypoint", status["feedback"]["error"])
+                self.assertFalse(
+                    (self.workspace / "evaluation-submission.json").exists()
+                )
+                self.assertFalse((self.control / "research-sources").exists())
+                self.assertEqual(self.backend_runs, 0)
+                source.write_bytes(self.script_source)
+                submit(self.workspace, "research")
+            return False
+
+        stop.wait.side_effect = waiting
+        stop.is_set.return_value = False
+        self.harness._watch(self.workspace, self.iteration, stop, self.deadline)
+        self.assertEqual(submission_status(self.workspace)["status"], "completed")
+        self.assertEqual(self.backend_runs, 1)
+        self.assertEqual(self.backend.evaluations, 0)
+        self.prepare_script.assert_called_once()
+        self.assertEqual(
+            self.prepare_script.call_args.kwargs["deadline"], self.deadline
+        )
+
+    def test_authored_syntax_and_generated_files_return_preclaim_feedback(self):
+        source = self.workspace / "research/main.py"
+        for invalid in ("def broken(:", None):
+            with self.subTest(invalid=invalid):
+                generated = self.workspace / "research/__pycache__/main.pyc"
+                if invalid is None:
+                    source.write_bytes(self.script_source)
+                    generated.parent.mkdir()
+                    generated.write_bytes(b"generated")
+                else:
+                    source.write_text(invalid)
+                submit(self.workspace, "research")
+                self.assertIsNone(
+                    claim_request(self.workspace, preflight=self.preflight)
+                )
+                self.assertEqual(
+                    submission_status(self.workspace)["status"], "parameter_error"
+                )
+                self.assertFalse(
+                    (self.workspace / "evaluation-submission.json").exists()
+                )
+                self.assertEqual(self.backend_runs, 0)
+                self.prepare_script.assert_not_called()
+                if generated.exists():
+                    generated.unlink()
+
+    def test_protected_scope_violation_blocks_before_authored_feedback(self):
+        (self.workspace / "protected.txt").write_text("outside authored scope")
+        (self.workspace / "research/bad.bin").write_bytes(b"artifact")
+        submit(self.workspace, "research")
+        with self.assertRaisesRegex(ProTokError, "outside candidate scope"):
+            claim_request(self.workspace, preflight=self.preflight)
+        self.assertEqual(submission_status(self.workspace)["status"], "pending")
+        self.assertFalse((self.workspace / "evaluation-parameter-errors.json").exists())
+        self.assertEqual(self.backend_runs, 0)
+
+    def test_preparation_pipeline_error_is_not_parameter_feedback(self):
+        submit(self.workspace, "research")
+        self.prepare_script.side_effect = ValueError(
+            "trusted input manifest unavailable"
+        )
+        with self.assertRaisesRegex(ValueError, "trusted input"):
+            claim_request(self.workspace, preflight=self.preflight)
+        self.assertEqual(submission_status(self.workspace)["status"], "pending")
+        self.assertFalse((self.workspace / "evaluation-parameter-errors.json").exists())
+        self.assertEqual(self.backend_runs, 0)
+
+    def test_preparation_cannot_claim_after_original_deadline(self):
+        submit(self.workspace, "research")
+        self.prepare_script.side_effect = lambda *a, **kw: self.stop.set()
+        with self.assertRaisesRegex(ProTokError, "ended during preparation"):
+            claim_request(self.workspace, preflight=self.preflight)
+        self.assertEqual(submission_status(self.workspace)["status"], "pending")
+        self.assertEqual(self.backend_runs, 0)
+
+    def test_prepared_source_race_blocks_before_native_start(self):
+        from integrations.protok.research_execution import ScriptExecutionBackend
+
+        adapter = ScriptExecutionBackend(
+            self.harness, self.workspace, self.iteration, self.stop, self.deadline
+        )
+        prepared = adapter.prepare()
+        original_freeze = RUNNER.freeze_source
+
+        def race(*args, **kwargs):
+            # Workspace A -> B while freezing -> A, so live-only parity would pass.
+            source = self.workspace / "research/main.py"
+            source.write_text("print('changed during freeze')\n")
+            result = original_freeze(*args, **kwargs)
+            source.write_bytes(self.script_source)
+            return result
+
+        # research_execution uses its ordinary module import rather than RUNNER.
+        from integrations.protok import run
+
+        with patch.object(run, "freeze_source", side_effect=race):
+            with self.assertRaisesRegex(ProTokError, "Frozen source differs"):
+                adapter.start(prepared)
+        self.run_script.assert_not_called()
+        self.assertEqual(self.backend_runs, 0)
+
+    def test_exhausted_live_correction_can_report_incomplete_without_effects(self):
+        (self.workspace / "research/main.py").unlink()
+        submit(self.workspace, "research")
+        self.assertIsNone(claim_request(self.workspace, preflight=self.preflight))
+        result = {
+            "outcome": "incomplete",
+            "markdown": "Authoring window exhausted.",
+            "artifacts": [],
+            "measurements": [],
+        }
+        evidence = RUNNER.local_incomplete(
+            self.root,
+            self.backend,
+            self.workspace,
+            self.iteration,
+            result,
+            completed=True,
+        )
+        self.assertEqual(evidence["classification"], "completed-incomplete")
+        self.assertEqual(self.backend_runs, 0)
 
     def test_plan_cli_and_backend_share_restricted_research_input_model(self):
         from integrations.protok.research_backend import SCRIPT_EXECUTION
@@ -316,10 +471,18 @@ class ResearchExecutionTests(unittest.TestCase):
         self.assertEqual(self.evaluate(), first)
         self.assertEqual(self.backend_runs, 1)
 
+    def test_settled_inspect_reuses_receipt_without_new_preparation(self):
+        first = self.evaluate()
+        self.prepare_script.side_effect = AssertionError(
+            "Do not re-prepare settled work"
+        )
+        self.assertEqual(self.evaluate(), first)
+        self.assertEqual(self.backend_runs, 1)
+
     def test_changed_source_rejected_on_repeat_and_completed_validation(self):
         _, response = self.accepted_response()
         (self.workspace / "research/main.py").write_text("print('changed')\n")
-        with self.assertRaisesRegex(ProTokError, "replace a submitted"):
+        with self.assertRaisesRegex(ProTokError, "changed after submission"):
             self.evaluate()
         with self.assertRaisesRegex(ProTokError, "changed after submission"):
             self.validate(response)
@@ -387,7 +550,7 @@ class ResearchExecutionTests(unittest.TestCase):
         source = self.workspace / "research/main.py"
         source.unlink()
         source.symlink_to(self.project / CANDIDATE_FILES[0])
-        with self.assertRaisesRegex(ProTokError, "regular source"):
+        with self.assertRaisesRegex(ParameterError, "regular source"):
             self.evaluate()
         self.run_script.assert_not_called()
 

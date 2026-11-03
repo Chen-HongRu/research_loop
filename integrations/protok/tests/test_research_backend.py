@@ -202,6 +202,45 @@ class ResearchBackendTests(unittest.TestCase):
             **changes,
         )
 
+    def prepare(self):
+        return research.prepare_script(
+            self.backend,
+            root=self.root,
+            iteration="0002",
+            source=self.source,
+            execution=self.execution,
+            deadline=self.deadline,
+        )
+
+    def test_dryrun_and_start_share_metadata_without_allocating_during_prepare(self):
+        with patch.object(
+            research, "_input_metadata", wraps=research._input_metadata
+        ) as metadata:
+            prepared = self.prepare()
+            self.assertEqual(self.fixed.submissions, 0)
+            self.assertFalse((self.control / "research-jobs").exists())
+            self.assertFalse((self.directory / "remote").exists())
+            receipt = self.run_job(prepared=prepared)
+            self.assertEqual(receipt["inputs"], prepared.inputs)
+            self.assertEqual(self.fixed.submissions, 1)
+            metadata.assert_called_once()
+
+    def test_prepared_identity_change_stops_before_effects(self):
+        prepared = self.prepare()
+        (self.source / "research/probe.py").write_text("print('changed')\n")
+        with self.assertRaisesRegex(ProTokError, "changed after preparation"):
+            self.run_job(prepared=prepared)
+        self.assertEqual(self.fixed.submissions, 0)
+        self.assertFalse((self.control / "research-jobs").exists())
+
+    def test_settled_inspection_does_not_require_a_live_preparation_lease(self):
+        initial = self.run_job()
+        with patch.object(
+            research, "prepare_script", side_effect=AssertionError("no re-prepare")
+        ):
+            self.assertEqual(self.run_job(), initial)
+        self.assertEqual(self.fixed.submissions, 1)
+
     def environment(self):
         return {
             "version": 1,

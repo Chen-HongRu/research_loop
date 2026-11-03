@@ -14,7 +14,9 @@ The generic correction loop applies to unaccepted read-only stage responses.
 Pydantic representation errors and designated pure cross-field checks are
 correctable; an arbitrary `ValueError` from a controller or harness is not.
 Execute response rejection does not authorize another Execute call. Adapter
-request preflight may reject explicit parameter errors before claim; after claim,
+request preparation may reject explicit action, missing entrypoint, authored-source
+policy or syntax errors before claim. Frozen Plan, protected source and trusted
+input failures remain blocking. Preparation allocates no compute; after claim,
 the durable submission and existing effect-reconciliation rules remain authoritative.
 
 A successful Agent response with `outcome=incomplete` and no measurements can enter
@@ -72,7 +74,9 @@ not the complete evidence.
 
 Repair uses existing call, time and GPU grants. A CPU-only repair does not grant a
 smoke or formal allocation. Exhausted repair capacity produces incomplete evidence;
-Review still obeys the Study's own remaining call/time budget. An expired execution
+New repair calls use fresh Study budgets and reserve one call for independent
+Review. Review still obeys the remaining time budget and original wall deadline;
+its completion time is not guaranteed. An expired execution
 window prevents new work and does not invalidate already-settled receipts.
 
 Diagnostics do not change candidate eligibility, fixed evaluation, data roles or
