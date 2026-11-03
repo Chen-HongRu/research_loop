@@ -27,8 +27,11 @@ it to force a restart. Previously running legacy Studies are accepted using thei
 retained current-iteration metadata and frozen context, without requiring the
 original three routes forever. Marked Studies still need valid current state.
 Unknown unmarked staging is not automatically cleaned; only explicitly owned,
-unpublished initialization staging can be rebuilt. No recovery here resets
-research notes, attempts, budgets or published evidence.
+unpublished initialization staging can be rebuilt. An empty nonsymlink `study/`
+may enter initialization. The supervisor retries initializer failures up to the
+five-observation threshold, then retains parent attention without stopping
+independent authorized children. Verified publication clears that failure; no
+recovery here resets research notes, attempts, budgets or published evidence.
 
 Keep these values and site-specific SSH/resource configuration in the operator's
 private environment. Do not infer a fingerprint or score from the current source,

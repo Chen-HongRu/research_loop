@@ -409,6 +409,11 @@ class CandidateFailureTests(unittest.TestCase):
         with self.assertRaisesRegex(ProTokError, "unsettled"):
             self.timeout_receipt(prepared, record)
         outstanding.unlink()
+        # A retained allocation directory without its required state is unknown,
+        # not proof that its cost disappeared. Remove this synthetic fixture
+        # entirely before testing the independent research-ledger gate.
+        self.assertIsNone(self.backend.inspect()["used_gpu_seconds"])
+        outstanding.parent.rmdir()
         (self.control / "research-jobs/0018").mkdir(parents=True)
         self.write(
             self.control / "research-jobs/0018/job.json",

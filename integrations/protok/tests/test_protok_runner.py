@@ -62,6 +62,9 @@ class FakeBackend:
             ],
         }
 
+    def _config(self):
+        return {"reserve_gpu_seconds": 3600}
+
     def inspect(self):
         return {
             "outstanding": [],
@@ -1142,6 +1145,70 @@ class ProTokRunnerTests(unittest.TestCase):
         for name in ("ownership.json", "continuation.json"):
             RUNNER.write(control / name, RUNNER.read(self.control / name))
         return root, FakeBackend(self.project, control), best
+
+    def test_supervisor_resumes_owned_staging_after_one_seed_write_failure(self):
+        from integrations.protok import server
+
+        root, backend, best = self.initialization_root()
+        (root / "study").mkdir()  # An empty target is valid for initialization.
+        lease = RUNNER.read(root / "control/continuation.json")
+        RUNNER.write(
+            root / "control/continuation.json",
+            {
+                **lease,
+                "schema": 2,
+                "seconds": 86400,
+                "initial_gpu_seconds": backend.inspect()["used_gpu_seconds"],
+                "additional_gpu_seconds": 86400,
+            },
+        )
+        original = RUNNER.write
+        interrupted = False
+        waits = []
+
+        def write(path, value):
+            nonlocal interrupted
+            if not interrupted and str(path).endswith("R0002/evaluation.json"):
+                interrupted = True
+                raise OSError("synthetic seed write interruption")
+            return original(path, value)
+
+        def wait(seconds):
+            waits.append(seconds)
+            self.assertFalse((root / "study").exists())
+            self.assertTrue((root / ".initializing/study/study.json").exists())
+            status = RUNNER.read(root / "control/supervisor-status.json")
+            self.assertEqual(
+                (status["stage"], status["consecutive_failures"]), ("initialization", 1)
+            )
+
+        def finish(*args):
+            state = RUNNER.ensure_study_ready(root).status()
+            self.assertEqual((state["iteration"], state["call_count"]), (0, 0))
+            (root / "control/STOP").touch()
+            return state
+
+        with (
+            patch.object(RUNNER, "BEST_COMMIT", best),
+            patch.object(RUNNER, "write", side_effect=write),
+            patch.object(RUNNER, "init_study", wraps=RUNNER.init_study) as init,
+            patch.object(RUNNER, "run_one", side_effect=finish) as run,
+        ):
+            self.assertEqual(
+                server.drive(root, RUNNER, backend, wait=wait), "user_stop"
+            )
+        self.assertEqual(init.call_count, 2)
+        run.assert_called_once()
+        self.assertEqual(waits, [5])
+        self.assertEqual(backend.evaluations, 0)
+        self.assertEqual(RUNNER.git(root / "baseline", "rev-parse", "HEAD"), best)
+        status = RUNNER.read(root / "control/supervisor-status.json")
+        self.assertIsNone(
+            status["failed_operation"] if "failed_operation" in status else None
+        )
+        self.assertTrue(
+            all(row["consecutive_failures"] == 0 for row in status["failures"])
+        )
 
     def test_initialization_resumes_after_a_retained_baseline(self):
         root, backend, best = self.initialization_root()

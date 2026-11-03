@@ -271,6 +271,12 @@ class ProTokServerTests(unittest.TestCase):
     def test_pipeline_failure_keeps_trace_and_deduplicates_polling_diagnostics(self):
         secret = "operator-owner-value"
         self.backend.owner_token = secret
+        self.write(
+            "control/ownership.json",
+            {"owner_token": secret, "handoff_acknowledged": True, "expires_at": 10000},
+        )
+        lease = SERVER.read(self.root / "control/continuation.json")
+        self.write("control/continuation.json", lease | {"owner_token": secret})
         self.backend.inspect.side_effect = RuntimeError(
             "pipeline failed while using " + secret
         )
@@ -297,6 +303,355 @@ class ProTokServerTests(unittest.TestCase):
         self.assertTrue(diagnostic["cause_chain"][0]["frames"])
         self.assertEqual(len(waits), 3)
         self.runner.run_one.assert_not_called()
+
+    def test_identical_blocked_polls_escalate_locally_without_shutdown(self):
+        self.backend.inspect.side_effect = RuntimeError("receipts unavailable")
+        waits = []
+
+        def wait(seconds):
+            self.assertFalse((self.root / "control/STOP").exists())
+            waits.append(seconds)
+            if len(waits) == 7:
+                (self.root / "control/HANDOFF").touch()
+
+        result = SERVER.drive(
+            self.root,
+            self.runner,
+            self.backend,
+            clock=lambda: 0,
+            wait=wait,
+        )
+        self.assertEqual(result, "handoff")
+        self.assertEqual(waits, [5, 10, 20, 40, 60, 60, 60])
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["status"], "blocked")
+        self.assertEqual(status["consecutive_failures"], 7)
+        self.assertEqual(status["blocked_since"], 0)
+        self.assertTrue(status["escalated"])
+        self.assertEqual(status["diagnostics"]["failure_count"], 1)
+        self.assertNotIn("escalated", SERVER.read(self.root / "study/state.json"))
+        self.runner.run_one.assert_not_called()
+
+    def test_successful_poll_resets_the_identical_failure_count(self):
+        self.backend.inspect.side_effect = [
+            RuntimeError("receipts unavailable"),
+            RuntimeError("receipts unavailable"),
+            {"outstanding": [], "used_gpu_seconds": 100},
+        ]
+
+        def finish(*args):
+            (self.root / "control/STOP").touch()
+            return {"status": "ready"}
+
+        self.runner.run_one.side_effect = finish
+        waits = []
+        result = SERVER.drive(
+            self.root,
+            self.runner,
+            self.backend,
+            clock=lambda: 0,
+            wait=waits.append,
+        )
+        self.assertEqual(result, "user_stop")
+        self.assertEqual(waits, [5, 10])
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["status"], "running")
+        self.assertNotIn("consecutive_failures", status)
+        self.runner.run_one.assert_called_once()
+
+    def test_restart_continues_an_identical_failure_count(self):
+        self.write(
+            "control/supervisor-status.json",
+            {
+                "status": "blocked",
+                "stage": "inspection",
+                "error": "RuntimeError: receipts unavailable",
+                "first_error": "RuntimeError: receipts unavailable",
+                "consecutive_failures": 4,
+                "blocked_since": 123,
+            },
+        )
+        self.backend.inspect.side_effect = RuntimeError("receipts unavailable")
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            (self.root / "control/HANDOFF").touch()
+
+        result = SERVER.drive(
+            self.root,
+            self.runner,
+            self.backend,
+            clock=lambda: 0,
+            wait=wait,
+        )
+        self.assertEqual(result, "handoff")
+        self.assertEqual(waits, [5])
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["consecutive_failures"], 5)
+        self.assertEqual(status["blocked_since"], 123)
+        self.runner.run_one.assert_not_called()
+
+    def test_initialization_retries_until_threshold_then_retains_evidence(self):
+        import shutil
+
+        shutil.rmtree(self.root / "study")
+        self.runner.init_study = Mock(side_effect=OSError("same staging failure"))
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            if len(waits) == 7:
+                (self.root / "control/STOP").touch()
+
+        SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 0, wait=wait)
+        self.assertEqual(self.runner.init_study.call_count, 5)
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(
+            (status["stage"], status["consecutive_failures"]), ("initialization", 7)
+        )
+        self.assertEqual(status["attention_status"], "needs_attention")
+        self.runner.run_one.assert_not_called()
+        self.runner.repair_completed_control.assert_not_called()
+
+    def test_retried_initialization_records_a_changed_error_before_retaining_it(self):
+        import shutil
+
+        shutil.rmtree(self.root / "study")
+        self.runner.init_study = Mock(
+            side_effect=[
+                OSError("first staging failure"),
+                OSError("changed staging failure"),
+                OSError("changed staging failure"),
+            ]
+        )
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            if len(waits) == 4:
+                (self.root / "control/STOP").touch()
+
+        SERVER.drive(
+            self.root,
+            self.runner,
+            self.backend,
+            clock=lambda: 0,
+            wait=wait,
+            escalate_after=2,
+        )
+        self.assertEqual(self.runner.init_study.call_count, 3)
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["error"], "OSError: changed staging failure")
+        counts = {
+            row["error"]: row["consecutive_failures"] for row in status["failures"]
+        }
+        self.assertEqual(counts["OSError: first staging failure"], 1)
+        self.assertEqual(counts["OSError: changed staging failure"], 3)
+        self.runner.run_one.assert_not_called()
+
+    def test_readiness_accepts_empty_target_but_retains_unknown_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "study").mkdir()
+            self.assertFalse(SERVER.retained_study(root))
+            (root / "study/notes.md").write_text("retained operator evidence")
+            self.assertTrue(SERVER.retained_study(root))
+            (root / "study/notes.md").unlink()
+            (root / "study").rmdir()
+            (root / "study").symlink_to(root / "missing")
+            self.assertTrue(SERVER.retained_study(root))
+
+    def test_missing_required_state_counts_seven_observations_without_execution(self):
+        (self.root / "study/state.json").unlink()
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            self.assertFalse((self.root / "control/STOP").exists())
+            if len(waits) == 7:
+                (self.root / "control/STOP").touch()
+
+        SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 0, wait=wait)
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["stage"], "readiness")
+        self.assertEqual(status["consecutive_failures"], 7)
+        self.assertEqual(status["attention_status"], "needs_attention")
+        self.assertIn("state.json", status["first_error"])
+        self.runner.run_one.assert_not_called()
+        self.runner.repair_completed_control.assert_not_called()
+
+    def test_readonly_retry_stops_locally_at_threshold_and_survives_restart(self):
+        self.write("study/state.json", {"phase": "review", "status": "needs_attention"})
+        with patch("research_loop.core.Study") as study:
+            study.return_value.retry.side_effect = RuntimeError(
+                "same retained read-only failure"
+            )
+            for count in (7, 9):
+                waits = []
+
+                def wait(seconds):
+                    waits.append(seconds)
+                    if len(waits) == (7 if count == 7 else 2):
+                        (self.root / "control/STOP").touch()
+
+                SERVER.drive(
+                    self.root, self.runner, self.backend, clock=lambda: 0, wait=wait
+                )
+                status = SERVER.read(self.root / "control/supervisor-status.json")
+                self.assertEqual(status["consecutive_failures"], count)
+                self.assertEqual(study.return_value.retry.call_count, 5)
+                self.assertEqual(status["diagnostics"]["failure_count"], 1)
+                (self.root / "control/STOP").unlink()
+        self.runner.run_one.assert_not_called()
+
+    def test_repeated_readonly_run_error_reaches_threshold_not_count_one(self):
+        ready = {"phase": "review", "status": "ready"}
+        failed = {"phase": "review", "status": "needs_attention"}
+        self.write("study/state.json", ready)
+
+        def run(*args):
+            self.write("study/state.json", failed)
+            raise RuntimeError("same Review operation failed")
+
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            if len(waits) == 7:
+                (self.root / "control/STOP").touch()
+
+        self.runner.run_one.side_effect = run
+        with patch("research_loop.core.Study") as study:
+            study.return_value.retry.side_effect = lambda **kwargs: self.write(
+                "study/state.json", ready
+            )
+            SERVER.drive(
+                self.root, self.runner, self.backend, clock=lambda: 0, wait=wait
+            )
+            self.assertEqual(study.return_value.retry.call_count, 4)
+        self.assertEqual(self.runner.run_one.call_count, 5)
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["stage"], "iteration")
+        self.assertEqual(status["consecutive_failures"], 7)
+        self.assertEqual(status["diagnostics"]["failure_count"], 1)
+
+    def test_explicit_reconciliation_resets_operation_before_renewed_failure(self):
+        failed = {"phase": "review", "status": "needs_attention"}
+        self.write("study/state.json", failed)
+        message = "RuntimeError: retained read-only error"
+        self.write(
+            "control/supervisor-status.json",
+            {
+                "first_error": message,
+                "failed_state": failed,
+                "failed_operation": {"stage": "readonly_retry", "error": message},
+                "failures": [
+                    {
+                        "scope": "parent",
+                        "target": str(self.root / "study"),
+                        "stage": "readonly_retry",
+                        "error": message,
+                        "consecutive_failures": 5,
+                        "blocked_since": 0,
+                    }
+                ],
+            },
+        )
+        self.write("study/state.json", failed | {"status": "ready"})
+
+        def finish(*args):
+            (self.root / "control/STOP").touch()
+            return {"status": "ready"}
+
+        self.runner.run_one.side_effect = finish
+        SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 10)
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["failures"][0]["consecutive_failures"], 0)
+        (self.root / "control/STOP").unlink()
+        self.write("study/state.json", failed)
+        with patch("research_loop.core.Study") as study:
+            study.return_value.retry.side_effect = RuntimeError(
+                "retained read-only error"
+            )
+            SERVER.drive(
+                self.root,
+                self.runner,
+                self.backend,
+                clock=lambda: 20,
+                wait=lambda seconds: (self.root / "control/STOP").touch(),
+            )
+        status = SERVER.read(self.root / "control/supervisor-status.json")
+        self.assertEqual(status["consecutive_failures"], 1)
+        self.assertEqual(status["blocked_since"], 20)
+        self.assertEqual(status["first_error"], message)
+
+    def test_count_reset_is_operation_local_and_recovery_then_renewed_failure(self):
+        from integrations.protok.supervisor_state import FailureCounts
+
+        counts = FailureCounts({}, self.root / "study")
+        for number in range(7):
+            row, _ = counts.failure("iteration", "same error", number)
+            counts.success("inspection")
+        self.assertEqual(row["consecutive_failures"], 7)
+        restarted = FailureCounts({"failures": counts.rows}, self.root / "study")
+        row, first = restarted.failure("iteration", "same error", 10)
+        self.assertEqual(row["consecutive_failures"], 8)
+        self.assertFalse(first)
+        restarted.success("iteration")
+        row, first = restarted.failure("iteration", "same error", 20)
+        self.assertEqual(row["consecutive_failures"], 1)
+        self.assertEqual(row["blocked_since"], 20)
+        self.assertTrue(first)
+        other = FailureCounts({"failures": counts.rows}, self.root / "independent")
+        other.failure("iteration", "same error", 21)
+        self.assertEqual(row["consecutive_failures"], 1)
+
+    def test_shared_ownership_invalidity_publishes_stop_and_nonzero(self):
+        self.backend.owner_token = "expected-owner"
+        self.write(
+            "control/ownership.json",
+            {
+                "owner_token": "wrong-owner",
+                "expires_at": 10000,
+                "handoff_acknowledged": True,
+            },
+        )
+        result = SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 0)
+        self.assertEqual(result, "global_attention")
+        self.assertEqual(SERVER.exit_status(result), 2)
+        self.assertTrue((self.root / "control/STOP").exists())
+        self.backend.inspect.assert_not_called()
+        self.runner.run_one.assert_not_called()
+        SERVER.final_summary(self.root, self.runner, self.backend, result)
+        self.assertEqual(
+            SERVER.read(self.root / "control/final-summary.json")["reason"], result
+        )
+
+    def test_parent_review_can_read_partial_short_report_without_allocation(self):
+        self.write("study/state.json", {"phase": "review", "status": "ready"})
+        self.backend.inspect.return_value.update(
+            used_gpu_seconds=None,
+            research_outstanding=["unknown"],
+            accounting_status="partial",
+        )
+
+        def review(*args):
+            (self.root / "control/STOP").touch()
+            return {"status": "ready"}
+
+        self.runner.run_one.side_effect = review
+        self.assertEqual(
+            SERVER.drive(self.root, self.runner, self.backend, clock=lambda: 0),
+            "user_stop",
+        )
+        self.runner.run_one.assert_called_once()
+
+    def test_attention_exit_status_differs_from_a_normal_end(self):
+        self.assertEqual(SERVER.exit_status("global_attention"), 2)
+        self.assertEqual(SERVER.exit_status("attention"), 0)
+        for reason in ("budget", "deadline", "review_stop", "user_stop", "handoff"):
+            self.assertEqual(SERVER.exit_status(reason), 0)
 
     def test_rejected_readonly_response_uses_locked_core_retry(self):
         for phase in ("selection", "plan", "review"):
@@ -477,7 +832,13 @@ class ProTokServerTests(unittest.TestCase):
 
         self.assertEqual(
             SERVER.drive(
-                self.root, self.runner, self.backend, clock=lambda: now[0], wait=wait
+                self.root,
+                self.runner,
+                self.backend,
+                clock=lambda: now[0],
+                wait=wait,
+                # Isolate backoff/deadline behavior from blocked escalation.
+                escalate_after=10**6,
             ),
             "deadline",
         )
@@ -578,6 +939,84 @@ class ProTokServerTests(unittest.TestCase):
             (self.root / "control/long-training-shutdown-error.json").exists()
         )
         self.assertTrue((self.root / "control/recovery-error.json").exists())
+
+    def test_missing_shared_owner_startup_stops_and_summarizes_without_workers(self):
+        with (
+            patch.object(
+                SERVER.sys,
+                "argv",
+                ["server", "--root", str(self.root), "--runner", "/runner.py"],
+            ),
+            patch("integrations.protok.tasks.ExperimentScheduler") as scheduler,
+        ):
+            self.assertEqual(SERVER.main(), 2)
+        scheduler.assert_not_called()
+        self.assertTrue((self.root / "control/STOP").exists())
+        summary = SERVER.read(self.root / "control/final-summary.json")
+        self.assertEqual(summary["reason"], "global_attention")
+        self.assertEqual(summary["accounting_status"], "unknown")
+        self.assertIn("ownership.json", summary["first_error"])
+
+    def test_failed_duplicate_startup_cannot_stop_existing_supervisor(self):
+        with (self.root / "control/supervisor.lock").open("a") as lock:
+            SERVER.fcntl.flock(lock, SERVER.fcntl.LOCK_EX | SERVER.fcntl.LOCK_NB)
+            with (
+                patch.object(
+                    SERVER.sys,
+                    "argv",
+                    ["server", "--root", str(self.root), "--runner", "/runner.py"],
+                ),
+                self.assertRaises(BlockingIOError),
+            ):
+                SERVER.main()
+        self.assertFalse((self.root / "control/STOP").exists())
+        self.assertFalse((self.root / "control/final-summary.json").exists())
+
+    def test_invalid_shared_owner_stops_before_worker_join_and_main_summarizes(self):
+        self.backend.owner_token = "expected"
+        self.write(
+            "control/ownership.json",
+            {
+                "project": "/synthetic/project",
+                "owner_token": "changed",
+                "expires_at": 10000,
+                "handoff_acknowledged": True,
+            },
+        )
+        self.runner.ProTokBackend = Mock(return_value=self.backend)
+        spec = SimpleNamespace(loader=SimpleNamespace(exec_module=Mock()))
+        scheduler = Mock()
+        joined = []
+
+        def shutdown():
+            self.assertTrue((self.root / "control/STOP").exists())
+            joined.append(True)
+
+        scheduler.shutdown.side_effect = shutdown
+        with (
+            patch.object(
+                SERVER.sys,
+                "argv",
+                ["server", "--root", str(self.root), "--runner", "/runner.py"],
+            ),
+            patch.object(SERVER.signal, "signal"),
+            patch.object(
+                SERVER.importlib.util, "spec_from_file_location", return_value=spec
+            ),
+            patch.object(
+                SERVER.importlib.util, "module_from_spec", return_value=self.runner
+            ),
+            patch(
+                "integrations.protok.tasks.ExperimentScheduler", return_value=scheduler
+            ),
+            patch.object(SERVER, "recover_owned"),
+        ):
+            self.assertEqual(SERVER.main(), 2)
+        self.assertEqual(joined, [True])
+        scheduler.finish_nominations.assert_not_called()
+        summary = SERVER.read(self.root / "control/final-summary.json")
+        self.assertEqual(summary["reason"], "global_attention")
+        self.assertIn("authorization", summary["first_error"])
 
     def test_long_training_drains_before_stop_and_accounting_is_published(self):
         self.write(

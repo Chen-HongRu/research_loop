@@ -575,6 +575,134 @@ class ManualExecutionTests(unittest.TestCase):
             all(row["status"] == "reviewed" for row in self.queue.snapshot())
         )
 
+    def test_real_supervisor_keeps_faulty_a_local_and_discovers_b_then_new_c(self):
+        from integrations.protok import run, server
+        from integrations.protok.backend import ProTokBackend
+
+        self.submit("faulty-a")
+        author = Author()
+        manager = tasks.ManualTrainingManager(self.root, self.backend, delegate=author)
+        actual_allocate = self.allocate
+
+        def allocate(backend, root, request, workspace, **kwargs):
+            result = actual_allocate(backend, root, request, workspace, **kwargs)
+            if request["manual_task_id"] == "faulty-a":
+                receipt = (
+                    root
+                    / "control/manual-training-jobs"
+                    / request["id"]
+                    / "receipt.json"
+                )
+                tasks._write(receipt, tasks._read(receipt) | {"gpu_seconds": -1})
+                raise HarnessError(
+                    "Synthetic task A accounting fault; retain original Execute"
+                )
+            return result
+
+        self.config.update(
+            records_root=str(self.root / "formal-records"), reserve_gpu_seconds=0
+        )
+        reporting = ProTokBackend(self.backend.project, self.root / "control", "test")
+        self.backend.inspect = reporting.inspect
+        tasks._write(
+            self.root / "control/continuation.json",
+            {
+                "schema": 2,
+                "seconds": 86400,
+                "deadline": time.time() + 10000,
+                "initial_gpu_seconds": 0,
+                "additional_gpu_seconds": 86400,
+                "owner_token": "test",
+            },
+        )
+        scheduler = tasks.ManualTrainingScheduler(
+            self.root, self.backend, manager=manager, interval=0.01
+        )
+        with (
+            patch.object(tasks, "_load_backend", return_value=(self.fixed, None)),
+            patch.object(tasks, "execute", side_effect=allocate),
+            patch.object(reporting, "_config", return_value=self.config),
+        ):
+            with self.assertRaisesRegex(HarnessError, "accounting fault"):
+                manager.run_one()
+            child = Study(self.root / "study/tasks/faulty-a/study")
+            retained = child.status()
+            retained_job = tasks._read(
+                self.root
+                / "control/manual-training-jobs"
+                / self.allocations[0]["id"]
+                / "job.json"
+            )
+            parent = Study(self.root / "study").status()
+            tasks._write(
+                self.root / "study/state.json",
+                parent | {"phase": "execute", "status": "needs_attention"},
+            )
+            self.submit("healthy-b")
+            polls, queued_c = [], []
+            started = time.monotonic()
+
+            def wait(seconds):
+                self.assertFalse((self.root / "control/STOP").exists())
+                self.assertEqual(child.status(), retained)
+                polls.append(seconds)
+                rows = {row["id"]: row for row in self.queue.snapshot()}
+                if rows["healthy-b"]["status"] == "reviewed" and not queued_c:
+                    queued_c.append(self.submit("new-c"))
+                if (
+                    len(polls) >= 7
+                    and rows.get("new-c", {}).get("status") == "reviewed"
+                ):
+                    (self.root / "control/STOP").write_text(
+                        "Explicit test shutdown after C Review"
+                    )
+                if time.monotonic() - started > 15:
+                    raise AssertionError("Independent children did not complete")
+                time.sleep(0.02)
+
+            try:
+                scheduler.start()
+                with patch.object(run, "run_one", wraps=run.run_one) as parent_run:
+                    self.assertEqual(
+                        server.drive(self.root, run, self.backend, wait=wait),
+                        "user_stop",
+                    )
+                    parent_run.assert_not_called()
+            finally:
+                (self.root / "control/STOP").touch()
+                scheduler.shutdown()
+            server.final_summary(self.root, run, self.backend, "user_stop")
+            report = tasks._read(self.root / "control/final-summary.json")
+            self.assertEqual(report["accounting_status"], "partial")
+            self.assertIsNone(report["total_gpu_seconds"])
+            self.assertIsNone(report["manual_training_gpu_seconds"])
+            self.assertEqual(report["known_gpu_seconds"], 240)
+            self.assertEqual(report["used_gpu_seconds"], 0)
+            supervisor = tasks._read(self.root / "control/supervisor-status.json")
+            self.assertTrue(supervisor["escalated"])
+            self.assertEqual(supervisor["scope"], "parent")
+            self.assertEqual(child.status(), retained)
+            self.assertEqual(
+                tasks._read(
+                    self.root
+                    / "control/manual-training-jobs"
+                    / self.allocations[0]["id"]
+                    / "job.json"
+                ),
+                retained_job,
+            )
+        self.assertEqual(
+            [r["manual_task_id"] for r in self.allocations],
+            ["faulty-a", "healthy-b", "new-c"],
+        )
+        for identity in ("healthy-b", "new-c"):
+            phases = [
+                call["phase"]
+                for call in author.calls
+                if identity in str(call["run_dir"]).split("/")
+            ]
+            self.assertEqual(phases, ["plan", "execute", "review"])
+
     def test_blocked_lane_does_not_hide_progressing_lane(self):
         automatic, manual = Mock(), Mock()
         automatic.status.return_value = {"status": "blocked", "reason": "unknown job"}

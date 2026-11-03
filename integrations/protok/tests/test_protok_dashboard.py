@@ -157,6 +157,49 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(result["backend_observed_at"], 123)
             self.assertEqual(result["gpu_seconds"], 19084)
 
+    def test_partial_accounting_preserves_healthy_subtotals_without_zero_or_authority(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "control").mkdir()
+            for short_unknown in (False, True):
+                report = {
+                    "records": [],
+                    "outstanding": [],
+                    "scored_records": 0,
+                    "accounting_status": "partial",
+                    "known_gpu_seconds": 37,
+                    "used_gpu_seconds": None if short_unknown else 17,
+                    "formal_gpu_seconds": 17,
+                    "research_gpu_seconds": None if short_unknown else 0,
+                    "total_gpu_seconds": None,
+                    "manual_training_gpu_seconds": None,
+                    "long_training_gpu_seconds": 20,
+                    "accounting_errors": [
+                        {
+                            "pool": "manual",
+                            "task_id": "faulty-a",
+                            "error": "synthetic invalid receipt",
+                        }
+                    ],
+                }
+                (root / "control/backend-snapshot.json").write_text(json.dumps(report))
+                result = DASH.view_snapshot(root, snapshot_only=True)
+                self.assertFalse(result["accounting_available"])
+                self.assertIsNone(result["backend_error"])
+                self.assertEqual(result["accounting_status"], "partial")
+                self.assertIsNone(result["gpu_seconds"])
+                self.assertIsNone(result["manual_training_gpu_seconds"])
+                self.assertEqual(result["formal_gpu_seconds"], 17)
+                self.assertEqual(result["long_training_gpu_seconds"], 20)
+                self.assertEqual(result["known_gpu_seconds"], 37)
+                self.assertTrue(
+                    any(
+                        "部分费用" in text for text in result["coverage"]["limitations"]
+                    )
+                )
+
     def test_research_overrun_keeps_actual_accounting_available(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
