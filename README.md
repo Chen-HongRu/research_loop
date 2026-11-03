@@ -68,6 +68,8 @@ uv run research-loop graph studies/demo
 
 安装需要 Python 3.11+、uv、Git 和已登录的 Codex CLI。skill 不安装模型或代办账号登录，也不会自动取得共享 GPU 权限。首次运行下载锁定依赖；`doctor` 不调用模型。具体实验仍需真实数据、评价器和适用的任务后端。
 
+已验证范围及实际遇到的安装、沙箱和型号限制见 [skill 验证记录](docs/skill-verification.md)；真实研究与脚本回复测试分别记录。
+
 新 Study 使用 version 3。Plan 在 `markdown` 冻结科学合同，以顶层 `timeout_seconds` 限制执行；字段用途见[消费者审计](docs/plan-field-audit.md)。旧格式目录保留原样，不自动迁移，详见[使用说明](docs/usage.md)。
 
 结构化输入输出由 Pydantic v2 模型统一定义，生成给现有 CLI 的 JSON Schema 并执行本地严格校验；安装或更新依赖使用 `uv sync --locked`。预算、作业、源码身份和核账仍由控制器判断。
