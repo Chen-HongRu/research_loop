@@ -1557,12 +1557,34 @@ failures, user STOP or exhausted authorization, not solely on a settled time lim
 """
 
 
+def ensure_study_ready(root):
+    from integrations.protok.initialization import ready
+
+    return ready(root)
+
+
 def init_study(root, backend):
+    from integrations.protok.initialization import initialization_lock
+
     require_baseline()
+    with initialization_lock(root):
+        return _init_study(root, backend)
+
+
+def _init_study(root, backend):
+    from integrations.protok.initialization import plain_path
+
     root = Path(root)
-    study = root / "study"
+    try:
+        study = plain_path(root, "study")
+        baseline = plain_path(root, "baseline")
+        plain_path(root, "baseline/.git")
+    except ValueError as error:
+        raise ProTokError(
+            "Unsafe initialization path; preserve and reconcile it"
+        ) from error
     if (study / "study.json").exists():
-        return Study(study).status()
+        return ensure_study_ready(root).status()
     if study.exists():
         if any(study.iterdir()):
             raise ProTokError(
@@ -1570,7 +1592,6 @@ def init_study(root, backend):
             )
         study.rmdir()
     deadline = admission(root, backend)
-    baseline = root / "baseline"
     if baseline.exists():
         # A crash after the clone must not require deleting retained work. Reuse
         # the baseline only when it is demonstrably the acknowledged source.
@@ -1601,6 +1622,13 @@ def init_study(root, backend):
             ],
             check=True,
         )
+        if (
+            git(staging_baseline, "status", "--porcelain")
+            or git(staging_baseline, "rev-parse", "HEAD") != BEST_COMMIT
+        ):
+            raise ProTokError(
+                "Staged baseline differs from the acknowledged clean commit"
+            )
         staging_baseline.rename(baseline)
     config = HarnessConfig(
         executable=CODEX, model="gpt-6.1-sol", reasoning="medium", timeout_seconds=3600
@@ -1675,20 +1703,49 @@ def init_study(root, backend):
             "evaluation_ref": f"routes/{rid}/evaluation.json",
         }
     write(staging_study / "routes/index.json", routes)
+    from integrations.protok.initialization import COMPLETION, completion
+
+    write(
+        staging_study / COMPLETION,
+        completion(read(staging_study / "study.json")["baseline"]),
+    )
+    # Validate the actual publication, not just the presence of its marker.
+    ensure_study_ready(root / ".initializing")
     staging_study.rename(study)
-    try:
-        (root / ".initializing").rmdir()
-    except OSError:
-        pass
-    return Study(study).status()
+    return ensure_study_ready(root).status()
 
 
 def _initialization_staging(root, name):
-    """Return an empty staging path inside the owned initialization directory."""
-    staging = Path(root) / ".initializing" / name
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.parent.mkdir(parents=True, exist_ok=True)
+    """Rebuild only explicitly owned, unpublished staging under the init lock."""
+    from integrations.protok.initialization import plain_path
+
+    if name not in {"baseline", "study"}:
+        raise ProTokError("Unknown initialization staging purpose")
+    try:
+        parent = plain_path(root, ".initializing")
+        marker = plain_path(root, ".initializing/owner.json")
+        staging = plain_path(root, f".initializing/{name}")
+        expected = {
+            "version": 1,
+            "purpose": "protok-parent-initialization",
+            "baseline": BEST_COMMIT,
+        }
+        if parent.exists():
+            if marker.exists():
+                if read(marker) != expected:
+                    raise ValueError("Staging ownership differs")
+            elif any(parent.iterdir()):
+                raise ValueError("Unrecognized nonempty staging directory")
+        else:
+            parent.mkdir()
+        if not marker.exists():
+            write(marker, expected)
+        if staging.exists():
+            shutil.rmtree(staging)
+    except (OSError, ValueError) as error:
+        raise ProTokError(
+            "Unowned or unsafe initialization staging; preserve and reconcile it"
+        ) from error
     return staging
 
 
@@ -1827,7 +1884,7 @@ def _run_one(root, backend, study):
 
 
 def run_one(root, backend):
-    study = Study(Path(root) / "study")
+    study = ensure_study_ready(root)
     control = Path(root) / "control"
     with (control / "runner.lock").open("a") as lock:
         try:

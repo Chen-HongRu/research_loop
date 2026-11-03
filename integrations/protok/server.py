@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from integrations.protok.run import job_path  # noqa: E402
-from research_loop import Study  # noqa: E402
 from research_loop.diagnostics import CommandDiagnostics, diagnostic_view  # noqa: E402
 
 
@@ -184,6 +183,8 @@ def drive(root, runner, backend, *, clock=time.time, wait=time.sleep):
             ownership = control / "ownership.json"
             if ownership.exists():
                 deadline = min(deadline, read(ownership)["expires_at"])
+            if (root / "study").exists() or (root / "study").is_symlink():
+                runner.ensure_study_ready(root)
             state_path = root / "study/state.json"
             state = read(state_path) if state_path.exists() else None
             if (control / "HANDOFF").exists() and state and state["phase"] == "done":
@@ -366,8 +367,10 @@ def main():
     # A copied archive or pending grant cannot become executable by starting this.
     if (control / "STOP").exists():
         raise SystemExit("Study is stopped; no action taken")
-    if (root / "study/study.json").exists():
-        Study(root / "study")
+    if (root / "study").exists() or (root / "study").is_symlink():
+        from integrations.protok.initialization import ready
+
+        ready(root)
     owner = read(control / "ownership.json")
     spec = importlib.util.spec_from_file_location("trusted_protok_runner", args.runner)
     runner = importlib.util.module_from_spec(spec)

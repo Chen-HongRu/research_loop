@@ -28,6 +28,8 @@ Research Loop 把研究目标拆成有边界的调查：选择路线、冻结计
 
 可选 [Scout](docs/scout.md) 独立阅读论文与实现，提供外部洞见、反证和新视角。Reviewer 综合本地证据与未解问题，研究选择阶段决定下一步。宿主接入 Scout 后，默认每推进一轮且间隔至少五分钟可调用；结果在下一轮边界进入主循环，不改变当前 Plan。
 
+ProTok 父 Study 初始化在受锁保护、带所有权记录的暂存目录完成后原子发布；初始化、supervisor 与直接执行共用只读就绪检查。完成标记不能替代当前状态，旧版零轮次、仅有核心文件的部分初始化会保留并拒绝执行；已有运行证据的历史 Study 不要求永久保留初始三条路线。详见[初始化与恢复边界](integrations/protok/README.md#initialization-and-readiness)。
+
 ProTok supervisor 按子 Study 异步调度长训任务。某个子 Study 等待处理时保留原调查，其他独立任务继续；各人工长训使用独立预算，自动提名共享的分配与核账门槛继续生效。每个 Study 内的阶段和父 Study 轮次仍顺序发布，详见[任务调度](docs/task-queue.md)。
 
 ## 快速体验

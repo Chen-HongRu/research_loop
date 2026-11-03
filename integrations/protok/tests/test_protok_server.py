@@ -165,8 +165,31 @@ class ProTokServerTests(unittest.TestCase):
                 "additional_gpu_seconds": 86400,
             },
         )
-        initialize(self.root / "study", goal="Parent")
-        self.write("study/state.json", {"status": "ready", "phase": "done"})
+        initialize(
+            self.root / "study",
+            goal="Parent",
+            workspace=self.root / "baseline",
+            allow_write=True,
+        )
+        # A complete synthetic legacy adapter seed, not a marker-only shortcut.
+        (self.root / "study/research.md").write_text(
+            "# Historical ProTok evidence\n\nSynthetic only.\n"
+        )
+        routes = {}
+        for rid in ("R0001", "R0002", "R0003"):
+            folder = self.root / "study/routes" / rid
+            folder.mkdir()
+            (folder / "research.md").write_text("Synthetic seed; no measured result.\n")
+            (folder / "evaluation.json").write_text("{}")
+            routes[rid] = {
+                "title": "Synthetic seed",
+                "status": "active",
+                "reason": "Offline fixture",
+                "resume_condition": None,
+                "research_ref": f"routes/{rid}/research.md",
+                "evaluation_ref": f"routes/{rid}/evaluation.json",
+            }
+        self.write("study/routes/index.json", routes)
         self.backend = SimpleNamespace(
             inspect=Mock(return_value={"outstanding": [], "used_gpu_seconds": 100}),
             _config=Mock(return_value={"reserve_gpu_seconds": 100}),
@@ -175,6 +198,7 @@ class ProTokServerTests(unittest.TestCase):
             read=SERVER.read,
             run_one=Mock(),
             repair_completed_control=Mock(return_value=False),
+            ensure_study_ready=Mock(),
         )
 
     def write(self, name, value):
@@ -520,7 +544,7 @@ class ProTokServerTests(unittest.TestCase):
         long_training = Mock()
         long_training.shutdown.side_effect = RuntimeError("long shutdown failed")
         with (
-            patch.object(SERVER, "Study"),
+            patch("integrations.protok.initialization.ready"),
             patch.object(
                 SERVER.sys,
                 "argv",
