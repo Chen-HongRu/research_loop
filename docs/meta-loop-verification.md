@@ -52,7 +52,7 @@ uv run research-loop meta status studies/meta-cactus-unique
 
 只有已收到成功 CLI 收据、但测量候选映射被控制器拒绝的 Review，允许在同一调用预算内恢复一次。原失败回复、耗时与 token 保留；Execute 不重复。无数值 measurement 的任务返回 `candidate_reviews=[]`，实际产物核查写入研究文档。
 
-普通 Study 也可通过 `init --selection-policy direct --review-policy concise` 使用候选策略。默认保持 `debate/full`。
+普通 Study 也可通过 `init --selection-policy direct --review-policy concise` 使用候选策略。普通 CLI 新建 Study 默认 `direct/full`；API 默认与 Meta 冻结策略仍为原设置，历史验证结果不变。
 
 ## 检查
 

@@ -58,6 +58,8 @@ uv run research-loop graph studies/demo
 
 ## 使用真实 Agent
 
+普通 CLI 新建 Study 默认采用 `direct/full`，保留 Plan 与独立 Review，省去四次选择辩论调用；指定实验应使用任务队列直接进入 Plan。已有 Study 和 Meta 策略不变。首次接入与复用启动的区别见 [启动指导](SKILL.md#keep-launch-work-bounded)。
+
 ### 在 Codex 中安装和使用
 
 整个仓库根目录也是一个可安装的 [research-loop skill](SKILL.md)，包含匹配的控制器源码、锁定依赖与操作指南。可以直接对 Codex 说：

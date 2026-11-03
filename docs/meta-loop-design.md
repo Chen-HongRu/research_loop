@@ -174,7 +174,7 @@ Meta Global Frontier 的主目标为 `mean_rO` 最小化，质量、完整耗时
 
 确认数据不进入可供研究 Agent 查询的 Frontier。该视图组织开发候选；监督指针由确认与晋升规则维护。回滚或评价纠正时撤销相应资格，原始测量继续保留。
 
-`strategy.py` 提供选择策略与 Review 提示入口。首个实现只允许修改 `selection=debate/direct` 与 `review=full/concise` 的配置；源码与固定驱动由版本快照保存，候选不能替换任意 Python 模块。`direct` 保留两个独立提案和 Judge，省略质疑与回应；`concise` 保留完整证据、输出字段与独立 Review，只要求减少重复表达。`_call` 的预算和收据、协议验证、版本管理、Frontier 数学关系与 `_publish` 的一致性逻辑由固定驱动持有。普通 Study 复用同一引擎，默认行为保持原策略。
+`strategy.py` 提供选择策略与 Review 提示入口。首个实现只允许修改 `selection=debate/direct` 与 `review=full/concise` 的配置；源码与固定驱动由版本快照保存，候选不能替换任意 Python 模块。`direct` 保留两个独立提案和 Judge，省略质疑与回应；`concise` 保留完整证据、输出字段与独立 Review，只要求减少重复表达。`_call` 的预算和收据、协议验证、版本管理、Frontier 数学关系与 `_publish` 的一致性逻辑由固定驱动持有。普通 Study 复用同一引擎；CLI 新建 Study 默认 direct/full，Python API 默认和 Meta 冻结策略保持原设置。
 
 `meta.py` 负责版本冻结、内层作业预算与回执、评估接纳、提名、晋升和回滚。CLI 提供 `meta init/status/decide/rollback`；可信 runner 调用 Python 接口冻结候选与提交评估。一个实例管理一个不可变评估批次，不自动续接新确认资源或启动下一代监督进程。开发协议不能晋升；正式晋升接口要求完整确认资源、已验证的读取隔离和外层发布清单。
 

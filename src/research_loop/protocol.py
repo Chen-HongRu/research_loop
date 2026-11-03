@@ -232,7 +232,13 @@ are not refutations or automatic evidence of support. Repeated summaries, retrie
 new agent sessions and debate opinions are not independent experimental evidence.
 Retain contradictions and negative results. Never invent observations or citations.
 Do not scan or hash whole datasets, caches, checkpoints or log histories to validate
-context. Read only evidence needed for the decision. Final-only evaluations and
+context. Use supplied source revisions, input version references and controller
+metadata for their stated scope; do not demand new immutability proofs or duplicate
+validation without a concrete mismatch. A scientific unknown that the authorized
+investigation is meant to measure is not itself a missing execution prerequisite.
+Missing access, recoverable identity, semantic agreement or authorization still
+blocks dependent work; name the specific missing prerequisite.
+Read only evidence needed for the decision. Final-only evaluations and
 frontiers must not inform ongoing search; local metrics never replace global goals.
 When diagnostics are supplied, their previews are bounded. Use the registered
 read_command with --log-id, --offset and --limit to read relevant public log pages.

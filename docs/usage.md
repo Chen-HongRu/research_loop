@@ -12,7 +12,7 @@
 
 Meta Loop 复用同一 Study、Route、实验图与 Plan → Execute → Review，研究选择和评审策略。固定驱动冻结监督版与候选版，记录配对评估、总预算与作业回执，并独立决定晋升或保留监督版。首个候选仅修改策略配置，减少选择调用与 Review 重复表达。
 
-普通 `init` 支持 `--selection-policy debate|direct` 与 `--review-policy full|concise`；默认 `debate/full`。Meta 入口为 `research-loop meta init/status/decide/rollback`。真实单批 Cactus runner、运行命令及边界见 [Meta Loop 实现与验证](meta-loop-verification.md)，协议见 [Meta Loop 设计](meta-loop-design.md)。单个开发配对不能触发正式晋升。
+普通 `init` 支持 `--selection-policy debate|direct` 与 `--review-policy full|concise`；普通 CLI 新建 Study 默认 `direct/full`；Python API 未指定策略时仍为 `debate/full`，已有 Study 使用已保存策略。Meta 入口为 `research-loop meta init/status/decide/rollback`。真实单批 Cactus runner、运行命令及边界见 [Meta Loop 实现与验证](meta-loop-verification.md)，协议见 [Meta Loop 设计](meta-loop-design.md)。单个开发配对不能触发正式晋升。
 
 ## 探索策略与研究 Scout
 
@@ -24,7 +24,7 @@ Study 可选用探索策略，为每轮分配研究类型，并在迭代边界�
 
 ```text
 Study 目标与固定评价
-  → 路线采样 → 两位 Advocate 独立提案 → 有限质疑与回应 → Judge
+  → 路线采样 → 两位 Advocate 独立提案 → [debate 策略的质疑与回应] → Judge
   → Plan 冻结调查合同与输入版本 → Execute → Review
   → 发布路线与全局研究文档、Frontier → 下一轮选择
 ```
@@ -67,7 +67,7 @@ uv run research-loop frontiers studies/proof-v2
 
 `init` 不调用模型；`status`、`graph`、`frontiers` 只读。`run` 默认推进一轮，`--iterations 3` 最多推进三轮，还受总预算约束。默认总预算为 10 轮、100 次 CLI 调用、3600 秒；每次 Harness 调用默认超时 600 秒，Pi 的目录预检和实际请求共用此额度，初始化时用 `--timeout` 调整。没有后台无限运行。
 
-路线选择默认 `--selection-seed 0 --debate-rounds 1 --max-resamples 1`。每位 Advocate 每轮各有一次质疑与回应；Plan 返回选择也使用同一重采样额度，调用均计入总预算。预算用尽只结束当前有界运行，不表示目标完成。
+普通 CLI 默认 `--selection-policy direct --review-policy full`，每轮选择为两次提案加一次 Judge，完整成功轮为 6 次模型调用。显式 `--selection-policy debate` 时默认增加四次质疑/回应调用，完整轮为 10 次；这不是墙钟加速比例的保证。`--selection-seed 0 --debate-rounds 1 --max-resamples 1` 保持不变，debate-rounds 只在 debate 策略下使用。Plan 返回选择也使用同一重采样额度，调用均计入总预算。预算用尽只结束当前有界运行，不表示目标完成。
 
 目标文件应写明目标、已有依据、允许访问和修改的范围、数据角色、成功条件、资源与停止条件。示例命题只检查端到端接线。指标调查可通过 `--evaluation examples/evaluation.json` 提供全局评价；该示例为开发集 AUC 最大化，使用前需将目标中的数据划分、评价器、聚合与候选选择规则固定为实际协议。定性调查可以不提供数值评价。
 

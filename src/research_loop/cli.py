@@ -74,7 +74,10 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--debate-rounds", type=int, default=1)
     init.add_argument("--max-resamples", type=int, default=1)
     init.add_argument(
-        "--selection-policy", choices=["debate", "direct"], default="debate"
+        "--selection-policy",
+        choices=["debate", "direct"],
+        default="direct",
+        help="New Study selection policy (default: direct; debate adds critique/response)",
     )
     init.add_argument("--review-policy", choices=["full", "concise"], default="full")
     run = commands.add_parser("run", help="Run or recover bounded research iterations")
