@@ -117,3 +117,24 @@ cases and require reconciliation rather than retry. The runner writes terminal
 `summary.json`, canonical Study publications, protected runtime snapshots and raw
 case receipts under the new root. Three development contexts support only a
 bounded comparison; synthetic bbRMSD is not a scientific performance result.
+
+## Additional authorized wall-time budget
+
+A completed Study is immutable. `research.py --prior-study /path/to/completed-run`
+starts a linked follow-on Study, importing only the best valid, independently
+reviewed instruction files. Keep `--source` at the same clean original revision.
+Use `--budget-seconds 36000 --max-iterations 60 --baseline-every 5` for an explicitly
+authorized ten-hour campaign. The wall budget governs admission; it does not
+reserve continuous GPU training. Each admitted round still runs three fresh
+Terra cases and full Review. Original-instruction controls check timing drift.
+
+Run the adapter under `benchmarks/startup/supervise.py --root NEW_ROOT
+--budget-seconds 36000 --host HOST --remote-archive REMOTE.tar.gz -- COMMAND...`.
+The supervisor writes a separate `NEW_ROOT-supervisor.json`, reaps its owned
+process on timeout/stop, and records unresolved effects rather than retrying.
+Terminal status is saved before archive transfer, so a transfer failure cannot
+leave a finished run labelled running. Its final local receipt records transfer
+success or failure. GPU outputs already live remotely; the terminal archive adds
+Study/model evidence and supervisor logs, excluding environments and temporary
+files. Run this supervisor detached from a short-lived terminal and retain its
+PID/logs. It has no automatic event-to-chat wakeup mechanism.
