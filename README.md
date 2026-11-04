@@ -32,7 +32,7 @@ ProTok 父 Study 初始化在受锁保护、带所有权记录的暂存目录完
 
 ProTok supervisor 按子 Study 异步调度长训任务。某个子 Study 等待处理时保留原调查，其他独立任务继续；各人工长训使用独立预算，自动提名共享的分配与核账门槛继续生效。每个 Study 内的阶段和父 Study 轮次仍顺序发布，详见[任务调度](docs/task-queue.md)。
 
-[#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端正在分阶段实现。[SQLite 状态层](docs/transactional-runtime.md)为新建测试 Study 提供事务化任务认领、独立 iteration、统一调用账本和协调者身份隔离。[Context / Feedback 接口](docs/context-feedback.md)冻结调用输入与来源，并通过验证器和版本检查接纳输出；当前串行 CLI 也为新调用保存 Context Manifest。现有 Study 不会自动迁移，新状态层也尚不启动并发实验。
+[#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端正在分阶段实现。[SQLite 状态层](docs/transactional-runtime.md)为新建测试 Study 提供事务化任务认领、独立 iteration、统一调用账本和协调者身份隔离。[Context / Feedback 接口](docs/context-feedback.md)冻结调用输入与来源，并通过验证器和版本检查接纳输出；当前串行 CLI 也为新调用保存 Context Manifest。[知识发布接口](docs/knowledge-publication.md)接纳 Scout/Review 的独立知识修订，以可信评价回执建立测量记录，按资格修订重建双层 Frontier 与研究文档。现有 Study 不会自动迁移，新状态层也尚不启动并发实验。
 
 ## 快速体验
 

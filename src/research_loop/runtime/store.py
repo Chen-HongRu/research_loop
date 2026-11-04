@@ -17,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DATABASE = "runtime.sqlite3"
 ROLES = {"scout", "advocate", "judge", "plan", "execute", "review"}
 PHASES = {"plan": "execute", "execute": "review", "review": "publication"}
@@ -82,6 +82,42 @@ CREATE TABLE contexts (
  attempt_id TEXT PRIMARY KEY REFERENCES attempts(id),
  context_ref TEXT NOT NULL, identity_json TEXT NOT NULL, revisions_json TEXT NOT NULL,
  evidence_identities_json TEXT NOT NULL
+);
+CREATE TABLE measurements (
+ id TEXT PRIMARY KEY, iteration_id TEXT NOT NULL REFERENCES iterations(id),
+ candidate_id TEXT NOT NULL, route_id TEXT,
+ level TEXT NOT NULL CHECK(level IN ('global','local')), evaluation_id TEXT NOT NULL,
+ definition_json TEXT NOT NULL, artifact_json TEXT NOT NULL,
+ evaluator_json TEXT NOT NULL, metrics_json TEXT NOT NULL,
+ receipt_ref TEXT NOT NULL UNIQUE, identity_json TEXT NOT NULL,
+ plan_attempt_id TEXT NOT NULL REFERENCES attempts(id),
+ execute_attempt_id TEXT NOT NULL REFERENCES attempts(id),
+ UNIQUE(iteration_id,candidate_id,evaluation_id)
+);
+CREATE TABLE publications (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(id),
+ payload_ref TEXT NOT NULL, identity_json TEXT NOT NULL, receipt_json TEXT NOT NULL
+);
+CREATE TABLE knowledge (
+ id TEXT NOT NULL, revision INTEGER NOT NULL, kind TEXT NOT NULL,
+ source_role TEXT NOT NULL, publication_id INTEGER NOT NULL REFERENCES publications(id),
+ entry_index INTEGER NOT NULL, PRIMARY KEY(id,revision)
+);
+CREATE TABLE eligibility (
+ measurement_id TEXT NOT NULL REFERENCES measurements(id), revision INTEGER NOT NULL,
+ valid INTEGER NOT NULL CHECK(valid IN (0,1)),
+ verified INTEGER NOT NULL CHECK(verified IN (0,1)),
+ publication_id INTEGER NOT NULL REFERENCES publications(id),
+ decision_kind TEXT NOT NULL, decision_index INTEGER NOT NULL,
+ PRIMARY KEY(measurement_id,revision)
+);
+CREATE TABLE publication_conflicts (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ publication_id INTEGER NOT NULL REFERENCES publications(id),
+ target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
+ expected_revision INTEGER NOT NULL, actual_revision INTEGER NOT NULL,
+ reason TEXT NOT NULL, entry_index INTEGER NOT NULL
 );
 """
 
@@ -309,6 +345,9 @@ class StateStore:
                 },
                 "owner_epoch": row["owner_epoch"],
                 "owner_open": bool(row["owner_open"]),
+                "knowledge_version": conn.execute(
+                    "SELECT COALESCE(MAX(id),0) FROM publications"
+                ).fetchone()[0],
             }
             for table in ("tasks", "iterations", "attempts"):
                 result[table] = [
@@ -700,6 +739,9 @@ class Coordinator:
             task=task,
             binding=binding,
             plan=plan,
+            knowledge_version=conn.execute(
+                "SELECT COALESCE(MAX(id),0) FROM publications"
+            ).fetchone()[0],
         )
 
     def _feedback_snapshot(self, call):

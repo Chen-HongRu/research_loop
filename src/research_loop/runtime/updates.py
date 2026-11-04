@@ -151,12 +151,14 @@ class Updater:
 
     @staticmethod
     def _revisions(record):
+        if record["binding"] is not None:
+            return record["binding"]["revisions"]
         task = record["task"]
         return dict(
             study=1,
             task=task["revision"] if task else None,
             iteration=record["attempt"]["expected_revision"],
-            knowledge=0,
+            knowledge=record["knowledge_version"],
         )
 
     def _check_identity(self, reference, expected):
@@ -189,7 +191,18 @@ class Updater:
             or manifest["role"] != attempt["role"]
         ):
             raise ConflictError("Context study or role does not match reservation")
-        if not _same(manifest["revisions"], self._revisions(record)):
+        revisions = self._revisions(record)
+        if record["binding"] is None:
+            # Independent append-only publication may advance after capture.
+            # Corrections use per-target revisions in the Publisher instead.
+            knowledge = manifest["revisions"].get("knowledge")
+            if (
+                type(knowledge) is not int
+                or not 0 <= knowledge <= revisions["knowledge"]
+            ):
+                raise ConflictError("Unknown knowledge snapshot version")
+            revisions["knowledge"] = knowledge
+        if not _same(manifest["revisions"], revisions):
             raise ConflictError("Context revisions do not match reservation")
         if not _same(manifest["task"], record["task"]):
             raise ConflictError("Context task envelope differs from immutable task")
