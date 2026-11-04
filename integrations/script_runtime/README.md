@@ -47,7 +47,12 @@ The application never reads private source files into prompts or adds bodies
 outside the selected ContextPackage. Backend configuration is not prompt context.
 
 Plan returns `timeout_seconds`, `local_evaluation`, `experiment_definition`,
-`baseline_ref`, `backend`, `scientific_contract`, and a nonempty `operations` list.
+`baseline_ref`, `backend`, `scientific_contract`, and an `operations` list.
+An empty list explicitly selects qualitative investigation with no external
+execution or allocation. Its `experiment_definition` must identify a concrete
+research question and the available context used to answer it; it must not
+invent an experiment or result. A task that requires an actual bounded diagnostic
+run must retain its script operations.
 Each planned operation has the core request fields `id`, `backend`,
 `authorization_id`, `resources`, `cost_bounds`, `timeout_seconds`, `input_artifacts`
 and `parameters`. Planned parameters have exactly `baseline_ref` and `execution`.
@@ -55,7 +60,8 @@ Execution has exactly `mode="script"`, a `research/*.py` entrypoint, `gpu=true`,
 `time_limit_seconds` (1–1800), `inputs=[{"name":"alias","source":"configured-key"}]`
 and relative `outputs` paths. Plan may name a new entrypoint for Execute to create.
 
-Execute returns nonempty `operations` and `artifacts=[]`. Every operation must
+Execute returns `operations` and `artifacts=[]`. An empty accepted Plan requires
+an empty Execute operation list. For script execution, every operation must
 match accepted Plan exactly, adding only
 `parameters.source_files=[{"path":"research/run.py","content":"..."}]`. Execute
 cannot alter execution, inputs, outputs, baseline, backend, grant, resources,

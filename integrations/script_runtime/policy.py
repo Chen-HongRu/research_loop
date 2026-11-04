@@ -63,11 +63,11 @@ class Plan(native.Plan):
     baseline_ref: native.Text
     backend: native.Text
     scientific_contract: dict
-    operations: Annotated[list[PlannedOperation], Field(min_length=1)]
+    operations: list[PlannedOperation]
 
 
 class Execute(native.StrictModel):
-    operations: Annotated[list[Operation], Field(min_length=1)]
+    operations: list[Operation]
     artifacts: Annotated[list[Artifact], Field(max_length=0)]
 
 
@@ -163,11 +163,15 @@ def prompt(role, package, config):
         "Preserve the exact scientific contract at context["
         + json.dumps(config["scientific_contract_source"])
         + "]. "
-        "Plan defines a nonempty bounded script experiment: freeze backend, baseline, execution, inputs, outputs, "
+        "Plan may use operations=[] for a qualitative investigation that answers a concrete research question "
+        "using available context, with no resource allocation. State that question and the usable context in "
+        "experiment_definition; do not invent experiments, measurements or results. If the task requires an actual "
+        "diagnostic run, include its bounded script operations. For each operation freeze backend, baseline, execution, inputs, outputs, "
         "authorization, resources, rounded GPU cost and lifecycle timeout. Its operations parameters contain only "
         "baseline_ref and execution. Do not generate source_files in Plan. Keep local_evaluation exactly as frozen "
         "in the scientific contract (None if absent), never override the fixed global evaluation. "
-        "Execute copies every accepted Plan operation exactly and adds only parameters.source_files, each a path/content "
+        "Execute must return operations=[] when accepted Plan operations are empty. Otherwise it copies every "
+        "accepted Plan operation exactly and adds only parameters.source_files, each a path/content "
         "text edit within operator scope. Return artifacts=[]; a tool-free model cannot create artifact evidence. "
         "The trusted backend runs the script. Script reports are unverified interpretation evidence, not registered "
         "measurements or Frontier scores. Never fabricate measurements. Preserve conditions, uncertainty and limitations. "

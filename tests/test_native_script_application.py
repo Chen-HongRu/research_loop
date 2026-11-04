@@ -228,6 +228,40 @@ class NativeScriptApplicationTests(unittest.TestCase):
                 Operations(owner).request(operations[0]["id"]), self.request
             )
 
+    def test_qualitative_plan_execute_requires_no_allocation(self):
+        plan = deepcopy(self.plan)
+        plan.update(
+            operations=[],
+            experiment_definition=(
+                "Which assumptions remain unsupported by the supplied synthetic "
+                "baseline source and frozen protocol? Reason only from that context."
+            ),
+        )
+        execute = {"operations": [], "artifacts": []}
+        with (
+            patch.object(
+                backend,
+                "validate_request",
+                side_effect=AssertionError("No backend request"),
+            ),
+            patch.object(
+                backend, "invoke", side_effect=AssertionError("No backend dispatch")
+            ),
+        ):
+            self.assertEqual(self.validate("plan", plan), plan)
+            self.assertEqual(
+                self.validate("execute", execute, self.context | {"plan": plan}),
+                execute,
+            )
+            with self.assertRaisesRegex(ValueError, "match accepted Plan"):
+                self.validate("execute", self.execute, self.context | {"plan": plan})
+            with self.assertRaises(ValueError):
+                self.validate(
+                    "execute",
+                    execute | {"artifacts": [{"path": "invented", "version": "1"}]},
+                    self.context | {"plan": plan},
+                )
+
     def test_execute_changes_only_source_files(self):
         for target, key, replacement in (
             ("request", "timeout_seconds", 599),
