@@ -42,7 +42,10 @@ The validator returns a normalized object; no default identity validators are
 provided. An optional `validate_config(config)` hook is run before admission;
 module imports, configuration validation and validators must be pure and make no
 external calls. The [native application](../integrations/native_runtime/README.md)
-provides tool-free Pi roles and qualitative Execute.
+provides tool-free Pi roles and qualitative Execute. The separately configured
+[script application](../integrations/script_runtime/README.md) adds bounded Slurm
+script execution with frozen Plan parameters and typed Execute source proposals;
+its collected reports remain unverified research evidence.
 Callbacks must keep local children in their process group and must not spawn
 untracked submitters. Use a versioned immutable module path outside the Study
 control directory and installed skill. Initialization freezes its absolute path,

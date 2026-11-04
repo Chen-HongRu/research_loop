@@ -12,7 +12,15 @@ from research_loop.runtime.files import publish_json
 
 class RuntimeAcceptanceTests(unittest.TestCase):
     def test_recovery_dependencies_retry_capacity_and_stop(self):
-        result = run_smoke()
+        with TemporaryDirectory(prefix="acceptance-restart-") as temporary:
+            result = run_smoke(Path(temporary))
+            records = Path(temporary) / "study" / "backend"
+            checkpoint = json.loads((records / "restart-checkpoint.json").read_text())
+            gate = json.loads((records / "recovery-open.json").read_text())
+            self.assertIsNone(checkpoint["sqlite_job_id"])
+            self.assertGreater(gate["owner_epoch"], checkpoint["owner_epoch"])
+            self.assertEqual(gate["operation_id"], checkpoint["operation_id"])
+            self.assertEqual(gate["submission_token"], checkpoint["submission_token"])
         self.assertEqual(
             result["tasks"],
             {"A": "failed", "B": "published", "C": "blocked", "D": "published"},
@@ -20,6 +28,8 @@ class RuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(result["max_actual_active_jobs"], 2)
         self.assertGreater(result["overlap_seconds"], 0)
         self.assertEqual(result["new_submits_after_recovery"], 0)
+        self.assertTrue(result["recovery_unknown_before_gate"])
+        self.assertTrue(result["recovered_original_job"])
         self.assertEqual(result["B_collection_attempts"], 2)
         self.assertEqual(result["B_review_attempts"], 2)
         self.assertEqual(result["B_execute_attempts"], 1)

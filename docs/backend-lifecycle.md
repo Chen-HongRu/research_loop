@@ -102,7 +102,7 @@ makes no automatic model call, retry loop or repeated training request.
 | Submit | Commit one stable token, original owner epoch, operation count and holds before calling the backend. Return `outcome`, `job_id`, `proof`, `reason`. |
 | Inspect | Address the original operation/token. Return `job_id`, `terminal`, `outcome`, `physical_released`, `not_submitted_proof`. |
 | Cancel | Request cancellation of that identity; return `job_id`, `acknowledged`, `reason`. Acknowledgement releases nothing. |
-| Collect | Return actual immutable `artifacts`, `evaluations`, and optional `unavailable_reason`. Partial artifacts may accompany an explicit unavailable result. |
+| Collect | Return actual immutable `artifacts`, `evaluations`, optional `unavailable_reason` and optional unscored `research_evidence`. Partial artifacts may accompany an explicit unavailable result. |
 | Settle | Return `final_costs`, mapping known units to their authoritative final totals. Missing units remain unresolved. |
 
 `prepare` moves pending work to prepared or records a known pre-submit failure.
@@ -185,6 +185,20 @@ Collection descriptors are:
 An `unavailable_reason` declares missing outputs and makes collection final. A
 genuine evaluator receipt for an exact artifact in the collected subset remains
 eligible for normal registration; missing outputs never imply measurements.
+An optional `research_evidence` list carries unscored script observations. Each
+entry has exactly `name`, `artifact: {path, version}`, `ref`, `identity` and
+`allow_feedback`. Names are unique simple identifiers within the operation;
+`artifact` must exactly match a member of the same `artifacts` list. `ref` points
+to a small immutable Study-local JSON-object report control artifact, with its
+captured `device`, `inode`, `size` and `mtime_ns` identity. These are actual report
+inputs, never dataset/checkpoint scans. Accepted collection provenance binds the
+report to the original operation. Only its own Review receives permitted report
+bodies as `evidence:<operation-id>:<name>`; denied reports remain metadata only.
+Updater independently verifies content and original source permissions. Knowledge
+citing these reports must be `interpretation`; reports never register a
+measurement, establish protected evaluator execution or enter a Frontier.
+Omitting this optional field preserves the existing receipt shape and schema.
+
 Collection itself is not a measurement. Each allowed evaluator receipt must be
 registered through `MeasurementRegistry.register(iteration_id, receipt_ref)` or
 explicitly rejected through `operations.reject_evaluation(receipt_ref, reason)`.

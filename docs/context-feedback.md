@@ -159,6 +159,34 @@ and denied evaluator bodies are excluded. Once bound, the selected package is
 reused even if policy or published knowledge later changes. Managed dispatches
 can accept only the exact result in their durable worker completion record.
 
+Operator-supplied baseline source and research contracts can be published as
+small immutable JSON-object control artifacts and selected with
+`config.context_sources`. Each entry has exactly `name`, `ref`, `identity`,
+`revision`, `roles`, `allow_feedback` and `required`. `ref` is a Study-local
+`artifacts/<32-hex>.json` reference; `identity` contains its captured `device`,
+`inode`, `size` and `mtime_ns`. `revision` is an explicit finite JSON version;
+`roles` is a nonempty subset of `plan`, `execute`, `review`, `scout`, `advocate`
+and `judge`. Use a unique simple name such as `baseline` and store source text
+inside the object, for example `{"files": [{"path": "baseline.py", "content": "..."}]}`.
+
+Eligible objects enter both ordinary and planning contexts as `provided:<name>`
+and their original refs enter the evidence allowlist. Required objects are
+protected; optional objects may be omitted, but neither may be rewritten or
+summarized. Denied and other-role sources retain only explanatory manifest
+metadata and never have their bodies read. Updater independently checks content,
+configured version and stat identity, with metadata-only rechecks at commit.
+These inputs are explicit control artifacts, not dataset/checkpoint readers or
+scientific verification. Omitting `context_sources` preserves existing behavior.
+
+Own Review can additionally receive explicitly feedback-permitted unscored
+reports from its accepted operation collections, under
+`evidence:<operation-id>:<name>`. These immutable JSON report objects retain
+unverified-observation provenance and original evidence refs. Denied reports are
+never opened; other iterations and roles do not receive their bodies. Source
+content and collection bindings are independently checked before acceptance.
+Report citations can support only interpretation knowledge, never new verified
+measurements or Frontier entries. See [collection and Review](backend-lifecycle.md#collection-and-review).
+
 ## Local API smoke
 
 This disposable example reserves one synthetic Scout call and accepts a strictly

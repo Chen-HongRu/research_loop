@@ -24,6 +24,7 @@ else:
 from research_loop.runtime.application import load_application, prepare_application
 from research_loop.runtime.controls import ControlInbox, receipt, submit_command
 from research_loop.runtime.coordinator import ConcurrentCoordinator
+from research_loop.runtime.files import publish_json
 from research_loop.runtime.store import StateStore
 from research_loop.runtime.task_pool import TaskPool
 
@@ -116,14 +117,14 @@ def _actions(root, action=None, task=None):
     ]
 
 
-def _drive(runner, condition, timeout=12):
-    deadline = time.monotonic() + timeout
+def _drive(runner, condition, *, deadline):
+    result = None
     while time.monotonic() < deadline:
         result = runner.tick()
         if condition():
             return
         time.sleep(0.02)
-    raise TimeoutError("Acceptance runtime stalled: " + json.dumps(result))
+    raise TimeoutError("Acceptance overall deadline exceeded: " + json.dumps(result))
 
 
 @contextmanager
@@ -160,6 +161,9 @@ def run_smoke(base=None):
             return run_smoke(Path(temporary))
     base = Path(base).resolve()
     base.mkdir(parents=True, exist_ok=True)
+    # One budget covers all cold Python launches and phases; each callback
+    # retains its independent, shorter timeout from the frozen configuration.
+    deadline = time.monotonic() + backend.SMOKE_SECONDS
     workspace, commit = _workspace(base)
     root = base / "study"
     store = StateStore.create(
@@ -167,9 +171,9 @@ def run_smoke(base=None):
         config=_configuration(root, workspace, commit),
         max_iterations=5,
         max_calls=20,
-        max_seconds=60,
+        max_seconds=backend.SMOKE_SECONDS,
     )
-    with backend.managed_backend(root, workspace, commit) as service:
+    with backend.managed_backend(root, workspace, commit, deadline=deadline) as service:
         with _execution_owner(store) as (owner, runner):
             for priority, (name, dependencies) in enumerate(
                 (("A", []), ("B", []), ("C", ["A"]), ("D", ["B"])), 1
@@ -199,10 +203,13 @@ def run_smoke(base=None):
                 }
                 entered = list((root / "backend" / "jobs").glob("*/entered.json"))
                 return (
-                    states == {"A": "submitted", "B": "unknown"} and len(entered) == 2
+                    states == {"A": "submitted", "B": "unknown"}
+                    and len(entered) == 2
+                    and (root / "backend" / "lost-ack-B.json").exists()
+                    and (root / "backend" / "visibility-withheld-B.json").exists()
                 )
 
-            _drive(runner, lost_ack_with_two_jobs)
+            _drive(runner, lost_ack_with_two_jobs, deadline=deadline)
             original = {
                 runner.operations.request(op["id"])["parameters"]["task"]: op
                 for op in runner.operations.list()
@@ -210,21 +217,61 @@ def run_smoke(base=None):
             assert len(_actions(root, "submit")) == 2
             assert original["B"]["job_id"] is None
             assert original["B"]["submission_token"]
+            lost_ack = json.loads((root / "backend" / "lost-ack-B.json").read_text())
+            assert lost_ack["submission_token"] == original["B"]["submission_token"]
+            submitted = next(
+                run
+                for run in runner.ledger.list("backend")
+                if run["operation_id"] == original["B"]["id"]
+                and run["action_kind"] == "submit"
+            )
+            assert submitted["worker_retired"] and submitted["status"] == "failed"
+            assert "Submit acknowledgement lost" in submitted["error"]
             submits_at_recovery = len(_actions(root, "submit"))
             first_epoch = owner.owner_epoch
             inspections_before = len(_actions(root, "inspection", "B"))
+            checkpoint = dict(
+                owner_epoch=first_epoch,
+                operation_id=original["B"]["id"],
+                submission_token=original["B"]["submission_token"],
+                sqlite_job_id=original["B"]["job_id"],
+            )
+            publish_json(root / "backend" / "restart-checkpoint.json", checkpoint)
 
         # The backend service retains and waits for the same actual children;
         # replacing the coordinator does not detach/restart callback senders.
         with _execution_owner(store) as (owner, runner):
             assert owner.owner_epoch > first_epoch
+            before_gate = runner.operations.get(original["B"]["id"])
+            assert before_gate["state"] == "unknown" and before_gate["job_id"] is None
+            publish_json(
+                root / "backend" / "recovery-open.json",
+                dict(
+                    owner_epoch=owner.owner_epoch,
+                    operation_id=checkpoint["operation_id"],
+                    submission_token=checkpoint["submission_token"],
+                ),
+            )
             _drive(
                 runner,
                 lambda: (
                     len(_actions(root, "inspection", "B")) > inspections_before
                     and runner.operations.get(original["B"]["id"])["job_id"] is not None
                 ),
+                deadline=deadline,
             )
+            recovered = runner.operations.get(original["B"]["id"])
+            actual_job = json.loads(
+                (
+                    root
+                    / "backend"
+                    / "jobs"
+                    / original["B"]["submission_token"]
+                    / "started.json"
+                ).read_text()
+            )
+            assert recovered["job_id"] == actual_job["job_id"]
+            assert recovered["job_id"] == lost_ack["job_id"]
             assert len(_actions(root, "submit")) == 2
             assert (
                 runner.operations.get(original["B"]["id"])["submission_token"]
@@ -237,6 +284,7 @@ def run_smoke(base=None):
                     _iterations(owner).get(name, {}).get("status") == "failed"
                     for name in ("A", "B")
                 ),
+                deadline=deadline,
             )
             failed = _iterations(owner)["B"]
             assert failed["phase"] == "review"
@@ -285,6 +333,7 @@ def run_smoke(base=None):
                         for op in runner.operations.list()
                     )
                 ),
+                deadline=deadline,
             )
             rows = _iterations(owner)
             assert {name: row["status"] for name, row in rows.items()} == {
@@ -356,6 +405,9 @@ def run_smoke(base=None):
                 max_actual_active_jobs=maximum,
                 overlap_seconds=round(overlap, 3),
                 coordinator_restarts=owner.owner_epoch - first_epoch,
+                recovery_unknown_before_gate=before_gate["state"] == "unknown"
+                and before_gate["job_id"] is None,
+                recovered_original_job=recovered["job_id"] == actual_job["job_id"],
                 submits=len(_actions(root, "submit")),
                 new_submits_after_recovery=len(_actions(root, "submit"))
                 - submits_at_recovery,

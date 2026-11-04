@@ -9,6 +9,10 @@ import json
 from typing import Callable, Mapping
 
 from .context import ContextPackage
+from .context_sources import (
+    check_metadata as check_source_metadata,
+    validate_package as validate_source_package,
+)
 from .files import publish_artifact, validate_artifact_ref
 from .store import ConflictError, InvalidTransition, _json
 
@@ -243,6 +247,8 @@ class Updater:
         if not _same(manifest["task"], record["task"]):
             raise ConflictError("Context task envelope differs from immutable task")
         config = control["config"]
+        validate_source_package(config, attempt["role"], package, self._read_record)
+        self._check_research_package(record, package)
         if not _same(manifest["budget"], config.get("context_budget", {})):
             raise ConflictError("Context quota differs from configured quota")
         limits = {
@@ -303,6 +309,65 @@ class Updater:
         elif attempt["status"] != "accepted":
             raise InvalidTransition("Attempt no longer accepts feedback")
 
+    def _check_research_package(self, record, package):
+        from .operations import Operations
+
+        attempt = record["attempt"]
+        reports, snapshots = (
+            Operations(self.coordinator).research_evidence(attempt["iteration_id"])
+            if attempt["role"] == "review"
+            else ([], [])
+        )
+        context, manifest = package.context, package.manifest
+        actual = {
+            source["key"]: source
+            for source in manifest["sources"]
+            if source["key"].startswith("evidence:")
+        }
+        expected = {entry["source"]["key"] for entry in reports}
+        if (
+            set(actual) != expected
+            or {key for key in context if key.startswith("evidence:")} - expected
+        ):
+            raise ConflictError(
+                "Research evidence is not from this Review's own collection"
+            )
+        refs = {entry["source"]["ref"] for entry in reports}
+        allowed = {
+            entry["source"]["ref"]
+            for entry in reports
+            if entry["source"]["allow_feedback"]
+        }
+        if set(manifest["allowed_evidence"]) & refs != allowed:
+            raise ConflictError(
+                "Research evidence permissions differ from accepted collection"
+            )
+        for entry in reports:
+            source = entry["source"]
+            key = source["key"]
+            if not _same({field: actual[key][field] for field in source}, source):
+                raise ConflictError(
+                    "Research evidence source differs from accepted collection"
+                )
+            if not source["allow_feedback"]:
+                if key in context or actual[key]["disposition"] != "omitted":
+                    raise ConflictError(
+                        "Denied research report cannot provide feedback"
+                    )
+                continue
+            if key in context:
+                body = self._read_record(source["ref"], entry["identity"])
+                if (
+                    actual[key]["disposition"] != "provided"
+                    or not isinstance(body, dict)
+                    or not _same(body, context[key])
+                ):
+                    raise ConflictError(
+                        "Research report differs from accepted collection input"
+                    )
+        record["research_collections"] = snapshots
+        record["research_reports"] = reports
+
     def _load_binding(self, record):
         binding = record["binding"]
         if binding is None:
@@ -362,6 +427,25 @@ class Updater:
         if current["plan"] is not None:
             plan = current["plan"]
             self._check_identity(plan["output_ref"], plan["output_identity"])
+        check_source_metadata(
+            captured["control"]["config"],
+            current["attempt"]["role"],
+            self._check_identity,
+        )
+        if captured.get("research_collections"):
+            from .operations import Operations
+
+            with self.coordinator.store._connection(readonly=True) as source_conn:
+                for snapshot in captured["research_collections"]:
+                    op = Operations._get(source_conn, snapshot["id"])
+                    if not _same(Operations.research_snapshot(op), snapshot):
+                        raise ConflictError("Accepted research collection changed")
+                    self._check_identity(
+                        snapshot["collection_ref"], snapshot["collection_identity"]
+                    )
+            for entry in captured["research_reports"]:
+                if entry["source"]["allow_feedback"]:
+                    self._check_identity(entry["source"]["ref"], entry["identity"])
         for key in ("dispatch", "reconciliation", "retry"):
             if not _same(current.get(key), captured.get(key)):
                 raise ConflictError("Invocation or recovery binding changed")
@@ -489,6 +573,18 @@ class Updater:
         normalized = json.loads(_json(normalized))
         if _FORBIDDEN & normalized.keys():
             raise ValueError("Normalized output cannot update control or authorization")
+        reports = {
+            entry["source"]["ref"] for entry in captured.get("research_reports", [])
+        }
+        for entry in normalized.get("knowledge", []):
+            if (
+                isinstance(entry, dict)
+                and reports.intersection(entry.get("source_refs", []))
+                and entry.get("kind") != "interpretation"
+            ):
+                raise ValueError(
+                    "Unverified research reports may only support interpretation knowledge"
+                )
         if call_identity.role == "execute":
             from .operations import Operations
 

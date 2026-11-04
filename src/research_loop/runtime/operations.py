@@ -720,6 +720,72 @@ class Operations:
             ),
         )
 
+    @staticmethod
+    def research_snapshot(op):
+        return {
+            key: op[key]
+            for key in (
+                "id",
+                "execute_attempt_id",
+                "iteration_id",
+                "state",
+                "collection_state",
+                "collection_ref",
+                "collection_identity",
+                "feedback_sealed",
+                "inconsistency",
+            )
+        }
+
+    def research_evidence(self, iteration_id):
+        """Read accepted own collection controls, never report bodies here."""
+        descriptors, snapshots = [], []
+        for op in self.list(iteration_id=iteration_id):
+            if op["collection_ref"] is None:
+                continue
+            collection = validate_receipt(
+                "collection",
+                self.reader._read_record(
+                    op["collection_ref"], op["collection_identity"]
+                ),
+                allow_legacy_epoch=self.imported(op),
+            )
+            self._check_binding(op, collection)
+            reports = collection["data"].get("research_evidence", [])
+            if not reports:
+                continue
+            if (
+                op["state"] != "terminal"
+                or op["collection_state"] not in {"collected", "unavailable"}
+                or not op["feedback_sealed"]
+                or op["inconsistency"] is not None
+            ):
+                raise ConflictError(
+                    "Research reports require accepted sealed own collection"
+                )
+            snapshots.append(self.research_snapshot(op))
+            for entry in reports:
+                key = f"evidence:{op['id']}:{entry['name']}"
+                descriptors.append(
+                    dict(
+                        source=dict(
+                            id=key,
+                            key=key,
+                            ref=entry["ref"],
+                            revision={
+                                "operation_id": op["id"],
+                                "collection_ref": op["collection_ref"],
+                                "artifact": entry["artifact"],
+                            },
+                            reason="Unverified backend research observation; not an evaluator measurement"
+                            + ("" if entry["allow_feedback"] else "; feedback denied"),
+                            allow_feedback=entry["allow_feedback"],
+                        ),
+                        identity=entry["identity"],
+                    )
+                )
+        return descriptors, snapshots
+
     def record_receipt(self, operation_id, expected_revision, kind, event_key, payload):
         self.owner._live()
         integer(expected_revision, "expected_revision", minimum=1)
@@ -758,6 +824,17 @@ class Operations:
             if kind == "collection"
             else {}
         )
+        reports = (
+            [
+                (entry["ref"], entry["identity"])
+                for entry in payload["data"].get("research_evidence", [])
+                if entry["allow_feedback"]
+            ]
+            if kind == "collection"
+            else []
+        )
+        for reference, expected in reports:
+            self.reader._check_identity(reference, expected)
         from .files import publish_artifact
 
         payload_ref = publish_artifact(self.owner.store.root, payload)
@@ -775,6 +852,8 @@ class Operations:
                 )
             self.reader._check_identity(payload_ref, identity)
             for reference, expected in intake.items():
+                self.reader._check_identity(reference, expected)
+            for reference, expected in reports:
                 self.reader._check_identity(reference, expected)
             conn.execute(
                 "INSERT INTO operation_events VALUES(?,?,?,?,?,?,?)",

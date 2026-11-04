@@ -383,7 +383,8 @@ def validate_receipt(kind, payload, *, allow_legacy_epoch=False):
         if (
             not isinstance(data, dict)
             or not {"artifacts", "evaluations"} <= data.keys()
-            or not data.keys() <= {"artifacts", "evaluations", "unavailable_reason"}
+            or not data.keys()
+            <= {"artifacts", "evaluations", "unavailable_reason", "research_evidence"}
         ):
             raise ValueError("Invalid collection receipt fields")
         if not isinstance(data["artifacts"], list) or not isinstance(
@@ -405,6 +406,42 @@ def validate_receipt(kind, payload, *, allow_legacy_epoch=False):
             refs.append(entry["receipt_ref"])
         if len(set(refs)) != len(refs):
             raise ValueError("Duplicate collected evaluator receipt")
+        reports = data.get("research_evidence", [])
+        if not isinstance(reports, list):
+            raise ValueError("Research evidence must be an explicit list")
+        names = set()
+        for entry in reports:
+            fields(
+                entry,
+                {"name", "artifact", "ref", "identity", "allow_feedback"},
+                "research evidence",
+            )
+            name = entry["name"]
+            if (
+                not isinstance(name, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name)
+                or name in names
+            ):
+                raise ValueError("Research evidence names must be unique safe names")
+            names.add(name)
+            artifact(entry["artifact"])
+            if entry["artifact"] not in data["artifacts"]:
+                raise ValueError(
+                    "Research evidence artifact must belong to its collection"
+                )
+            if not isinstance(entry["ref"], str) or not re.fullmatch(
+                r"artifacts/[0-9a-f]{32}\.json", entry["ref"]
+            ):
+                raise ValueError("Research evidence requires an immutable report ref")
+            fields(
+                entry["identity"],
+                {"device", "inode", "size", "mtime_ns"},
+                "research evidence identity",
+            )
+            for value in entry["identity"].values():
+                integer(value, "research evidence identity")
+            if type(entry["allow_feedback"]) is not bool:
+                raise ValueError("Research evidence feedback flag must be boolean")
         data.setdefault("unavailable_reason", None)
         if data["unavailable_reason"] is not None:
             text(data["unavailable_reason"], "unavailable_reason")

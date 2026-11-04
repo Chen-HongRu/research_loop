@@ -21,6 +21,7 @@ from research_loop.runtime.files import publish_artifact, publish_json
 
 
 APPLICATION_IDENTITY = {"id": "local-acceptance", "version": "1"}
+SMOKE_SECONDS = 90
 
 
 def _wait(path, timeout=8):
@@ -33,9 +34,10 @@ def _wait(path, timeout=8):
 
 
 @contextmanager
-def managed_backend(root, workspace, commit):
+def managed_backend(root, workspace, commit, *, deadline=None):
     """Own one bounded service and reap it, including on failed assertions."""
     root = Path(root)
+    deadline = time.monotonic() + SMOKE_SECONDS if deadline is None else deadline
     folder = root / "backend"
     for name in ("requests", "jobs", "actions", "calls"):
         (folder / name).mkdir(parents=True, exist_ok=True)
@@ -48,6 +50,7 @@ def managed_backend(root, workspace, commit):
                 str(root),
                 str(workspace),
                 commit,
+                str(deadline),
             ],
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -78,12 +81,11 @@ def managed_backend(root, workspace, commit):
                 )
 
 
-def _serve(root, workspace, commit):
+def _serve(root, workspace, commit, deadline):
     folder = root / "backend"
     identity = dict(pid=os.getpid(), process_group=os.getpgrp(), nonce=uuid.uuid4().hex)
     publish_json(folder / "service.json", identity)
     live, seen = {}, set()
-    deadline = time.monotonic() + 35
     try:
         while not (folder / "stop").exists():
             if time.monotonic() >= deadline:
@@ -124,6 +126,7 @@ def _serve(root, workspace, commit):
                             request["task"],
                             str(workspace),
                             commit,
+                            str(deadline),
                         ],
                         cwd=workspace,
                         stdout=log,
@@ -160,7 +163,7 @@ def _serve(root, workspace, commit):
         )
 
 
-def _job(root, token, name, workspace, commit):
+def _job(root, token, name, workspace, commit, deadline):
     folder = root / "backend"
     job = folder / "jobs" / token
     observed = subprocess.check_output(
@@ -171,7 +174,6 @@ def _job(root, token, name, workspace, commit):
     publish_json(
         job / "entered.json", dict(pid=os.getpid(), commit=observed, task=name)
     )
-    deadline = time.monotonic() + 25
     while not (folder / "release").exists():
         if (folder / "stop").exists() or time.monotonic() >= deadline:
             raise TimeoutError("Actual local job was never released")
@@ -334,6 +336,34 @@ def invoke(kind, payload, config):
             else None
         )
         if action == "inspection":
+            if name == "B":
+                gate = folder / "recovery-open.json"
+                if not gate.exists():
+                    withheld = folder / "visibility-withheld-B.json"
+                    if not withheld.exists():
+                        publish_json(
+                            withheld,
+                            dict(operation_id=operation["id"], submission_token=token),
+                        )
+                    # Simulate unavailable backend identity until the driver
+                    # durably opens visibility under the replacement owner.
+                    # Unknown is conservative and makes no absence assertion.
+                    return dict(
+                        event_key=event_key,
+                        data=dict(
+                            job_id=None,
+                            terminal=False,
+                            outcome=None,
+                            physical_released=False,
+                            not_submitted_proof=None,
+                        ),
+                    )
+                opened = json.loads(gate.read_text())
+                if (
+                    opened["operation_id"] != operation["id"]
+                    or opened["submission_token"] != token
+                ):
+                    raise ValueError("Recovery gate differs from the original job")
             data = dict(
                 job_id=started["job_id"],
                 terminal=finished is not None,
@@ -393,7 +423,7 @@ def invoke(kind, payload, config):
 if __name__ == "__main__":
     mode, location, *arguments = sys.argv[1:]
     if mode == "serve":
-        _serve(Path(location), Path(arguments[0]), arguments[1])
+        _serve(Path(location), Path(arguments[0]), arguments[1], float(arguments[2]))
     elif mode == "job":
         raise SystemExit(
             _job(
@@ -402,6 +432,7 @@ if __name__ == "__main__":
                 arguments[1],
                 Path(arguments[2]),
                 arguments[3],
+                float(arguments[4]),
             )
         )
     else:

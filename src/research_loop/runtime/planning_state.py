@@ -3,6 +3,7 @@
 import uuid
 
 from .context import ContextSnapshot, build_context
+from .context_sources import extend as extend_sources
 from .files import publish_artifact
 from .publication import Publisher
 from .publication_views import build_views, render_research
@@ -294,6 +295,20 @@ class PlanningLedger:
             )
             for key in inputs
         ]
+        allowed = list(
+            dict.fromkeys(
+                ref for ref in references.values() if ref.startswith("artifacts/")
+            )
+        )
+        extend_sources(
+            config,
+            call.role,
+            self.reader._read_record,
+            inputs,
+            sources,
+            protected,
+            allowed,
+        )
         package = ContextSnapshot.capture(
             study_id=call.study_id,
             revisions=dict(
@@ -305,11 +320,7 @@ class PlanningLedger:
             inputs=inputs,
             sources=sources,
             protected_keys=protected,
-            allowed_evidence=list(
-                dict.fromkeys(
-                    ref for ref in references.values() if ref.startswith("artifacts/")
-                )
-            ),
+            allowed_evidence=allowed,
         )
         return build_context(
             package,

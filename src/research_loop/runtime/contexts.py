@@ -5,6 +5,7 @@ open denied evaluator receipts or infer measurements from backend narratives.
 """
 
 from .context import ContextPackage, ContextSnapshot, build_context
+from .context_sources import extend as extend_sources
 from .files import publish_artifact
 from .operations import Operations
 from .planning_state import PlanningLedger
@@ -187,6 +188,42 @@ class RuntimeContexts:
         reference = publish_artifact(self.owner.store.root, research)
         source("research", research["research"], reference, knowledge["version"])
         source("frontiers", research["frontiers"], reference, knowledge["version"])
+        sources = [
+            {
+                "id": key,
+                "key": key,
+                "ref": references.get(key, f"control:{key}"),
+                "revision": revisions.get(key, 1),
+                "reason": "Accepted controller input at invocation start",
+                "allow_feedback": True,
+            }
+            for key in inputs
+        ]
+        allowed = list(dict.fromkeys(references.values()))
+        if call.role == "review":
+            reports, _ = Operations(self.owner).research_evidence(call.iteration_id)
+            for entry in reports:
+                metadata = entry["source"]
+                body = None
+                if metadata["allow_feedback"]:
+                    body = self.reader._read_record(metadata["ref"], entry["identity"])
+                    if not isinstance(body, dict):
+                        raise ValueError(
+                            "Research report must be a JSON control object"
+                        )
+                    if metadata["ref"] not in allowed:
+                        allowed.append(metadata["ref"])
+                inputs[metadata["key"]] = body
+                sources.append(metadata)
+        extend_sources(
+            config,
+            call.role,
+            self.reader._read_record,
+            inputs,
+            sources,
+            protected,
+            allowed,
+        )
         snapshot = ContextSnapshot.capture(
             study_id=call.study_id,
             revisions={
@@ -196,19 +233,9 @@ class RuntimeContexts:
                 "knowledge": knowledge["version"],
             },
             inputs=inputs,
-            sources=[
-                {
-                    "id": key,
-                    "key": key,
-                    "ref": references.get(key, f"control:{key}"),
-                    "revision": revisions.get(key, 1),
-                    "reason": "Accepted controller input at invocation start",
-                    "allow_feedback": True,
-                }
-                for key in inputs
-            ],
+            sources=sources,
             protected_keys=protected,
-            allowed_evidence=list(dict.fromkeys(references.values())),
+            allowed_evidence=allowed,
         )
         return build_context(
             snapshot,

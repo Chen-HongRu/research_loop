@@ -144,7 +144,7 @@ New runtime initialization publishes `runtime.json` with `format: sqlite-v1` and
 the database Study identity. The serial `Study` and `TaskQueue` reject either this
 marker or `runtime.sqlite3`, including partially initialized directories. The
 runtime refuses in-place creation over legacy `study.json` or `state.json`.
-The current SQLite schema is 7; earlier prototype schemas are explicitly rejected.
+The current SQLite schema is 8; earlier prototype schemas are explicitly rejected.
 Existing legacy Studies require the [explicit migration procedure](runtime-migration.md); creating a
 database beside existing files is not migration. Old deployed binaries must be
 stopped during that procedure; they cannot be controlled by a check they lack.
