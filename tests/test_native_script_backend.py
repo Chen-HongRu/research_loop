@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from integrations.script_runtime import backend
+from research_loop.runtime.files import validate_artifact_ref
 
 
 class Transport:
@@ -537,10 +538,20 @@ class NativeScriptBackendTests(unittest.TestCase):
         calls = len(self.transport.calls)
         self.assertEqual(self.invoke("collection")["data"], result)
         self.assertEqual(len(self.transport.calls), calls)
-        for evidence in result["research_evidence"]:
+        for evidence, body in zip(result["research_evidence"], bodies, strict=True):
+            published = validate_artifact_ref(
+                Path(self.config["study_root"]), evidence["ref"]
+            )
+            self.assertEqual(
+                evidence["artifact"],
+                {
+                    "path": evidence["ref"],
+                    "version": "native-report-" + backend._digest(body),
+                },
+            )
             self.assertEqual(
                 evidence["identity"],
-                backend._identity(Path(self.config["study_root"]) / evidence["ref"]),
+                backend._identity(published),
             )
 
     def test_collection_rejects_unrequested_or_oversized_payload(self):

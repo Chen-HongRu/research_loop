@@ -26,6 +26,7 @@ import time
 import uuid
 
 from research_loop.runtime.operation_contract import fields, json_value
+from research_loop.runtime.files import publish_artifact
 
 SUFFIXES = {".py", ".json", ".md", ".txt", ".sh", ".toml", ".yaml", ".yml", ".sbatch"}
 SUBMISSION_MARGIN_SECONDS = 60
@@ -782,8 +783,7 @@ print(json.dumps(result))
             body["text"] = value.decode("utf-8")
         else:
             body["content_collected"] = False
-        ref = "artifacts/" + uuid.uuid4().hex + ".json"
-        _write(study / ref, body)
+        ref = publish_artifact(study, body)
         artifact = {"path": ref, "version": "native-report-" + _digest(body)}
         artifacts.append(artifact)
         evidence.append(

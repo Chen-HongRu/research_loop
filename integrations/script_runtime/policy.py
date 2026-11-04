@@ -171,8 +171,11 @@ def prompt(role, package, config):
             },
         }
     return (
-        "You are the native script research runtime role " + role + ". "
-        "Use only this frozen ContextPackage. No tools, filesystem access or source editing are available. "
+        "You are the native script research runtime role "
+        + role
+        + ". "
+        + native.role_instructions(role)
+        + "Use only this frozen ContextPackage. No tools, filesystem access or source editing are available. "
         "Preserve the exact scientific contract at context["
         + json.dumps(config["scientific_contract_source"])
         + "]. "
