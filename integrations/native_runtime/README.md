@@ -61,6 +61,16 @@ still ignore the field: client mode metadata does not prove server behavior.
 Check reported reasoning-token usage where available, without inspecting thought
 text. See the [DeepSeek thinking protocol](https://api-docs.deepseek.com/guides/thinking_mode/).
 
+An isolated native Pi model profile can request JSON syntax with
+`samplingParams: {"response_format": {"type": "json_object"}}`. Pi 1.5 forwards
+this parameter without enabling extensions, MCP or tools. Use a separate profile
+selected through `PI_CODING_AGENT_DIR` in the trusted executable wrapper when
+interactive sessions should retain their ordinary output mode. The complete
+`{output, evidence_refs}` schema is still supplied in the prompt and validated
+by the application; JSON mode alone does not enforce that schema. Provider support
+must be checked in the target environment. See
+[DeepSeek response formats](https://api-docs.deepseek.com/api/create-chat-completion/).
+
 An explicit `backend_handlers` entry can select `protok_cleanup` with `config`
 containing the frozen `inventory`, `backend_controls`, and optionally an absolute
 `receipt_path`. The cleanup is restricted to imported ProTok operations with

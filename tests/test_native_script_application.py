@@ -381,6 +381,55 @@ class NativeScriptApplicationTests(unittest.TestCase):
                 ):
                     self.assertIn(instruction, prompt)
 
+    def test_prompt_public_operation_contract_uses_config_without_private_settings(
+        self,
+    ):
+        config = deepcopy(self.config)
+        settings = config["backend_handlers"]["script"]["config"]
+        settings.update(
+            resource_pool="accelerator",
+            cost_unit="allocated_gpu_s",
+            staging_headroom_seconds=480,
+        )
+        for role in ("plan", "execute"):
+            prompt = policy.prompt(role, self.package(role).to_dict(), config)
+            with self.subTest(role=role):
+                contracts = json.loads(
+                    prompt.split("Per-backend public operation contracts:\n", 1)[
+                        1
+                    ].split("\n", 1)[0]
+                )
+                self.assertEqual(
+                    contracts,
+                    {
+                        "script": {
+                            "resources": {"accelerator": 1},
+                            "cost_bounds": {
+                                "allocated_gpu_s": "ceil(time_limit_seconds/60)*60"
+                            },
+                            "staging_headroom_seconds": 480,
+                            "example": {
+                                "time_limit_seconds": 1800,
+                                "cost_bounds": {"allocated_gpu_s": 1800},
+                                "minimum_timeout_seconds": 2280,
+                            },
+                        }
+                    },
+                )
+                self.assertIn("no extra CPU or memory keys", prompt)
+                self.assertIn(
+                    "not lifecycle timeout or a multiple of candidate count", prompt
+                )
+                for key in (
+                    "ssh_target",
+                    "remote_root",
+                    "baseline_root",
+                    "journal_root",
+                    "launcher_source",
+                ):
+                    self.assertNotIn(settings[key], prompt)
+                self.assertNotIn(json.dumps(settings), prompt)
+
     def test_all_roles_transport_only_manifested_context_and_evidence(self):
         empty = {"knowledge": [], "reviews": [], "corrections": []}
         outputs = {

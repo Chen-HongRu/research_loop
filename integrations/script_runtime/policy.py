@@ -157,6 +157,19 @@ def prompt(role, package, config):
             "registered measurements or Frontier scores.\n"
             + native.prompt(role, package)
         )
+    contracts = {}
+    for name, handler in config["backend_handlers"].items():
+        settings = handler["config"]
+        contracts[name] = {
+            "resources": {settings["resource_pool"]: 1},
+            "cost_bounds": {settings["cost_unit"]: "ceil(time_limit_seconds/60)*60"},
+            "staging_headroom_seconds": settings["staging_headroom_seconds"],
+            "example": {
+                "time_limit_seconds": 1800,
+                "cost_bounds": {settings["cost_unit"]: 1800},
+                "minimum_timeout_seconds": 1800 + settings["staging_headroom_seconds"],
+            },
+        }
     return (
         "You are the native script research runtime role " + role + ". "
         "Use only this frozen ContextPackage. No tools, filesystem access or source editing are available. "
@@ -183,6 +196,13 @@ def prompt(role, package, config):
         "text edit within operator scope. Return artifacts=[]; a tool-free model cannot create artifact evidence. "
         "The trusted backend runs the script. Script reports are unverified interpretation evidence, not registered "
         "measurements or Frontier scores. Never fabricate measurements. Preserve conditions, uncertainty and limitations. "
+        "For each operation use the selected backend's exact resources map below, with no extra CPU or memory keys; "
+        "CPU and memory are hardware settings owned by the operator. cost_bounds must contain exactly the configured "
+        "cost unit and the rounded allocation for that operation, not lifecycle timeout or a multiple of candidate count. "
+        "For time_limit_seconds=1800, cost is exactly 1800, even when timeout_seconds is larger. "
+        "Per-backend public operation contracts:\n"
+        + json.dumps(contracts, sort_keys=True)
+        + "\n"
         "Return exactly one JSON object with output and evidence_refs. Cite only actually used manifest.allowed_evidence "
         "references. The complete response must satisfy this JSON schema:\n"
         + json.dumps(native.response_schema(MODELS[role]))
