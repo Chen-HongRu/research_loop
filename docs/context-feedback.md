@@ -73,6 +73,13 @@ iteration identity. A snapshot captured before another independent publication
 may still bind and finish. Its knowledge version remains frozen; updates to an
 existing knowledge or eligibility record require that target's expected revision.
 
+Planning calls additionally protect their exact captured task pool, in-flight
+iteration metadata and event range. Judge inputs include the two terminal
+Advocate results or failure summaries. These identities come from the reserved
+planning slots, not the worker's proposed replacements. Research text and
+Frontiers use separate frozen knowledge sources and remain selectable by context
+policy. Claimed task envelopes never change when pending tasks are revised.
+
 In the SQLite updater, permitted evidence references name existing immutable
 `artifacts/<uuid>.json` records. Their file identities are frozen at binding, so
 replacement between dispatch and the first response is rejected. Source metadata
@@ -125,7 +132,7 @@ fields have controller source identities and the exact call revision. Cached
 successful attempts keep their original manifest. Historical attempts without
 one remain readable; their provenance is not retroactively invented.
 
-SQLite schema 3 contains binding, update and publication records. Earlier SQLite
+SQLite schema 4 contains binding, update, publication and planning records. Earlier SQLite
 test Studies must be retained as evidence or recreated in a new directory. No
 automatic conversion of existing Studies occurs in this stage.
 

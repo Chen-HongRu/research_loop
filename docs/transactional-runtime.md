@@ -9,6 +9,8 @@ The [Context / Feedback interface](context-feedback.md) binds immutable inputs
 and validates output before accepting context-bound attempts.
 The [knowledge publication API](knowledge-publication.md) appends Scout/Review
 records and projects research documents and Frontiers without replacing state.
+The [task pool and planning APIs](task-planning.md) add protected human ownership,
+pending revisions, dependency-ready claims and event-driven parallel Advocates.
 
 ## Authority and identities
 
@@ -50,6 +52,14 @@ Claiming a pending task freezes its revision and creates one independent
 iteration. Claim and iteration-budget reservation commit together. Dependencies
 must have published results. Repeating the same claim returns the existing
 iteration and does not admit a second investigation.
+
+Pending tasks can be revised through the task pool; every revision is retained.
+Claimed envelopes remain immutable even after their iteration finishes. Human
+intervention promotes an autonomous pending task to protected human ownership.
+`claim_next()` filters blocked/cancelled/claimed tasks, then orders ready human
+tasks before autonomous tasks, with ascending numeric priority and stable ID
+within each tier. Direct `claim_task()` obeys that same order for new claims.
+The pool version advances on revisions, claims and iteration terminal outcomes.
 
 Iteration phases are `plan → execute → review → publication`. Each phase permits
 one active attempt. An accepted artifact advances only that iteration and its
@@ -111,7 +121,7 @@ New runtime initialization publishes `runtime.json` with `format: sqlite-v1` and
 the database Study identity. The serial `Study` and `TaskQueue` reject either this
 marker or `runtime.sqlite3`, including partially initialized directories. The
 runtime refuses in-place creation over legacy `study.json` or `state.json`.
-The current SQLite schema is 3; earlier prototype schemas are explicitly rejected.
+The current SQLite schema is 4; earlier prototype schemas are explicitly rejected.
 Existing Studies require the later explicit migration procedure; creating a
 database beside existing files is not migration. Old deployed binaries must be
 stopped during that procedure; they cannot be controlled by a check they lack.

@@ -183,6 +183,28 @@ class Updater:
         proposal = self._read_record(plan["output_ref"], plan["output_identity"])
         return proposal["normalized_output"]
 
+    def _planning_inputs(self, record):
+        planning = record.get("planning")
+        if planning is None:
+            return {}
+        inputs = {
+            "planning": self._read_record(
+                planning["snapshot_ref"], planning["identity"]
+            )
+        }
+        for advocate in planning.get("advocates", []):
+            value = {"attempt_id": advocate["id"], "status": advocate["status"]}
+            if advocate["status"] == "accepted":
+                value["output"] = self._read_record(
+                    advocate["output_ref"], advocate["output_identity"]
+                )["normalized_output"]
+            elif advocate["status"] == "failed":
+                value["failure_reason"] = advocate["failure_reason"]
+            else:
+                raise InvalidTransition("Judge requires terminal Advocate results")
+            inputs[advocate["slot"]] = value
+        return inputs
+
     def _check_package(self, record, package, plan_output):
         context, manifest = package.context, package.manifest
         control, attempt = record["control"], record["attempt"]
@@ -226,6 +248,7 @@ class Updater:
         for key in ("goal", "global_evaluation"):
             if key in config:
                 required[key] = config[key]
+        required.update(self._planning_inputs(record))
         if attempt["role"] in {"execute", "review"}:
             if record["plan"] is None:
                 raise InvalidTransition(
@@ -301,6 +324,19 @@ class Updater:
         if current["plan"] is not None:
             plan = current["plan"]
             self._check_identity(plan["output_ref"], plan["output_identity"])
+        if not _same(current.get("planning"), captured.get("planning")):
+            raise ConflictError("Frozen planning references changed")
+        planning = current.get("planning")
+        if planning is not None:
+            self._check_identity(planning["snapshot_ref"], planning["identity"])
+            self._check_identity(
+                planning["knowledge_ref"], planning["knowledge_identity"]
+            )
+            for advocate in planning.get("advocates", []):
+                if advocate["status"] == "accepted":
+                    self._check_identity(
+                        advocate["output_ref"], advocate["output_identity"]
+                    )
 
     def bind_context(self, call_identity, package):
         if not isinstance(call_identity, CallIdentity) or not isinstance(

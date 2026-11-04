@@ -17,14 +17,15 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DATABASE = "runtime.sqlite3"
 ROLES = {"scout", "advocate", "judge", "plan", "execute", "review"}
 PHASES = {"plan": "execute", "execute": "review", "review": "publication"}
 _CONTROL_METADATA = (
     "study_id,max_iterations,max_calls,max_seconds,admission_deadline,calls,iterations,"
-    "elapsed_seconds,stop_reason,owner_epoch,owner_open,anchor"
+    "elapsed_seconds,stop_reason,owner_epoch,owner_open,anchor,pool_version"
 )
+_TASK_METADATA = "id,revision,source,priority,dependencies_json,cancelled"
 
 
 class StateStoreError(RuntimeError):
@@ -59,11 +60,42 @@ CREATE TABLE control (
  calls INTEGER NOT NULL DEFAULT 0, iterations INTEGER NOT NULL DEFAULT 0,
  elapsed_seconds REAL NOT NULL DEFAULT 0, stop_reason TEXT,
  owner_epoch INTEGER NOT NULL DEFAULT 0, owner_open INTEGER NOT NULL DEFAULT 0,
- anchor REAL NOT NULL
+ anchor REAL NOT NULL, pool_version INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE tasks (
  id TEXT PRIMARY KEY, revision INTEGER NOT NULL, specification_json TEXT NOT NULL,
- source TEXT NOT NULL, priority INTEGER NOT NULL, dependencies_json TEXT NOT NULL
+ source TEXT NOT NULL, priority INTEGER NOT NULL, dependencies_json TEXT NOT NULL,
+ cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN (0,1))
+);
+CREATE TABLE task_revisions (
+ id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,
+ specification_json TEXT NOT NULL, source TEXT NOT NULL, priority INTEGER NOT NULL,
+ dependencies_json TEXT NOT NULL, cancelled INTEGER NOT NULL CHECK(cancelled IN (0,1)),
+ pool_version INTEGER NOT NULL, origin_kind TEXT NOT NULL, origin_id TEXT NOT NULL,
+ PRIMARY KEY(id,revision)
+);
+CREATE TABLE task_requests (
+ request_id TEXT PRIMARY KEY, intent_json TEXT NOT NULL, receipt_json TEXT NOT NULL
+);
+CREATE TABLE task_batches (
+ attempt_id TEXT PRIMARY KEY REFERENCES attempts(id), payload_ref TEXT NOT NULL,
+ identity_json TEXT NOT NULL, receipt_json TEXT NOT NULL
+);
+CREATE TABLE planning_events (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, producer_key TEXT NOT NULL UNIQUE,
+ kind TEXT NOT NULL, payload_json TEXT NOT NULL
+);
+CREATE TABLE planning_rounds (
+ id TEXT PRIMARY KEY, owner_epoch INTEGER NOT NULL, pool_version INTEGER NOT NULL,
+ event_from INTEGER NOT NULL, event_through INTEGER NOT NULL,
+ snapshot_ref TEXT NOT NULL, identity_json TEXT NOT NULL,
+ knowledge_ref TEXT NOT NULL, knowledge_identity_json TEXT NOT NULL,
+ status TEXT NOT NULL, error TEXT, receipt_json TEXT
+);
+CREATE UNIQUE INDEX active_planning_round ON planning_rounds(status) WHERE status='active';
+CREATE TABLE planning_calls (
+ round_id TEXT NOT NULL REFERENCES planning_rounds(id), slot TEXT NOT NULL,
+ attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(id), PRIMARY KEY(round_id,slot)
 );
 CREATE TABLE iterations (
  id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
@@ -162,6 +194,8 @@ def _decode(row):
         if name.endswith("_json"):
             value = result.pop(name)
             result[name[:-5]] = json.loads(value) if value else None
+    if "cancelled" in result:
+        result["cancelled"] = bool(result["cancelled"])
     return result
 
 
@@ -326,6 +360,7 @@ class StateStore:
             result = {
                 "study_id": row["study_id"],
                 "schema_version": SCHEMA_VERSION,
+                "pool_version": row["pool_version"],
                 "config": row["config"],
                 "limits": {
                     key: row[key]
@@ -448,13 +483,14 @@ class Coordinator:
             or len(set(dependencies)) != len(dependencies)
         ):
             raise ValueError("Invalid task dependencies")
-        values = (
-            task_id,
-            1,
-            _json(specification),
-            source,
-            priority,
-            _json(list(dependencies)),
+        task = dict(
+            id=task_id,
+            revision=1,
+            specification=json.loads(_json(specification)),
+            source=source,
+            priority=priority,
+            dependencies=list(dependencies),
+            cancelled=False,
         )
         with self._transaction() as (conn, _):
             if conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
@@ -464,47 +500,158 @@ class Coordinator:
                     "SELECT 1 FROM tasks WHERE id=?", (dependency,)
                 ).fetchone():
                     raise ConflictError(f"Unknown dependency: {dependency}")
-            conn.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?)", values)
-            return _decode(
-                conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            result = self._save_task(conn, task, "direct", task_id)
+            if source == "human":
+                self._planning_event(
+                    conn,
+                    f"direct-human:{task_id}",
+                    "human_task",
+                    {"id": task_id, "revision": 1},
+                )
+            return result
+
+    @staticmethod
+    def _planning_event(conn, producer_key, kind, payload):
+        _text(producer_key, "producer_key")
+        _text(kind, "event kind")
+        payload_json = _json(payload)
+        previous = conn.execute(
+            "SELECT * FROM planning_events WHERE producer_key=?", (producer_key,)
+        ).fetchone()
+        if previous:
+            if previous["kind"] != kind or previous["payload_json"] != payload_json:
+                raise ConflictError("Planning event key reused with different intent")
+            return _decode(previous)
+        identity = conn.execute(
+            "INSERT INTO planning_events(producer_key,kind,payload_json) VALUES(?,?,?)",
+            (producer_key, kind, payload_json),
+        ).lastrowid
+        return _decode(
+            conn.execute(
+                "SELECT * FROM planning_events WHERE id=?", (identity,)
+            ).fetchone()
+        )
+
+    @staticmethod
+    def _save_task(conn, task, origin_kind, origin_id):
+        """Persist one validated pending revision and its history atomically."""
+        prior = _decode(
+            conn.execute(
+                "SELECT id,revision,source,cancelled FROM tasks WHERE id=?",
+                (task["id"],),
+            ).fetchone()
+        )
+        if conn.execute(
+            "SELECT 1 FROM iterations WHERE task_id=?", (task["id"],)
+        ).fetchone():
+            raise InvalidTransition("A claimed task envelope is frozen")
+        if prior and prior["cancelled"]:
+            raise InvalidTransition("Cancelled task identities remain reserved")
+        if prior and prior["source"] == "human" and task["source"] != "human":
+            raise InvalidTransition("Human task ownership cannot be downgraded")
+        if task["revision"] != (prior["revision"] + 1 if prior else 1):
+            raise ConflictError("Task revision must advance exactly once")
+        values = (
+            task["id"],
+            task["revision"],
+            _json(task["specification"]),
+            task["source"],
+            task["priority"],
+            _json(task["dependencies"]),
+            int(task["cancelled"]),
+        )
+        conn.execute(
+            "INSERT INTO tasks VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "revision=excluded.revision,specification_json=excluded.specification_json,"
+            "source=excluded.source,priority=excluded.priority,"
+            "dependencies_json=excluded.dependencies_json,cancelled=excluded.cancelled",
+            values,
+        )
+        conn.execute("UPDATE control SET pool_version=pool_version+1")
+        version = conn.execute("SELECT pool_version FROM control").fetchone()[0]
+        conn.execute(
+            "INSERT INTO task_revisions VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (*values, version, origin_kind, origin_id),
+        )
+        return _decode(
+            conn.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
+        )
+
+    @staticmethod
+    def _ready_tasks(conn):
+        claimed = {
+            row["task_id"]: row["status"]
+            for row in conn.execute("SELECT task_id,status FROM iterations")
+        }
+        ready = []
+        for row in conn.execute(f"SELECT {_TASK_METADATA} FROM tasks"):
+            task = _decode(row)
+            if task["id"] in claimed or task["cancelled"]:
+                continue
+            if all(claimed.get(dep) == "published" for dep in task["dependencies"]):
+                ready.append(task)
+        return sorted(
+            ready,
+            key=lambda task: (task["source"] != "human", task["priority"], task["id"]),
+        )
+
+    def _claim_task(self, conn, control, task, expected_revision, *, ready=None):
+        if task is None or task["revision"] != expected_revision:
+            raise ConflictError("Unknown task or task revision mismatch")
+        existing = conn.execute(
+            "SELECT * FROM iterations WHERE task_id=?", (task["id"],)
+        ).fetchone()
+        if existing:
+            return _decode(existing)
+        if task["cancelled"]:
+            raise InvalidTransition("Cancelled tasks cannot be claimed")
+        self._admit(control, deadline=True)
+        limit = control["max_iterations"]
+        if limit is not None and control["iterations"] >= limit:
+            raise BudgetExceeded("Iteration budget exhausted")
+        for dependency in task["dependencies"]:
+            record = conn.execute(
+                "SELECT status FROM iterations WHERE task_id=?", (dependency,)
+            ).fetchone()
+            if record is None or record["status"] != "published":
+                raise InvalidTransition(f"Dependency is not published: {dependency}")
+        if ready is None:
+            ready = self._ready_tasks(conn)
+        if not ready or ready[0]["id"] != task["id"]:
+            raise InvalidTransition("Higher-priority ready task must be claimed first")
+        iteration_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO iterations VALUES(?,?,?,1,'plan','active')",
+            (iteration_id, task["id"], expected_revision),
+        )
+        conn.execute(
+            "UPDATE control SET iterations=iterations+1,pool_version=pool_version+1"
+        )
+        return _decode(
+            conn.execute(
+                "SELECT * FROM iterations WHERE id=?", (iteration_id,)
+            ).fetchone()
+        )
+
+    def claim_next(self):
+        """Claim the highest-priority dependency-ready task in one transaction."""
+        with self._transaction() as (conn, control):
+            ready = self._ready_tasks(conn)
+            if not ready:
+                return None
+            return self._claim_task(
+                conn, control, ready[0], ready[0]["revision"], ready=ready
             )
 
     def claim_task(self, task_id, expected_revision=1):
         _revision(expected_revision)
         with self._transaction() as (conn, control):
             task = _decode(
-                conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-            )
-            if task is None or task["revision"] != expected_revision:
-                raise ConflictError("Unknown task or task revision mismatch")
-            existing = conn.execute(
-                "SELECT * FROM iterations WHERE task_id=?", (task_id,)
-            ).fetchone()
-            if existing:
-                return _decode(existing)
-            self._admit(control, deadline=True)
-            limit = control["max_iterations"]
-            if limit is not None and control["iterations"] >= limit:
-                raise BudgetExceeded("Iteration budget exhausted")
-            for dependency in task["dependencies"]:
-                record = conn.execute(
-                    "SELECT status FROM iterations WHERE task_id=?", (dependency,)
-                ).fetchone()
-                if record is None or record["status"] != "published":
-                    raise InvalidTransition(
-                        f"Dependency is not published: {dependency}"
-                    )
-            iteration_id = uuid.uuid4().hex
-            conn.execute(
-                "INSERT INTO iterations VALUES(?,?,?,1,'plan','active')",
-                (iteration_id, task_id, expected_revision),
-            )
-            conn.execute("UPDATE control SET iterations=iterations+1")
-            return _decode(
                 conn.execute(
-                    "SELECT * FROM iterations WHERE id=?", (iteration_id,)
+                    f"SELECT {_TASK_METADATA} FROM tasks WHERE id=?", (task_id,)
                 ).fetchone()
             )
+            return self._claim_task(conn, control, task, expected_revision)
 
     def begin_attempt(
         self, role, *, request_id, iteration_id=None, expected_revision=None
@@ -519,62 +666,81 @@ class Coordinator:
         if iteration_id is not None:
             _revision(expected_revision)
         with self._transaction() as (conn, control):
-            existing = _decode(
-                conn.execute(
-                    "SELECT * FROM attempts WHERE request_id=?", (request_id,)
-                ).fetchone()
+            return self._reserve_attempt(
+                conn,
+                control,
+                role,
+                request_id=request_id,
+                iteration_id=iteration_id,
+                expected_revision=expected_revision,
             )
-            if existing:
-                if (
-                    existing["role"],
-                    existing["iteration_id"],
-                    existing["expected_revision"],
-                ) != (role, iteration_id, expected_revision):
-                    raise ConflictError("Request id reused with different intent")
-                return existing
-            self._admit(control)
-            if (
-                control["max_calls"] is not None
-                and control["calls"] >= control["max_calls"]
-            ):
-                raise BudgetExceeded("Call budget exhausted")
-            if iteration_id is not None:
-                iteration = conn.execute(
-                    "SELECT * FROM iterations WHERE id=?", (iteration_id,)
-                ).fetchone()
-                if iteration is None or iteration["revision"] != expected_revision:
-                    raise ConflictError("Unknown iteration or revision mismatch")
-                if iteration["status"] != "active" or iteration["phase"] != role:
-                    raise InvalidTransition(
-                        "Attempt role does not match active iteration phase"
-                    )
-                active = conn.execute(
-                    "SELECT 1 FROM attempts WHERE role=? AND iteration_id=? AND status='active'",
-                    (role, iteration_id),
-                ).fetchone()
-                if active:
-                    raise InvalidTransition(
-                        "This phase already has an active or unresolved attempt"
-                    )
-            attempt_id, token = uuid.uuid4().hex, uuid.uuid4().hex
+
+    def _reserve_attempt(
+        self,
+        conn,
+        control,
+        role,
+        *,
+        request_id,
+        iteration_id=None,
+        expected_revision=None,
+    ):
+        """Reserve within an existing owner transaction; callers validate scope."""
+        existing = _decode(
             conn.execute(
-                "INSERT INTO attempts(id,request_id,role,iteration_id,expected_revision,owner_epoch,worker_token,status) VALUES(?,?,?,?,?,?,?,'active')",
-                (
-                    attempt_id,
-                    request_id,
-                    role,
-                    iteration_id,
-                    expected_revision,
-                    self.owner_epoch,
-                    token,
-                ),
-            )
-            conn.execute("UPDATE control SET calls=calls+1")
-            return _decode(
-                conn.execute(
-                    "SELECT * FROM attempts WHERE id=?", (attempt_id,)
-                ).fetchone()
-            )
+                "SELECT * FROM attempts WHERE request_id=?", (request_id,)
+            ).fetchone()
+        )
+        if existing:
+            if (
+                existing["role"],
+                existing["iteration_id"],
+                existing["expected_revision"],
+            ) != (role, iteration_id, expected_revision):
+                raise ConflictError("Request id reused with different intent")
+            return existing
+        self._admit(control)
+        if (
+            control["max_calls"] is not None
+            and control["calls"] >= control["max_calls"]
+        ):
+            raise BudgetExceeded("Call budget exhausted")
+        if iteration_id is not None:
+            iteration = conn.execute(
+                "SELECT * FROM iterations WHERE id=?", (iteration_id,)
+            ).fetchone()
+            if iteration is None or iteration["revision"] != expected_revision:
+                raise ConflictError("Unknown iteration or revision mismatch")
+            if iteration["status"] != "active" or iteration["phase"] != role:
+                raise InvalidTransition(
+                    "Attempt role does not match active iteration phase"
+                )
+            active = conn.execute(
+                "SELECT 1 FROM attempts WHERE role=? AND iteration_id=? AND status='active'",
+                (role, iteration_id),
+            ).fetchone()
+            if active:
+                raise InvalidTransition(
+                    "This phase already has an active or unresolved attempt"
+                )
+        attempt_id, token = uuid.uuid4().hex, uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO attempts(id,request_id,role,iteration_id,expected_revision,owner_epoch,worker_token,status) VALUES(?,?,?,?,?,?,?,'active')",
+            (
+                attempt_id,
+                request_id,
+                role,
+                iteration_id,
+                expected_revision,
+                self.owner_epoch,
+                token,
+            ),
+        )
+        conn.execute("UPDATE control SET calls=calls+1")
+        control["calls"] += 1
+        return _decode(
+            conn.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+        )
 
     def _attempt(
         self,
@@ -719,6 +885,10 @@ class Coordinator:
                     f"SELECT {columns} FROM tasks WHERE id=?", (iteration["task_id"],)
                 ).fetchone()
             )
+            if task is None or task["revision"] != iteration["task_revision"]:
+                raise ConflictError(
+                    "Claimed task revision no longer matches its frozen envelope"
+                )
         binding = _decode(
             conn.execute(
                 "SELECT * FROM contexts WHERE attempt_id=?", (attempt["id"],)
@@ -742,7 +912,31 @@ class Coordinator:
             knowledge_version=conn.execute(
                 "SELECT COALESCE(MAX(id),0) FROM publications"
             ).fetchone()[0],
+            planning=self._planning_record(conn, attempt),
         )
+
+    @staticmethod
+    def _planning_record(conn, attempt):
+        row = _decode(
+            conn.execute(
+                "SELECT r.id,r.snapshot_ref,r.identity_json,r.knowledge_ref,r.knowledge_identity_json FROM planning_rounds r "
+                "JOIN planning_calls c ON c.round_id=r.id WHERE c.attempt_id=?",
+                (attempt["id"],),
+            ).fetchone()
+        )
+        if row is None:
+            return None
+        if attempt["role"] == "judge":
+            row["advocates"] = [
+                _decode(record)
+                for record in conn.execute(
+                    "SELECT c.slot,a.id,a.status,a.output_ref,a.output_identity_json,a.failure_reason "
+                    "FROM planning_calls c JOIN attempts a ON a.id=c.attempt_id "
+                    "WHERE c.round_id=? AND c.slot IN ('advocate_a','advocate_b') ORDER BY c.slot",
+                    (row["id"],),
+                )
+            ]
+        return row
 
     def _feedback_snapshot(self, call):
         self._live()
@@ -773,6 +967,17 @@ class Coordinator:
                 conn.execute(
                     "UPDATE iterations SET status='failed',revision=revision+1 WHERE id=?",
                     (iteration["id"],),
+                )
+                conn.execute("UPDATE control SET pool_version=pool_version+1")
+                self._planning_event(
+                    conn,
+                    f"iteration-failed:{iteration['id']}:{attempt_id}",
+                    "task_result",
+                    {
+                        "iteration_id": iteration["id"],
+                        "attempt_id": attempt_id,
+                        "status": "failed",
+                    },
                 )
             conn.execute(
                 "UPDATE attempts SET status='failed',failure_reason=? WHERE id=?",

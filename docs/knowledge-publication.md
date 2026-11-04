@@ -2,8 +2,9 @@
 
 This is stage 3 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77),
 available through Python APIs on new SQLite Studies. The serial CLI retains its
-existing document format. Concurrent dispatch, production role adapters, backend
-receipt collection and explicit migration are later stages. SQLite schema 3
+existing document format. [Planning](task-planning.md) consumes its frozen knowledge
+and publication events. Concurrent experiment dispatch, production role adapters,
+backend receipt collection and explicit migration are later stages. SQLite schema 4
 rejects earlier prototype schemas; no existing Study is converted automatically.
 
 Measurement registration and combined Frontier/document reconstruction require a
@@ -124,6 +125,9 @@ They preserve rejected requests for later resolution; they are not accepted
 knowledge. Publication sequence is independent of iteration identity. An exact
 duplicate call returns its original publication receipt. STOP, limits, spent calls
 and other iterations are never restored from the worker's context.
+Each new publication emits one durable planning trigger. Duplicate publication
+replay does not emit another. Review completion also advances the pool version;
+planning itself does not automatically create another planning trigger.
 
 ## Derived views
 
