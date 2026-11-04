@@ -80,6 +80,42 @@ OUTPUTS = {
 }
 
 
+def assert_prompt_envelope(testcase, prompt, output_model):
+    schema_text = prompt.split(
+        "The complete response must satisfy this JSON schema:\n", 1
+    )[1].split("\nContextPackage:\n", 1)[0]
+    schema = json.loads(schema_text)
+    testcase.assertEqual(schema["type"], "object")
+    testcase.assertEqual(set(schema["properties"]), {"output", "evidence_refs"})
+    testcase.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
+    testcase.assertIs(schema["additionalProperties"], False)
+    testcase.assertEqual(
+        schema["properties"]["evidence_refs"],
+        {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+    )
+    inner = output_model.model_json_schema()
+    definitions = inner.pop("$defs", {})
+    testcase.assertEqual(schema.get("$defs", {}), definitions)
+    testcase.assertEqual(schema["properties"]["output"], inner)
+
+    def check_refs(value):
+        if isinstance(value, dict):
+            if "$ref" in value:
+                reference = value["$ref"]
+                testcase.assertTrue(reference.startswith("#/"))
+                target = schema
+                for part in reference[2:].split("/"):
+                    target = target[part.replace("~1", "/").replace("~0", "~")]
+                testcase.assertIsInstance(target, dict)
+            for child in value.values():
+                check_refs(child)
+        elif isinstance(value, list):
+            for child in value:
+                check_refs(child)
+
+    check_refs(schema)
+
+
 class NativeApplicationTests(unittest.TestCase):
     def setUp(self):
         temporary = TemporaryDirectory()
@@ -217,6 +253,29 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
             ),
             6,
         )
+
+    def test_prompts_describe_complete_envelope_with_resolvable_role_refs(self):
+        for role, output_model in policy.MODELS.items():
+            with self.subTest(role=role):
+                assert_prompt_envelope(
+                    self,
+                    policy.prompt(role, self.package(role).to_dict()),
+                    output_model,
+                )
+
+    def test_flat_missing_and_extended_response_envelopes_remain_rejected(self):
+        for response in (
+            OUTPUTS["plan"],
+            {"output": OUTPUTS["plan"]},
+            {"output": OUTPUTS["plan"], "evidence_refs": [], "extra": True},
+            {
+                "output": OUTPUTS["plan"],
+                "evidence_refs": ["source:used", "source:used"],
+            },
+        ):
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                self.stub(response=response)
+                application.invoke("agent", self.payload("plan"), self.config)
 
     def test_catalog_or_effective_identity_mismatch_never_falls_back(self):
         self.stub(catalog="other-model")

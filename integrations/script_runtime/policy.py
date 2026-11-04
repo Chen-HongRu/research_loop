@@ -168,7 +168,15 @@ def prompt(role, package, config):
         "experiment_definition; do not invent experiments, measurements or results. If the task requires an actual "
         "diagnostic run, include its bounded script operations. For each operation freeze backend, baseline, execution, inputs, outputs, "
         "authorization, resources, rounded GPU cost and lifecycle timeout. Its operations parameters contain only "
-        "baseline_ref and execution. Do not generate source_files in Plan. Keep local_evaluation exactly as frozen "
+        "baseline_ref and execution. Entrypoint must be a relative research/*.py path, such as research/diagnostic.py, "
+        "and gpu=true is required. Declared outputs must be paths relative to /output, such as report.json or "
+        "train/summary.json, without an /output/ prefix. Script source may write /output/report.json; that is distinct "
+        "from the relative outputs declaration. Rounded allocation is ceil(time_limit_seconds/60)*60 GPU seconds. "
+        "cost_bounds uses only that rounded allocation in the configured cost unit, never the longer lifecycle timeout. "
+        "Each operation timeout_seconds must be at least rounded allocation plus the headroom at the frozen scientific "
+        "contract's execution_interface.lifecycle_headroom_seconds (the configured staging_headroom_seconds). "
+        "Plan.timeout_seconds must be at least every operation timeout_seconds. "
+        "Do not generate source_files in Plan. Keep local_evaluation exactly as frozen "
         "in the scientific contract (None if absent), never override the fixed global evaluation. "
         "Execute must return operations=[] when accepted Plan operations are empty. Otherwise it copies every "
         "accepted Plan operation exactly and adds only parameters.source_files, each a path/content "
@@ -176,8 +184,8 @@ def prompt(role, package, config):
         "The trusted backend runs the script. Script reports are unverified interpretation evidence, not registered "
         "measurements or Frontier scores. Never fabricate measurements. Preserve conditions, uncertainty and limitations. "
         "Return exactly one JSON object with output and evidence_refs. Cite only actually used manifest.allowed_evidence "
-        "references. Output schema:\n"
-        + json.dumps(MODELS[role].model_json_schema())
+        "references. The complete response must satisfy this JSON schema:\n"
+        + json.dumps(native.response_schema(MODELS[role]))
         + "\nContextPackage:\n"
         + json.dumps(package, ensure_ascii=False)
     )

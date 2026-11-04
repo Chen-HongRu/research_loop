@@ -187,6 +187,28 @@ def cited_refs(output, context):
     return list(dict.fromkeys(refs))
 
 
+def response_schema(output_model):
+    """Describe the full response while keeping Pydantic references at the root."""
+    output = output_model.model_json_schema()
+    definitions = output.pop("$defs", None)
+    schema = {
+        "type": "object",
+        "properties": {
+            "output": output,
+            "evidence_refs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "uniqueItems": True,
+            },
+        },
+        "required": ["output", "evidence_refs"],
+        "additionalProperties": False,
+    }
+    if definitions is not None:
+        schema["$defs"] = definitions
+    return schema
+
+
 def prompt(role, package):
     return (
         "You are the native research runtime role "
@@ -197,8 +219,8 @@ def prompt(role, package):
         "Execute is qualitative here and must return operations=[] and artifacts=[]. "
         "Scout/Review use only registered visible measurements and cited sources. "
         "Return exactly one JSON object with output and evidence_refs. evidence_refs must contain only references actually used, "
-        "all present in manifest.allowed_evidence. The output must satisfy this JSON schema:\n"
-        + json.dumps(MODELS[role].model_json_schema())
+        "all present in manifest.allowed_evidence. The complete response must satisfy this JSON schema:\n"
+        + json.dumps(response_schema(MODELS[role]))
         + "\nContextPackage:\n"
         + json.dumps(package, ensure_ascii=False)
     )

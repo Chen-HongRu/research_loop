@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import test_native_script_backend as fixture
+from test_native_runtime_application import assert_prompt_envelope
 from integrations.native_runtime import policy as native
 from integrations.script_runtime import application, backend, policy
 from research_loop.runtime.context import ContextSnapshot, build_context
@@ -356,6 +357,29 @@ class NativeScriptApplicationTests(unittest.TestCase):
         plan["scientific_contract"]["repeats"] = True
         with self.assertRaisesRegex(ValueError, "frozen scientific"):
             self.validate("plan", plan, context)
+
+    def test_prompts_describe_complete_envelope_with_resolvable_script_refs(self):
+        for role, output_model in policy.MODELS.items():
+            with self.subTest(role=role):
+                assert_prompt_envelope(
+                    self,
+                    policy.prompt(role, self.package(role).to_dict(), self.config),
+                    output_model,
+                )
+
+    def test_script_prompts_explain_existing_paths_and_allocation_bounds(self):
+        for role in ("plan", "execute"):
+            prompt = policy.prompt(role, self.package(role).to_dict(), self.config)
+            with self.subTest(role=role):
+                for instruction in (
+                    "relative research/*.py",
+                    "gpu=true",
+                    "paths relative to /output",
+                    "ceil(time_limit_seconds/60)*60",
+                    "execution_interface.lifecycle_headroom_seconds",
+                    "Plan.timeout_seconds must be at least every operation timeout_seconds",
+                ):
+                    self.assertIn(instruction, prompt)
 
     def test_all_roles_transport_only_manifested_context_and_evidence(self):
         empty = {"knowledge": [], "reviews": [], "corrections": []}
