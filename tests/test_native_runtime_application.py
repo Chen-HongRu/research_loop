@@ -117,6 +117,20 @@ def assert_prompt_envelope(testcase, prompt, output_model):
     check_refs(schema)
 
 
+def expand_prompt_package(view):
+    if view.get("encoding") != "shared-json-subtrees-v1":
+        return deepcopy(view)
+    package = deepcopy(view["package"])
+    for replacement in view["replacements"]:
+        parent = package
+        for key in replacement["path"][:-1]:
+            parent = parent[key]
+        parent[replacement["path"][-1]] = deepcopy(
+            view["shared_values"][replacement["value_id"]]
+        )
+    return package
+
+
 class NativeApplicationTests(unittest.TestCase):
     def setUp(self):
         temporary = TemporaryDirectory()
@@ -168,6 +182,14 @@ assert arguments[arguments.index('--model')+1] == 'synthetic-model'
 assert arguments[arguments.index('--thinking')+1] == 'medium'
 prompt = sys.stdin.read()
 package = json.loads(prompt.split('ContextPackage:\\n', 1)[1])
+if package.get('encoding') == 'shared-json-subtrees-v1':
+    view = package
+    package = view['package']
+    for replacement in view['replacements']:
+        parent = package
+        for key in replacement['path'][:-1]:
+            parent = parent[key]
+        parent[replacement['path'][-1]] = json.loads(json.dumps(view['shared_values'][replacement['value_id']]))
 role = package['manifest']['role']
 assert package['context']['goal'] == 'Synthetic native roles'
 if {hanging!r}:
@@ -571,6 +593,206 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
                         self.assertIn("visible in the frozen planning pool", prompt)
                         self.assertIn("unclaimed, uncancelled autonomous tasks", prompt)
                         self.assertIn("protect human tasks", prompt)
+
+    def repeated_package(self, role):
+        base = self.package(role)
+        inputs = base.context
+        source = {
+            "file-" + str(i) + ".py": {"digest": "a" * 64, "bytes": i}
+            for i in range(244)
+        }
+        for i in range(9):
+            inputs["evidence:synthetic:" + str(i)] = {
+                "report_id": i,
+                "trusted": False,
+                "source": deepcopy(source),
+            }
+        refs = {item["key"]: item["ref"] for item in base.manifest["sources"]}
+        for key in inputs:
+            refs.setdefault(key, "source:" + key)
+        snapshot = ContextSnapshot.capture(
+            study_id="synthetic",
+            revisions={},
+            inputs=inputs,
+            sources=[
+                {
+                    "id": key,
+                    "key": key,
+                    "ref": refs[key],
+                    "revision": 1,
+                    "reason": "Synthetic frozen report",
+                    "allow_feedback": True,
+                }
+                for key in inputs
+            ],
+            protected_keys=base.manifest["protected_keys"],
+            allowed_evidence=list(refs.values()),
+        )
+        return build_context(snapshot, role, None, "synthetic-repeated-v1", {})
+
+    def test_review_encoding_is_typed_lossless_and_nonmutating(self):
+        large = {
+            "unicode/键~": [
+                None,
+                True,
+                1,
+                1.0,
+                -0.0,
+                {"value_id": "v1", "path": ["literal"]},
+            ],
+            "payload": "研究" * 600,
+        }
+        marker = {
+            "encoding": "shared-json-subtrees-v1",
+            "value_id": "v1",
+            "replacements": None,
+        }
+        package = {
+            "context": {
+                "first/键": {
+                    "nested": [deepcopy(large), deepcopy(large)],
+                    "null": None,
+                    "marker": marker,
+                },
+                "second": {
+                    "nested": [deepcopy(large), deepcopy(large)],
+                    "text": json.dumps(large),
+                },
+            },
+            "manifest": {"allowed_evidence": ["original:ref"], "opaque": marker},
+        }
+        original = json.dumps(package, ensure_ascii=False)
+        view = policy.review_prompt_package(package)
+        self.assertEqual(view["encoding"], "shared-json-subtrees-v1")
+        self.assertEqual(json.dumps(package, ensure_ascii=False), original)
+        self.assertEqual(
+            json.dumps(expand_prompt_package(view), ensure_ascii=False), original
+        )
+        self.assertEqual(
+            json.dumps(view["package"]["manifest"], ensure_ascii=False),
+            json.dumps(package["manifest"], ensure_ascii=False),
+        )
+        self.assertEqual(
+            len(view["shared_values"]), 1
+        )  # Repeated outer list wins over nested duplicate objects.
+        paths = [entry["path"] for entry in view["replacements"]]
+        self.assertEqual(len(paths), 2)
+        for index, path in enumerate(paths):
+            for other in paths[index + 1 :]:
+                self.assertNotEqual(path[: len(other)], other)
+                self.assertNotEqual(other[: len(path)], path)
+        self.assertIsNone(view["package"]["context"]["first/键"]["null"])
+        self.assertEqual(view["package"]["context"]["first/键"]["marker"], marker)
+        self.assertEqual(
+            view["package"]["context"]["second"]["text"], json.dumps(large)
+        )
+        # Order and scalar types are identity, not Python's bool/int/float equality.
+        variants = [{"a": "x" * 1100, "n": value} for value in (True, 1, 1.0)]
+        variants += [{"a": "y" * 1100, "b": 1}, {"b": 1, "a": "y" * 1100}]
+        unique = {"context": {"items": {"values": variants}}, "manifest": {}}
+        self.assertIs(policy.review_prompt_package(unique), unique)
+
+    def test_review_shared_ids_do_not_collide_with_original_evidence_refs(self):
+        repeated = {"payload": "x" * 4096}
+        package = {
+            "context": {"report": {"items": [deepcopy(repeated), deepcopy(repeated)]}},
+            "manifest": {"allowed_evidence": ["v1", "source:original"]},
+        }
+        view = policy.review_prompt_package(package)
+        self.assertEqual(set(view["shared_values"]), {"v2"})
+        self.assertEqual(view["package"]["manifest"], package["manifest"])
+        self.assertIn("v1", view["package"]["manifest"]["allowed_evidence"])
+        self.assertTrue(
+            set(view["shared_values"]).isdisjoint(
+                package["manifest"]["allowed_evidence"]
+            )
+        )
+        self.assertEqual(json.dumps(expand_prompt_package(view)), json.dumps(package))
+
+    def test_review_encoding_array_paths_and_no_savings_fallback(self):
+        repeated = {"payload": "x" * 2048, "null": None}
+        package = {
+            "context": {"report": {"items": [deepcopy(repeated), deepcopy(repeated)]}},
+            "manifest": {},
+        }
+        view = policy.review_prompt_package(package)
+        self.assertEqual([item["path"][-1] for item in view["replacements"]], [0, 1])
+        self.assertEqual(expand_prompt_package(view), package)
+        small = {
+            # Repeating a long literal path outweighs sharing the eligible objects.
+            "context": {
+                "report" + "p" * 2048: {"items": [{"payload": "x" * 1020}] * 2}
+            },
+            "manifest": {},
+        }
+        self.assertIs(policy.review_prompt_package(small), small)
+
+    def test_nine_reports_shrink_with_manifest_and_outer_bindings_visible(self):
+        package = self.repeated_package("review").to_dict()
+        view = policy.review_prompt_package(package)
+        original_bytes = len(json.dumps(package, ensure_ascii=False).encode())
+        encoded_bytes = len(
+            (
+                json.dumps(view, ensure_ascii=False)
+                + policy.SHARED_SUBTREES_INSTRUCTIONS
+            ).encode()
+        )
+        self.assertLess(encoded_bytes, original_bytes // 2)
+        self.assertEqual(expand_prompt_package(view), package)
+        self.assertEqual(
+            json.dumps(view["package"]["manifest"]), json.dumps(package["manifest"])
+        )
+        self.assertEqual(len(view["replacements"]), 9)
+        for item in view["replacements"]:
+            self.assertEqual(len(item["path"]), 3)
+            self.assertEqual(item["path"][-1], "source")
+            wrapper = view["package"]["context"][item["path"][1]]
+            self.assertFalse(wrapper["trusted"])
+            self.assertIn("report_id", wrapper)
+        self.assertIn("receipt:m", view["package"]["manifest"]["allowed_evidence"])
+
+    def test_real_cli_stub_encodes_only_review_and_keeps_original_evidence_rules(self):
+        for role in policy.MODELS:
+            payload = self.payload(role)
+            payload["package"] = self.repeated_package(role).to_dict()
+            with self.subTest(role=role):
+                self.assertEqual(
+                    application.invoke("agent", payload, self.config)["output"],
+                    OUTPUTS[role],
+                )
+                folder = next(
+                    (self.root / "private-calls").glob(
+                        "call-synthetic-" + role + "-*/prompt.txt"
+                    )
+                )
+                view = json.loads(folder.read_text().split("ContextPackage:\n", 1)[1])
+                self.assertEqual(
+                    view.get("encoding") == "shared-json-subtrees-v1", role == "review"
+                )
+                self.assertEqual(expand_prompt_package(view), payload["package"])
+        for ref in ("v1", "source:unauthorized"):
+            output = deepcopy(OUTPUTS["review"])
+            output["knowledge"] = [
+                {
+                    "id": "note",
+                    "expected_revision": 0,
+                    "kind": "interpretation",
+                    "statement": "Synthetic uncertainty",
+                    "conditions": ["Fixture"],
+                    "source_refs": [ref],
+                    "measurement_ids": [],
+                    "interpretation": "Unverified",
+                    "limitations": ["No result"],
+                }
+            ]
+            self.stub(response={"output": output, "evidence_refs": ["receipt:m", ref]})
+            payload = self.payload("review")
+            payload["package"] = self.repeated_package("review").to_dict()
+            with (
+                self.subTest(ref=ref),
+                self.assertRaisesRegex(ValueError, "outside the bound manifest"),
+            ):
+                application.invoke("agent", payload, self.config)
 
     def test_local_evaluation_with_nullable_global_requires_route_and_valid_protocol(
         self,

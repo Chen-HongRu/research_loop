@@ -7,6 +7,15 @@ The initial Execute is qualitative only: its operations and artifacts lists are
 empty. It does not edit source or start training. Existing legacy Harness role
 schemas are separate and are not automatically adapted.
 
+Review prompts may encode repeated large nested context objects once using
+`shared-json-subtrees-v1`, only when this reduces prompt bytes. The prompt includes
+the complete shared objects and explicit nonoverlapping replacement paths; exact
+substitution reconstructs the original package. The manifest, report wrappers,
+original evidence references and output validation remain unchanged. Shared IDs
+are representation labels, never evidence. Strings remain opaque, and other
+roles keep the ordinary package format. Frozen inputs and retries are unchanged;
+this encoding does not summarize or drop evidence or add authority.
+
 Set `runtime.worker_adapter` to `{"id": "native-runtime-v1", "version": "1"}`
 and select a versioned immutable copy of `application.py` with `--application`.
 Its package and dependencies must be available in the chosen runtime environment.

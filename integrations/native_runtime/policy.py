@@ -251,12 +251,95 @@ def role_instructions(role):
     return instructions
 
 
+SHARED_SUBTREES_INSTRUCTIONS = (
+    "The following ContextPackage uses shared-json-subtrees-v1 lossless encoding. "
+    "Start with package and, for each replacements entry, replace the null at its literal path "
+    "(object keys or array indices) with the complete shared_values[value_id]. Only listed paths are substitutions; "
+    "all other nulls and marker-like data are original data. Shared values are not recursively encoded. "
+    "This reconstructs the exact original ContextPackage without changing its manifest, authority, trust or citations. "
+    "Shared IDs are not evidence references. Use original manifest references for citations, and expanded original "
+    "values in your output, never shared IDs or encoding placeholders. "
+)
+
+
+def _prompt_json(value):
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+def review_prompt_package(package):
+    """Intern repeated nested context objects without changing the frozen package."""
+    occurrences = {}
+
+    def visit(value, path):
+        if not isinstance(value, (dict, list)):
+            return  # Strings, including report text, remain opaque.
+        # Keep each context item's outer identity/trust wrapper literal.
+        if len(path) >= 3:
+            serialized = _prompt_json(value)
+            if len(serialized.encode("utf-8")) >= 1024:
+                occurrences.setdefault(serialized, []).append(path)
+        children = value.items() if isinstance(value, dict) else enumerate(value)
+        for key, child in children:
+            visit(child, path + [key])
+
+    for key, value in package["context"].items():
+        visit(value, ["context", key])
+    selected, shared, replacements = [], {}, []
+    evidence_refs = set(package["manifest"].get("allowed_evidence", []))
+    next_value = 1
+    # Larger repeated subtrees win over any descendants, without nested encoding.
+    for serialized, paths in sorted(
+        occurrences.items(), key=lambda item: len(item[0].encode("utf-8")), reverse=True
+    ):
+        available = [
+            path
+            for path in paths
+            if not any(
+                path[: len(old)] == old or old[: len(path)] == path for old in selected
+            )
+        ]
+        if len(available) < 2:
+            continue
+        while "v" + str(next_value) in evidence_refs:
+            next_value += 1
+        value_id = "v" + str(next_value)
+        next_value += 1
+        shared[value_id] = json.loads(serialized)
+        for path in available:
+            selected.append(path)
+            replacements.append({"path": path, "value_id": value_id})
+    if not replacements:
+        return package
+    original = _prompt_json(package)
+    view = json.loads(original)
+    for replacement in replacements:
+        path = replacement["path"]
+        parent = view
+        for key in path[:-1]:
+            parent = parent[key]
+        parent[path[-1]] = None
+    encoded = {
+        "encoding": "shared-json-subtrees-v1",
+        "package": view,
+        "shared_values": shared,
+        "replacements": replacements,
+    }
+    if len(
+        (_prompt_json(encoded) + SHARED_SUBTREES_INSTRUCTIONS).encode("utf-8")
+    ) < len(original.encode("utf-8")):
+        return encoded
+    return package
+
+
 def prompt(role, package):
+    view = review_prompt_package(package) if role == "review" else package
+    encoding_instructions = SHARED_SUBTREES_INSTRUCTIONS if view is not package else ""
     return (
         "You are the native research runtime role "
         + role
         + ". Use only the supplied ContextPackage. "
         + role_instructions(role)
+        + encoding_instructions
         + "No tools, filesystem access or source editing are available. Preserve uncertainty, conditions and limitations. "
         "Do not treat narratives or backend returns as scientific measurements. Plan states an explicit experiment definition. "
         "Execute is qualitative here and must return operations=[] and artifacts=[]. "
@@ -265,5 +348,5 @@ def prompt(role, package):
         "all present in manifest.allowed_evidence. The complete response must satisfy this JSON schema:\n"
         + json.dumps(response_schema(MODELS[role]))
         + "\nContextPackage:\n"
-        + json.dumps(package, ensure_ascii=False)
+        + _prompt_json(view)
     )

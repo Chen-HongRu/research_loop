@@ -44,6 +44,21 @@ class Transport:
         return ""
 
 
+class LocalTransport(Transport):
+    def run(self, command, *, stdin=None, timeout=120):
+        if command.startswith(("sbatch ", "sacct ", "scancel ")):
+            return super().run(command, stdin=stdin, timeout=timeout)
+        self.calls.append((command, stdin, timeout))
+        return subprocess.run(
+            shlex.split(command),
+            input=stdin,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=timeout,
+        ).stdout
+
+
 class NativeScriptBackendTests(unittest.TestCase):
     def setUp(self):
         tmp = TemporaryDirectory()
@@ -202,6 +217,30 @@ class NativeScriptBackendTests(unittest.TestCase):
         self.assertEqual(len(self.transport.calls), 1)
         self.assertNotIn("read_bytes", self.transport.calls[0][0])
         self.assertNotIn("sbatch", self.transport.calls[0][0])
+
+    def test_real_local_prepare_rejects_missing_dependency_before_submission(self):
+        self.transport = LocalTransport()
+        self.config["remote_python"] = sys.executable
+        self.request["parameters"]["execution"]["inputs"] = []
+        dependency = self.root / "missing-required-launcher.py"
+        self.config["metadata_checks"] = [
+            {"path": str(dependency), "kind": "file", "identity": None}
+        ]
+        with self.assertRaises(subprocess.CalledProcessError) as failed:
+            self.invoke("prepare")
+        self.assertIn("FileNotFoundError", failed.exception.stderr)
+        self.assertIn(str(dependency), failed.exception.stderr)
+        self.assertEqual(len(self.transport.calls), 1)
+        self.assertFalse(
+            any(
+                call[0].startswith(("sbatch ", "sacct ", "scancel "))
+                for call in self.transport.calls
+            )
+        )
+        self.assertIsNone(self.op["submission_token"])
+        self.assertEqual(
+            list(Path(self.config["journal_root"]).glob("*/journal.json")), []
+        )
 
     def test_rejects_scope_protected_paths_bad_compile_and_understated_cost(self):
         for edit in [
@@ -574,20 +613,6 @@ class NativeScriptBackendTests(unittest.TestCase):
         )
 
     def test_real_local_python_stage_and_collection_smoke_without_scheduler(self):
-        class LocalTransport(Transport):
-            def run(inner, command, *, stdin=None, timeout=120):
-                if command.startswith(("sbatch ", "sacct ", "scancel ")):
-                    return super().run(command, stdin=stdin, timeout=timeout)
-                inner.calls.append((command, stdin, timeout))
-                return subprocess.run(
-                    shlex.split(command),
-                    input=stdin,
-                    text=True,
-                    capture_output=True,
-                    check=True,
-                    timeout=timeout,
-                ).stdout
-
         self.transport = LocalTransport()
         self.config["remote_python"] = sys.executable
         self.config["remote_root"] = str(self.root / "remote")

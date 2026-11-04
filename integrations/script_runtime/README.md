@@ -109,6 +109,13 @@ interpretation with uncertainty and limitations; it must not turn script-reporte
 numbers into verified scientific claims. Imported legacy cleanup uses its separate
 application and cannot be routed through this native submission handler.
 
+Review uses the native lossless `shared-json-subtrees-v1` prompt encoding when
+repeated large nested objects can reduce bytes. Complete shared values and
+explicit replacement paths reconstruct the same frozen package; report wrappers,
+manifest and citation permissions stay literal. This is representation sharing,
+not a summary or new evidence; shared IDs cannot be cited. Plan, Execute and the
+other roles retain their ordinary prompt package format.
+
 Run focused offline checks with:
 
 ```sh
