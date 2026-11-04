@@ -848,6 +848,76 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
             ):
                 policy.validate_output("review", invalid, package.context)
 
+    def test_review_report_interpretation_passes_but_extra_measurement_note_is_rejected(
+        self,
+    ):
+        report = {
+            "status": "synthetic_completed",
+            "limitations": "Unverified script report; no evaluator measurement",
+        }
+        ref = publish_artifact(self.root, report)
+        inputs = {
+            "goal": "Synthetic native roles",
+            "evidence:diagnostic:summary": report,
+        }
+        snapshot = ContextSnapshot.capture(
+            study_id="synthetic",
+            revisions={},
+            inputs=inputs,
+            sources=[
+                {
+                    "id": key,
+                    "key": key,
+                    "ref": ref if key.startswith("evidence:") else "control:" + key,
+                    "revision": 1,
+                    "reason": "Synthetic frozen report",
+                    "allow_feedback": True,
+                }
+                for key in inputs
+            ],
+            protected_keys=["goal"],
+            allowed_evidence=[ref],
+        )
+        package = build_context(snapshot, "review", None, "synthetic-v1", {})
+        output = {
+            "knowledge": [
+                {
+                    "id": "report-interpretation",
+                    "expected_revision": 0,
+                    "kind": "interpretation",
+                    "statement": "The synthetic report describes completion without an audited evaluation measurement.",
+                    "conditions": [
+                        "Only the cited synthetic script report is available"
+                    ],
+                    "source_refs": [ref],
+                    "measurement_ids": [],
+                    "interpretation": "Treat completion as an unverified execution observation.",
+                    "limitations": [
+                        "No registered measurement or scientific validation"
+                    ],
+                }
+            ],
+            "reviews": [],
+            "corrections": [],
+        }
+        payload = self.payload("review") | {"package": package.to_dict()}
+        self.stub(response={"output": output, "evidence_refs": [ref]})
+        self.assertEqual(
+            application.invoke("agent", payload, self.config),
+            {"output": output, "evidence_refs": [ref]},
+        )
+        prompt = policy.prompt("review", package.to_dict())
+        self.assertIn("exactly these nine fields", prompt)
+        self.assertIn("put explanatory notes in interpretation or limitations", prompt)
+        self.assertIn(
+            "Never cite the placeholder or invent unsupported conclusions", prompt
+        )
+        invalid = deepcopy(output)
+        invalid["knowledge"][0]["measurement_ids_note"] = "none"
+        self.stub(response={"output": invalid, "evidence_refs": [ref]})
+        with self.assertRaisesRegex(ValueError, "measurement_ids_note"):
+            application.invoke("agent", payload, self.config)
+
     def test_review_schema_enumerates_only_original_visible_measurement_ids(self):
         package = self.repeated_package("review").to_dict()
         original = deepcopy(package)

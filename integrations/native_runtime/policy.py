@@ -266,6 +266,37 @@ def role_instructions(role):
             "reviews and corrections qualify only registered visible measurements, never operation, job or artifact IDs. "
             "If no measurements are visible, return reviews=[], corrections=[], and measurement_ids=[] for every knowledge entry. "
             "Interpretations of research reports belong in knowledge, not measurement decisions. "
+            "Each knowledge entry has exactly these nine fields: id, expected_revision, kind, statement, conditions, "
+            "source_refs, measurement_ids, interpretation, limitations. Extra fields such as measurement_ids_note "
+            "or any additional *_note field are forbidden; put explanatory notes in interpretation or limitations. "
+            "Complete example for no visible measurements follows. All REPLACE placeholders must be replaced with "
+            "current IDs/revisions and report-supported content; the reference must be an actually used current "
+            "manifest.allowed_evidence reference. Never cite the placeholder or invent unsupported conclusions: "
+            + json.dumps(
+                {
+                    "output": {
+                        "knowledge": [
+                            {
+                                "id": "REPLACE_KNOWLEDGE_ID",
+                                "expected_revision": 0,
+                                "kind": "interpretation",
+                                "statement": "REPLACE_WITH_INTERPRETATION_SUPPORTED_BY_CITED_REPORT",
+                                "conditions": ["REPLACE_WITH_APPLICABLE_CONDITIONS"],
+                                "source_refs": [
+                                    "REPLACE_WITH_CURRENT_ALLOWED_REPORT_REFERENCE"
+                                ],
+                                "measurement_ids": [],
+                                "interpretation": "REPLACE_WITH_EXPLANATION_AND_NOTES",
+                                "limitations": ["REPLACE_WITH_EVIDENCE_LIMITATIONS"],
+                            }
+                        ],
+                        "reviews": [],
+                        "corrections": [],
+                    },
+                    "evidence_refs": ["REPLACE_WITH_CURRENT_ALLOWED_REPORT_REFERENCE"],
+                }
+            )
+            + " "
         )
     if role == "judge":
         instructions += (
