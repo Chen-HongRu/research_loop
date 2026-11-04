@@ -94,10 +94,15 @@ def assert_prompt_envelope(testcase, prompt, output_model):
         schema["properties"]["evidence_refs"],
         {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
     )
-    inner = output_model.model_json_schema()
-    definitions = inner.pop("$defs", {})
-    testcase.assertEqual(schema.get("$defs", {}), definitions)
-    testcase.assertEqual(schema["properties"]["output"], inner)
+    package = expand_prompt_package(
+        json.loads(prompt.split("\nContextPackage:\n", 1)[1])
+    )
+    context = package["context"] if package["manifest"]["role"] == "review" else None
+    expected = policy.response_schema(output_model, context=context)
+    testcase.assertEqual(schema.get("$defs", {}), expected.get("$defs", {}))
+    testcase.assertEqual(
+        schema["properties"]["output"], expected["properties"]["output"]
+    )
 
     def check_refs(value):
         if isinstance(value, dict):
@@ -691,6 +696,127 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
         variants += [{"a": "y" * 1100, "b": 1}, {"b": 1, "a": "y" * 1100}]
         unique = {"context": {"items": {"values": variants}}, "manifest": {}}
         self.assertIs(policy.review_prompt_package(unique), unique)
+
+    def test_review_without_measurements_prompts_empty_decisions_and_accepts_empty_output(
+        self,
+    ):
+        inputs = {
+            "goal": "Synthetic native roles",
+            "permissions": {},
+            "task": {"specification": {}},
+            "budget": {},
+            "evidence:operation-123": {
+                "operation_id": "operation-123",
+                "report": "Unverified observation",
+            },
+        }
+        snapshot = ContextSnapshot.capture(
+            study_id="synthetic",
+            revisions={},
+            inputs=inputs,
+            sources=[
+                {
+                    "id": key,
+                    "key": key,
+                    "ref": "source:report"
+                    if key.startswith("evidence:")
+                    else "control:" + key,
+                    "revision": 1,
+                    "reason": "Synthetic frozen input",
+                    "allow_feedback": True,
+                }
+                for key in inputs
+            ],
+            protected_keys=["goal", "permissions", "task", "budget"],
+            allowed_evidence=["source:report"],
+        )
+        package = build_context(snapshot, "review", None, "synthetic-v1", {})
+        prompt = policy.prompt("review", package.to_dict())
+        schema = json.loads(
+            prompt.split("The complete response must satisfy this JSON schema:\n", 1)[
+                1
+            ].split("\nContextPackage:\n", 1)[0]
+        )
+        properties = schema["properties"]["output"]["properties"]
+        self.assertEqual(properties["reviews"]["maxItems"], 0)
+        self.assertEqual(properties["corrections"]["maxItems"], 0)
+        self.assertEqual(
+            schema["$defs"]["Knowledge"]["properties"]["measurement_ids"]["maxItems"], 0
+        )
+        self.assertIn("never operation, job or artifact IDs", prompt)
+        self.assertIn("Interpretations of research reports belong in knowledge", prompt)
+        output = {"knowledge": [], "reviews": [], "corrections": []}
+        self.stub(response={"output": output, "evidence_refs": []})
+        payload = self.payload("review") | {"package": package.to_dict()}
+        self.assertEqual(
+            application.invoke("agent", payload, self.config)["output"], output
+        )
+        decision = {
+            "measurement_id": "operation-123",
+            "valid": False,
+            "verified": False,
+            "reason": "This is an operation, not a registered measurement",
+        }
+        for invalid in (
+            output | {"reviews": [decision]},
+            output
+            | {
+                "corrections": [
+                    decision
+                    | {"expected_revision": 1, "evidence_refs": ["source:report"]}
+                ]
+            },
+            output
+            | {
+                "knowledge": [
+                    OUTPUTS["scout"]["knowledge"][0]
+                    | {
+                        "kind": "interpretation",
+                        "source_refs": ["source:report"],
+                        "measurement_ids": ["operation-123"],
+                    }
+                ]
+            },
+        ):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(ValueError, "Measurement is absent"),
+            ):
+                policy.validate_output("review", invalid, package.context)
+
+    def test_review_schema_enumerates_only_original_visible_measurement_ids(self):
+        package = self.repeated_package("review").to_dict()
+        original = deepcopy(package)
+        prompt = policy.prompt("review", package)
+        schema = json.loads(
+            prompt.split("The complete response must satisfy this JSON schema:\n", 1)[
+                1
+            ].split("\nContextPackage:\n", 1)[0]
+        )
+        self.assertIn("shared-json-subtrees-v1", prompt)
+        self.assertEqual(package, original)
+        for name in ("Decision", "Correction"):
+            self.assertEqual(
+                schema["$defs"][name]["properties"]["measurement_id"]["enum"], ["m"]
+            )
+        knowledge_ids = schema["$defs"]["Knowledge"]["properties"]["measurement_ids"]
+        self.assertEqual(knowledge_ids["items"]["enum"], ["m"])
+        for value in (
+            schema["properties"]["output"]["properties"]["reviews"],
+            schema["properties"]["output"]["properties"]["corrections"],
+            knowledge_ids,
+        ):
+            self.assertNotIn("maxItems", value)
+        static = policy.response_schema(policy.Publication)
+        self.assertNotIn(
+            "enum", static["$defs"]["Decision"]["properties"]["measurement_id"]
+        )
+        self.assertNotIn(
+            "maxItems", static["properties"]["output"]["properties"]["reviews"]
+        )
+        self.assertEqual(
+            schema["properties"]["evidence_refs"], static["properties"]["evidence_refs"]
+        )
 
     def test_review_shared_ids_do_not_collide_with_original_evidence_refs(self):
         repeated = {"payload": "x" * 4096}
