@@ -248,6 +248,14 @@ class Updater:
         for key in ("goal", "global_evaluation"):
             if key in config:
                 required[key] = config[key]
+        if attempt["role"] in {"plan", "execute"}:
+            for key in (
+                "execution_backends",
+                "resource_pools",
+                "operation_authorizations",
+            ):
+                if key in config:
+                    required[key] = config[key]
         required.update(self._planning_inputs(record))
         if attempt["role"] in {"execute", "review"}:
             if record["plan"] is None:
@@ -419,6 +427,17 @@ class Updater:
         normalized = json.loads(_json(normalized))
         if _FORBIDDEN & normalized.keys():
             raise ValueError("Normalized output cannot update control or authorization")
+        if call_identity.role == "execute":
+            from .operations import Operations
+
+            captured["operation_admission"] = Operations(
+                self.coordinator
+            ).prepare_execution(
+                call_identity,
+                normalized,
+                self._plan_output(captured),
+                captured["control"]["config"],
+            )
         proposal = UpdateProposal.from_dict(
             dict(
                 call=call_identity.to_dict(),
@@ -492,7 +511,7 @@ class Updater:
         self._expected_revisions(proposed, expected_revisions, captured)
         output_ref = publish_artifact(self._root, proposed)
         identity = _identity(self._root, output_ref)
-        with self.coordinator._transaction() as (conn, _):
+        with self.coordinator._transaction() as (conn, control):
             current = self.coordinator._feedback_record(
                 conn, call.to_dict(), metadata_only=True
             )
@@ -507,15 +526,29 @@ class Updater:
                 proposed["evidence_refs"],
                 proposed["evidence_identities"],
             )
+            extra = dict(
+                context_ref=proposed["context_ref"],
+                revisions=proposed["revisions"],
+                evidence_refs=proposed["evidence_refs"],
+            )
+            if call.role == "execute":
+                from .operations import Operations
+
+                operation_ids = Operations.seal_execution(
+                    conn,
+                    call,
+                    output_ref,
+                    identity,
+                    captured["operation_admission"],
+                    control["anchor"],
+                )
+                if operation_ids:
+                    extra["operation_ids"] = operation_ids
             receipt = self.coordinator._accept_record(
                 conn,
                 current["attempt"],
                 output_ref,
                 identity,
-                receipt_extra=dict(
-                    context_ref=proposed["context_ref"],
-                    revisions=proposed["revisions"],
-                    evidence_refs=proposed["evidence_refs"],
-                ),
+                receipt_extra=extra,
             )
             return UpdateReceipt.from_dict(receipt)

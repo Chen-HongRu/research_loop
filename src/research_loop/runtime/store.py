@@ -17,7 +17,9 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+from .operation_contract import OPERATION_SCHEMA
+
+SCHEMA_VERSION = 5
 DATABASE = "runtime.sqlite3"
 ROLES = {"scout", "advocate", "judge", "plan", "execute", "review"}
 PHASES = {"plan": "execute", "execute": "review", "review": "publication"}
@@ -52,7 +54,8 @@ class InvalidTransition(StateStoreError):
     pass
 
 
-_SCHEMA = """
+_SCHEMA = (
+    """
 CREATE TABLE control (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), study_id TEXT NOT NULL,
  config_json TEXT NOT NULL, max_iterations INTEGER, max_calls INTEGER,
@@ -152,6 +155,8 @@ CREATE TABLE publication_conflicts (
  reason TEXT NOT NULL, entry_index INTEGER NOT NULL
 );
 """
+    + OPERATION_SCHEMA
+)
 
 
 def _json(value):
@@ -331,7 +336,10 @@ class StateStore:
                 )
                 now = max(_timestamp(self._clock), row["anchor"])
                 elapsed = row["elapsed_seconds"]
-                if row["owner_open"]:
+                external_open = conn.execute(
+                    "SELECT 1 FROM operations WHERE external_open=1 LIMIT 1"
+                ).fetchone()
+                if row["owner_open"] or external_open:
                     elapsed += now - row["anchor"]
                 epoch = row["owner_epoch"] + 1
                 conn.execute(
@@ -715,6 +723,10 @@ class Coordinator:
                 raise InvalidTransition(
                     "Attempt role does not match active iteration phase"
                 )
+            if role == "review":
+                from .operations import Operations
+
+                Operations.check_review_ready(conn, iteration_id)
             active = conn.execute(
                 "SELECT 1 FROM attempts WHERE role=? AND iteration_id=? AND status='active'",
                 (role, iteration_id),

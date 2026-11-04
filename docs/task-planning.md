@@ -2,9 +2,11 @@
 
 This is stage 4 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77),
 available on new SQLite Studies through Python APIs. It does not replace the
-existing serial task CLI or start experiment backends. Schema 4 rejects previous
-prototype databases; no automatic migration, deployment or new compute authority
-is introduced.
+existing serial task CLI or automatically dispatch experiments. Current SQLite
+schema 5 rejects previous prototype databases. The [backend lifecycle APIs](backend-lifecycle.md)
+provide explicit operation actions after accepted Execute requests; a new SQLite
+CLI, concurrent experiment coordinator and explicit migration remain future work.
+No automatic migration, deployment or new compute authority is introduced.
 
 ## Tasks and ownership
 
@@ -142,7 +144,11 @@ failure. Events arriving during work remain pending for a later explicit
 `run_once()`. Idle calls return null and invoke no model. Failed rounds do not
 create their own retry trigger or change existing tasks. Priority and dependencies
 are checked by the deterministic claim path; resource release does not require a
-new Judge call.
+new Judge call. Physical resource release and fee settlement are separate
+backend transitions; a task's requested priority cannot grant or reset either
+budget. Execute operation requests retain the configured authorization, while
+Review waits for collected/resolved/sealed feedback rather than for billing
+alone. Planning does not submit or resubmit an operation.
 
 ## Recovery and validation
 

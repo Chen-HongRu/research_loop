@@ -112,6 +112,20 @@ uv run research-loop init studies/my-study-v2 \
 
 工作区不能等于或包含研究目录；默认基线位于研究目录下的 `workspace/`，实验 worktree 位于对应 iteration 的 `workspace/`。Codex 使用 `workspace-write` 沙箱，不自动批准提权，并关闭命令工具的网络访问；模型连接由 CLI 本身处理。需要远程执行时可接任务专用的受限接口，Cactus 示例采用可信文件请求桥。Pi 的工具白名单不是 OS 沙箱，启用写入会开放 bash/edit/write，需要隔离时在单独环境运行。
 
+## Legacy 执行后端
+
+JSON `Study` 的阻塞式执行可显式接入可信适配器：
+
+```bash
+uv run research-loop run /absolute/study --iterations 10 \
+  --backend /absolute/task_adapter.py \
+  --backend-config /absolute/backend.json
+```
+
+Plan 必须通过已选择的合同显式提供 `execution`，缺少该字段会阻断，不会被当作定性 Execute。可由可信适配器的 `response_schema` 定义，或用 Python `initialize(..., research_execution={"version": 1})` 显式选择现有合同；CLI `init` 不启用该选项，加载 backend 也不自动启用或放宽它。
+
+初次接纳 iteration 时登记模块绝对路径与配置指纹，之后普通 `run` 自动沿用；路径或配置改变会阻断。此入口保留原有显式选择的 Plan 合同，不授权额外资源，也不实现 SQLite runtime 的异步操作生命周期；SQLite Study 会被拒绝。任务配置负责授权、期限和核账。结构化计算结果来自可信后端，原始 Agent 报告单独保留；`execution=null` 只在这个强制只读、拒绝产物和 measurements 的桥中允许定性 Execute。接口见[Legacy 执行后端](execution-backends.md#legacy-unified-launcher)。
+
 ## 记录与恢复
 
 ```text

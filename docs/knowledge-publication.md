@@ -3,9 +3,11 @@
 This is stage 3 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77),
 available through Python APIs on new SQLite Studies. The serial CLI retains its
 existing document format. [Planning](task-planning.md) consumes its frozen knowledge
-and publication events. Concurrent experiment dispatch, production role adapters,
-backend receipt collection and explicit migration are later stages. SQLite schema 4
-rejects earlier prototype schemas; no existing Study is converted automatically.
+and publication events. SQLite schema 5 also supports operation-bound evaluator
+intake through the [backend lifecycle APIs](backend-lifecycle.md). A new SQLite
+CLI, concurrent experiment coordinator, production task adapters and explicit
+migration remain later stages. Earlier prototype schemas are rejected; no
+existing Study is converted automatically.
 
 Measurement registration and combined Frontier/document reconstruction require a
 valid, non-null, frozen `config.global_evaluation` using the existing Evaluation
@@ -22,7 +24,8 @@ measurement = MeasurementRegistry(owner).register(iteration_id, receipt_ref)
 ```
 
 Only the trusted backend/controller invokes registration. It supplies a canonical
-immutable artifact reference containing these exact evaluator receipt fields:
+immutable artifact reference. The direct v1 path retains these exact evaluator
+receipt fields:
 
 ```json
 {
@@ -39,7 +42,24 @@ immutable artifact reference containing these exact evaluator receipt fields:
 ```
 
 The iteration must have accepted context-bound Plan and Execute outputs. The
-receipt names that exact Execute and one of its declared artifact versions.
+v1 receipt names that exact Execute and one of its declared artifact versions.
+A v2 operation receipt contains the same fields with `version: 2`, plus exactly
+`operation_id` and `collection_event_key`. The latter is the stable backend event
+key chosen before collection, not a circular reference to the collection file.
+The receipt must be listed by a pending, feedback-permitted intake for that
+operation's accepted collection; its artifact must match that operation's
+collected artifact metadata and its Plan/Execute group. V1 receipts cannot stand
+in for operation intake, and v2 receipts without intake are rejected. Collection
+never appends artifacts or measurements to the already accepted Execute output.
+
+Denied/final-only intake is marked `allow_feedback: false` by the trusted
+backend/controller and rejected without opening the evaluator body. Permitted
+receipts still undergo the actual fixed evaluation-definition checks below.
+Measurement insertion and the intake's `registered` disposition commit atomically;
+explicit controller rejection can resolve invalid intake without inventing a
+measurement. Collection and intake identities are rechecked on registration and
+registered replay.
+
 Evaluation ID and comparison scope resolve to the frozen Study global definition
 or accepted Plan local definition. Local evaluation requires the task's stable
 `specification.route_id`; a local definition cannot reuse the global ID. Within
@@ -52,8 +72,12 @@ constraints remain incomplete observations and are excluded from Frontier
 membership. Extra finite diagnostic metrics do not become optimization targets.
 Execute and Review narrative scores never supply or replace these numeric values.
 
-Registration must finish before the first Review reservation; failed Review
-attempts do not reopen the measurement set. The same receipt replays unchanged,
+Registration must finish before feedback sealing and the first Review
+reservation; failed Review attempts do not reopen the measurement set. For an
+operation group, Review requires terminal operation knowledge and collection,
+all intake registered or rejected, and `Operations.finalize_feedback(...)`.
+Physical release and fee settlement remain separate: unresolved fees alone do
+not block Review after feedback is sealed. The same receipt replays unchanged,
 including after Review or restart. A second receipt for the same
 `(iteration_id, candidate_id, evaluation_id)` conflicts. New measurements after
 Review require a separate authorized investigation.
@@ -181,3 +205,11 @@ role decisions and evaluator receipts. It publishes two Reviews out of creation
 order, corrects a winner's eligibility without modifying its numeric record, and
 rebuilds the restored Frontier and research document. It starts no model, training
 process or remote job; it demonstrates control semantics, not research benefit.
+
+The [backend lifecycle smoke](../examples/backend_lifecycle.py), run with
+`uv run python examples/backend_lifecycle.py`, additionally executes one bounded
+local child doing synthetic arithmetic. It deliberately loses the submission
+acknowledgement, reopens ownership, inspects the same identity, collects a v2
+receipt, registers it and admits Review before settling fees. The observed result
+is one submission, score `0.6`, and empty resource/cost holds after settlement.
+This uses no model, network, GPU or scientific benchmark.
