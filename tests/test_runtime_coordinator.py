@@ -234,13 +234,17 @@ class RuntimeCoordinatorTests(unittest.TestCase):
             )
         )
         self.assertEqual(set(self.iterations()), {"human"})
+        # Five iterations and publication-triggered planning use real process
+        # workers and fsync; this checks progress, not aggregate wall latency.
         self.pump(
             lambda: (
                 len(self.iterations()) == 5
                 and all(
                     row["status"] == "published" for row in self.iterations().values()
                 )
-            )
+                and self.runner.ledger.active_count() == 0
+            ),
+            timeout=60,
         )
 
     def test_stop_retires_reserved_and_registered_but_unlaunched_calls(self):
