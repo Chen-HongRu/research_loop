@@ -22,24 +22,24 @@
 </head>
 <body>
 <header>
-  <div><div class="eyebrow">RESEARCH LOOP / PROTOK SE3</div><h1>研究现场</h1><small>追踪每次研究决策、代码演化与已核查的发现。</small></div>
+  <div><div class="eyebrow">RESEARCH LOOP</div><h1>研究现场</h1><small>追踪每次研究决策、代码演化与已核查的发现。</small></div>
   <div class="connection"><span id="connection">正在连接…</span><br><span id="updated">—</span><br><span id="sourceName">只读观察 · 每 5 秒刷新</span></div>
 </header>
 <main>
   <section class="panel frontier-panel" aria-labelledby="frontierTitle">
-    <div class="toolbar between"><div><div class="eyebrow">GLOBAL FRONTIER / RMSD ↓</div><h2 id="frontierTitle">研究前沿</h2></div><div class="toolbar" id="frontierViews" aria-label="Frontier 图显示范围"><button data-chart-view="frontier" class="on" aria-pressed="true">Frontier 演进</button><button data-chart-view="all" aria-pressed="false">全部实验</button><button data-chart-view="recent" aria-pressed="false">最近 10 轮</button></div></div>
+    <div class="toolbar between"><div><div class="eyebrow" id="frontierMetric">STUDY FRONTIER</div><h2 id="frontierTitle">研究前沿</h2></div><select id="frontierSource" aria-label="选择来源与评价协议"></select><div class="toolbar" id="frontierViews" aria-label="Frontier 图显示范围"><button data-chart-view="frontier" class="on" aria-pressed="true">Frontier 演进</button><button data-chart-view="all" aria-pressed="false">全部实验</button><button data-chart-view="recent" aria-pressed="false">最近 10 轮</button></div></div>
     <div class="frontier-content">
-      <div class="frontier-summary"><div><small>当前已发布 Frontier · RMSD 越低越好</small><div class="frontier-best" id="best">—</div><small id="bestSub">正在读取正式 Frontier…</small><div class="frontier-members" id="frontierMembers"></div></div><div class="frontier-legend"><span><i class="mark-ring"></i>当前 Frontier</span><span><i class="mark-diamond"></i>发布时进入 Frontier</span><span><i class="mark-dot"></i>其他已核查测量</span><span><i class="mark-dot ledger"></i>早期账本，未经本 Loop 评审</span></div></div>
+      <div class="frontier-summary"><div><small id="frontierSummary">当前已发布 Frontier</small><div class="frontier-best" id="best">—</div><small id="bestSub">正在读取正式 Frontier…</small><div class="frontier-members" id="frontierMembers"></div></div><div class="frontier-legend" id="frontierLegend"><span><i class="mark-ring"></i>当前 Frontier</span><span><i class="mark-diamond"></i>发布时进入 Frontier</span><span><i class="mark-dot"></i>其他已核查测量</span><span><i class="mark-dot ledger"></i>早期账本，未经本 Loop 评审</span></div></div>
       <div class="frontier-chart-wrap"><svg id="frontierChart" role="group" aria-label="Frontier 演进交互图"></svg><div id="chartRange" class="frontier-note"></div></div>
     </div>
     <div class="frontier-readout" id="frontierReadout" aria-live="polite"><div><b id="inspectTitle">选择图中实验</b><div id="inspectStatus" class="frontier-inspect-meta">悬停查看，点击固定</div></div><div><div id="inspectValue" class="exact-value">—</div><div id="inspectDelta" class="frontier-inspect-meta"></div></div><button id="frontierDetails" disabled>查看该轮记录</button><div id="inspectProvenance" class="frontier-inspect-meta" style="grid-column:1/-1" hidden></div></div>
-    <div class="frontier-scrub"><button id="frontierPrev" aria-label="上一个图中实验">‹</button><input id="frontierSlider" type="range" min="0" max="0" value="0" step="1" disabled aria-label="滑动查看 Frontier 和实验的精确 RMSD"><button id="frontierNext" aria-label="下一个图中实验">›</button></div>
-    <div class="frontier-bottom"><span id="frontierPosition">尚无可浏览的测量</span><span>悬停 / 滑动查看精确值 · 点击固定 · 绿阶梯为当前有效证据的累计最优</span></div>
+    <div class="frontier-scrub"><button id="frontierPrev" aria-label="上一个图中实验">‹</button><input id="frontierSlider" type="range" min="0" max="0" value="0" step="1" disabled aria-label="滑动查看 Frontier 和实验的精确指标"><button id="frontierNext" aria-label="下一个图中实验">›</button></div>
+    <div class="frontier-bottom"><span id="frontierPosition">尚无可浏览的测量</span><span id="frontierInteraction">悬停 / 滑动查看精确值 · 点击固定 · 绿阶梯为当前有效证据的累计最优</span></div>
     <div class="frontier-note" id="frontierNote"></div><div class="frontier-note" id="historyCoverage"></div><div class="source-badges" id="sourceBadges"></div>
   </section>
   <div class="cards">
     <div class="card"><small>任务状态 · 本地记录</small><b id="current">—</b><small id="currentSub">—</small></div>
-    <div class="card"><small>累计 GPU 用量</small><b id="gpu">—</b><small>含接管前历史；回执核账后更新</small></div>
+    <div class="card" id="gpuCard"><small>累计 GPU 用量</small><b id="gpu">—</b><small>含接管前历史；回执核账后更新</small></div>
     <div class="card"><small>主循环新轮次进入截止</small><b id="remaining">—</b><small id="deadline">—</small></div>
   </div>
   <div id="statusline" class="statusline" style="margin-bottom:16px"></div>
@@ -77,7 +77,7 @@
     </section>
   </div>
   <section class="panel scout" id="scoutPanel" hidden><div class="toolbar between"><h3>Scout · 外部研究输入</h3><span id="scoutStatus" class="badge"></span></div><div id="scoutBody"></div></section>
-  <div class="footer">固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板读取本地研究记录与回执，不发起训练、模型调用或远程轮询。Execute 展示已完成的执行与修复输出、作业回执及调试历史；调试不计正式质量，正式测量经过独立 Review 后才进入质量曲线。</div>
+  <div class="footer" id="protocolNote">此面板读取研究记录与回执。正式测量经过独立 Review 后才进入指标曲线。</div>
 </main>
 <script src="/assets/vendor/markdown-it/markdown-it.umd.min.js"></script>
 <script src="/assets/vendor/katex/katex.min.js"></script>
@@ -114,6 +114,7 @@ let data = null, selected = null, detail = null, following = true, tab = 'explan
 let rawVisible=false;
 const detailReading=new Map(), taskTabs=new Map();
 let renderedDetailKey=null;
+let frontierSelection=null;
 let chartView='frontier', frontierPinned=null, frontierHover=null, chartModel=null;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const translated = value => VALUES[String(value)] || String(value ?? '—');
@@ -199,6 +200,9 @@ function renderProgress() {
     $('currentSub').textContent='等待 '+live.filter(task=>['waiting','queued'].includes(taskState(task))).length+' · 需要处理 '+attention+' · 已完成 '+data.tasks.filter(task=>taskState(task)==='completed').length;
     $('taskSummary').textContent=running.length+' 项进行中 · '+attention+' 项需要处理';
   }
+  const accounting=data.capabilities?.protok_accounting===true;
+  $('gpuCard').hidden=!accounting;
+  $('protocolNote').textContent=data.capabilities?.protok?'固定协议：seed42 · 2000 更新 · 449 条开发蛋白 · Euler100 · 单 H100。开发集用于自适应选择，单次改善不代表跨 seed 稳定性或独立泛化。此面板读取研究记录与回执。':'此面板读取研究记录与回执。正式测量经过独立 Review 后才进入指标曲线。';
   $('gpu').textContent = data.gpu_seconds == null ? '未知' : (data.gpu_seconds/3600).toFixed(2)+' 小时';
   const effectiveDeadline = data.effective_deadline ?? data.deadline;
   const deadline = timestamp(effectiveDeadline), remaining = deadline == null ? null : Math.max(0, Math.floor((deadline-Date.now())/1000));
@@ -208,16 +212,16 @@ function renderProgress() {
   const jobs = (data.outstanding || []).flatMap(row => {const label=row.mode==='research'?'研究脚本作业 ':'正式评测作业 ';return row.attempts?.length?row.attempts.map(attempt=>label+(attempt.owned_job_id || '待绑定')+' · '+(attempt.terminal_state || attempt.status || '待核账')):[label+'状态待确认 · '+(row.status || '待核账')];});
   for (const path of data.manual_training_outstanding || []) jobs.push('人工长训练作业 '+path.split('/').pop()+' · 待核账');
   for (const path of data.long_training_outstanding || []) jobs.push('长训练作业 '+path.split('/').pop()+' · 待核账');
-  const bits = [data.snapshot_only ? '归档快照 · 非实时 HPC · 核账时间 '+clock(data.backend_observed_at) : '读取本地控制记录与后端回执', data.accounting_available===false ? 'GPU 用量与待核账作业未知 · 后端读取失败' : jobs.length ? jobs.join(' / ') : '无待核账 GPU 作业', '主循环角色调用 '+(state.call_count ?? '—')+' 次'];
+  const bits = [accounting && data.snapshot_only ? '归档快照 · 非实时 HPC · 核账时间 '+clock(data.backend_observed_at) : '读取本地控制记录与后端回执', ...(accounting?[data.accounting_available===false ? 'GPU 用量与待核账作业未知 · 后端读取失败' : jobs.length ? jobs.join(' / ') : '无待核账 GPU 作业']:[]), '主循环角色调用 '+(state.call_count ?? '—')+' 次'];
   if (progress.active_role) bits.push((state.status==='running'?'主循环当前角色 ':'主循环最近调用角色 ')+progress.active_role);
   if (progress.elapsed_seconds != null) bits.push((state.status==='running'?'主循环本次调用已用 ':'主循环最近调用耗时 ')+duration(progress.elapsed_seconds));
   if (data.runner?.status) bits.push('主循环 Runner '+(STATUS[data.runner.status] || data.runner.status));
-  if (data.accounting_status === 'partial') bits.push('部分费用未知 · 已知小计 '+data.known_gpu_seconds+' GPU 秒（不是总费用或可用额度）');
-  if (data.formal_gpu_seconds != null) bits.push('正式评分 '+data.formal_gpu_seconds+' GPU 秒 · 研究脚本 '+(data.research_gpu_seconds ?? '未知')+' GPU 秒 · 调试 '+(data.debug_gpu_seconds ?? '未知')+' GPU 秒（独立记账）');
-  if (data.manual_training_gpu_seconds != null) bits.push('人工长训练 '+data.manual_training_gpu_seconds+' GPU秒（任务独立预算）');
-  if (data.long_training_gpu_seconds != null) bits.push('自动长训练 '+data.long_training_gpu_seconds+' GPU 秒（独立记账）');
-  for (const overrun of data.research_overruns || []) bits.push('研究 #'+overrun.iteration+' 已按实际 '+overrun.gpu_seconds+' GPU 秒结算（申请 '+overrun.allocated_seconds+' 秒，超出 '+overrun.overrun_seconds+' 秒）');
-  if (data.debug) bits.push('主循环本调查调试 '+data.debug.used_gpu_seconds+'/'+data.debug.limit_gpu_seconds+' GPU 秒 · 已预留 '+data.debug.reserved_gpu_seconds+' GPU 秒');
+  if (accounting && data.accounting_status === 'partial') bits.push('部分费用未知 · 已知小计 '+data.known_gpu_seconds+' GPU 秒（不是总费用或可用额度）');
+  if (accounting && data.formal_gpu_seconds != null) bits.push('正式评分 '+data.formal_gpu_seconds+' GPU 秒 · 研究脚本 '+(data.research_gpu_seconds ?? '未知')+' GPU 秒 · 调试 '+(data.debug_gpu_seconds ?? '未知')+' GPU 秒（独立记账）');
+  if (accounting && data.manual_training_gpu_seconds != null) bits.push('人工长训练 '+data.manual_training_gpu_seconds+' GPU秒（任务独立预算）');
+  if (accounting && data.long_training_gpu_seconds != null) bits.push('自动长训练 '+data.long_training_gpu_seconds+' GPU 秒（独立记账）');
+  for (const overrun of accounting?data.research_overruns || []:[]) bits.push('研究 #'+overrun.iteration+' 已按实际 '+overrun.gpu_seconds+' GPU 秒结算（申请 '+overrun.allocated_seconds+' 秒，超出 '+overrun.overrun_seconds+' 秒）');
+  if (accounting && data.debug) bits.push('主循环本调查调试 '+data.debug.used_gpu_seconds+'/'+data.debug.limit_gpu_seconds+' GPU 秒 · 已预留 '+data.debug.reserved_gpu_seconds+' GPU 秒');
   $('statusline').innerHTML = bits.map(bit => '<span>'+esc(bit)+'</span>').join('');
   $('updated').textContent = '记录读取于 '+clock(data.observed_at);
   $('sourceName').textContent = (data.study_name || '当前目录')+' · 每 5 秒刷新';
@@ -262,7 +266,7 @@ function nodeTone(node) { return node.frontier_current===true ? 'green' : taskSt
 function nodeResult(node) {
   if(node.task_kind==='long_training')return node.published?node.outcome==='failed'?'长训未完成 · 已评审':'长训已评审':taskStateLabel(node);
   if(node.execution_kind==='research_script' && node.value==null) return node.job_status==='failed'?'研究脚本失败'+(node.published?' · 已评审':''):node.job_status==='blocked'?'研究作业待核账':node.published?'研究证据已评审':node.job_status==='completed'?'研究脚本已完成':'研究脚本 · '+(STATUS[node.job_status] || STATUS[node.status] || '状态未确认');
-  return node.source_id==='ledger' ? node.value!=null?'账本 '+score(node.value)+' Å':STATUS[node.status] || node.status || '无测量' : node.value != null ? score(node.value)+' Å' : node.provisional_value != null ? '待审 '+score(node.provisional_value) : node.imported ? '历史导入' : !node.published ? (STATUS[node.status] || phaseName(node.phase)) : '无质量测量';
+  return node.source_id==='ledger' ? node.value!=null?'账本 '+metricName(node)+' '+score(node.value)+metricUnit(node):STATUS[node.status] || node.status || '无测量' : node.value != null ? metricName(node)+' '+score(node.value)+metricUnit(node) : node.provisional_value != null ? '待审 '+metricName(node)+' '+score(node.provisional_value)+metricUnit(node) : node.imported ? '历史导入' : !node.published ? (STATUS[node.status] || phaseName(node.phase)) : '无质量测量';
 }
 function drawRoutes() {
   const filter = $('routeFilter').value,source=$('sourceFilter').value, routes = Object.entries(data.routes || {}).filter(([id]) => (!filter || id === filter) && (!source || id.startsWith(source+':')));
@@ -272,16 +276,36 @@ function drawRoutes() {
   }).join('') : '<div class="empty">尚无研究路线；新路线会在 Plan 冻结后出现。</div>';
   bindExperiments($('routeWrap'));
 }
+function frontierChoices(){return data?.frontiers?.length?data.frontiers:[{...(data?.frontier || {}),source_id:'active',source_label:'当前 Study'}];}
+function frontierChoiceKey(frontier){return JSON.stringify([frontier.source_id,frontier.evaluation_id,frontier.comparison_scope]);}
+function selectedFrontier(){const choices=frontierChoices();return choices.find(item=>frontierChoiceKey(item)===frontierSelection)||choices.find(item=>item.source_id==='active'&&item.evaluation_id===data?.frontier?.evaluation_id)||choices.find(item=>item.source_id==='active')||choices[0];}
+function metricName(metadata){return metadata?.metric || '指标';}
+function metricUnit(metadata){return metadata?.unit?' '+metadata.unit:'';}
+function metricValue(value,metadata){return exactScore(value)+metricUnit(metadata);}
+function metricDirection(metadata){return metadata?.direction==='maximize'?'↑':metadata?.direction==='minimize'?'↓':'';}
+function protokLongTraining(node){const source=data?.sources?.find(item=>item.id===node?.source_id);return (node?.capabilities || source?.capabilities || data?.capabilities)?.protok_long_training===true;}
 function drawChart() {
-  const frontier=data.frontier || {}, model=frontierPlot(frontier,data.nodes,chartView), current=(frontier.points || []).filter(point=>point.current);
+  const choices=frontierChoices(), frontier=selectedFrontier();
+  frontierSelection=frontierChoiceKey(frontier);
+  if(frontier.unreviewed)chartView='all';
+  $('frontierTitle').textContent=frontier.unreviewed?'前置账本（未经评审）':'研究前沿';
+  $('frontierLegend').hidden=!!frontier.unreviewed;
+  $('frontierInteraction').textContent=frontier.unreviewed?'悬停 / 滑动查看账本精确值 · 点击查看来源记录':'悬停 / 滑动查看精确值 · 点击固定 · 绿阶梯为当前有效证据的累计最优';
+  $('frontierSource').innerHTML=choices.map(item=>'<option value="'+esc(frontierChoiceKey(item))+'">'+esc((item.source_label || item.source_id || 'Study')+' · '+(item.evaluation_id || '评价未记录')+(item.comparison_scope?' · '+item.comparison_scope:''))+'</option>').join('');
+  $('frontierSource').value=frontierSelection;
+  const nodes=(data.nodes || []).filter(node=>!frontier.source_id || node.source_id===frontier.source_id), model=frontierPlot(frontier,nodes,chartView), current=frontier.available&&!frontier.unreviewed?(frontier.points || []).filter(point=>point.current&&Number.isFinite(point.value)):[];
+  model.frontier=frontier;
+  $('frontierMetric').textContent=(frontier.unreviewed?'UNREVIEWED LEDGER / ':'STUDY FRONTIER / ')+metricName(frontier)+' '+metricDirection(frontier);
+  $('frontierSummary').textContent=(frontier.unreviewed?'未经评审的账本测量 · ':'当前已发布 Frontier · ')+metricName(frontier)+(frontier.direction?' '+translated(frontier.direction):'');
+  $('frontierSlider').setAttribute('aria-label','滑动查看 '+metricName(frontier)+' 的精确值');
   chartModel=model;
-  const best=current.length?Math.min(...current.map(point=>point.value)):null;
-  $('best').innerHTML=best==null?'—':esc(best.toFixed(6))+' <small>Å</small>';
-  $('best').title=best==null?'当前成员尚不可确认':exactScore(best)+' Å';
-  $('bestSub').textContent=!frontier.available ? frontier.reason || '正式 Frontier 记录不可用，不推断当前成员。' : frontier.current_membership_complete===false ? 'Frontier 正在发布，等待成员证据完整。' : current.length ? current.length+' 个当前成员 · 悬停或滑动查看完整精度' : '当前没有可确认的已发布成员';
+  const best=current.length?(frontier.direction==='maximize'?Math.max:Math.min)(...current.map(point=>point.value)):null;
+  $('best').innerHTML=best==null?'—':esc(best.toFixed(6))+(frontier.unit?' <small>'+esc(frontier.unit)+'</small>':'');
+  $('best').title=frontier.unreviewed?'未经评审的账本不显示已发布最优值':best==null?'当前成员尚不可确认':metricName(frontier)+' '+metricValue(best,frontier);
+  $('bestSub').textContent=frontier.unreviewed?'未经本 Loop 独立评审；仅供核对，不表示已发布 Frontier 或最优值。':!frontier.available ? frontier.reason || '正式 Frontier 记录不可用，不推断当前成员。' : frontier.current_membership_complete===false ? 'Frontier 正在发布，等待成员证据完整。' : current.length ? current.length+' 个当前成员 · 悬停或滑动查看完整精度' : '当前没有可确认的已发布成员';
   $('frontierMembers').innerHTML=current.map(point=>'<button data-frontier-current="'+esc(pointKey(point))+'">◎ '+esc(pointLabel(point))+'</button>').join('');
   $('frontierMembers').querySelectorAll('button').forEach(button=>button.onclick=()=>{chartView='frontier';frontierPinned=button.dataset.frontierCurrent;frontierHover=null;drawChart();});
-  $('frontierViews').querySelectorAll('button').forEach(button=>{const active=button.dataset.chartView===chartView;button.classList.toggle('on',active);button.setAttribute('aria-pressed',String(active));});
+  $('frontierViews').querySelectorAll('button').forEach(button=>{const active=button.dataset.chartView===chartView;button.disabled=!!frontier.unreviewed&&button.dataset.chartView!=='all';button.classList.toggle('on',active);button.setAttribute('aria-pressed',String(active));});
   const allNotes=[];
   if(!frontier.available)allNotes.push(frontier.reason || '当前 Frontier 不可用。');
   if((frontier.points || []).some(point=>point.reached==null))allNotes.push('部分历史轮次缺少发布时的 Frontier 快照，其历史成员身份不作推断。');
@@ -293,18 +317,18 @@ function drawChart() {
   $('sourceBadges').innerHTML=(data.sources || []).map(source=>'<button data-source="'+esc(source.id)+'" title="'+esc(source.root)+'">'+esc(source.label)+' · '+source.count+'</button>').join('');
   $('sourceBadges').querySelectorAll('button').forEach(button=>button.onclick=()=>highlightSource(button.dataset.source));
   const W=Math.max(260,$('frontierChart').clientWidth || 1100),H=Math.max(240,$('frontierChart').clientHeight || 300),L=76,R=25,T=32,B=40;
-  const svg=$('frontierChart'),focused=svg.contains(document.activeElement)?document.activeElement?.closest('[data-frontier-id]')?.dataset.frontierId:null;
+  const svg=$('frontierChart'),focused=svg.contains?.(document.activeElement)?document.activeElement?.closest('[data-frontier-id]')?.dataset.frontierId:null;
   svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
-  if(!model.points.length && !model.curve.length){svg.innerHTML='<text x="25" y="80" fill="#a0afc5" font-size="15">'+esc(frontier.available?'这个范围内没有可读测量。':'正在等待可确认的 Frontier 记录。')+'</text>';frontierPinned=null;showFrontierPoint(null);return;}
+  if(!model.points.length && !model.curve.length){$('chartRange').textContent='';svg.onpointermove=null;svg.onpointerleave=null;svg.onclick=null;svg.innerHTML='<text x="25" y="80" fill="#a0afc5" font-size="15">'+esc(frontier.available?'这个范围内没有可读测量。':'正在等待可确认的 Frontier 记录。')+'</text>';frontierPinned=null;showFrontierPoint(null);return;}
   model.x=sequence=>L+(sequence-model.first)/Math.max(1,model.last-model.first)*(W-L-R);
   model.y=value=>T+(model.hi-value)/(model.hi-model.lo)*(H-T-B);
-  let html='<text x="'+L+'" y="16" fill="#a0afc5" font-size="11">'+esc(model.axisOffset==null?'RMSD / Å ↓':'相对 '+exactScore(model.axisOffset)+' Å 的差值 ↓')+'</text>';
+  let html='<text x="'+L+'" y="16" fill="#a0afc5" font-size="11">'+esc(model.axisOffset==null?metricName(frontier)+(frontier.unit?' / '+frontier.unit:'')+' '+metricDirection(frontier):'相对 '+metricValue(model.axisOffset,frontier)+' 的差值 '+metricDirection(frontier))+'</text>';
   for(let tick=0;tick<5;tick++){const value=model.lo+(model.hi-model.lo)*tick/4,Y=model.y(value);html+=`<line x1="${L}" x2="${W-R}" y1="${Y}" y2="${Y}" stroke="#2a3b4d"/><text x="${L-10}" y="${Y+4}" fill="#a0afc5" text-anchor="end" font-size="11">${esc(axisValue(value,model))}</text>`;}
   const step=Math.max(1,Math.ceil((model.last-model.first)/Math.max(3,Math.floor((W-L-R)/70))));
   for(let sequence=model.first;sequence<=model.last;sequence+=step)html+=`<text x="${model.x(sequence)}" y="${H-12}" fill="#a0afc5" text-anchor="middle" font-size="11">${sequence}</text>`;
   if((model.last-model.first)%step)html+=`<text x="${model.x(model.last)}" y="${H-12}" fill="#a0afc5" text-anchor="middle" font-size="11">${model.last}</text>`;
   const boundaries=[];
-  for(const node of [...data.nodes].sort((a,b)=>nodeOrder(a)-nodeOrder(b))){if(nodeOrder(node)<model.first || nodeOrder(node)>model.last)continue;if(boundaries.at(-1)?.source!==node.source_id)boundaries.push({sequence:nodeOrder(node),source:node.source_id,label:node.source_label});}
+  for(const node of [...nodes].sort((a,b)=>nodeOrder(a)-nodeOrder(b))){if(nodeOrder(node)<model.first || nodeOrder(node)>model.last)continue;if(boundaries.at(-1)?.source!==node.source_id)boundaries.push({sequence:nodeOrder(node),source:node.source_id,label:node.source_label});}
   for(const boundary of boundaries.slice(1))html+=`<line x1="${model.x(boundary.sequence-.5)}" x2="${model.x(boundary.sequence-.5)}" y1="${T}" y2="${H-B}" stroke="#506074" stroke-dasharray="3 5"/><text x="${model.x(boundary.sequence-.5)+6}" y="${T+12}" fill="#a0afc5" font-size="10">${esc(boundary.label)}</text>`;
   let path='';for(const point of model.curve)path+=path?' H'+model.x(point.sequence)+' V'+model.y(point.value):'M'+model.x(point.sequence)+','+model.y(point.value);
   if(path)html+='<path d="'+path+' H'+model.x(model.last)+'" fill="none" stroke="#72dfb3" stroke-width="2.4"/>';
@@ -313,7 +337,7 @@ function drawChart() {
   model.points.forEach((point,index)=>{
     const x=model.x(point.sequence),y=model.y(point.value),ledger=point.reviewed===false,color=point.current||point.reached===true?'#72dfb3':ledger?'#9baac2':'#8ab8ff',r=point.current?7:point.reached===true?6:4;
     const status=point.current?'当前 Frontier':point.reached===true?'发布时进入 Frontier':ledger?'早期未评审账本':'其他已核查测量';
-    html+=`<g class="plot-point" data-frontier-id="${esc(pointKey(point))}" role="button" tabindex="0" aria-label="${esc(pointLabel(point)+'，RMSD '+exactScore(point.value)+' Å，'+status)}"><title>${esc(pointLabel(point)+' · '+exactScore(point.value)+' Å · '+status)}</title><circle class="point-halo" cx="${x}" cy="${y}" r="14" fill="${color}" fill-opacity=".18"/>`;
+    html+=`<g class="plot-point" data-frontier-id="${esc(pointKey(point))}" role="button" tabindex="0" aria-label="${esc(pointLabel(point)+'，'+metricName(frontier)+' '+metricValue(point.value,frontier)+'，'+status)}"><title>${esc(pointLabel(point)+' · '+metricName(frontier)+' '+metricValue(point.value,frontier)+' · '+status)}</title><circle class="point-halo" cx="${x}" cy="${y}" r="14" fill="${color}" fill-opacity=".18"/>`;
     if(point.reached===true&&!point.current)html+=`<path d="M${x},${y-r} L${x+r},${y} L${x},${y+r} L${x-r},${y} Z" fill="${color}" stroke="#10202b" stroke-width="1.2"/>`;
     else html+=`<circle cx="${x}" cy="${y}" r="${r}" fill="${ledger?'#151f30':color}" stroke="${ledger?color:'#10202b'}" stroke-width="1.8"/>`;
     if(point.current)html+=`<circle cx="${x}" cy="${y}" r="11" fill="none" stroke="${color}" stroke-width="1.4"/>`;
@@ -331,19 +355,21 @@ function drawChart() {
   svg.querySelectorAll('.plot-point').forEach((element,index)=>{element.onfocus=()=>{frontierPinned=pointKey(model.points[index]);showFrontierPoint(model.points[index]);};element.onkeydown=event=>{if(['Enter',' ','ArrowLeft','ArrowRight'].includes(event.key)){event.preventDefault();const target=event.key==='ArrowLeft'?Math.max(0,index-1):event.key==='ArrowRight'?Math.min(model.points.length-1,index+1):index;pinFrontierIndex(target);svg.querySelectorAll('.plot-point')[target]?.focus({preventScroll:true});}};});
   if(focused)[...svg.querySelectorAll('.plot-point')].find(element=>element.dataset.frontierId===focused)?.focus({preventScroll:true});
 }
-function pointKey(point){return point?.candidate_id || point?.id || null;}
+function pointKey(point){return point?JSON.stringify([point.id,point.candidate_id]):null;}
 function pointLabel(point){const node=data?.nodes.find(item=>item.id===point?.id);return node?nodeLabel(node):point?.id || '—';}
 function pointShortLabel(point){const node=data?.nodes.find(item=>item.id===point.id);return node?.source_id==='ledger'?'账本':(node?.source_id==='active'?'当前 ':node?.source_label?node.source_label+' ':'')+'#'+(node?.local_id || point.id);}
 function frontierPlot(frontier,nodes,mode){
+  nodes=nodes.filter(node=>!frontier.source_id || node.source_id===frontier.source_id);
   const order=point=>point.sequence ?? nodeOrder(nodes.find(node=>node.id===point.id) || {id:point.id});
-  const reviewed=frontier.available?(frontier.points || []).filter(point=>typeof point.value==='number'&&Number.isFinite(point.value)&&point.frontier_eligible!==false).map(point=>({...point,sequence:order(point)})).sort((a,b)=>a.sequence-b.sequence):[];
-  const ledger=(frontier.legacy_points || []).filter(point=>typeof point.value==='number'&&Number.isFinite(point.value)).map(point=>({...point,sequence:order(point),reviewed:false}));
+  const reviewed=frontier.available&&!frontier.unreviewed?(frontier.points || []).filter(point=>typeof point.value==='number'&&Number.isFinite(point.value)&&point.frontier_eligible!==false).map(point=>({...point,sequence:order(point)})).sort((a,b)=>a.sequence-b.sequence):[];
+  const ledger=(frontier.available?frontier.legacy_points || []:[]).filter(point=>typeof point.value==='number'&&Number.isFinite(point.value)).map(point=>({...point,sequence:order(point),reviewed:false}));
   const orders=nodes.map(nodeOrder).filter(Number.isFinite),last=Math.max(1,...orders,...reviewed.map(point=>point.sequence)),start=Math.min(last,...orders);
   const first=mode==='recent'?Math.max(start,last-9):mode==='frontier'&&reviewed.length?Math.min(...reviewed.map(point=>point.sequence)):start;
   const points=(mode==='frontier'?reviewed.filter(point=>point.reached===true||point.current):[...reviewed,...ledger]).filter(point=>point.sequence>=first&&point.sequence<=last).sort((a,b)=>a.sequence-b.sequence);
-  let best=Infinity;const curve=[];
-  for(const point of reviewed){if(point.sequence<first){best=Math.min(best,point.value);continue;}if(!curve.length&&best!==Infinity)curve.push({sequence:first,value:best});best=Math.min(best,point.value);curve.push({sequence:point.sequence,value:best});}
-  if(!curve.length&&best!==Infinity)curve.push({sequence:first,value:best});
+  const initial=frontier.direction==='maximize'?-Infinity:Infinity, optimum=frontier.direction==='maximize'?Math.max:Math.min;
+  let best=initial;const curve=[];
+  for(const point of reviewed){if(point.sequence<first){best=optimum(best,point.value);continue;}if(!curve.length&&best!==initial)curve.push({sequence:first,value:best});best=optimum(best,point.value);curve.push({sequence:point.sequence,value:best});}
+  if(!curve.length&&best!==initial)curve.push({sequence:first,value:best});
   const values=[...points.map(point=>point.value),...curve.map(point=>point.value),...reviewed.filter(point=>point.current).map(point=>point.value)];
   const low=values.length?Math.min(...values):0,high=values.length?Math.max(...values):1,span=high-low,pad=span?span*.13:Math.max(Math.abs(low)*1e-6,1e-6);
   return {points,curve,first,last,lo:low-pad,hi:high+pad,axisOffset:span>0&&span<.001?low:null,precision:Math.min(12,Math.max(2,Math.ceil(-Math.log10(span || pad))+1))};
@@ -356,15 +382,16 @@ function showFrontierPoint(point){
   if(!point){$('inspectTitle').textContent='尚无可浏览测量';$('inspectStatus').textContent='等待已发布记录';$('inspectValue').textContent='—';$('inspectDelta').textContent='';$('inspectProvenance').hidden=true;$('frontierPosition').textContent='尚无可浏览的测量';return;}
   $('inspectTitle').textContent=pointLabel(point);
   $('inspectStatus').textContent=point.current?'◎ 当前 Frontier':point.reached===true?'◇ 发布时进入 Frontier':point.reviewed===false?'○ 早期账本，未经本 Loop 评审':point.reached==null?'已核查测量 · 历史成员身份未确认':'● 已核查测量 · 未进入当时 Frontier';
-  $('inspectValue').textContent=exactScore(point.value)+' Å';
-  $('inspectDelta').textContent=point.reviewed===false?'历史记录值，不参与已评审 Frontier 曲线':point.duplicate_of?'同一评价结果再次导入，本次不计为新测量或新的全程改善':point.improved===true?'较该实例此前 Frontier 降低约 '+Number(point.delta).toPrecision(8)+' Å':point.previous_best==null?'首个已发布基线，或此前 Frontier 记录未完整保留':point.reached===true?'与该实例此前 Frontier 持平':'本轮没有推进该实例当时的 Frontier';
+  const frontier=chartModel?.frontier || selectedFrontier();
+  $('inspectValue').textContent=metricValue(point.value,frontier);
+  $('inspectDelta').textContent=point.reviewed===false?'历史记录值，不参与已评审 Frontier 曲线':point.duplicate_of?'同一评价结果再次导入，本次不计为新测量或新的全程改善':point.improved===true?'较该实例此前 Frontier '+(frontier.direction==='maximize'?'提高':'降低')+'约 '+Number(Math.abs(point.delta)).toPrecision(8)+metricUnit(frontier):point.previous_best==null?'首个已发布基线，或此前 Frontier 记录未完整保留':point.reached===true?'与该实例此前 Frontier 持平':'本轮没有推进该实例当时的 Frontier';
   const provenance=[];
   if(point.duplicate_of)provenance.push('复用同一评价结果：'+nodeLabel(data.nodes.find(node=>node.id===point.duplicate_of))+'；不增加新评价结果。');
   if(point.same_ledger_result)provenance.push('与早期账本记录的 fingerprint 相同；账本未由本 Loop 独立评审。');
   if(point.imported&&!point.duplicate_of)provenance.push('历史结果导入，不是一次新训练。');
   $('inspectProvenance').textContent=provenance.join(' ');$('inspectProvenance').hidden=!provenance.length;
-  $('frontierPosition').textContent='滑动浏览图中实验 '+(index+1)+' / '+pool.length+' · 精确 RMSD 保留记录精度';
-  $('frontierSlider').setAttribute('aria-valuetext',pointLabel(point)+'，RMSD '+exactScore(point.value)+' Å');
+  $('frontierPosition').textContent='滑动浏览图中实验 '+(index+1)+' / '+pool.length+' · '+metricName(frontier)+' 精确值保留记录精度';
+  $('frontierSlider').setAttribute('aria-valuetext',pointLabel(point)+'，'+metricName(frontier)+' '+metricValue(point.value,frontier));
   const cursor=$('frontierCursor');if(cursor&&chartModel?.x){cursor.setAttribute('x1',chartModel.x(point.sequence));cursor.setAttribute('x2',chartModel.x(point.sequence));cursor.setAttribute('opacity','0.6');}
   $('frontierChart').querySelectorAll('.plot-point').forEach(element=>element.classList.toggle('inspected',element.dataset.frontierId===pointKey(point)));
 }
@@ -398,7 +425,7 @@ function renderSnapshot() {
   drawGraph(); drawRoutes(); drawChart(); updateView(); renderScout(); renderDetailHeader();
 }
 function renderDetailHeader() {
-  const node = taskNodes().find(item => item.id === selected), long=node?.task_kind==='long_training';
+  const node = taskNodes().find(item => item.id === selected), long=node?.task_kind==='long_training'&&protokLongTraining(node);
   renderTaskProgress();
   $('tabs').hidden=node?.source_id==='ledger'&&!globalView;
   $('tabs').querySelectorAll('[data-tab]').forEach(button=>{
@@ -407,7 +434,7 @@ function renderDetailHeader() {
   });
   const cachedTitle=detail?.id===selected && detail.explanation?.status==='ready' ? detail.explanation.content?.title : (data.sources || []).find(s=>s.id===node?.source_id)?.explanation?.entries?.find(e=>e.id===node?.local_id && e.status==='ready')?.title;
   $('detailTitle').textContent = globalView ? '全局研究理解' : node ? nodeLabel(node)+' · '+(long?taskKind(node):cachedTitle || node.route || '调查') : '尚无任务记录';
-  $('detailMeta').textContent = globalView ? '当前实例已发布的全局知识；历史实例的文档可从对应节点查看。' : node ? (node.archived?'归档 · ':'')+taskStateLabel(node)+' · '+(long?'10k / 完整开发集 · 独立 Plan → Execute → Review':(node.source_id==='ledger'?'早期评价账本，未经本 Loop 评审':node.published?'Review 已发布':'尚未发布 Review')+' · '+(node.imported?'历史回执导入 · ':'')+(node.execution_kind==='research_script'?'研究脚本证据 · 无 RMSD 评分':node.value==null?'无已核查的质量测量':'RMSD '+exactScore(node.value)+' Å')) : '等待第一个任务节点';
+  $('detailMeta').textContent = globalView ? '当前实例已发布的全局知识；历史实例的文档可从对应节点查看。' : node ? (node.archived?'归档 · ':'')+taskStateLabel(node)+' · '+(long?'10k / 完整开发集 · 独立 Plan → Execute → Review':(node.source_id==='ledger'?'早期评价账本，未经本 Loop 评审':node.published?'Review 已发布':'尚未发布 Review')+' · '+(node.imported?'历史回执导入 · ':'')+(node.execution_kind==='research_script'?'研究脚本证据 · 无标量评分':node.value==null?'无已核查的质量测量':metricName(node)+' '+metricValue(node.value,node))) : '等待第一个任务节点';
   if (!node || globalView) { $('context').innerHTML = ''; return; }
   if(long) {
     const job=(node.attempts || [])[0] || {};
@@ -444,7 +471,7 @@ function researchEvidencePanel(research) {
   if(!research) return '';
   const key='research-'+research.iteration;
   const status=research.status==='completed'?'脚本执行完成':research.status==='failed'?'脚本执行失败':research.status==='blocked'?'等待作业核账或协调':STATUS[research.status] || '状态未确认';
-  return '<section class="agent-card"><div class="agent-header"><h3>研究脚本 · 证据计算</h3>'+badge(status,research.status==='completed'?'green':research.status==='failed'?'red':'amber')+'</div><p class="caption">该任务按研究合同收集观测证据；没有 RMSD 评分。脚本执行状态与独立 Review 的研究判断分别记录。</p>'+facts(research,['owned_job_id','terminal_state','gpu_seconds','allocated_gpu_seconds'])+(research.error?'<p class="agent-error">'+esc(research.error)+'</p>':'')+(research.outputs?.length?'<div class="fact-block"><h4>已收集的证据产物</h4><ul>'+research.outputs.map(path=>'<li class="source">'+esc(path)+'</li>').join('')+'</ul></div>':'<p class="muted">尚无已收集的证据产物。</p>')+disclosure(key+'-sources','执行凭据与版本',facts(research,['execution_identity','source_identity','source'])+(research.evidence?.length?structured({evidence:research.evidence}):''))+'</section>';
+  return '<section class="agent-card"><div class="agent-header"><h3>研究脚本 · 证据计算</h3>'+badge(status,research.status==='completed'?'green':research.status==='failed'?'red':'amber')+'</div><p class="caption">该任务按研究合同收集观测证据；没有标量评分。脚本执行状态与独立 Review 的研究判断分别记录。</p>'+facts(research,['owned_job_id','terminal_state','gpu_seconds','allocated_gpu_seconds'])+(research.error?'<p class="agent-error">'+esc(research.error)+'</p>':'')+(research.outputs?.length?'<div class="fact-block"><h4>已收集的证据产物</h4><ul>'+research.outputs.map(path=>'<li class="source">'+esc(path)+'</li>').join('')+'</ul></div>':'<p class="muted">尚无已收集的证据产物。</p>')+disclosure(key+'-sources','执行凭据与版本',facts(research,['execution_identity','source_identity','source'])+(research.evidence?.length?structured({evidence:research.evidence}):''))+'</section>';
 }
 function executePanel(record) {
   const agents = (record.agents || []).filter(agent=>agent.phase==='execute');
@@ -510,8 +537,8 @@ function renderDetail() {
   else if (!selected) body.innerHTML = '<div class="empty">尚无调查记录。</div>';
   else if (!detail || detail.id !== selected) body.innerHTML = '<div class="loading">正在读取 #'+esc(selected)+' 的记录…</div>';
   else if (detail.ledger) body.innerHTML='<div class="notice">'+esc(detail.summary)+'</div>'+structured(detail.ledger)+disclosure('ledger-sources','元数据来源',structured(detail.sources));
-  else if (detail.task_origin==='user' && tab==='explanation' && (detail.task_kind==='long_training' || !taskNodes().find(node=>node.id===selected)?.experiment_id)) body.innerHTML='<h3>人工任务请求</h3>'+structured(detail.manual_request)+(detail.task_kind==='long_training'?longTrainingRuns(detail.long_training || []):'<div class="notice">等待绑定主循环；绑定后可查看本轮 Plan、Execute 和 Review。</div>');
-  else if (detail.task_kind==='long_training' && tab==='explanation') body.innerHTML='<div class="notice">长训使用独立的 10k / 完整开发集协议。最终端点、曲线最优和未评审观测分别标明；指标不进入短训 Frontier。</div>'+longTrainingRuns(detail.long_training || []);
+  else if (detail.task_origin==='user' && tab==='explanation' && (detail.task_kind==='long_training' || !taskNodes().find(node=>node.id===selected)?.experiment_id)) body.innerHTML='<h3>人工任务请求</h3>'+structured(detail.manual_request)+(detail.task_kind==='long_training'&&protokLongTraining(taskNodes().find(node=>node.id===selected))?longTrainingRuns(detail.long_training || []):'<div class="notice">等待绑定主循环；绑定后可查看本轮 Plan、Execute 和 Review。</div>');
+  else if (detail.task_kind==='long_training' && protokLongTraining(taskNodes().find(node=>node.id===selected)) && tab==='explanation') body.innerHTML='<div class="notice">长训使用独立的 10k / 完整开发集协议。最终端点、曲线最优和未评审观测分别标明；指标不进入短训 Frontier。</div>'+longTrainingRuns(detail.long_training || []);
   else if (tab === 'explanation') {
     const node=data.nodes.find(item=>item.id===(taskNodes().find(task=>task.id===selected)?.experiment_id || selected)), source=data.sources?.find(item=>item.id===node?.source_id);
     body.innerHTML=(detail.manual_request?disclosure('manual-request','人工任务请求',structured(detail.manual_request)):'')+explanationPanel(detail,node,source);
@@ -619,6 +646,7 @@ function renderScout() {
 $('routeFilter').onchange=()=>{drawGraph();drawRoutes();updateView();};
 $('taskFilter').onchange=()=>{drawGraph();drawRoutes();updateView();};
 $('sourceFilter').onchange=()=>highlightSource($('sourceFilter').value);
+$('frontierSource').onchange=()=>{frontierSelection=$('frontierSource').value;frontierPinned=null;frontierHover=null;drawChart();};
 $('frontierViews').querySelectorAll('[data-chart-view]').forEach(button=>button.onclick=()=>{chartView=button.dataset.chartView;frontierHover=null;drawChart();});
 $('frontierSlider').oninput=()=>pinFrontierIndex(Number($('frontierSlider').value));
 $('frontierPrev').onclick=()=>pinFrontierIndex(Math.max(0,Number($('frontierSlider').value)-1));
@@ -640,7 +668,7 @@ $('tabs').querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{tab
 $('follow').onclick=async()=>{following=true;globalView=false;detailSignature='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);focusTreeTask();};
 $('researchBtn').onclick=async()=>{following=false;globalView=true;research='';renderSnapshot();renderDetail();await Promise.all([loadDetail(true),loadTaskMetrics()]);};
 async function refresh() {
-  try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.backend_error?'● 研究目录已连接 · 后端核账不可用':snapshot.accounting_status==='partial'?'● 研究目录已连接 · 部分核账未知':snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className=snapshot.backend_error||snapshot.accounting_status==='partial'?'amber':'green';renderSnapshot();await Promise.all([loadDetail(),loadTaskMetrics()]); }
+  try { const snapshot=await api('/api/snapshot');data=snapshot;$('connection').textContent=snapshot.backend_error?(snapshot.capabilities?.protok_accounting?'● 研究目录已连接 · 后端核账不可用':'● 研究目录已连接 · 后端记录不可用'):snapshot.capabilities?.protok_accounting&&snapshot.accounting_status==='partial'?'● 研究目录已连接 · 部分核账未知':snapshot.snapshot_only?'● 归档快照已连接':'● 研究目录记录已连接';$('connection').className=snapshot.backend_error||(snapshot.capabilities?.protok_accounting&&snapshot.accounting_status==='partial')?'amber':'green';renderSnapshot();await Promise.all([loadDetail(),loadTaskMetrics()]); }
   catch(error){$('connection').textContent='读取失败 · '+error.message;$('connection').className='red';}
   finally{setTimeout(refresh,5000);}
 }

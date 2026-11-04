@@ -32,6 +32,10 @@ class ExplanationTests(unittest.TestCase):
                     "id": "eval",
                     "comparison_scope": "dev",
                     "data_role": "development",
+                    "allow_feedback": True,
+                    "objectives": [
+                        {"name": METRIC, "unit": "angstrom", "direction": "minimize"}
+                    ],
                 }
             },
         )
@@ -197,7 +201,7 @@ class ExplanationTests(unittest.TestCase):
         material = ex.collect_material(self.root, "0001")
         self.assertNotIn("execution_ref", {s["kind"] for s in material["sources"]})
 
-    def test_ordinary_material_preserves_historical_cache_identity(self):
+    def test_ordinary_material_uses_generic_metric_cache_version(self):
         with patch.object(ex, "execution_plan") as resolver:
             material = ex.collect_material(self.root, "0001")
             resolver.assert_not_called()
@@ -233,7 +237,7 @@ class ExplanationTests(unittest.TestCase):
         expected = hashlib.sha256(
             json.dumps(
                 [
-                    "research-explanation-2",
+                    "research-explanation-3",
                     "gpt-6.1-sol",
                     "medium",
                     240,
@@ -580,7 +584,16 @@ class ExplanationTests(unittest.TestCase):
     def test_numeric_authority_import_and_incompatible(self):
         material = ex.collect_material(self.root, "0001")
         self.assertEqual(
-            material["facts"]["measurements"], [{"candidate_id": "c1", "value": 2.0}]
+            material["facts"]["measurements"],
+            [
+                {
+                    "candidate_id": "c1",
+                    "metric": METRIC,
+                    "unit": "angstrom",
+                    "direction": "minimize",
+                    "value": 2.0,
+                }
+            ],
         )
         self.assertTrue(material["facts"]["imported"])
         self.put(
@@ -594,6 +607,83 @@ class ExplanationTests(unittest.TestCase):
         bad["value"] = 0.1
         with self.assertRaises(ValueError):
             ex.validate_content(bad, material)
+
+    def test_generic_objectives_keep_metadata_without_selecting_one_best(self):
+        self.test_declared_base_and_negative_result_are_preserved()
+        context = json.loads(
+            (self.root / self.prefix / "context/study.before.json").read_text()
+        )
+        objectives = [
+            {"name": "accuracy", "unit": "ratio", "direction": "maximize"},
+            {"name": "latency", "unit": "ms", "direction": "minimize"},
+        ]
+        context["global_evaluation"]["objectives"] = objectives
+        self.put(self.prefix + "context/study.before.json", context)
+        for node, values in (("0001", [0.8, 10]), ("0007", [0.7, 8])):
+            relative = f"study/iterations/{node}/candidates.json"
+            record = json.loads((self.root / relative).read_text())
+            record["candidates"][0]["metrics"] = dict(
+                zip((objective["name"] for objective in objectives), values)
+            ) | {METRIC: 999}
+            self.put(relative, record)
+        facts = ex.collect_material(self.root, "0001")["facts"]
+        for key, candidate, values in (
+            ("measurements", "c1", [0.8, 10]),
+            ("base_measurements", "base7", [0.7, 8]),
+        ):
+            self.assertEqual(
+                facts[key],
+                [
+                    {
+                        "candidate_id": candidate,
+                        "metric": objective["name"],
+                        "unit": objective["unit"],
+                        "direction": objective["direction"],
+                        "value": value,
+                    }
+                    for objective, value in zip(objectives, values)
+                ],
+            )
+        context["global_evaluation"]["objectives"] = objectives[:1]
+        self.put(self.prefix + "context/study.before.json", context)
+        self.assertEqual(
+            len(ex.collect_material(self.root, "0001")["facts"]["measurements"]), 1
+        )
+        content = self.content()
+        content["overview"]["text"] = "accuracy improved to 0.8"
+        with self.assertRaisesRegex(ValueError, "Metric figures"):
+            ex.validate_content(content, ex.collect_material(self.root, "0001"))
+
+    def test_objective_measurements_require_feedback_and_complete_metadata(self):
+        self.test_declared_base_and_negative_result_are_preserved()
+        path = self.root / self.prefix / "context/study.before.json"
+        context = json.loads(path.read_text())
+        for update in (
+            {"data_role": "final"},
+            {"allow_feedback": False},
+            {"objectives": []},
+            {"objectives": [{"name": METRIC, "direction": "minimize"}]},
+        ):
+            with self.subTest(update=update):
+                changed = copy.deepcopy(context)
+                changed["global_evaluation"].update(update)
+                self.put(self.prefix + "context/study.before.json", changed)
+                facts = ex.collect_material(self.root, "0001")["facts"]
+                self.assertEqual(facts["measurements"], [])
+                self.assertEqual(facts["base_measurements"], [])
+                self.assertEqual(facts["measurement_state"], "no_verified_measurement")
+
+    def test_metric_name_digits_do_not_become_measurement_figures(self):
+        material = ex.collect_material(self.root, "0001")
+        material["facts"]["evaluation"]["objectives"] = [
+            {"name": "f1_score", "unit": "ratio", "direction": "maximize"}
+        ]
+        content = self.content()
+        content["overview"]["text"] = "f1_score improved"
+        ex.validate_content(content, material)
+        content["overview"]["text"] = "f1_score improved to 0.8"
+        with self.assertRaisesRegex(ValueError, "Metric figures"):
+            ex.validate_content(content, material)
 
     def test_invalid_citation_and_missing_code_formula(self):
         material = ex.collect_material(self.root, "0001")
@@ -703,7 +793,15 @@ class ExplanationTests(unittest.TestCase):
         self.assertEqual(material["facts"]["base_experiment"], "0007")
         self.assertEqual(
             material["facts"]["base_measurements"],
-            [{"candidate_id": "base7", "value": 1.0}],
+            [
+                {
+                    "candidate_id": "base7",
+                    "metric": METRIC,
+                    "unit": "angstrom",
+                    "direction": "minimize",
+                    "value": 1.0,
+                }
+            ],
         )
         self.assertGreater(
             material["facts"]["measurements"][0]["value"],

@@ -1095,7 +1095,7 @@ class FrontierTests(unittest.TestCase):
         frontier = result["frontier"]
         points = frontier["points"]
         self.assertTrue(frontier["available"])
-        self.assertEqual(frontier["unit"], "Å")
+        self.assertEqual(frontier["unit"], "Angstrom")
         self.assertEqual([p["reached"] for p in points], [True, True, True, False])
         self.assertEqual([p["improved"] for p in points], [False, False, True, False])
         self.assertEqual([p["current"] for p in points], [False, False, True, False])
@@ -1451,6 +1451,19 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIsNone(nodes["ledger:" + failed]["value"])
         archive = nodes["history-1:0001"]
         self.assertEqual(archive["same_ledger_result"], "ledger:" + self.first)
+        ledger_node = nodes["ledger:" + self.first]
+        self.assertEqual(
+            (ledger_node["metric"], ledger_node["unit"], ledger_node["direction"]),
+            (DASH.METRIC, "Angstrom", "minimize"),
+        )
+        views = {view["source_id"]: view for view in result["frontiers"]}
+        self.assertTrue(views["ledger"]["unreviewed"])
+        self.assertEqual(views["ledger"]["points"], [])
+        self.assertEqual(len(views["ledger"]["legacy_points"]), 1)
+        self.assertEqual(
+            views["history-1"]["points"][0]["same_ledger_result"],
+            "ledger:" + self.first,
+        )
         self.assertNotIn("imported_from", archive)
         self.assertNotIn("duplicate_of", archive)
         self.assertEqual(result["coverage"]["unique_observed_fingerprint_count"], 2)

@@ -23,6 +23,7 @@ from integrations.protok.plan_provenance import accepted_plan_response, executio
 from integrations.protok.run import job_path
 from integrations.protok.task_telemetry import TASK_ID, manual_locations
 from integrations.protok import tensorboard_scope
+from research_loop.evaluation import validate_evaluation
 from research_loop import telemetry
 from research_loop.tasks import TaskQueue
 from research_loop.harness import completed_response
@@ -725,17 +726,24 @@ def scout_snapshot(root):
     }
 
 
-def frontier_snapshot(root):
-    """Display canonical, published RMSD metadata without grading experiments again."""
-    definition = read(root / "study/study.json", {}).get("global_evaluation") or {}
+def frontier_snapshot(root, definition=None):
+    """Project published measurements without grading experiments again."""
+    if definition is None:
+        definition = read(root / "study/study.json", {}).get("global_evaluation") or {}
+    objectives = definition.get("objectives") or []
+    objective = objectives[0] if len(objectives) == 1 else {}
+    metric, direction = objective.get("name"), objective.get("direction")
+    optimum = max if direction == "maximize" else min
     evaluation_id, scope = definition.get("id"), definition.get("comparison_scope")
     result = {
         "available": False,
         "evaluation_id": evaluation_id,
         "comparison_scope": scope,
-        "metric": METRIC,
-        "unit": "Å",
-        "direction": "minimize",
+        "metric": metric,
+        "unit": objective.get("unit"),
+        "direction": direction,
+        "objectives": objectives,
+        "definition": definition,
         "current_candidate_ids": [],
         "current_experiment_ids": [],
         "canonical_candidate_ids": [],
@@ -744,17 +752,18 @@ def frontier_snapshot(root):
         "excluded": [],
         "source": "study/frontiers.json",
         "history_basis": "accepted_publication_frontier",
-        "improvement_basis": "exact_decrease_from_prepublication_frontier",
+        "improvement_basis": "exact_gain_from_prepublication_frontier",
     }
-    if (
-        evaluation_id != PROTOCOL
-        or not scope
-        or definition.get("allow_feedback") is not True
-        or len(definition.get("objectives", [])) != 1
-        or definition["objectives"][0].get("name") != METRIC
-        or definition["objectives"][0].get("direction") != "minimize"
-    ):
-        result["reason"] = "固定 RMSD 最小化全局评价定义不可用。"
+    try:
+        validate_evaluation(definition)
+    except (ValueError, KeyError, TypeError) as error:
+        result["reason"] = f"评价定义不可用：{error}"
+        return result
+    if definition.get("allow_feedback") is not True:
+        result["reason"] = "该评价禁止反馈；不展示候选测量。"
+        return result
+    if len(objectives) != 1:
+        result["reason"] = "多目标评价没有单一最优分数；不投影为标量曲线。"
         return result
 
     def matching(view):
@@ -807,7 +816,7 @@ def frontier_snapshot(root):
         return contents if isinstance(contents, dict) else None
 
     def metric_value(candidate):
-        value = candidate.get("metrics", {}).get(METRIC)
+        value = candidate.get("metrics", {}).get(metric)
         return value if type(value) in (int, float) and math.isfinite(value) else None
 
     for folder, metadata, record, candidates in records:
@@ -826,7 +835,7 @@ def frontier_snapshot(root):
         previous_values = [metric_value(c) for c in (prior or {}).get("candidates", [])]
         previous_values = [value for value in previous_values if value is not None]
         prior_ids = (prior or {}).get("candidate_ids", [])
-        previous_best = min(previous_values) if previous_values else None
+        previous_best = optimum(previous_values) if previous_values else None
         if prior_ids and (
             not previous_values or len(previous_values) != len(prior_ids)
         ):
@@ -857,7 +866,15 @@ def frontier_snapshot(root):
                 else None
             )
             improved = (
-                (value < previous_best if previous_best is not None else False)
+                (
+                    (
+                        value > previous_best
+                        if direction == "maximize"
+                        else value < previous_best
+                    )
+                    if previous_best is not None
+                    else False
+                )
                 if reached is True and prior_known
                 else False
                 if reached is False
@@ -868,11 +885,16 @@ def frontier_snapshot(root):
                     "id": candidate["experiment_id"],
                     "candidate_id": identity,
                     "value": value,
+                    "metric": metric,
+                    "unit": objective.get("unit"),
+                    "direction": direction,
+                    "evaluation_id": evaluation_id,
+                    "comparison_scope": scope,
                     "current": identity in current_ids,
                     "reached": reached,
                     "improved": improved,
                     "previous_best": previous_best if prior_known else None,
-                    "delta": previous_best - value
+                    "delta": abs(previous_best - value)
                     if improved
                     else 0
                     if prior_known and previous_best is not None
@@ -920,12 +942,57 @@ def frontier_snapshot(root):
     return result
 
 
+def study_capabilities(root):
+    config = read(root / "study/study.json", {})
+    definition = config.get("global_evaluation") or {}
+    # Explicit Study definitions take precedence over stale adapter receipts.
+    protok = definition.get("id") == PROTOCOL or (
+        "global_evaluation" not in config
+        and (
+            (root / "control/ownership.json").exists()
+            or (root / "control/backend-snapshot.json").exists()
+        )
+    )
+    return {
+        "protok": protok,
+        "protok_accounting": protok,
+        "protok_long_training": protok,
+    }
+
+
+def study_frontiers(root):
+    """Keep retained global protocols separate, using published definitions."""
+    current = read(root / "study/study.json", {}).get("global_evaluation") or {}
+    definitions = {current.get("id"): current}
+    for folder in sorted((root / "study/iterations").glob("[0-9]*")):
+        if (
+            read(folder / "iteration.json", {}).get("status") != "reviewed"
+            or not (folder / "publication.json").exists()
+        ):
+            continue
+        record = read(folder / "candidates.json", {})
+        for definition in record.get("definitions", []):
+            if definition.get("id") == record.get("global_evaluation_id"):
+                definitions.setdefault(definition["id"], definition)
+    return [frontier_snapshot(root, definition) for definition in definitions.values()]
+
+
 def snapshot(root, *, snapshot_only=False):
     study = root / "study"
     state = read(study / "state.json", {})
-    best = read(root / "control/active-best.json", {})
+    capabilities = study_capabilities(root)
+    protok = capabilities["protok"]
+    best = read(root / "control/active-best.json", {}) if protok else {}
     backend_error = None
-    if snapshot_only:
+    if not protok:
+        backend = {
+            "records": [],
+            "used_gpu_seconds": None,
+            "scored_records": None,
+            "outstanding": [],
+            "accounting_status": "not_applicable",
+        }
+    elif snapshot_only:
         backend = read(root / "control/backend-snapshot.json")
         if not backend:
             raise ValueError("Missing exported backend snapshot")
@@ -1097,9 +1164,30 @@ def snapshot(root, *, snapshot_only=False):
                 "created_at": meta.get("created_at"),
             }
         )
-    frontier = frontier_snapshot(root)
+    frontiers = study_frontiers(root)
+    frontier = frontiers[0]
     for node in nodes:
-        points = [point for point in frontier["points"] if point["id"] == node["id"]]
+        record_evaluation = read(
+            study / "iterations" / node["id"] / "candidates.json", {}
+        ).get("global_evaluation_id")
+        node_frontier = next(
+            (view for view in frontiers if view["evaluation_id"] == record_evaluation),
+            frontier,
+        )
+        points = [
+            point for point in node_frontier["points"] if point["id"] == node["id"]
+        ]
+        node.update(
+            {key: node_frontier.get(key) for key in ("metric", "unit", "direction")}
+        )
+        node["capabilities"] = capabilities
+        if (
+            not protok
+            or node_frontier["definition"].get("allow_feedback") is False
+            or (node_frontier["definition"] and len(node_frontier["objectives"]) != 1)
+        ):
+            node["value"] = node["provisional_value"] = None
+            node["eligible"] = False
         node["fingerprint"] = read(job_path(root, node["id"]) / "job.json", {}).get(
             "fingerprint"
         ) or read(job_path(root, node["id"]) / "result.json", {}).get("fingerprint")
@@ -1119,11 +1207,12 @@ def snapshot(root, *, snapshot_only=False):
             ).get("version")
             node["value"] = points[0]["value"]
             node["eligible"] = True
-        node["evaluation_id"] = frontier["evaluation_id"] if points else None
-        node["comparison_scope"] = frontier["comparison_scope"] if points else None
+        node["evaluation_id"] = node_frontier["evaluation_id"] if points else None
+        node["comparison_scope"] = node_frontier["comparison_scope"] if points else None
         node["frontier_current"] = (
-            node["id"] in frontier["current_experiment_ids"]
-            if frontier["available"]
+            node["id"] in node_frontier["current_experiment_ids"]
+            and node_frontier["evaluation_id"] == frontier["evaluation_id"]
+            if node_frontier["available"]
             else None
         )
         node["frontier_exclusion_reason"] = (
@@ -1131,7 +1220,7 @@ def snapshot(root, *, snapshot_only=False):
                 sorted(
                     {
                         entry["reason"]
-                        for entry in frontier["excluded"]
+                        for entry in node_frontier["excluded"]
                         if entry["id"] == node["id"]
                         and entry.get("reason")
                         and entry["reason"] != "dominated"
@@ -1193,9 +1282,12 @@ def snapshot(root, *, snapshot_only=False):
         "study_name": root.name,
         "study_root": str(root),
         "snapshot_only": snapshot_only,
+        "capabilities": capabilities,
+        "frontiers": frontiers,
         "backend_observed_at": backend.get("observed_at"),
         "backend_error": backend_error,
-        "accounting_available": backend_error is None
+        "accounting_available": protok
+        and backend_error is None
         and backend.get("accounting_status", "known") == "known",
         "research_overruns": backend.get("research_overruns", []),
         "state": {
@@ -1218,7 +1310,7 @@ def snapshot(root, *, snapshot_only=False):
         "runner": runner,
         "progress": current_progress,
         "scout": scout_snapshot(root),
-        "long_training": long_training_snapshot(root / "study"),
+        "long_training": long_training_snapshot(root / "study") if protok else [],
         "best": {"id": best.get("experiment_id"), "metrics": best.get("metrics", {})},
         "gpu_seconds": backend.get("total_gpu_seconds", backend["used_gpu_seconds"]),
         "accounting_status": backend.get(
@@ -1263,8 +1355,9 @@ def snapshot(root, *, snapshot_only=False):
         if debug_budget or state.get("debugging")
         else None,
         "scored_records": backend["scored_records"],
-        "outstanding": backend["outstanding"] + research_outstanding(root, backend),
-        "research_outstanding": research_outstanding(root, backend),
+        "outstanding": backend["outstanding"]
+        + (research_outstanding(root, backend) if protok else []),
+        "research_outstanding": research_outstanding(root, backend) if protok else [],
         "nodes": nodes,
         "frontier": frontier,
         "routes": read(study / "routes/index.json", {}),
@@ -1994,6 +2087,9 @@ def ledger_history(records_root, cutoff):
             "fingerprint": fingerprint,
             "evaluation_id": protocol,
             "comparison_scope": None,
+            "metric": METRIC if same_protocol else None,
+            "unit": "Angstrom" if same_protocol else None,
+            "direction": "minimize" if same_protocol else None,
             "imported": False,
             "attempts": [
                 {
@@ -2112,7 +2208,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         )
         nodes.extend(ledger_nodes)
     active_frontier = active["frontier"]
-    history_frontiers, long_training, long_tasks = [], [], []
+    history_frontiers, long_training, long_tasks, separate_frontiers = [], [], [], []
     for definition in definitions:
         source_id, source_root, label = (
             definition["id"],
@@ -2135,7 +2231,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         source_frontier = local["frontier"]
         compatible = all(
             source_frontier.get(key) == active_frontier.get(key)
-            for key in ("evaluation_id", "comparison_scope", "metric", "direction")
+            for key in ("evaluation_id", "comparison_scope", "definition")
         )
         sources.append(
             {
@@ -2147,6 +2243,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
                 if source_id != "active" or snapshot_only
                 else "local_records",
                 "count": len(local["nodes"]),
+                "capabilities": local["capabilities"],
                 "explanation": explanation_coverage(source_root),
             }
         )
@@ -2168,6 +2265,36 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         elif not compatible:
             limitations.append(
                 f"{label}的评价或比较范围与当前 Study 不同；未合并其 Frontier 曲线。"
+            )
+        for view in local["frontiers"]:
+            separate_frontiers.append(
+                {
+                    **view,
+                    "id": source_id + ":" + str(view["evaluation_id"]),
+                    "source_id": source_id,
+                    "source_label": label,
+                    "current_candidate_ids": [
+                        source_id + ":" + key for key in view["current_candidate_ids"]
+                    ],
+                    "canonical_candidate_ids": [
+                        source_id + ":" + key for key in view["canonical_candidate_ids"]
+                    ],
+                    "current_experiment_ids": [
+                        source_id + ":" + key for key in view["current_experiment_ids"]
+                    ],
+                    "points": [
+                        {
+                            **point,
+                            "id": source_id + ":" + point["id"],
+                            "candidate_id": source_id + ":" + point["candidate_id"],
+                            "source_id": source_id,
+                            "source_label": label,
+                            "reviewed": True,
+                            "frontier_eligible": True,
+                        }
+                        for point in view["points"]
+                    ],
+                }
             )
         for node in local["nodes"]:
             original = node["id"]
@@ -2288,6 +2415,41 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         point["fingerprint"] = node.get("fingerprint")
         point["duplicate_of"] = node.get("duplicate_of")
         point["same_ledger_result"] = node.get("same_ledger_result")
+    for view in separate_frontiers:
+        for point in view["points"]:
+            node = by_id[point["id"]]
+            point.update(
+                {
+                    key: node.get(key)
+                    for key in (
+                        "sequence",
+                        "fingerprint",
+                        "duplicate_of",
+                        "same_ledger_result",
+                    )
+                }
+            )
+    if records_root is not None:
+        separate_frontiers.append(
+            {
+                "id": "ledger:" + PROTOCOL,
+                "source_id": "ledger",
+                "source_label": "前置账本（未经评审）",
+                "unreviewed": True,
+                "available": True,
+                "evaluation_id": PROTOCOL,
+                "comparison_scope": None,
+                "metric": METRIC,
+                "unit": "Angstrom",
+                "direction": "minimize",
+                "points": [],
+                "legacy_points": legacy_points,
+                "current_candidate_ids": [],
+                "canonical_candidate_ids": [],
+                "current_experiment_ids": [],
+                "current_membership_complete": False,
+            }
+        )
     points.sort(key=lambda point: point["sequence"])
     legacy_points.sort(key=lambda point: point["sequence"])
     merged_frontier = {
@@ -2302,7 +2464,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
             "active:" + value for value in active_frontier["current_experiment_ids"]
         ],
         "points": points,
-        "legacy_points": legacy_points,
+        "legacy_points": legacy_points if active["capabilities"]["protok"] else [],
         "sources": history_frontiers,
         "source": "active",
         "evidence_source": active_frontier["source"],
@@ -2341,6 +2503,7 @@ def view_snapshot(root, *, snapshot_only=False, history_roots=(), records_root=N
         if active["nodes"]
         else None,
         "frontier": merged_frontier,
+        "frontiers": separate_frontiers,
         "telemetry": telemetry_view(root, history_roots=history_roots),
         "long_training": long_training,
         "tasks": tasks,
