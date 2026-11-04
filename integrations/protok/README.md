@@ -33,7 +33,11 @@ canonical data and an authorized resource lease. Private research inputs,
 experiment reports and deployment snapshots are not distributed here.
 See [Deployment configuration](deployment.md) for the required settings.
 
-The [read-only dashboard](dashboard.md#阅读方式) places the current Frontier's code
+The [read-only dashboard](dashboard.md#阅读方式) reads generic Study objective
+names, units, optimization directions and published Frontiers. Its source/protocol
+selector keeps historical evaluations separate; generic Studies require neither a
+ProTok project nor an accounting export. ProTok accounting and fixed long-training
+views appear only for the applicable adapter. The dashboard places the current Frontier's code
 ancestry on a horizontal mainline and branches other tasks from their actual
 parents. It offers a fitted overview and zoomable local view. Hover or focus a
 node to preview its task card; select it to update the progress and evidence

@@ -16,7 +16,7 @@ const context = vm.createContext({document, fetch: () => new Promise(() => {}), 
 for (const [,src] of html.matchAll(/<script src="\/(assets\/[^\"]+)"><\/script>/g)) {
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..',src),'utf8'),context);
 }
-vm.runInContext(script+'\nglobalThis.ui = {loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, tensorboardTaskURL, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, treeEdge, graphParent, drawGraph, focusTreeTask, frontierSpine, previewTreeTask, renderTreePopover, setTreeZoom, zoomTree, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
+vm.runInContext(script+'\nglobalThis.ui = {drawChart, selectedFrontier, frontierChoiceKey, metricValue, protokLongTraining, loadDetail, taskNodes, visibleTasks, taskState, renderDetail, telemetryGroups, metricTask, tensorboardTaskURL, metricMatches, metricLeaves, metricSeries, metricPlot, metricCard, mergeTaskMetrics, loadTaskMetrics, longTrainingRuns, longTrainingCurve, gitLayout, treeEdge, graphParent, drawGraph, focusTreeTask, frontierSpine, previewTreeTask, renderTreePopover, setTreeZoom, zoomTree, renderProgress, renderScout, nodeResult, researchEvidencePanel, markdown, structured, agentCard, executionHistory, executePanel, readingField, frontierPlot, axisValue, exactScore, showFrontierPoint, resolveReference, explanationPanel, explanationMeasurements, explainTechnical, readingState, renderMath, explanationCoverage, operatorPlanPanel, continuationPlanPanel};', context);
 const ui = context.ui;
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -364,16 +364,16 @@ test('Research scripts show evidence instead of a missing quality score', () => 
   assert.equal(ui.nodeResult({...node,job_status:'blocked',published:false}),'研究作业待核账');
   const research={iteration:'0017',status:'completed',owned_job_id:'901',gpu_seconds:30,allocated_gpu_seconds:180,outputs:['probe/metrics.json','probe/<script>.png'],evidence:['control/research-jobs/0017/state.json'],source:'control/research-jobs/0017/receipt.json',execution_identity:'execution-v1'};
   const rendered=ui.researchEvidencePanel(research);
-  for(const text of ['研究脚本 · 证据计算','脚本执行完成','没有 RMSD 评分','probe/metrics.json','分配 GPU 秒','execution-v1']) assert.ok(rendered.includes(text),text);
+  for(const text of ['研究脚本 · 证据计算','脚本执行完成','没有标量评分','probe/metrics.json','分配 GPU 秒','execution-v1']) assert.ok(rendered.includes(text),text);
   assert.doesNotMatch(rendered,/<script>|<img|"gpu_seconds"\s*:/);
   const pending=ui.explanationPanel({id:'active:0017',execution:{research},explanation:{status:'unpublished'}},node);
   assert.match(pending,/已收集的证据产物/);
-  assert.match(pending,/不产生固定协议 RMSD，也不进入 RMSD Frontier/);
+  assert.match(pending,/不产生标量评分，也不进入指标 Frontier/);
   assert.doesNotMatch(pending,/本轮没有可在此确认的已发布且已核查测量/);
 });
 
 test('Unknown research effects remain visible and resource labels do not count them as formal scoring', () => {
-  context.researchProgress={state:{iteration:16,phase:'done',status:'ready'},nodes:[],formal_gpu_seconds:300,research_gpu_seconds:30,debug_gpu_seconds:5,outstanding:[{mode:'research',status:'unknown',attempts:[]}]};
+  context.researchProgress={capabilities:{protok_accounting:true},state:{iteration:16,phase:'done',status:'ready'},nodes:[],formal_gpu_seconds:300,research_gpu_seconds:30,debug_gpu_seconds:5,outstanding:[{mode:'research',status:'unknown',attempts:[]}]};
   vm.runInContext('data=researchProgress;',context);
   ui.renderProgress();
   const status=elements.get('statusline').innerHTML;
@@ -535,7 +535,7 @@ test('Inspector displays full precision and labels a repeated import as reuse de
   context.inspectPoint=point;
   vm.runInContext('chartModel={points:[inspectPoint]};',context);
   ui.showFrontierPoint(point);
-  assert.equal(elements.get('inspectValue').textContent,'2.2214044051580952 Å');
+  assert.equal(elements.get('inspectValue').textContent,'2.2214044051580952');
   assert.match(elements.get('inspectDelta').textContent,/不计为新测量/);
   assert.doesNotMatch(elements.get('inspectDelta').textContent,/降低约/);
 });
@@ -573,8 +573,8 @@ test('Explanation defaults to steps, preserves per-node reading state, and separ
   assert.match(rendered,/尚未测量/);
   state.mode='brief';
   rendered=ui.explanationPanel(record,node);
-  assert.match(rendered,/1\.8843203088266018 Å/);
-  assert.match(rendered,/2\.187434156835498 Å/);
+  assert.match(rendered,/1\.8843203088266018/);
+  assert.match(rendered,/2\.187434156835498/);
   assert.match(rendered,/建议 · 本说明未执行/);
   assert.equal(ui.readingState(record.id).mode,'brief');
   state.mode='steps';state.step=4;
@@ -595,7 +595,7 @@ test('Measurement panel discloses reuse and current exclusions without turning e
 test('Pending, failed, stale and unpublished explanations stay honest and keep authoritative values', () => {
   for (const status of ['pending','failed','stale','unpublished','insufficient']) {
     const rendered=ui.explanationPanel({id:status,explanation:{status,reason:'<script>bad</script>'}},{value:2.21});
-    assert.match(rendered,/2\.21 Å/);
+    assert.match(rendered,/2\.21；/);
     assert.doesNotMatch(rendered,/<script>|逐步讲解|证据支持到哪里/);
   }
   const coverage=ui.explanationCoverage({label:'历史',explanation:{counts:{ready:3,pending:2,failed:1},latest_published_id:'0009',covered_through_id:'0008'}});
@@ -638,7 +638,7 @@ test('Proven continuation shows the original Planner contract and separates exec
 
 test('Degraded accounting is unknown while retained research and interaction state survive refresh', async () => {
   vm.runInContext(`
-    data={state:{iteration:1,status:'needs_attention'},nodes:[{id:'0001',route:'Retained question'}],
+    data={capabilities:{protok_accounting:true},state:{iteration:1,status:'needs_attention'},nodes:[{id:'0001',route:'Retained question'}],
       accounting_available:false,backend_error:'ProTokError: Invalid research GPU charge',
       gpu_seconds:null,formal_gpu_seconds:null,research_gpu_seconds:null,debug_gpu_seconds:null,
       progress:{title:'后端核账不可用 · 需要处理',reasons:[{title:'后端读取失败',detail:'Invalid research GPU charge'}]}};
@@ -663,7 +663,7 @@ test('Degraded accounting is unknown while retained research and interaction sta
 
 
 test('Settled research overruns show actual accounting without marking it unknown', () => {
-  vm.runInContext(`data={state:{iteration:17,phase:'done',status:'ready'},nodes:[],
+  vm.runInContext(`data={capabilities:{protok_accounting:true},state:{iteration:17,phase:'done',status:'ready'},nodes:[],
     accounting_available:true,gpu_seconds:180,formal_gpu_seconds:100,research_gpu_seconds:75,debug_gpu_seconds:5,
     research_overruns:[{iteration:'0017',allocated_seconds:60,gpu_seconds:75,overrun_seconds:15}]};`,context);
   ui.renderProgress();
@@ -688,7 +688,7 @@ test('Long training separates reviewed 10k endpoints and best checkpoints with a
 });
 
 test('Long training allocations appear in accounting when no short job is outstanding', () => {
-  vm.runInContext(`data={state:{},nodes:[],accounting_available:true,outstanding:[],
+  vm.runInContext(`data={capabilities:{protok_accounting:true},state:{},nodes:[],accounting_available:true,outstanding:[],
     formal_gpu_seconds:10,research_gpu_seconds:0,debug_gpu_seconds:0,
     long_training_gpu_seconds:80,long_training_outstanding:['/jobs/L0123456789abcdef']};`,context);
   ui.renderProgress();
@@ -925,7 +925,7 @@ test('Task detail refresh and task switching retain each task reading position a
     get innerHTML(){return markup;},set innerHTML(value){markup=value;folds=[...value.matchAll(/<details data-disclosure="([^"]+)"([^>]*)>/g)].map(match=>({dataset:{disclosure:match[1]},open:/\sopen(?:\s|$)/.test(match[2])}));}};
   elements.set('detailBody',body);
   const tasks=concurrentTasks();
-  context.taskFixture={tasks,nodes:[],state:{}};
+  context.taskFixture={capabilities:{protok_long_training:true},tasks,nodes:[],state:{}};
   context.longDetail={id:tasks[1].id,task_kind:'long_training',long_training:[{id:'L0123456789abcdef',status:'reviewed',request:{source_iteration:'0001'},result:{review:{markdown:'Independent result'},result:{curve:[]}}}]};
   try {
     vm.runInContext("data=taskFixture;selected=longDetail.id;detail=longDetail;tab='explanation';globalView=false;",context);
@@ -981,4 +981,103 @@ test('Manual long metrics use the stable task selector and isolate all other lan
   } finally {
     vm.runInContext('({api,renderTaskMetrics}=savedManualMetricIO);delete globalThis.savedManualMetricIO;data=null;selected=null;',context);
   }
+});
+
+
+test('Maximize curves carry the earlier optimum into a recent window', () => {
+  const nodes=Array.from({length:30},(_,index)=>({id:'active:'+index,source_id:'active',sequence:index+1}));
+  const points=[{...nodes[1],value:.9,current:true,reached:true},{...nodes[27],value:.7,reached:false},{...nodes[29],value:.95,current:true,reached:true}];
+  const model=ui.frontierPlot({source_id:'active',available:true,direction:'maximize',points},nodes,'recent');
+  assert.deepEqual(plain(model.curve.map(point=>point.value)),[.9,.9,.95]);
+  assert.equal(model.first,21);
+});
+
+test('Source and evaluation selection isolate charts, summaries and exact unitless readouts', () => {
+  const prior=elements.get('frontierChart');
+  elements.set('frontierChart',{clientWidth:800,clientHeight:300,querySelectorAll:()=>[],setAttribute(){},contains:()=>false});
+  context.frontierFixture={nodes:[{id:'history:1',source_id:'history',sequence:1},{id:'active:1',source_id:'active',sequence:2},{id:'active:2',source_id:'active',sequence:3}],frontier:{evaluation_id:'accuracy'},frontiers:[
+    {source_id:'history',source_label:'History',evaluation_id:'distance',comparison_scope:'old',available:true,metric:'distance',unit:'km',direction:'minimize',points:[{id:'history:1',sequence:1,value:100,current:true,reached:true}]},
+    {source_id:'active',evaluation_id:'older',available:true,metric:'latency',unit:'ms',direction:'minimize',points:[{id:'active:1',sequence:2,value:9,current:true,reached:true}]},
+    {source_id:'active',evaluation_id:'accuracy',available:true,metric:'accuracy',unit:'',direction:'maximize',points:[{id:'active:1',sequence:2,value:.7,current:true,reached:true},{id:'active:2',sequence:3,value:.9,current:true,reached:true}]},
+    {source_id:'active',evaluation_id:'multi',available:false,metric:null,objectives:[{},{}],reason:'Multiple objectives require separate views',points:[{id:'active:2',value:900,current:true}]}]};
+  try {
+    vm.runInContext('data=frontierFixture;frontierSelection=null;chartView="all";',context);
+    ui.drawChart();
+    assert.equal(ui.selectedFrontier().evaluation_id,'accuracy');
+    assert.equal(elements.get('best').innerHTML,'0.900000');
+    assert.match(elements.get('frontierChart').innerHTML,/accuracy 0.9/);
+    assert.doesNotMatch(elements.get('frontierChart').innerHTML,/km|ms|Å|history:1/);
+    assert.equal(elements.get('inspectValue').textContent,'0.7');
+    assert.equal(ui.nodeResult({value:.9,metric:'accuracy',unit:''}),'accuracy 0.9000');
+    vm.runInContext('frontierSelection=frontierChoiceKey(data.frontiers[0]);',context);ui.drawChart();
+    assert.equal(elements.get('inspectValue').textContent,'100 km');
+    assert.doesNotMatch(elements.get('frontierChart').innerHTML,/accuracy|active:1/);
+    vm.runInContext('frontierSelection=frontierChoiceKey(data.frontiers[3]);',context);ui.drawChart();
+    assert.equal(elements.get('best').innerHTML,'—');
+    assert.match(elements.get('bestSub').textContent,/Multiple objectives/);
+    assert.equal(vm.runInContext('chartModel.points.length',context),0);
+  } finally {elements.set('frontierChart',prior);vm.runInContext('data=null;frontierSelection=null;chartView="frontier";',context);}
+});
+
+test('Generic progress hides ProTok accounting and specialized long-training output', () => {
+  vm.runInContext('data={state:{},nodes:[],capabilities:{protok:false,protok_accounting:false,protok_long_training:false},gpu_seconds:100,formal_gpu_seconds:100};',context);
+  ui.renderProgress();
+  assert.equal(elements.get('gpuCard').hidden,true);
+  assert.doesNotMatch(elements.get('statusline').innerHTML,/GPU|核账/);
+  assert.doesNotMatch(elements.get('protocolNote').textContent,/H100|蛋白|seed42/);
+  assert.equal(ui.protokLongTraining({task_kind:'long_training'}),false);
+  assert.equal(ui.protokLongTraining({capabilities:{protok_long_training:true}}),true);
+  vm.runInContext('data=null;',context);
+});
+
+
+test('Generic detail measurements retain declared metric and exact units without RMSD claims', () => {
+  const record={explanation:{facts:{measurements:[{value:.875}],base_measurements:[{value:.75}]}}};
+  const markup=ui.explanationMeasurements(record,{metric:'accuracy',unit:'ratio',direction:'maximize'});
+  assert.match(markup,/accuracy/);
+  assert.match(markup,/0.875 ratio/);
+  assert.match(markup,/增加 0.125 ratio/);
+  assert.doesNotMatch(markup,/RMSD|Å/);
+});
+
+
+test('Objective rows use their own metadata and only compare matching metric, unit and direction', () => {
+  const values=[{candidate_id:'a',metric:'accuracy',unit:'ratio',direction:'maximize',value:.9},{candidate_id:'a',metric:'latency',unit:'ms',direction:'minimize',value:12}];
+  const bases=[{...values[1],value:15},{...values[0],value:.8}];
+  const markup=ui.explanationMeasurements({explanation:{facts:{measurements:values,base_measurements:bases}}},{metric:'wrong node metric',unit:'wrong unit',direction:'minimize'});
+  assert.match(markup,/accuracy ↑/);
+  assert.match(markup,/latency ↓/);
+  assert.match(markup,/0.9 ratio/);
+  assert.match(markup,/12 ms/);
+  assert.match(markup,/latency 降低 3 ms/);
+  assert.match(markup,/accuracy 增加/);
+  assert.doesNotMatch(markup,/wrong node metric|wrong unit/);
+  for(const changed of [{metric:'other'},{unit:'percent'},{direction:'minimize'}]) {
+    const mismatch=ui.explanationMeasurements({explanation:{facts:{measurements:[values[0]],base_measurements:[{...bases[1],...changed}]}}},{});
+    assert.doesNotMatch(mismatch,/差值由记录计算|measurement-arrow/);
+  }
+});
+
+test('Explicit ledger view defaults to all observations without a reviewed optimum or Frontier claims', () => {
+  const prior=elements.get('frontierChart');
+  elements.set('frontierChart',{clientWidth:800,clientHeight:300,querySelectorAll:()=>[],setAttribute(){},contains:()=>false});
+  context.ledgerFixture={nodes:[{id:'ledger:x',source_id:'ledger',sequence:1},{id:'active:1',source_id:'active',sequence:2}],frontier:{evaluation_id:'active'},frontiers:[{source_id:'active',evaluation_id:'active',available:true,points:[]},{source_id:'ledger',evaluation_id:'legacy',available:true,unreviewed:true,current_membership_complete:false,metric:'distance',unit:'Angstrom',direction:'minimize',points:[],legacy_points:[{id:'ledger:x',sequence:1,value:1.25}]}]};
+  try {
+    vm.runInContext('data=ledgerFixture;frontierSelection=frontierChoiceKey(data.frontiers[1]);chartView="frontier";',context);ui.drawChart();
+    assert.equal(vm.runInContext('chartView',context),'all');
+    assert.equal(vm.runInContext('chartModel.points.length',context),1);
+    assert.equal(vm.runInContext('chartModel.curve.length',context),0);
+    assert.equal(elements.get('best').innerHTML,'—');
+    assert.match(elements.get('bestSub').textContent,/未经本 Loop 独立评审/);
+    assert.doesNotMatch(elements.get('bestSub').textContent,/正在发布/);
+    assert.match(elements.get('frontierSummary').textContent,/未经评审/);
+    assert.equal(elements.get('frontierLegend').hidden,true);
+    assert.doesNotMatch(elements.get('frontierInteraction').textContent,/累计最优/);
+    assert.equal(elements.get('inspectValue').textContent,'1.25 Angstrom');
+    assert.match(elements.get('inspectStatus').textContent,/未经本 Loop 评审/);
+    assert.doesNotMatch(elements.get('frontierChart').innerHTML,/active:1/);
+    vm.runInContext('frontierSelection=frontierChoiceKey(data.frontiers[0]);',context);ui.drawChart();
+    assert.equal(elements.get('frontierLegend').hidden,false);
+    assert.equal(elements.get('frontierTitle').textContent,'研究前沿');
+  } finally {elements.set('frontierChart',prior);vm.runInContext('data=null;frontierSelection=null;chartView="frontier";',context);}
 });

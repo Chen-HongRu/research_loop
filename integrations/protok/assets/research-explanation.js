@@ -69,18 +69,23 @@ function explainTechnical(technical,record) {
   return html;
 }
 function explanationMeasurements(record,node) {
-  if(node?.execution_kind==='research_script') return '<div class="explain-facts"><h4>研究证据与质量评分</h4><p>本轮通过研究脚本收集证据，不产生固定协议 RMSD，也不进入 RMSD Frontier。研究结论以独立 Review 为准。</p></div>';
+  if(node?.execution_kind==='research_script') return '<div class="explain-facts"><h4>研究证据与质量评分</h4><p>本轮通过研究脚本收集证据，不产生标量评分，也不进入指标 Frontier。研究结论以独立 Review 为准。</p></div>';
   const fact=record.explanation?.facts || {}, values=fact.measurements || [], bases=fact.base_measurements || [];
   const imported=fact.imported || node?.imported, repeated=node?.duplicate_of || node?.same_ledger_result;
   let html='<div class="explain-facts"><h4>记录中的测量 · 控制器数值</h4>';
-  if (values.length===1) {
-    html+='<div class="measurement-pair">'+(bases.length===1?'<div><small>声明的代码起点 '+esc(fact.base_experiment || '未记录')+'</small><strong>'+exactScore(bases[0].value)+' Å</strong></div><span class="measurement-arrow">→</span>':'')+'<div><small>本轮已发布记录</small><strong>'+exactScore(values[0].value)+' Å</strong></div></div>';
-    if (bases.length===1 && !imported && !repeated) {
-      const delta=bases[0].value-values[0].value;
-      html+='<p class="caption">相对声明的代码起点，RMSD '+(delta>0?'降低 ':delta<0?'增加 ':'持平 ')+(delta===0?'':exactScore(Math.abs(delta))+' Å')+'。差值由记录计算；单次对照不能单独判定机制。</p>';
+  const metadata=row=>({...node,...row});
+  const sameObjective=(left,right)=>left.metric===right.metric&&left.unit===right.unit&&left.direction===right.direction;
+  const measurement=(label,row)=>'<div><small>'+esc(label)+' · '+esc(metricName(metadata(row)))+' '+esc(metricDirection(metadata(row)))+'</small><strong>'+esc(metricValue(row.value,metadata(row)))+'</strong></div>';
+  if (values.length) {
+    for(const value of values) {
+      const objective=metadata(value), matches=bases.filter(base=>sameObjective(metadata(base),objective)), base=matches.length===1?matches[0]:null;
+      html+='<div class="measurement-pair">'+(base?measurement('声明的代码起点 '+(fact.base_experiment || '未记录'),base)+'<span class="measurement-arrow">→</span>':'')+measurement('本轮已发布记录'+(values.length>1?' · '+(value.candidate_id || ''):''),value)+'</div>';
+      if(base && !imported && !repeated && Number.isFinite(base.value) && Number.isFinite(value.value)) {
+        const delta=base.value-value.value;
+        html+='<p class="caption">相对声明的代码起点，'+esc(metricName(objective))+' '+(delta>0?'降低 ':delta<0?'增加 ':'持平 ')+(delta===0?'':esc(metricValue(Math.abs(delta),objective)))+'。差值由记录计算；单次对照不能单独判定机制。</p>';
+      }
     }
-  } else if (values.length>1) html+='<ul>'+values.map(value=>'<li>'+esc(value.candidate_id)+'：'+exactScore(value.value)+' Å</li>').join('')+'</ul>';
-  else html+='<p>'+esc(node?.value!=null?'当前有效记录：'+exactScore(node.value)+' Å；说明材料尚未载入。':'本轮没有可在此确认的已发布且已核查测量。')+'</p>';
+  } else html+='<p>'+esc(node?.value!=null?'当前有效记录：'+metricValue(node.value,node)+'；说明材料尚未载入。':'本轮没有可在此确认的已发布且已核查测量。')+'</p>';
   if(imported || repeated) html+='<p class="amber">'+(imported?'本轮导入历史结果。':'此节点复用同一账本结果。')+'不计为新的独立测量。</p>';
   if(node?.frontier_exclusion_reason) html+='<p class="amber">当前资格已排除：'+esc(node.frontier_exclusion_reason)+'。原发布记录保留用于核对，不进入当前 Frontier。</p>';
   else html+='<p class="caption">当前资格：'+(node?.frontier_current?'当前 Frontier 成员':node?.frontier_eligible?'符合当前 Frontier 比较范围':'未确认进入当前 Frontier 比较范围')+'。说明作者不能修改资格。</p>';
