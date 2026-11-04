@@ -1,10 +1,11 @@
 # Transactional runtime
 
 This is the SQLite state foundation for [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
-SQLite schema 5 is available through Python APIs for new, isolated Studies.
+SQLite schema 6 is available through Python APIs for new, isolated Studies.
 The current `research-loop init/run` commands still use the serial document
-controller. A new SQLite CLI, concurrent experiment coordinator and explicit
-migration remain subsequent deliverables tracked in #77. The
+controller. The [concurrent coordinator](concurrent-runtime.md) is available through Python APIs.
+A new SQLite CLI, skill and dashboard remain phase 7; explicit migration remains
+phase 8. The
 [backend lifecycle](backend-lifecycle.md) provides `Operations` and `BackendDriver`
 for explicit asynchronous operation transitions.
 The [Context / Feedback interface](context-feedback.md) binds immutable inputs
@@ -49,8 +50,8 @@ attempt identities, not writable state handles.
 Worker processes must use spawn/exec; the lock descriptor is closed on exec.
 A fork-only child can retain the parent's open lock descriptor and block takeover
 after the parent dies until that child exits. PID fencing prevents child writes
-or explicit unlock, but does not remove this OS-level inheritance. The later
-scheduler must not launch fork-only workers while holding ownership.
+or explicit unlock, but does not remove this OS-level inheritance. The concurrent
+invoker uses exec-based supervisors and callback processes.
 
 Claiming a pending task freezes its revision and creates one independent
 iteration. Claim and iteration-budget reservation commit together. Dependencies
@@ -93,7 +94,8 @@ phase before recording an artifact reference. An exact duplicate returns the
 same acceptance; a changed result or stale revision is a conflict. Prior-owner
 committed receipts can be replayed unchanged after restart. Unresolved attempts
 from a prior owner cannot be accepted or replaced
-without a later explicit reconciliation transition. This layer does not infer
+without an explicit reconciliation grant bound to the exact recorded completion,
+input, context and positive sender retirement proof. This layer does not infer
 whether a backend submitted work and does not retry Execute.
 
 ## Budgets and STOP
@@ -106,7 +108,7 @@ transaction, so two contenders cannot both spend the final call.
 Shared elapsed time counts the coordinator's active interval once, regardless of
 the number of concurrent workers. The wall-clock anchor and consumed total are
 persisted. Graceful close records the final interval. Its subsequent gap is
-excluded only when no operation has `external_open=1`. Live or unknown submission
+excluded only when no worker remains unretired and no operation has `external_open=1`. Live or unknown submission
 intent, and terminal work whose physical release is still unconfirmed, keep that
 gap chargeable on reacquisition even after graceful close. A billing-only gap
 after confirmed physical release is excluded when ownership was closed. After an
@@ -142,7 +144,7 @@ New runtime initialization publishes `runtime.json` with `format: sqlite-v1` and
 the database Study identity. The serial `Study` and `TaskQueue` reject either this
 marker or `runtime.sqlite3`, including partially initialized directories. The
 runtime refuses in-place creation over legacy `study.json` or `state.json`.
-The current SQLite schema is 5; earlier prototype schemas are explicitly rejected.
+The current SQLite schema is 6; earlier prototype schemas are explicitly rejected.
 Existing Studies require the later explicit migration procedure; creating a
 database beside existing files is not migration. Old deployed binaries must be
 stopped during that procedure; they cannot be controlled by a check they lack.

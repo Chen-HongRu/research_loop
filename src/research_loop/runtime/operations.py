@@ -280,86 +280,93 @@ class Operations:
         )
 
     def reserve_submit(self, operation_id, expected_revision):
-        integer(expected_revision, "expected_revision", minimum=1)
         with self.owner._transaction() as (conn, control):
-            op = self._get(conn, operation_id)
-            if op["submission_token"] is not None:
-                raise InvalidTransition(
-                    "Operation already has a submit intent; inspect original identity"
-                )
-            if op["revision"] != expected_revision:
-                raise ConflictError("Operation revision mismatch")
-            if op["state"] != "prepared" or op["inconsistency"]:
-                raise InvalidTransition(
-                    "Operation is not prepared for first submission"
-                )
-            self.owner._admit(control, deadline=True)
-            if control["anchor"] >= op["deadline"]:
-                raise BudgetExceeded("Frozen operation deadline reached")
-            authority = conn.execute(
-                "SELECT * FROM operation_authorities WHERE id=?",
-                (op["authorization_id"],),
+            return self._reserve_submit(conn, control, operation_id, expected_revision)
+
+    def _reserve_submit(
+        self, conn, control, operation_id, expected_revision, *, submission_token=None
+    ):
+        """Reserve inside a caller's transaction; dispatch can commit atomically."""
+        integer(expected_revision, "expected_revision", minimum=1)
+        op = self._get(conn, operation_id)
+        if op["submission_token"] is not None:
+            raise InvalidTransition(
+                "Operation already has a submit intent; inspect original identity"
+            )
+        if op["revision"] != expected_revision:
+            raise ConflictError("Operation revision mismatch")
+        if op["state"] != "prepared" or op["inconsistency"]:
+            raise InvalidTransition("Operation is not prepared for first submission")
+        self.owner._admit(control, deadline=True)
+        if control["anchor"] >= op["deadline"]:
+            raise BudgetExceeded("Frozen operation deadline reached")
+        authority = conn.execute(
+            "SELECT * FROM operation_authorities WHERE id=?",
+            (op["authorization_id"],),
+        ).fetchone()
+        if authority["blocked_reason"] or authority["admitted_operations"] >= int(
+            authority["max_operations"]
+        ):
+            raise BudgetExceeded("Operation authorization is blocked or exhausted")
+        for pool, amount in op["resources"].items():
+            global_row = conn.execute(
+                "SELECT * FROM operation_pool_balances WHERE pool=?", (pool,)
             ).fetchone()
-            if authority["blocked_reason"] or authority["admitted_operations"] >= int(
-                authority["max_operations"]
+            scoped = conn.execute(
+                "SELECT * FROM operation_scope_resources WHERE authorization_id=? AND pool=?",
+                (op["authorization_id"], pool),
+            ).fetchone()
+            if (
+                global_row["blocked_reason"]
+                or int(global_row["held"]) + amount > int(global_row["capacity"])
+                or int(scoped["held"]) + amount > int(scoped["capacity"])
             ):
-                raise BudgetExceeded("Operation authorization is blocked or exhausted")
-            for pool, amount in op["resources"].items():
-                global_row = conn.execute(
-                    "SELECT * FROM operation_pool_balances WHERE pool=?", (pool,)
-                ).fetchone()
-                scoped = conn.execute(
-                    "SELECT * FROM operation_scope_resources WHERE authorization_id=? AND pool=?",
-                    (op["authorization_id"], pool),
-                ).fetchone()
-                if (
-                    global_row["blocked_reason"]
-                    or int(global_row["held"]) + amount > int(global_row["capacity"])
-                    or int(scoped["held"]) + amount > int(scoped["capacity"])
-                ):
-                    raise BudgetExceeded(
-                        "Physical resource capacity is held by other operations"
-                    )
-            for unit, amount in op["cost_bounds"].items():
-                row = conn.execute(
-                    "SELECT * FROM operation_scope_costs WHERE authorization_id=? AND unit=?",
-                    (op["authorization_id"], unit),
-                ).fetchone()
-                if int(row["settled"]) + int(row["held"]) + amount > int(
-                    row["cost_limit"]
-                ):
-                    raise BudgetExceeded("Cost authorization is held or exhausted")
-            self._add_resources(conn, op, op["resources"])
-            for unit, amount in op["cost_bounds"].items():
-                self._balance(
-                    conn,
-                    "operation_scope_costs",
-                    dict(authorization_id=op["authorization_id"], unit=unit),
-                    "held",
-                    amount,
+                raise BudgetExceeded(
+                    "Physical resource capacity is held by other operations"
                 )
-            token = uuid.uuid4().hex
-            conn.execute(
-                "UPDATE operation_authorities SET admitted_operations=admitted_operations+1 WHERE id=?",
-                (op["authorization_id"],),
+        for unit, amount in op["cost_bounds"].items():
+            row = conn.execute(
+                "SELECT * FROM operation_scope_costs WHERE authorization_id=? AND unit=?",
+                (op["authorization_id"], unit),
+            ).fetchone()
+            if int(row["settled"]) + int(row["held"]) + amount > int(row["cost_limit"]):
+                raise BudgetExceeded("Cost authorization is held or exhausted")
+        self._add_resources(conn, op, op["resources"])
+        for unit, amount in op["cost_bounds"].items():
+            self._balance(
+                conn,
+                "operation_scope_costs",
+                dict(authorization_id=op["authorization_id"], unit=unit),
+                "held",
+                amount,
             )
-            conn.execute(
-                "UPDATE operations SET state='submitting',revision=revision+1,submission_token=?,submit_owner_epoch=?,held_resources_json=?,held_costs_json=?,external_open=1 WHERE id=?",
-                (
-                    token,
-                    self.owner.owner_epoch,
-                    _json(op["resources"]),
-                    _json(op["cost_bounds"]),
-                    operation_id,
-                ),
-            )
-            current = self._get(conn, operation_id)
-            return {
-                **self._binding(current),
-                "deadline": current["deadline"],
-                "operation_revision": current["revision"],
-                "request_ref": current["request_ref"],
-            }
+        token = submission_token if submission_token is not None else uuid.uuid4().hex
+        text(token, "submission_token")
+        if conn.execute(
+            "SELECT 1 FROM operations WHERE submission_token=?", (token,)
+        ).fetchone():
+            raise ConflictError("Submission token belongs to an existing operation")
+        conn.execute(
+            "UPDATE operation_authorities SET admitted_operations=admitted_operations+1 WHERE id=?",
+            (op["authorization_id"],),
+        )
+        conn.execute(
+            "UPDATE operations SET state='submitting',revision=revision+1,submission_token=?,submit_owner_epoch=?,held_resources_json=?,held_costs_json=?,external_open=1 WHERE id=?",
+            (
+                token,
+                self.owner.owner_epoch,
+                _json(op["resources"]),
+                _json(op["cost_bounds"]),
+                operation_id,
+            ),
+        )
+        current = self._get(conn, operation_id)
+        return {
+            **self._binding(current),
+            "deadline": current["deadline"],
+            "operation_revision": current["revision"],
+            "request_ref": current["request_ref"],
+        }
 
     @classmethod
     def _add_resources(cls, conn, op, resources):
@@ -467,6 +474,14 @@ class Operations:
             no_submit_proof=proof,
             external_open=False,
         )
+        if proof["basis"] == "no_submission_intent" and op["inconsistency"] is None:
+            if any(op["actual_costs"].values()):
+                # Preserve actual charged facts even when they contradict the
+                # free-preparation contract; absence of intent cannot erase them.
+                op["inconsistency"] = "cost_without_submission_intent"
+                cls._block(conn, op, op["inconsistency"])
+            else:
+                cls._settle(conn, op, {unit: 0 for unit in op["cost_bounds"]})
 
     @classmethod
     def _settle(cls, conn, op, final_costs):
@@ -750,6 +765,52 @@ class Operations:
             )
             self._save(conn, current)
             result = self._get(conn, operation_id)
+            from .dispatch import RuntimeEvents
+
+            if op["state"] != "terminal" and result["state"] == "terminal":
+                RuntimeEvents.emit(
+                    conn,
+                    "operation-terminal:" + event_key,
+                    "operation_terminal",
+                    operation_id,
+                    payload_ref=payload_ref,
+                    identity=identity,
+                    payload={
+                        "outcome": result["terminal_outcome"],
+                        "iteration_id": result["iteration_id"],
+                    },
+                )
+            if (
+                op["inconsistency"] != result["inconsistency"]
+                or op["unexpected_job_ids"] != result["unexpected_job_ids"]
+            ):
+                RuntimeEvents.emit(
+                    conn,
+                    "operation-attention:" + event_key,
+                    "operation_attention",
+                    operation_id,
+                    payload_ref=payload_ref,
+                    identity=identity,
+                    payload={"reason": result["inconsistency"]},
+                )
+            if op["held_resources"] and not result["held_resources"]:
+                RuntimeEvents.emit(
+                    conn,
+                    "operation-release:" + event_key,
+                    "resources_released",
+                    operation_id,
+                    payload_ref=payload_ref,
+                    identity=identity,
+                )
+            if not op["costs_final"] and result["costs_final"]:
+                RuntimeEvents.emit(
+                    conn,
+                    "operation-settled:" + event_key,
+                    "operation_settled",
+                    operation_id,
+                    payload_ref=payload_ref,
+                    identity=identity,
+                )
             receipt = dict(
                 event_key=event_key,
                 operation_id=operation_id,

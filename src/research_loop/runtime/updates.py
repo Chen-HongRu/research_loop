@@ -268,6 +268,22 @@ class Updater:
         for key, value in required.items():
             if key not in context or not _same(context[key], value):
                 raise ConflictError(f"Context {key} differs from authoritative input")
+        retry = record.get("retry")
+        if retry is not None and retry["source_context_ref"] is not None:
+            original = self._read_record(
+                retry["source_context_ref"], retry["source_context_identity"]
+            )
+            original["manifest"]["revisions"]["iteration"] = attempt[
+                "expected_revision"
+            ]
+            if _package_text(ContextPackage.from_dict(original)) != _package_text(
+                package
+            ):
+                raise ConflictError(
+                    "Review retry must retain its original frozen inputs"
+                )
+            for reference, identity in retry["source_evidence_identities"].items():
+                self._check_identity(reference, identity)
         if attempt["status"] == "active":
             self.coordinator._iteration_for_feedback(record)
         elif attempt["status"] != "accepted":
@@ -332,6 +348,25 @@ class Updater:
         if current["plan"] is not None:
             plan = current["plan"]
             self._check_identity(plan["output_ref"], plan["output_identity"])
+        for key in ("dispatch", "reconciliation", "retry"):
+            if not _same(current.get(key), captured.get(key)):
+                raise ConflictError("Invocation or recovery binding changed")
+        dispatch = current.get("dispatch")
+        if dispatch is not None:
+            self._check_identity(dispatch["input_ref"], dispatch["input_identity"])
+            if dispatch["completion_ref"] is not None:
+                self._check_identity(
+                    dispatch["completion_ref"], dispatch["completion_identity"]
+                )
+        retry = current.get("retry")
+        if retry is not None:
+            if retry["source_context_ref"] is not None:
+                self._check_identity(
+                    retry["source_context_ref"], retry["source_context_identity"]
+                )
+            self._check_identity(retry["proof_ref"], retry["proof_identity"])
+            for reference, identity in retry["source_evidence_identities"].items():
+                self._check_identity(reference, identity)
         if not _same(current.get("planning"), captured.get("planning")):
             raise ConflictError("Frozen planning references changed")
         planning = current.get("planning")
@@ -414,6 +449,19 @@ class Updater:
         ):
             raise ValueError("Evidence references must be unique strings")
         captured = self.coordinator._feedback_snapshot(call_identity.to_dict())
+        dispatch = captured.get("dispatch")
+        if dispatch is not None:
+            if not dispatch["worker_retired"] or dispatch["status"] != "completed":
+                raise InvalidTransition(
+                    "Managed output requires a retired completed invocation"
+                )
+            completion = self._read_record(
+                dispatch["completion_ref"], dispatch["completion_identity"]
+            )
+            if not _same(
+                completion["result"], {"output": raw, "evidence_refs": evidence_refs}
+            ):
+                raise ConflictError("Worker output differs from its durable completion")
         package, _ = self._load_binding(captured)
         if not set(evidence_refs) <= set(package.manifest["allowed_evidence"]):
             raise ValueError("Output references evidence outside its frozen allowlist")

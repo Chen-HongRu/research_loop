@@ -3,10 +3,11 @@
 This is stage 3 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77),
 available through Python APIs on new SQLite Studies. The serial CLI retains its
 existing document format. [Planning](task-planning.md) consumes its frozen knowledge
-and publication events. SQLite schema 5 also supports operation-bound evaluator
+and publication events. SQLite schema 6 also supports operation-bound evaluator
 intake through the [backend lifecycle APIs](backend-lifecycle.md). A new SQLite
-CLI, concurrent experiment coordinator, production task adapters and explicit
-migration remain later stages. Earlier prototype schemas are rejected; no
+CLI, skill and dashboard remain phase 7; explicit migration remains phase 8.
+The [concurrent coordinator](concurrent-runtime.md) is available through Python APIs;
+production task adapters remain future work. Earlier prototype schemas are rejected; no
 existing Study is converted automatically.
 
 Measurement registration and combined Frontier/document reconstruction require a

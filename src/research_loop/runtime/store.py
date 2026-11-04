@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .operation_contract import OPERATION_SCHEMA
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DATABASE = "runtime.sqlite3"
 ROLES = {"scout", "advocate", "judge", "plan", "execute", "review"}
 PHASES = {"plan": "execute", "execute": "review", "review": "publication"}
@@ -269,6 +269,9 @@ class StateStore:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=FULL")
                 conn.executescript(_SCHEMA)
+                from .dispatch import DISPATCH_SCHEMA
+
+                conn.executescript(DISPATCH_SCHEMA)
                 conn.execute(
                     "INSERT INTO control(singleton,study_id,config_json,max_iterations,"
                     "max_calls,max_seconds,admission_deadline,anchor) VALUES(1,?,?,?,?,?,?,?)",
@@ -339,13 +342,40 @@ class StateStore:
                 external_open = conn.execute(
                     "SELECT 1 FROM operations WHERE external_open=1 LIMIT 1"
                 ).fetchone()
-                if row["owner_open"] or external_open:
+                worker_open = conn.execute(
+                    "SELECT 1 FROM dispatch_runs WHERE worker_retired=0 LIMIT 1"
+                ).fetchone()
+                if row["owner_open"] or external_open or worker_open:
                     elapsed += now - row["anchor"]
                 epoch = row["owner_epoch"] + 1
                 conn.execute(
                     "UPDATE control SET elapsed_seconds=?,anchor=?,owner_epoch=?,owner_open=1",
                     (elapsed, now, epoch),
                 )
+                from .dispatch import RuntimeEvents
+
+                for run in conn.execute(
+                    "SELECT token,category,state,worker_retired FROM dispatch_runs WHERE owner_epoch<? AND settled=0",
+                    (epoch,),
+                ):
+                    RuntimeEvents.emit(
+                        conn,
+                        "dispatch-recovery:" + run["token"],
+                        "recovery_needed",
+                        run["token"],
+                        payload={"category": run["category"]},
+                    )
+                for call in conn.execute(
+                    "SELECT a.id,a.role FROM attempts a LEFT JOIN dispatch_runs d ON d.attempt_id=a.id WHERE a.owner_epoch<? AND a.status='active' AND d.token IS NULL",
+                    (epoch,),
+                ):
+                    RuntimeEvents.emit(
+                        conn,
+                        "untracked-call:" + call["id"],
+                        "recovery_needed",
+                        call["id"],
+                        payload={"untracked": True, "role": call["role"]},
+                    )
                 conn.commit()
             owner = Coordinator(self, epoch, pid)
             yield owner
@@ -581,6 +611,16 @@ class Coordinator:
             "INSERT INTO task_revisions VALUES(?,?,?,?,?,?,?,?,?,?)",
             (*values, version, origin_kind, origin_id),
         )
+        if task["cancelled"]:
+            from .dispatch import RuntimeEvents
+
+            RuntimeEvents.emit(
+                conn,
+                f"task-cancelled:{task['id']}:{task['revision']}",
+                "task_terminal",
+                task["id"],
+                payload={"status": "cancelled", "revision": task["revision"]},
+            )
         return _decode(
             conn.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone()
         )
@@ -775,7 +815,33 @@ class Coordinator:
         if attempt["owner_epoch"] != self.owner_epoch and not (
             allow_accepted_replay and attempt["status"] == "accepted"
         ):
-            raise OwnershipError("Worker owner epoch mismatch")
+            from .dispatch import DispatchLedger
+
+            if attempt["status"] != "active" or not DispatchLedger.can_reconcile(
+                conn, attempt_id, self.owner_epoch
+            ):
+                raise OwnershipError(
+                    "Worker owner epoch mismatch without an exact reconciliation grant"
+                )
+            grant = _decode(
+                conn.execute(
+                    "SELECT * FROM reconciliation_grants WHERE attempt_id=? AND current_owner_epoch=?",
+                    (attempt_id, self.owner_epoch),
+                ).fetchone()
+            )
+            from .updates import _identity
+
+            for ref_key, identity_key in (
+                ("completion_ref", "completion_identity"),
+                ("input_ref", "input_identity"),
+                ("context_ref", "context_identity"),
+            ):
+                if grant[ref_key] is not None and _json(
+                    _identity(self.store.root, grant[ref_key])
+                ) != _json(grant[identity_key]):
+                    raise OwnershipError(
+                        "Reconciliation proof or immutable input identity changed"
+                    )
         if attempt["expected_revision"] != expected_revision:
             raise ConflictError("Attempt revision mismatch")
         return attempt
@@ -833,6 +899,16 @@ class Coordinator:
             return attempt["receipt"]
         if attempt["status"] != "active":
             raise InvalidTransition("Attempt is no longer active")
+        run = conn.execute(
+            "SELECT worker_retired,status FROM dispatch_runs WHERE attempt_id=?",
+            (attempt["id"],),
+        ).fetchone()
+        if run is not None and (
+            not run["worker_retired"] or run["status"] != "completed"
+        ):
+            raise InvalidTransition(
+                "Dispatched output requires its completed retired sender proof"
+            )
         iteration = self._iteration(conn, attempt)
         receipt = {
             "attempt_id": attempt["id"],
@@ -852,6 +928,21 @@ class Coordinator:
         conn.execute(
             "UPDATE attempts SET status='accepted',output_ref=?,output_identity_json=?,receipt_json=? WHERE id=?",
             (output_ref, _json(identity), _json(receipt), attempt["id"]),
+        )
+        from .dispatch import RuntimeEvents
+
+        RuntimeEvents.emit(
+            conn,
+            "attempt-accepted:" + attempt["id"],
+            "attempt_terminal",
+            attempt["id"],
+            payload_ref=output_ref,
+            identity=identity,
+            payload={
+                "status": "accepted",
+                "role": attempt["role"],
+                "iteration_id": attempt["iteration_id"],
+            },
         )
         return receipt
 
@@ -925,6 +1016,23 @@ class Coordinator:
                 "SELECT COALESCE(MAX(id),0) FROM publications"
             ).fetchone()[0],
             planning=self._planning_record(conn, attempt),
+            dispatch=_decode(
+                conn.execute(
+                    "SELECT * FROM dispatch_runs WHERE attempt_id=?", (attempt["id"],)
+                ).fetchone()
+            ),
+            reconciliation=_decode(
+                conn.execute(
+                    "SELECT * FROM reconciliation_grants WHERE attempt_id=? AND current_owner_epoch=?",
+                    (attempt["id"], self.owner_epoch),
+                ).fetchone()
+            ),
+            retry=_decode(
+                conn.execute(
+                    "SELECT * FROM phase_retries WHERE new_attempt_id=?",
+                    (attempt["id"],),
+                ).fetchone()
+            ),
         )
 
     @staticmethod
@@ -974,6 +1082,13 @@ class Coordinator:
                 return attempt
             if attempt["status"] != "active":
                 raise InvalidTransition("Attempt is no longer active")
+            run = _decode(
+                conn.execute(
+                    "SELECT * FROM dispatch_runs WHERE attempt_id=?", (attempt_id,)
+                ).fetchone()
+            )
+            if run is not None and not run["worker_retired"]:
+                raise InvalidTransition("Failure cannot retire an unknown live sender")
             iteration = self._iteration(conn, attempt)
             if iteration is not None:
                 conn.execute(
@@ -995,6 +1110,36 @@ class Coordinator:
                 "UPDATE attempts SET status='failed',failure_reason=? WHERE id=?",
                 (reason, attempt_id),
             )
+            from .dispatch import RuntimeEvents
+
+            proof_ref = run["completion_ref"] if run else None
+            proof_identity = run["completion_identity"] if run else None
+            RuntimeEvents.emit(
+                conn,
+                "attempt-failed:" + attempt_id,
+                "attempt_failed",
+                attempt_id,
+                payload_ref=proof_ref,
+                identity=proof_identity,
+                payload={
+                    "role": attempt["role"],
+                    "iteration_id": attempt["iteration_id"],
+                },
+            )
+            if iteration is not None:
+                RuntimeEvents.emit(
+                    conn,
+                    "iteration-failed:" + iteration["id"] + ":" + attempt_id,
+                    "task_terminal",
+                    iteration["task_id"],
+                    payload_ref=proof_ref,
+                    identity=proof_identity,
+                    payload={
+                        "status": "failed",
+                        "iteration_id": iteration["id"],
+                        "attempt_id": attempt_id,
+                    },
+                )
             return _decode(
                 conn.execute(
                     "SELECT * FROM attempts WHERE id=?", (attempt_id,)
@@ -1003,7 +1148,17 @@ class Coordinator:
 
     def set_stop(self, reason):
         _text(reason, "reason")
-        with self._transaction() as (conn, _):
+        with self._transaction() as (conn, control):
             conn.execute(
                 "UPDATE control SET stop_reason=COALESCE(stop_reason,?)", (reason,)
             )
+            if control["stop_reason"] is None:
+                from .dispatch import RuntimeEvents
+
+                RuntimeEvents.emit(
+                    conn,
+                    "study-stop",
+                    "stop",
+                    control["study_id"],
+                    payload={"requested": True},
+                )

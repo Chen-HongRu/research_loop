@@ -2,10 +2,10 @@
 
 This is stage 2 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
 The input facade runs on new calls in the existing serial Study controller.
-The transactional Updater is available for new SQLite schema-5 Studies. The
+The transactional Updater is available for new SQLite schema-6 Studies. The
 [backend lifecycle](backend-lifecycle.md) adds operation admission and trusted
-receipt intake; a new SQLite CLI, concurrent experiment coordinator and migration
-remain subsequent stages. The
+receipt intake; the [concurrent coordinator](concurrent-runtime.md) drives these
+interfaces. A new SQLite CLI, skill and dashboard remain phase 7; migration is phase 8. The
 [publication interface](knowledge-publication.md) accepts Scout/Review knowledge
 and builds derived views from registered measurements and eligibility revisions.
 
@@ -146,10 +146,18 @@ fields have controller source identities and the exact call revision. Cached
 successful attempts keep their original manifest. Historical attempts without
 one remain readable; their provenance is not retroactively invented.
 
-SQLite schema 5 contains binding, update, publication, planning and operation
+SQLite schema 6 contains binding, update, publication, planning and operation
 records, including evaluator intake and separate resource/cost holds. Earlier SQLite
 test Studies must be retained as evidence or recreated in a new directory. No
 automatic conversion of existing Studies occurs in this stage.
+
+`RuntimeContexts` builds concurrent role inputs from frozen control fields,
+accepted Plan/Execute outputs and published knowledge. Review also receives its
+own feedback-permitted, unpublished measurements with their exact evaluator
+receipt references protected from policy omission. Other unpublished measurements
+and denied evaluator bodies are excluded. Once bound, the selected package is
+reused even if policy or published knowledge later changes. Managed dispatches
+can accept only the exact result in their durable worker completion record.
 
 ## Local API smoke
 

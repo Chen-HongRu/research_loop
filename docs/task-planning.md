@@ -1,11 +1,11 @@
 # Task pool and planning
 
 This is stage 4 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77),
-available on new SQLite Studies through Python APIs. It does not replace the
-existing serial task CLI or automatically dispatch experiments. Current SQLite
-schema 5 rejects previous prototype databases. The [backend lifecycle APIs](backend-lifecycle.md)
-provide explicit operation actions after accepted Execute requests; a new SQLite
-CLI, concurrent experiment coordinator and explicit migration remain future work.
+available on new SQLite Studies through Python APIs. The existing serial task CLI is unchanged. Current SQLite
+schema 6 rejects previous prototype databases. The [backend lifecycle APIs](backend-lifecycle.md)
+provide operation actions after accepted Execute requests. The [concurrent
+coordinator](concurrent-runtime.md) dispatches work through Python APIs; a new SQLite
+CLI, skill and dashboard remain phase 7 and explicit migration phase 8.
 No automatic migration, deployment or new compute authority is introduced.
 
 ## Tasks and ownership
@@ -154,8 +154,8 @@ alone. Planning does not submit or resubmit an operation.
 
 Restart does not redispatch active calls. A prior-owner unresolved round remains
 visible and blocks new planning rounds pending reconciliation; it does not cancel
-or invalidate the existing task pool. General worker reconciliation belongs to the
-later concurrent coordinator. If Judge was already accepted, use
+or invalidate the existing task pool. The [concurrent coordinator](concurrent-runtime.md) reconciles exact old
+completions. If Judge was already accepted, use
 `runner.settle_accepted_judge(round_id)` to apply/finish that exact decision without
 invoking or reserving another call, including after owner restart. A committed
 batch must settle as applied; it cannot be relabeled as failed. Inputs, outputs,
