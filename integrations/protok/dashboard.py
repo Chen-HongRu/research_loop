@@ -995,7 +995,14 @@ def snapshot(root, *, snapshot_only=False):
     elif snapshot_only:
         backend = read(root / "control/backend-snapshot.json")
         if not backend:
-            raise ValueError("Missing exported backend snapshot")
+            # Generic Studies can retain research/telemetry without ProTok accounting.
+            backend_error = "Missing exported backend snapshot"
+            backend = {
+                "records": [],
+                "used_gpu_seconds": None,
+                "scored_records": None,
+                "outstanding": [],
+            }
     else:
         try:
             owner = read(root / "control/ownership.json", {})

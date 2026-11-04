@@ -70,6 +70,10 @@ class HarnessTests(unittest.TestCase):
             f"    print(json.dumps({settled!r}))\n"
         )
 
+    def test_terra_is_preserved_without_model_substitution(self):
+        config = HarnessConfig(model="gpt-6.1-terra", reasoning="medium")
+        self.assertEqual(config.model, "gpt-6.1-terra")
+
     def test_configuration_rejects_fallback_and_unknown_values(self):
         for changes in (
             {"model": "gpt-5"},

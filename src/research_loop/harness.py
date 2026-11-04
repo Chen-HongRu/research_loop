@@ -39,7 +39,12 @@ class HarnessConfig:
     def __post_init__(self) -> None:
         if self.backend not in {"codex", "pi"}:
             raise ValueError(f"Unsupported harness backend: {self.backend!r}")
-        if self.model not in {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"}:
+        if self.model not in {
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-luna",
+        }:
             raise ValueError(
                 f"Unsupported model: {self.model!r}; no fallback is allowed"
             )

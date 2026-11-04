@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -5,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from research_loop import Study, initialize
+from research_loop.cli import main
 from research_loop.harness import HarnessError
 from research_loop.strategy import validate_strategy
 from test_core import RecordedHarness, evaluation, read
@@ -28,6 +31,48 @@ class StrategyTests(unittest.TestCase):
 
     def observations(self):
         return read(self.root / "observations.json")
+
+    def test_cli_default_and_explicit_debate_publish_with_full_review(self):
+        goal = self.root.parent / "goal.md"
+        goal.write_text("Measure one bounded intervention.")
+        for policy, extra, phases in (
+            ("direct", [], ["proposal", "proposal", "judge"]),
+            (
+                "debate",
+                ["--selection-policy", "debate"],
+                [
+                    "proposal",
+                    "proposal",
+                    "critique",
+                    "critique",
+                    "response",
+                    "response",
+                    "judge",
+                ],
+            ),
+        ):
+            with self.subTest(policy=policy):
+                root = self.root.parent / policy
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        main(["init", str(root), "--goal", str(goal), *extra]), 0
+                    )
+                harness = RecordedHarness()
+                study = Study(root, harness)
+                self.assertEqual(
+                    study.strategy, {"selection": policy, "review": "full"}
+                )
+                study.run()
+                self.assertEqual(
+                    [call["phase"] for call in harness.calls],
+                    phases + ["plan", "execute", "review"],
+                )
+                self.assertEqual(study.graph()[0]["status"], "reviewed")
+                self.assertNotIn("review_guidance", harness.calls[-1]["context"])
+                # Reopening never adopts a different CLI default.
+                self.assertEqual(
+                    Study(root, RecordedHarness()).strategy, study.strategy
+                )
 
     def test_default_and_strict_configuration(self):
         self.assertEqual(validate_strategy(), {"selection": "debate", "review": "full"})

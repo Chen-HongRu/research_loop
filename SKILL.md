@@ -38,6 +38,40 @@ Read only the relevant references. Existing task adapters have their own runner,
 authorization and reconciliation rules; use those instead of generic `run`.
 Never initialize a second Study just to bypass an interruption or spent budget.
 
+## Keep launch work bounded
+
+First classify the request: first-time setup, a new experiment on an existing
+backend, a specified follow-up, or resume. Reuse the installed runtime, existing
+runner, environment, input metadata and applicable smoke evidence. Re-run only
+checks affected by changed source, dependencies, inputs or execution permissions;
+a warm launch is not a runtime upgrade or a repeat of the setup workflow.
+
+If the next experiment is already specified (including an initial smoke or baseline),
+use the existing task queue to go directly to Plan → Execute → Review; see
+[operations](references/operations.md). Do not ask autonomous selection to rediscover
+that task. For genuinely open-ended new CLI Studies, use `--selection-policy direct
+--review-policy full` (the CLI default). This retains two proposals and Judge but
+omits four debate calls. API/adapter defaults may differ: pass the policy through
+an existing supported setup interface; do not rewrite a running Study's strategy.
+Use debate when explicitly wanted for the research decision.
+
+Before freezing/submitting new source, check the changed entrypoint's imports and
+backend interface with the cheapest relevant check. Reuse a still-applicable real
+smoke; otherwise run the smallest real one once through the authorized runner.
+Do not make dashboards, additional provenance machinery, broad test suites or
+mechanism explanations prerequisites for an otherwise executable experiment.
+For an optimization Study, wire the requested evaluation before claiming ranked
+results; an explicitly unranked diagnostic may run without a finished formal scorer
+only when the backend supports that mode.
+
+If preparation reveals a missing backend feature, distinguish implementation work
+from launch time and report the concrete blocker. Fix only what the next authorized
+experiment needs. Preserve genuine access, identity, budget and unknown-effect gates.
+Report milestones separately: preparation, Plan, submitted job receipt, running,
+and reviewed. A started supervisor is not a started GPU job. Once a verified durable
+supervisor owns the work, hand off its status/wakeup path; do not spend model calls
+polling unchanged state unless the user requests live monitoring.
+
 ## Turn a question into a runnable Study
 
 1. **Recover the actual contract.** Inspect the target repository's AGENTS.md,
@@ -93,9 +127,17 @@ Never initialize a second Study just to bypass an interruption or spent budget.
    prepare the bundled controller's own `.venv` inside the installation.
 
 6. **Initialize, then start.** Inspect `init --help` and [usage](docs/usage.md).
-   Use actual absolute paths for Study, goal, baseline and evaluation. Set explicit
-   total iterations/calls/time and per-call timeout suitable for the authorized
-   first investigation. Preserve the user's model; absent a choice, use
+   Use actual absolute paths for Study, goal, baseline and evaluation. Translate
+   a user time budget into one persisted absolute campaign deadline. Do not invent
+   independent phase allocations, iteration/call ceilings, safety multipliers or
+   worst-case round reservations. Additional resource limits require an explicit
+   user constraint or an already frozen benchmark protocol; identify that source.
+   Derive stage/operation waits from the authoritative remaining time. Plan may
+   estimate cost but must not introduce a new scheduling limit. Keep fixed scoring
+   windows and remote job termination separate from research authorization.
+   Use an adapter that enforces this policy for time-budget campaigns: the generic
+   CLI still has independent default limits, and must not be described as deadline-only.
+   Preserve the user's model; absent a choice, use
    `gpt-6.1-sol`/`medium`, without fallback. Add `--allow-write` only for authorized
    writes; omit `--evaluation` for qualitative work. `init` makes no model call.
    Start with `run STUDY --iterations 1` through the launcher, or the task runner

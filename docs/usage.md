@@ -12,7 +12,7 @@
 
 Meta Loop 复用同一 Study、Route、实验图与 Plan → Execute → Review，研究选择和评审策略。固定驱动冻结监督版与候选版，记录配对评估、总预算与作业回执，并独立决定晋升或保留监督版。首个候选仅修改策略配置，减少选择调用与 Review 重复表达。
 
-普通 `init` 支持 `--selection-policy debate|direct` 与 `--review-policy full|concise`；默认 `debate/full`。Meta 入口为 `research-loop meta init/status/decide/rollback`。真实单批 Cactus runner、运行命令及边界见 [Meta Loop 实现与验证](meta-loop-verification.md)，协议见 [Meta Loop 设计](meta-loop-design.md)。单个开发配对不能触发正式晋升。
+普通 `init` 支持 `--selection-policy debate|direct` 与 `--review-policy full|concise`；普通 CLI 新建 Study 默认 `direct/full`；Python API 未指定策略时仍为 `debate/full`，已有 Study 使用已保存策略。Meta 入口为 `research-loop meta init/status/decide/rollback`。真实单批 Cactus runner、运行命令及边界见 [Meta Loop 实现与验证](meta-loop-verification.md)，协议见 [Meta Loop 设计](meta-loop-design.md)。单个开发配对不能触发正式晋升。
 
 ## 探索策略与研究 Scout
 
@@ -24,7 +24,7 @@ Study 可选用探索策略，为每轮分配研究类型，并在迭代边界�
 
 ```text
 Study 目标与固定评价
-  → 路线采样 → 两位 Advocate 独立提案 → 有限质疑与回应 → Judge
+  → 路线采样 → 两位 Advocate 独立提案 → [debate 策略的质疑与回应] → Judge
   → Plan 冻结调查合同与输入版本 → Execute → Review
   → 发布路线与全局研究文档、Frontier → 下一轮选择
 ```
@@ -67,7 +67,7 @@ uv run research-loop frontiers studies/proof-v2
 
 `init` 不调用模型；`status`、`graph`、`frontiers` 只读。`run` 默认推进一轮，`--iterations 3` 最多推进三轮，还受总预算约束。默认总预算为 10 轮、100 次 CLI 调用、3600 秒；每次 Harness 调用默认超时 600 秒，Pi 的目录预检和实际请求共用此额度，初始化时用 `--timeout` 调整。没有后台无限运行。
 
-路线选择默认 `--selection-seed 0 --debate-rounds 1 --max-resamples 1`。每位 Advocate 每轮各有一次质疑与回应；Plan 返回选择也使用同一重采样额度，调用均计入总预算。预算用尽只结束当前有界运行，不表示目标完成。
+普通 CLI 默认 `--selection-policy direct --review-policy full`，每轮选择为两次提案加一次 Judge，完整成功轮为 6 次模型调用。显式 `--selection-policy debate` 时默认增加四次质疑/回应调用，完整轮为 10 次；这不是墙钟加速比例的保证。`--selection-seed 0 --debate-rounds 1 --max-resamples 1` 保持不变，debate-rounds 只在 debate 策略下使用。Plan 返回选择也使用同一重采样额度，调用均计入总预算。预算用尽只结束当前有界运行，不表示目标完成。
 
 目标文件应写明目标、已有依据、允许访问和修改的范围、数据角色、成功条件、资源与停止条件。示例命题只检查端到端接线。指标调查可通过 `--evaluation examples/evaluation.json` 提供全局评价；该示例为开发集 AUC 最大化，使用前需将目标中的数据划分、评价器、聚合与候选选择规则固定为实际协议。定性调查可以不提供数值评价。
 
@@ -92,7 +92,7 @@ uv run research-loop init studies/pi-proof \
 uv run research-loop run studies/pi-proof
 ```
 
-允许型号为 `gpt-6-astra / gpt-6.1-sol / gpt-6-luna`，默认 Sol/medium，不自动切换型号。Pi 请求前精确检查本地可用目录；目录缺少指定 provider/model 时停止，不改用其他 provider。两后端均通过 stdin 接收提示词，并使用相同的阶段校验和完成/恢复回执。Pi 仅在最终 `agent_settled` 未中止、最终 assistant 正常结束且 provider/model、有效 `thinkingLevel` 匹配请求后接纳 JSON；旧版缺少这些字段会明确失败。
+允许型号为 `gpt-6-astra / gpt-6.1-sol / gpt-6.1-terra / gpt-6-luna`，默认 Sol/medium，不自动切换型号。Pi 请求前精确检查本地可用目录；目录缺少指定 provider/model 时停止，不改用其他 provider。两后端均通过 stdin 接收提示词，并使用相同的阶段校验和完成/恢复回执。Pi 仅在最终 `agent_settled` 未中止、最终 assistant 正常结束且 provider/model、有效 `thinkingLevel` 匹配请求后接纳 JSON；旧版缺少这些字段会明确失败。
 
 目录匹配与 Pi 的配置回报不证明服务端实际采用该型号或推理强度；`process.json` 保留请求、客户端回报与未核实的服务端信息。真实 CLI 的本地固定响应验证和订阅调用的验证边界见 [Pi 验证记录](pi-harness.md)。后台 Scout 使用 Codex 的原生 web search，Pi 工具白名单不提供这一能力。
 
@@ -174,3 +174,5 @@ PYTHONPATH=src:tests:. uv run python -m unittest discover -s integrations/protok
 ```
 
 固定回复和假 CLI 测试用于验证控制、恢复与协议，不证明研究收益。Harness 选型与登录方式调研见 [调研记录](harness-research.md)。
+
+Plan 的上下文明示后续 `execution_writes_enabled` 和 `execution_workspace_prepared_after_plan`。Plan 自身始终只读；隔离工作区在接受 Plan 后才创建，尚不存在不是执行权限失败。只读 Study 仍不能写请求；固定候选任务允许的请求与结果写入不等于允许修改候选。

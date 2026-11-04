@@ -58,6 +58,8 @@ uv run research-loop graph studies/demo
 
 ## 使用真实 Agent
 
+普通 CLI 新建 Study 默认采用 `direct/full`，保留 Plan 与独立 Review，省去四次选择辩论调用；指定实验应使用任务队列直接进入 Plan。已有 Study 和 Meta 策略不变。首次接入与复用启动的区别见 [启动指导](SKILL.md#keep-launch-work-bounded)。
+
 ### 在 Codex 中安装和使用
 
 整个仓库根目录也是一个可安装的 [research-loop skill](SKILL.md)，包含匹配的控制器源码、锁定依赖与操作指南。可以直接对 Codex 说：
@@ -97,7 +99,7 @@ uv run research-loop run studies/proof
 uv run research-loop status studies/proof
 ```
 
-`init` 不调用模型；`run` 会使用账号额度，最多推进一轮并受总预算限制。`status`、`graph`、`frontiers` 和 `knowledge` 为只读命令。支持的请求型号为 `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-luna`；实际可用性取决于客户端和账号，不会自动替换型号。
+`init` 不调用模型；`run` 会使用账号额度，最多推进一轮并受总预算限制。`status`、`graph`、`frontiers` 和 `knowledge` 为只读命令。支持的请求型号为 `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-luna`；实际可用性取决于客户端和账号，不会自动替换型号。
 
 默认只读。需要修改实验代码时，通过 `--workspace` 指定干净的 Git 基线，并显式加 `--allow-write`。每次调查使用独立工作区。仅有 `run` 权限不等于已授权远程计算；训练资源与受保护评价器由任务后端管理。
 

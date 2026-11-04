@@ -132,6 +132,50 @@ class DashboardTests(unittest.TestCase):
                     )
                 )
 
+    def test_missing_export_keeps_active_and_history_http_readable(self):
+        from io import BytesIO
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "active"
+            history = Path(temporary) / "history"
+            for base in (root, history):
+                folder = base / "study/iterations/0001"
+                folder.mkdir(parents=True)
+                (folder / "iteration.json").write_text(json.dumps({"id": "0001"}))
+                (folder / "plan.md").write_text("Retained startup experiment")
+                (base / "study/state.json").write_text(
+                    json.dumps(
+                        {"iteration": 1, "phase": "execute", "status": "running"}
+                    )
+                )
+            with patch.object(DASH, "ThreadingHTTPServer") as factory:
+                factory.return_value.server_port = 0
+                DASH.serve(root, 0, snapshot_only=True, history_roots=[history])
+                handler = factory.call_args.args[1]
+            connection = Mock()
+            connection.makefile.return_value = BytesIO(
+                b"GET /api/snapshot HTTP/1.0\r\n\r\n"
+            )
+            response = bytearray()
+            connection.sendall.side_effect = response.extend
+            with patch.object(
+                DASH.ProTokBackend,
+                "inspect",
+                side_effect=AssertionError("Offline view must not inspect a backend"),
+            ):
+                handler(connection, ("127.0.0.1", 1), Mock())
+            header, body = bytes(response).split(b"\r\n\r\n", 1)
+            self.assertIn(b"200 OK", header)
+            payload = json.loads(body)
+            self.assertEqual(payload["state"]["status"], "running")
+            self.assertFalse(payload["accounting_available"])
+            self.assertIsNone(payload["gpu_seconds"])
+            self.assertEqual(
+                {node["id"] for node in payload["nodes"]},
+                {"active:0001", "history-1:0001"},
+            )
+            self.assertFalse((root / "control/backend-snapshot.json").exists())
+
     def test_offline_snapshot_needs_neither_owner_token_nor_canonical_project(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
