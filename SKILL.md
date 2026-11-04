@@ -127,9 +127,17 @@ polling unchanged state unless the user requests live monitoring.
    prepare the bundled controller's own `.venv` inside the installation.
 
 6. **Initialize, then start.** Inspect `init --help` and [usage](docs/usage.md).
-   Use actual absolute paths for Study, goal, baseline and evaluation. Set explicit
-   total iterations/calls/time and per-call timeout suitable for the authorized
-   first investigation. Preserve the user's model; absent a choice, use
+   Use actual absolute paths for Study, goal, baseline and evaluation. Translate
+   a user time budget into one persisted absolute campaign deadline. Do not invent
+   independent phase allocations, iteration/call ceilings, safety multipliers or
+   worst-case round reservations. Additional resource limits require an explicit
+   user constraint or an already frozen benchmark protocol; identify that source.
+   Derive stage/operation waits from the authoritative remaining time. Plan may
+   estimate cost but must not introduce a new scheduling limit. Keep fixed scoring
+   windows and remote job termination separate from research authorization.
+   Use an adapter that enforces this policy for time-budget campaigns: the generic
+   CLI still has independent default limits, and must not be described as deadline-only.
+   Preserve the user's model; absent a choice, use
    `gpt-6.1-sol`/`medium`, without fallback. Add `--allow-write` only for authorized
    writes; omit `--evaluation` for qualitative work. `init` makes no model call.
    Start with `run STUDY --iterations 1` through the launcher, or the task runner
