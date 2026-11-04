@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .operation_contract import OPERATION_SCHEMA
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DATABASE = "runtime.sqlite3"
 ROLES = {"scout", "advocate", "judge", "plan", "execute", "review"}
 PHASES = {"plan": "execute", "execute": "review", "review": "publication"}
@@ -272,6 +272,9 @@ class StateStore:
                 from .dispatch import DISPATCH_SCHEMA
 
                 conn.executescript(DISPATCH_SCHEMA)
+                from .controls import CONTROL_SCHEMA
+
+                conn.executescript(CONTROL_SCHEMA)
                 conn.execute(
                     "INSERT INTO control(singleton,study_id,config_json,max_iterations,"
                     "max_calls,max_seconds,admission_deadline,anchor) VALUES(1,?,?,?,?,?,?,?)",

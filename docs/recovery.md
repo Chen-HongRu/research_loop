@@ -1,12 +1,10 @@
 # Interruption and recovery
 
-This guide describes the serial document controller. The new
-[SQLite runtime foundation](transactional-runtime.md) preserves unresolved
-attempts across owner epochs. Its [Updater](context-feedback.md) can replay exact
-committed receipts without invoking a validator or Agent again; it does not yet
-expose unresolved-attempt recovery or migration in
-the CLI. Legacy entry points refuse its marker or database instead of replaying
-`state.json` over authoritative SQLite state.
+This guide describes the serial document controller. For SQLite Studies use the
+[runtime CLI recovery contract](concurrent-runtime.md#recovery-and-stopping).
+It preserves unresolved attempts and can reconcile exact recorded completions
+across owner epochs; migration is not provided. Legacy entry points reject the
+SQLite marker or database instead of replaying `state.json` over SQLite state.
 
 See [Failure diagnostics and recovery](failure-diagnostics.md) for workspace versus
 pipeline responsibility, Agent-readable server logs and operator blocking records.

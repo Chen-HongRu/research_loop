@@ -4,6 +4,8 @@
 
 通过 Codex 自然语言使用时，先安装仓库根目录的 [research-loop skill](../SKILL.md)。安装后的所有通用命令使用 `python3 /path/to/installed/research-loop/scripts/research_loop.py` 替代本页的 `uv run research-loop` 前缀；启动器固定使用随 skill 安装的源码和锁文件，并保留调用目录。安装和环境检查见[安装指南](../references/installation.md)，继续、任务、停止与恢复见[操作指南](../references/operations.md)。本页的源码开发命令继续有效。
 
+本页其余命令适用于串行文档 Study；SQLite Study 使用 [runtime CLI](concurrent-runtime.md)。先检查格式，不能混用命令或原地迁移。
+
 阶段结构化输出与研究执行请求通过 Pydantic v2 严格模型校验；同一模型生成 Codex/Pi CLI 使用的 JSON Schema。新增依赖由根目录 `uv sync --locked` 安装，不需要切换到 Agents SDK。控制器从冻结上下文派生动态选择和模型省略字段，首次调用与缓存接纳共用这些类型。预算、作业状态、身份、来源和核账判断仍在控制器中执行。
 
 只读阶段的明确输出参数错误会带着拒收反馈返回原阶段，使用同一任务、冻结上下文和剩余预算。每次新调用照常计费并保留独立 attempt；不会因为纠错增加调用或时间额度。CLI/管线故障、来源/身份/核账错误及效果未知的作业仍然阻断，Execute 不会因输出不合规而自动重跑。
@@ -73,7 +75,7 @@ uv run research-loop frontiers studies/proof-v2
 
 评价 JSON 使用固定字段：`id`、`comparison_scope`、`protocol`、`data_role`、`allow_feedback`、`objectives`、`constraints`。目标指标包含 `name / direction / unit`，方向为 `maximize` 或 `minimize`；约束包含 `name / operator / value / unit`，运算为 `le` 或 `ge`。开发评价可允许搜索反馈；最终验收评价须明确数据角色与反馈权限，禁止将仅供最终验收的结果回传搜索。Agent 无权修改全局评价或成功条件。
 
-当前格式为 **version 3**。旧格式 Study 在任何状态写入前拒绝打开，不自动迁移；保留旧目录，在新目录重新 `init`，并在目标中明确引用仍适用的历史记录。
+串行文档 Study 当前格式为 **version 3**。旧格式 Study 在任何状态写入前拒绝打开，不自动迁移；保留旧目录，在新目录重新 `init`，并在目标中明确引用仍适用的历史记录。
 
 Plan 的 `markdown` 是权威科学合同，冻结问题、行动、条件、输入路径与版本、证据要求及解释边界。`timeout_seconds` 是控制器实际消费的顶层执行时限；输入声明不另存为结构化字段。`base_experiment`、历史引用和可选局部评价继续承担图关系、工作区恢复和 Frontier 比较职责。
 

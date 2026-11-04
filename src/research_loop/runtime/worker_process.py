@@ -1,6 +1,5 @@
 """Exec-only local supervisor and callback child; never opens SQLite state."""
 
-import importlib.util
 import os
 from pathlib import Path
 import signal
@@ -14,6 +13,7 @@ from .invocations import (
     _folder,
     _json,
     _locked,
+    _load_module,
     _publish_completion,
     _read,
 )
@@ -27,14 +27,7 @@ def _callback(root, token):
         payload = _read(root / claim["binding"]["input_ref"])
         _json(payload)
         _check_input(root, claim)
-        specification = importlib.util.spec_from_file_location(
-            "local_invocation_callback", claim["module_path"]
-        )
-        if specification is None or specification.loader is None:
-            raise ValueError("Cannot load invocation module")
-        module = importlib.util.module_from_spec(specification)
-        sys.modules[specification.name] = module
-        specification.loader.exec_module(module)
+        module = _load_module(claim["module_path"], claim["module_identity"])
         result = module.invoke(claim["binding"]["kind"], payload, claim["config"])
         _json(result)
         publish_json(folder / "callback-result.json", {"result": result, "error": None})

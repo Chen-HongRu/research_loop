@@ -5,6 +5,23 @@ Identify the Study and runtime from the earlier handoff or repository records;
 inspect status before mutations. Multiple plausible Studies require clarification.
 Task-specific runners supersede generic `run` and have separate resource controls.
 
+For SQLite Studies, prefix the commands below with the bundled launcher followed
+by `runtime`. Read [concurrent runtime](../docs/concurrent-runtime.md) for the
+trusted application and complete command contract. Use `runtime status STUDY`,
+`runtime events STUDY --consumer NAME`, or `runtime dashboard STUDY` for read-only
+inspection. Use `runtime run STUDY` to drive work within the original authorization;
+`--watch` keeps the owner available while idle. Idle is not goal completion.
+Mutations (`task create/edit/cancel`, `stop`, `scout`, `plan`, `retry-review`,
+`cancel-operation`, `retry-action`, `ack-event`) submit durable intents. Inspect
+`runtime request-status STUDY REQUEST_ID`: only `status: applied` means the
+command took effect; `not_recorded` can still mean queued. Scout and Review retry
+stay pending without spending a call until `runtime run` admits them. Use the same request ID only for the
+same intent. STOP is permanent; there is no resume API. Interrupting the driver
+does not request or clear STOP. Reconcile unknown effects and holds rather than
+resubmitting. Events and acknowledgements are durable, but no agent wakeup consumer
+or automatic follow-up is installed. The remaining commands in this guide apply
+only to the legacy document controller.
+
 The generic launcher does not dispatch adapter scripts. Adapter guides assume a
 repository-root working directory: use `uv run --locked --directory SKILL_ROOT
 python -m integrations.protok.tasks ...` (or the guide's script path) with all

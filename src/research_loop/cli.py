@@ -21,8 +21,14 @@ def _interrupt(signum, frame):
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["runtime"]:
+        from .runtime.cli import main as runtime_main
+
+        return runtime_main(argv[1:])
     parser = argparse.ArgumentParser(prog="research-loop")
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("runtime", help="Manage the concurrent SQLite runtime")
     tasks = commands.add_parser("task", help="Manage durable operator requests")
     task_commands = tasks.add_subparsers(dest="task_command", required=True)
     for name in ("submit", "list", "status", "cancel", "priority"):

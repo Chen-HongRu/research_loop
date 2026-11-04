@@ -2,10 +2,9 @@
 
 This is stage 4 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77),
 available on new SQLite Studies through Python APIs. The existing serial task CLI is unchanged. Current SQLite
-schema 6 rejects previous prototype databases. The [backend lifecycle APIs](backend-lifecycle.md)
+schema 7 rejects previous prototype databases. The [backend lifecycle APIs](backend-lifecycle.md)
 provide operation actions after accepted Execute requests. The [concurrent
-coordinator](concurrent-runtime.md) dispatches work through Python APIs; a new SQLite
-CLI, skill and dashboard remain phase 7 and explicit migration phase 8.
+coordinator](concurrent-runtime.md) dispatches work through Python APIs; the SQLite CLI and dashboard are available, while explicit migration and deployment remain phase 8.
 No automatic migration, deployment or new compute authority is introduced.
 
 ## Tasks and ownership

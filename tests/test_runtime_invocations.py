@@ -331,6 +331,36 @@ class RuntimeInvocationTests(unittest.TestCase):
             "captured",
         )
 
+    def test_changed_source_blocks_new_launch_but_preserves_old_proof(self):
+        reference = self.input()
+        binding = dict(kind="agent", input_ref=reference, deadline=time.time() + 8)
+        completed = self.invoker.retire_unlaunched("original-proof", binding)
+        self.module.write_text(MODULE + "\n# changed after source capture\n")
+        with self.assertRaisesRegex(ValueError, "module identity changed"):
+            self.invoker.launch("new-source", **binding)
+        self.assertFalse((self.root / "invocations/new-source/claimed.json").exists())
+        self.invoker = self.new_invoker()
+        self.assertEqual(self.invoker.inspect("original-proof"), completed)
+        self.assertEqual(self.invoker.launch("original-proof", **binding), completed)
+        self.assertEqual(self.invoker.cancel("original-proof", "cleanup"), completed)
+
+    def test_worker_rechecks_source_after_parent_launch_check(self):
+        reference = self.input()
+        spawn = invocations.subprocess.Popen
+
+        def change_then_spawn(*args, **kwargs):
+            self.module.write_text(MODULE + "\n# changed before worker import\n")
+            return spawn(*args, **kwargs)
+
+        with patch.object(invocations.subprocess, "Popen", change_then_spawn):
+            self.invoker.launch(
+                "worker-source-fence", "agent", reference, time.time() + 8
+            )
+        completion = self.completion(self.wait_for("worker-source-fence"))
+        self.assertEqual(completion["status"], "failed")
+        self.assertIn("module identity changed", completion["error"])
+        self.assertFalse((self.root / "calls").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,16 @@ quote paths. The launcher uses uv with this release's lockfile, preserves the
 current working directory and forwards CLI arguments and exit status. Do not use
 a globally installed `research-loop` which may be a different release.
 
+## Identify the Study format
+
+Before operating an existing Study, inspect its directory: `runtime.json` with
+`format: sqlite-v1` or `runtime.sqlite3` identifies the SQLite runtime; `study.json`
+and `state.json` identify the legacy document controller. If markers conflict or
+the format is unclear, stop and inspect rather than guessing. Route SQLite Studies
+to `runtime ...` commands in [concurrent runtime](docs/concurrent-runtime.md) and
+[operations](references/operations.md); use the legacy commands below only for
+legacy Studies. Do not convert either format in place.
+
 ## Choose the operation
 
 | User request | Action |
@@ -37,6 +47,11 @@ a globally installed `research-loop` which may be a different release.
 Read only the relevant references. Existing task adapters have their own runner,
 authorization and reconciliation rules; use those instead of generic `run`.
 Never initialize a second Study just to bypass an interruption or spent budget.
+
+The workflow below creates a legacy document Study. For a requested SQLite Study,
+use the explicit trusted application and initialization contract in
+[concurrent runtime](docs/concurrent-runtime.md); the legacy Harness is not
+automatically integrated and its role schemas are different.
 
 ## Turn a question into a runnable Study
 
@@ -116,7 +131,8 @@ Never initialize a second Study just to bypass an interruption or spent budget.
 
 ## Controller boundaries
 
-New Studies use version 3. Plan's `markdown` freezes the scientific contract;
+New legacy document Studies use version 3; SQLite Studies use schema 7. In the
+legacy controller, Plan's `markdown` freezes the scientific contract;
 top-level `timeout_seconds` bounds execution. Execute produces evidence; independent
 Review verifies it; only the controller publishes research documents and Frontiers.
 Realtime observations are unreviewed. Local improvement is not global success,
