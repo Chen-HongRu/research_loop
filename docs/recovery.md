@@ -1,5 +1,11 @@
 # Interruption and recovery
 
+This guide describes the serial document controller. The new
+[SQLite runtime foundation](transactional-runtime.md) preserves unresolved
+attempts across owner epochs and does not yet expose recovery or migration in
+the CLI. Legacy entry points refuse its marker or database instead of replaying
+`state.json` over authoritative SQLite state.
+
 See [Failure diagnostics and recovery](failure-diagnostics.md) for workspace versus
 pipeline responsibility, Agent-readable server logs and operator blocking records.
 

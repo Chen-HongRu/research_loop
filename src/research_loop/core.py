@@ -62,6 +62,7 @@ from .scout import REPORT_MAX_BYTES as SCOUT_REPORT_MAX_BYTES
 from .strategy import debate_rounds, review_guidance, validate_strategy
 from .submission import retire_unstarted_request
 from .tasks import TaskQueue, completed_results as task_results
+from .runtime.format import require_legacy
 
 
 class StudyError(RuntimeError):
@@ -238,6 +239,7 @@ def initialize(
 class Study:
     def __init__(self, root: Path, harness: AgentHarness | None = None):
         self.root = Path(root).resolve()
+        require_legacy(self.root)
         self.config = _read(self.root / "study.json")
         if self.config.get("version") != 3:
             raise StudyError(
@@ -253,6 +255,7 @@ class Study:
         self._elapsed_start = 0.0
 
     def status(self) -> dict:
+        require_legacy(self.root)
         return _read(self.root / "state.json")
 
     def knowledge(self) -> dict:
@@ -347,11 +350,13 @@ class Study:
             except BlockingIOError as exc:
                 raise StudyError("Another controller is using this study") from exc
             try:
+                require_legacy(self.root)
                 yield
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _save(self, state: dict) -> None:
+        require_legacy(self.root)
         if self._run_start is not None:
             state["elapsed_seconds"] = (
                 self._elapsed_start + time.monotonic() - self._run_start

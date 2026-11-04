@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from research_loop.scheduling import child_blocked, recorded_child_error
+from research_loop.runtime.format import require_legacy
 
 
 def _read(path):
@@ -59,6 +60,7 @@ def _identifier(value):
 class TaskQueue:
     def __init__(self, study_root):
         self.root = Path(study_root).resolve()
+        require_legacy(self.root)
         self.lane = self.root / "tasks"
 
     @contextmanager
@@ -67,6 +69,7 @@ class TaskQueue:
         with (self.lane / "queue.lock").open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
+                require_legacy(self.root)
                 yield
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
@@ -217,9 +220,11 @@ class TaskQueue:
             return request
 
     def request(self, identity):
+        require_legacy(self.root)
         return _read(self._folder(identity) / "request.json")
 
     def snapshot(self):
+        require_legacy(self.root)
         rows = []
         for path in sorted(self.lane.glob("*/request.json")):
             request = _read(path)

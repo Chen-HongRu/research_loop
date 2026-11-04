@@ -32,6 +32,8 @@ ProTok 父 Study 初始化在受锁保护、带所有权记录的暂存目录完
 
 ProTok supervisor 按子 Study 异步调度长训任务。某个子 Study 等待处理时保留原调查，其他独立任务继续；各人工长训使用独立预算，自动提名共享的分配与核账门槛继续生效。每个 Study 内的阶段和父 Study 轮次仍顺序发布，详见[任务调度](docs/task-queue.md)。
 
+[#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端正在分阶段实现。[SQLite 状态层](docs/transactional-runtime.md)为新建测试 Study 提供事务化任务认领、独立 iteration、统一调用账本和协调者身份隔离；当前 CLI 仍使用上述串行控制器。现有 Study 不会自动迁移，新状态层也尚不启动并发实验。
+
 ## 快速体验
 
 要求 Python 3.11+、[uv](https://docs.astral.sh/uv/) 和 Git，运行环境为 macOS/Linux。
