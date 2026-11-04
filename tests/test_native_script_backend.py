@@ -165,8 +165,8 @@ class NativeScriptBackendTests(unittest.TestCase):
             "|".join(
                 [
                     job_id,
-                    name or record["job_name"],
-                    comment or record["comment"],
+                    record["job_name"] if name is None else name,
+                    record["comment"] if comment is None else comment,
                     "synthetic-user",
                     "synthetic-account",
                     state,
@@ -381,8 +381,51 @@ class NativeScriptBackendTests(unittest.TestCase):
         self.assertFalse(result["data"]["terminal"])
         self.assertFalse(result["data"]["physical_released"])
         self.mark_terminal()
-        with self.assertRaisesRegex(ValueError, "accounting"):
-            self.invoke("settlement")
+        self.assertEqual(self.invoke("settlement")["data"], {"final_costs": {}})
+
+    def test_partial_identity_retains_original_job_and_never_authorizes_effects(self):
+        self.prepare_submit()
+        self.transport.rows = self.row(comment="", state="RUNNING", end="Unknown")
+        inspection = self.invoke("inspection")["data"]
+        self.assertEqual(inspection["job_id"], "123")
+        self.assertFalse(inspection["terminal"])
+        self.assertFalse(inspection["physical_released"])
+        self.assertFalse(self.invoke("cancellation")["data"]["acknowledged"])
+        self.assertEqual(self.invoke("settlement")["data"], {"final_costs": {}})
+        self.assertEqual(self.invoke("submission")["data"]["job_id"], "123")
+        self.assertEqual(
+            sum(call[0].startswith("sbatch ") for call in self.transport.calls), 1
+        )
+        self.assertFalse(
+            any(call[0].startswith("scancel ") for call in self.transport.calls)
+        )
+        self.assertEqual(json.loads(self.journal().read_text())["job_id"], "123")
+
+    def test_missing_identity_cannot_confirm_terminal_or_hide_contradiction(self):
+        self.prepare_submit()
+        original = self.row().strip().split("|")
+        for index in range(1, 5):
+            with self.subTest(missing=index):
+                row = original.copy()
+                row[index] = ""
+                self.transport.rows = "|".join(row) + "\n"
+                data = self.invoke("inspection")["data"]
+                self.assertFalse(data["terminal"])
+                self.assertFalse(data["physical_released"])
+        for index in [0, 1, 3, 4]:
+            with self.subTest(contradiction=index):
+                row = original.copy()
+                row[2] = ""
+                row[index] = "999" if index == 0 else "contradiction"
+                self.transport.rows = "|".join(row) + "\n"
+                with self.assertRaisesRegex(ValueError, "identity"):
+                    self.invoke("inspection")
+
+    def test_duplicate_partial_identity_rows_still_contradict_one_submission(self):
+        self.prepare_submit()
+        self.transport.rows = self.row(comment="") * 2
+        with self.assertRaisesRegex(ValueError, "Multiple scheduler jobs"):
+            self.invoke("inspection")
 
     def test_contradictory_identity_never_cancels_or_settles(self):
         self.prepare_submit()
@@ -413,15 +456,59 @@ class NativeScriptBackendTests(unittest.TestCase):
         self.transport.rows = self.row()
         result = self.invoke("inspection")
         self.assertTrue(result["data"]["physical_released"])
-        with self.assertRaisesRegex(ValueError, "inspected terminal"):
-            self.invoke("settlement")
+        self.assertEqual(self.invoke("settlement")["data"], {"final_costs": {}})
         self.mark_terminal()
         self.assertEqual(
             self.invoke("settlement")["data"], {"final_costs": {"gpu_seconds": 100}}
         )
         self.transport.rows = self.row(tres="")
-        with self.assertRaisesRegex(ValueError, "never infer zero"):
-            self.invoke("settlement")
+        self.assertEqual(self.invoke("settlement")["data"], {"final_costs": {}})
+
+    def test_pending_accounting_then_same_terminal_job_final_fees(self):
+        self.prepare_submit()
+        self.transport.rows = self.row(state="RUNNING", end="Unknown")
+        self.assertEqual(self.invoke("settlement")["data"], {"final_costs": {}})
+        self.transport.rows = self.row()
+        self.assertEqual(self.invoke("settlement")["data"], {"final_costs": {}})
+        self.mark_terminal()
+        for missing in [{"end": "Unknown"}, {"elapsed": ""}, {"tres": ""}]:
+            with self.subTest(missing=missing):
+                self.transport.rows = self.row(**missing)
+                self.assertEqual(self.invoke("settlement")["data"], {"final_costs": {}})
+        self.transport.rows = self.row(elapsed="43")
+        self.assertEqual(
+            self.invoke("settlement")["data"], {"final_costs": {"gpu_seconds": 43}}
+        )
+
+    def test_accounting_contradictions_remain_errors(self):
+        self.prepare_submit()
+        self.mark_terminal()
+        for values, message in [
+            ({"state": "FAILED"}, "outcome"),
+            ({"tres": "gres/gpu=2"}, "GPU count"),
+            ({"elapsed": "invalid"}, "elapsed"),
+        ]:
+            with self.subTest(values=values):
+                self.transport.rows = self.row(**values)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.invoke("settlement")
+
+    def test_failed_job_missing_outputs_is_final_unavailable_collection(self):
+        self.prepare_submit()
+        self.mark_terminal()
+        self.op["terminal_outcome"] = "failed"
+        self.transport.outputs = [
+            {"name": "report.json", "missing": True},
+            {"name": "latest.pt", "missing": True},
+        ]
+        result = self.invoke("collection")["data"]
+        self.assertEqual(result["artifacts"], [])
+        self.assertEqual(result["research_evidence"], [])
+        self.assertEqual(result["evaluations"], [])
+        self.assertTrue(result["unavailable_reason"])
+        calls = len(self.transport.calls)
+        self.assertEqual(self.invoke("collection")["data"], result)
+        self.assertEqual(len(self.transport.calls), calls)
 
     def test_collect_declared_reports_only_and_checkpoint_metadata_no_measurement(self):
         self.prepare_submit()

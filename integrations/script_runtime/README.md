@@ -95,8 +95,14 @@ scientific artifacts outside Git, and authorize accounts/resources separately.
 Each callback performs a bounded scheduler action. The native durable submission
 permit binds its token and original owner; uncertain submission is reconciled
 without replay. Journals retain the original job identity through inspection,
-cancellation, collection and settlement. Collection includes only explicitly
-allowed small report formats; it does not download datasets or checkpoints.
+cancellation, collection and settlement. Slurm may expose an allocation before
+its identity metadata or final accounting is complete. Missing identity fields
+retain the original job and resource hold without confirming terminal state or
+authorizing cancellation; nonempty contradictory identity fields remain errors.
+Settlement returns pending costs until the same job has been inspected terminal
+and complete allocated GPU accounting is available; missing fees are never zero.
+Collection includes only explicitly allowed small report formats; it does not
+download datasets or checkpoints.
 Reports enter Review-only `research_evidence` as unverified interpretation inputs.
 They do not become evaluator measurements or Frontier scores. Review may publish
 interpretation with uncertainty and limitations; it must not turn script-reported

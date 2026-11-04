@@ -526,17 +526,23 @@ def _query(transport, op, c, record):
             raise ValueError("Malformed accounting observation")
         if not row[0].isdigit():
             continue
-        if row[1:5] != [
+        expected = [
             record["job_name"],
             record["comment"],
             c["slurm_user"],
             c["account"],
-        ] or (record.get("job_id") and row[0] != record["job_id"]):
+        ]
+        if any(
+            actual and actual != wanted
+            for actual, wanted in zip(row[1:5], expected, strict=True)
+        ) or (record.get("job_id") and row[0] != record["job_id"]):
             raise ValueError("Scheduler identity contradicts original operation")
         rows.append(row)
     if len(rows) > 1:
         raise ValueError("Multiple scheduler jobs contradict one-submit identity")
-    return rows[0] if rows else None
+    # Slurm accounting may publish the allocation before all identity metadata.
+    # A partial row cannot authorize cancellation, release or final accounting.
+    return rows[0] if rows and all(rows[0][1:5]) else None
 
 
 def _outcome(row):
@@ -914,22 +920,39 @@ def invoke(action, operation, request, config, *, transport=None):
                             "reason": "Same positively identified job cancellation acknowledged; release requires inspection",
                         }
                 else:
+                    outcome = _outcome(row) if row else None
                     if (
-                        row is None
-                        or _outcome(row) is None
-                        or op.get("state") != "terminal"
-                        or op.get("job_id") != row[0]
-                        or op.get("terminal_outcome") != _outcome(row)
-                        or row[9] in {"", "Unknown", "None"}
-                        or not row[7].isdigit()
+                        row is not None
+                        and outcome is not None
+                        and op.get("state") == "terminal"
+                        and (
+                            op.get("job_id") != row[0]
+                            or op.get("terminal_outcome") != outcome
+                        )
                     ):
                         raise ValueError(
-                            "Final fees require the same inspected terminal identity and complete accounting"
+                            "Final fees contradict the inspected terminal identity or outcome"
                         )
-                    gpu = re.search(r"(?:^|,)gres/gpu=([0-9]+)(?:,|$)", row[8])
-                    if gpu is None or gpu.group(1) != "1":
+                    gpu = (
+                        re.search(r"(?:^|,)gres/gpu=([0-9]+)(?:,|$)", row[8])
+                        if row
+                        else None
+                    )
+                    if gpu is not None and gpu.group(1) != "1":
                         raise ValueError(
-                            "Final allocated GPU seconds unresolved; never infer zero"
+                            "Final allocated GPU count contradicts allocation"
                         )
-                    data = {"final_costs": {c["cost_unit"]: int(row[7])}}
+                    if row is not None and row[7] and not row[7].isdigit():
+                        raise ValueError("Invalid final allocated elapsed seconds")
+                    if (
+                        row is None
+                        or outcome is None
+                        or op.get("state") != "terminal"
+                        or row[9] in {"", "Unknown", "None"}
+                        or not row[7]
+                        or gpu is None
+                    ):
+                        data = {"final_costs": {}}
+                    else:
+                        data = {"final_costs": {c["cost_unit"]: int(row[7])}}
         return _event(op, action, data)
