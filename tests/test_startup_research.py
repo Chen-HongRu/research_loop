@@ -48,13 +48,13 @@ class CampaignDelegate(RecordedHarness):
                 time.sleep(0.01)
             result = read(workspace / submission.RESULT)
             if result["status"] != "completed":
-                raise AssertionError(result)
+                return {"markdown": "Synthetic prelaunch failure; no GPU or models."}
             return {
                 "markdown": "Synthetic local evaluation completed; no GPU or models."
             }
         result = super().response(phase, context, kwargs)
         if phase == "plan":
-            result["timeout_seconds"] = research.EXECUTE_SECONDS
+            result["timeout_seconds"] = 36000
         return result
 
 
@@ -161,12 +161,12 @@ class StartupResearchTests(unittest.TestCase):
             (3600, 2, 5),
         )
         harness = research.StartupResearchHarness(
-            args, HarnessConfig(), "unused", deadline=research.ROUND_SECONDS - 1
+            args, HarnessConfig(), "unused", deadline=0
         )
         with patch.object(research.time, "monotonic", return_value=0):
             with self.assertRaisesRegex(BudgetExhausted, "campaign_budget"):
                 harness.admit_iteration("0001")
-            self.assertEqual(harness.call_allowance(10000), research.ROUND_SECONDS - 1)
+            self.assertEqual(harness.call_allowance(10000), 0)
         for option, value in (
             ("--budget-seconds", "36001"),
             ("--max-iterations", "61"),
@@ -245,22 +245,154 @@ class StartupResearchTests(unittest.TestCase):
                 unchanged=False,
             )
 
-    def test_evaluator_refuses_late_round_before_any_process(self):
-        args = SimpleNamespace(root=self.root, max_iterations=60)
+    def test_late_evaluation_is_incomplete_and_unranked_without_launch(self):
+        args = research.parse_args(self.argv(self.root / "late"))
+        args.root.mkdir()
+        args.revision = research.git(self.source, "rev-parse", "HEAD")
         harness = research.StartupResearchHarness(
-            args, HarnessConfig(), "unused", deadline=100
+            args, HarnessConfig(), args.revision, deadline=100
         )
-        harness.rounds[1] = {"control": False}
+        (args.root / "controller/0001").mkdir(parents=True)
+        harness.rounds[1] = {
+            "control": True,
+            "kind": "baseline-control",
+            "source_revision": args.revision,
+            "base_experiment": None,
+        }
         with (
             patch.object(research.time, "monotonic", return_value=99),
             patch.object(research.subprocess, "Popen") as popen,
+            patch.object(research, "freeze_candidate", return_value={"id": "test"}),
         ):
-            with self.assertRaisesRegex(HarnessError, "all three"):
-                harness.evaluate(
-                    self.source, 1, SimpleNamespace(is_set=lambda: False), 10000
-                )
+            receipt = harness.evaluate(
+                self.source, 1, SimpleNamespace(is_set=lambda: False), 10000
+            )
         popen.assert_not_called()
+        self.assertEqual(receipt["status"], "incomplete")
+        self.assertEqual(receipt["cases"], [])
+        self.assertEqual(receipt["metrics"]["mean_startup_seconds"], 420)
+        self.assertFalse(research.eligible(receipt, {}, "0001"))
         self.assertEqual(harness.case_count, 0)
+
+    def test_campaign_deadline_overrides_short_plan_timeout(self):
+        args = research.parse_args(self.argv(self.root / "allowance"))
+        (args.root / "study").mkdir(parents=True)
+        (args.root / "study/state.json").write_text('{"iteration": 1}')
+        harness = research.StartupResearchHarness(
+            args, HarnessConfig(), "unused", deadline=5000
+        )
+        harness.delegate = Mock()
+        with patch.object(research.time, "monotonic", return_value=100):
+            harness.admit_iteration("0001")
+            harness.run(
+                run_dir=args.root / "study/iterations/0001/plan/attempt-001",
+                timeout_seconds=5,
+                prompt="x",
+                schema={},
+                writable=False,
+            )
+        self.assertEqual(harness.delegate.run.call_args.kwargs["timeout_seconds"], 4900)
+
+    def test_expiry_during_any_stage_stops_normally_without_ranking(self):
+        original = CampaignDelegate.response
+        for expired_phase in ("plan", "execute", "review"):
+            with self.subTest(phase=expired_phase):
+                root = self.root / f"expires-{expired_phase}"
+
+                def expire(delegate, phase, context, kwargs):
+                    if phase == expired_phase:
+                        raise BudgetExhausted("campaign_budget")
+                    return original(delegate, phase, context, kwargs)
+
+                with patch.object(CampaignDelegate, "response", expire):
+                    summary = self.campaign(root)
+                self.assertEqual(summary["status"], "completed")
+                self.assertEqual(summary["stop_reason"], "campaign_budget")
+                self.assertEqual(summary["completed_rounds"], 0)
+                self.assertEqual(summary["unreviewed_rounds"], [1])
+                self.assertEqual(read(root / "study/frontiers.json")["global"], {})
+
+    def test_timeout_at_deadline_is_budget_but_earlier_failure_is_error(self):
+        args = research.parse_args(self.argv(self.root / "timeout"))
+        (args.root / "study").mkdir(parents=True)
+        (args.root / "study/state.json").write_text('{"iteration": 1}')
+        harness = research.StartupResearchHarness(
+            args, HarnessConfig(), "unused", deadline=5000
+        )
+        harness.delegate = Mock()
+        harness.delegate.run.side_effect = HarnessError("model timeout")
+        kwargs = dict(
+            run_dir=args.root / "study/iterations/0001/plan/attempt-001",
+            timeout_seconds=5,
+            prompt="x",
+            schema={},
+            writable=False,
+        )
+        with patch.object(research.time, "monotonic", side_effect=[100, 100, 4999.5]):
+            with self.assertRaisesRegex(BudgetExhausted, "campaign_budget"):
+                harness.run(**kwargs)
+        with patch.object(research.time, "monotonic", return_value=100):
+            with self.assertRaisesRegex(HarnessError, "model timeout"):
+                harness.run(**kwargs)
+
+    def test_recovery_settles_retained_candidate_without_replaying_execute(self):
+        root = self.root / "recovery"
+        calls = []
+
+        def fail_second(harness, workspace, iteration, stop, deadline):
+            calls.append(iteration)
+            if iteration == 2:
+                raise HarnessError(
+                    "Insufficient Execute budget for all three fixed cases"
+                )
+            return synthetic_evaluate(harness, workspace, iteration, stop, deadline)
+
+        with (
+            patch.object(research, "CodexHarness", CampaignDelegate),
+            patch.object(research.StartupResearchHarness, "evaluate", fail_second),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(research.main(self.argv(root)), 1)
+        before = read(root / "study/state.json")
+        self.assertEqual(before["iteration"], 2)
+        workspace = Path(
+            read(root / "study/iterations/0002/iteration.json")["workspace"]
+        )
+        candidate_before = (workspace / "SKILL.md").read_bytes()
+        config_before = (root / "study/study.json").read_bytes()
+        goal_before = (root / "study/goal.md").read_bytes()
+        deadline = read(root / "summary.json")["deadline_unix"]
+        original_argv = self.argv(root)
+        argv = [
+            "--resume-root",
+            str(root),
+            *original_argv[2:],
+            "--deadline-unix",
+            str(deadline),
+        ]
+        with (
+            patch.object(research, "CodexHarness", CampaignDelegate),
+            patch.object(
+                research.StartupResearchHarness, "evaluate", synthetic_evaluate
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = research.main(argv)
+        summary = read(root / "summary.json")
+        self.assertEqual(code, 0, summary)
+        self.assertEqual(summary["completed_rounds"], 2)
+        self.assertEqual(summary["evaluation_cases_started"], 6)
+        self.assertEqual(summary["state"]["call_count"], before["call_count"] + 1)
+        self.assertEqual((workspace / "SKILL.md").read_bytes(), candidate_before)
+        self.assertEqual((root / "study/study.json").read_bytes(), config_before)
+        self.assertEqual((root / "study/goal.md").read_bytes(), goal_before)
+        self.assertEqual(summary["deadline_unix"], deadline)
+        self.assertEqual(summary["task_statuses"]["round-0002"], "reviewed")
+        self.assertTrue(
+            (
+                root / "study/recoveries/campaign-deadline-0002.previous/response.json"
+            ).exists()
+        )
 
     def test_api_scope_freezes_only_four_allowed_files(self):
         baseline = research.git(self.source, "rev-parse", "HEAD")
@@ -387,7 +519,7 @@ class StartupResearchTests(unittest.TestCase):
                 self.source,
                 1,
                 SimpleNamespace(is_set=lambda: False),
-                time.monotonic() + 1500,
+                time.monotonic() + 600,
             )
         self.assertEqual(launched.call_count, 3)
         self.assertEqual(result["comparison_scope"], research.API_SCOPE)

@@ -41,10 +41,6 @@ SCOPE = "startup-e2e-v3"
 API_SCOPE = "startup-e2e-api-v1"
 CASE_SECONDS = 420
 REPEATS = 3
-EXECUTE_SECONDS = 1500
-PLAN_SECONDS = 240
-REVIEW_SECONDS = 420
-ROUND_SECONDS = EXECUTE_SECONDS + PLAN_SECONDS + REVIEW_SECONDS + 30
 MAX_BUDGET_SECONDS = 36000
 MAX_ITERATIONS = 60
 ARTIFACT = "startup-evaluation.json"
@@ -77,7 +73,7 @@ GOAL = """Research the fastest reliable from-zero startup of the fixed ProTok sy
 GPU smoke through the existing research-loop interfaces. This is a bounded campaign
 of dynamically queued investigations, not a two-investigation completion goal.
 Continue instruction-only optimization and scheduled baseline controls until the
-controller's wall-clock admission budget or iteration cap prevents another round.
+controller's campaign deadline or iteration cap prevents another round.
 An improvement, completed baseline or finished candidate alone never meets this
 continuing goal. Prior completed Studies remain complete; this is a new linked
 Study with a new explicit authorization, not a resumption of their old goals.
@@ -101,7 +97,8 @@ python3 src/research_loop/submission.py submit --workspace . --action evaluate
 Poll status with the same script's status --workspace . command until terminal.
 The host owns the scorer and publishes evaluation-result.json and
 startup-evaluation.json; accepted is never permission to resubmit. Evaluation can
-take about 23 minutes; Plan must grant Execute 1500 seconds within Study budget.
+take multiple minutes. The trusted adapter uses the single campaign deadline;
+Plan timeout recommendations do not shorten Execute.
 Use short polling waits. Do not create alternate snapshots, graders or launchers.
 Final Execute response is only schema-conforming markdown; the host constructs
 the artifact and measurements. Report all three cases, failures, actual timings,
@@ -505,7 +502,6 @@ class StartupResearchHarness:
         self.case_count = 0
         self.rounds = {}
         self.admissions = {}
-        self.stage_deadlines = {}
 
     def admit_iteration(self, identity):
         if identity in self.admissions:
@@ -513,7 +509,7 @@ class StartupResearchHarness:
         if int(identity) > self.args.max_iterations:
             raise BudgetExhausted("iteration_budget")
         remaining = self.deadline - time.monotonic()
-        if remaining < ROUND_SECONDS:
+        if remaining < 1:
             raise BudgetExhausted("campaign_budget")
         token = {"iteration": identity, "remaining_seconds": remaining}
         self.admissions[identity] = token
@@ -529,11 +525,6 @@ class StartupResearchHarness:
         ):
             raise HarnessError("Authorized campaign iteration/case budget exceeded")
         deadline = min(deadline, self.deadline)
-        if (
-            stop.is_set()
-            or time.monotonic() + REPEATS * (CASE_SECONDS + 15) + 7 >= deadline
-        ):
-            raise HarnessError("Insufficient Execute budget for all three fixed cases")
         current = self.rounds[iteration]
         controller = self.args.root / "controller" / f"{iteration:04d}"
         candidate = freeze_candidate(
@@ -550,9 +541,7 @@ class StartupResearchHarness:
         rows = []
         for number in range(1, REPEATS + 1):
             if stop.is_set() or time.monotonic() + CASE_SECONDS + 15 >= deadline:
-                raise HarnessError(
-                    "Insufficient Execute budget; no additional case launched"
-                )
+                break
             case_root = controller / f"case-{number:02d}"
             command = [
                 sys.executable,
@@ -652,14 +641,17 @@ class StartupResearchHarness:
             )
             _publish(controller / "cases.json", {"candidate": candidate, "cases": rows})
         metrics = {
-            "mean_startup_seconds": sum(row["startup_seconds"] for row in rows)
+            "mean_startup_seconds": (
+                sum(row["startup_seconds"] for row in rows)
+                + (REPEATS - len(rows)) * CASE_SECONDS
+            )
             / REPEATS,
             "success_rate": sum(row["success"] for row in rows) / REPEATS,
             "scalar_visibility_rate": sum(row["scalar_visible"] for row in rows)
             / REPEATS,
         }
         receipt = {
-            "status": "completed",
+            "status": "completed" if len(rows) == REPEATS else "incomplete",
             "candidate": candidate,
             "cases": rows,
             "metrics": metrics,
@@ -686,26 +678,18 @@ class StartupResearchHarness:
         iteration = int(
             json.loads((self.args.root / "study/state.json").read_text())["iteration"]
         )
-        stage_key = (iteration, phase)
-        allowance = {
-            "plan": PLAN_SECONDS,
-            "execute": EXECUTE_SECONDS,
-            "review": REVIEW_SECONDS,
-        }.get(phase, PLAN_SECONDS)
-        deadline = self.stage_deadlines.setdefault(
-            stage_key, min(self.deadline, time.monotonic() + allowance)
-        )
-        remaining = min(
-            kwargs.get("timeout_seconds", allowance), deadline - time.monotonic()
-        )
+        # Operator-authorized campaign deadline is the only stage allowance.
+        # The core's historical harness/Plan timeout is a recommendation here.
+        deadline = self.deadline
+        remaining = deadline - time.monotonic()
         if remaining < 1:
-            raise HarnessError(f"Campaign {phase} deadline exhausted; no call launched")
+            raise BudgetExhausted("campaign_budget")
         kwargs["timeout_seconds"] = int(remaining)
         kwargs["prompt"] += (
             f"\n\nCampaign round {iteration}/{self.args.max_iterations}; "
             f"overall wall time remaining {max(0, self.deadline - time.monotonic()):.0f}s. "
             "This is a new continuing campaign; old completed goals do not apply. "
-            "Plan must allocate 1500 seconds to Execute. Full independent Review "
+            "The campaign deadline overrides historical stage/Plan timeouts. Full independent Review "
             "is required for every measured round. Continue while another round "
             "fits; stop for unsafe or unresolved effects."
         )
@@ -715,7 +699,7 @@ class StartupResearchHarness:
             if (
                 phase == "review"
                 and iteration < self.args.max_iterations
-                and self.deadline - time.monotonic() >= ROUND_SECONDS
+                and self.deadline - time.monotonic() >= 1
             ):
                 schema = json.loads(json.dumps(kwargs["schema"]))
                 schema["properties"]["goal_status"] = {
@@ -724,11 +708,16 @@ class StartupResearchHarness:
                 }
                 kwargs["schema"] = schema
                 kwargs["prompt"] += (
-                    " Another complete round still fits; the continuing campaign "
+                    " Campaign time remains; the continuing campaign "
                     "goal is not met. Use decision continue unless an actual "
                     "safety or unresolved-effect concern requires stopping."
                 )
-            return self.delegate.run(**kwargs)
+            try:
+                return self.delegate.run(**kwargs)
+            except HarnessError:
+                if deadline - time.monotonic() < 1:
+                    raise BudgetExhausted("campaign_budget") from None
+                raise
         workspace = Path(kwargs["workspace"]).resolve()
         expected_workspace = (
             self.args.root / "study/iterations" / f"{iteration:04d}" / "workspace"
@@ -793,8 +782,11 @@ class StartupResearchHarness:
             target=service, name="trusted-startup-research-evaluator"
         )
         worker.start()
+        delegate_error = None
         try:
             report = self.delegate.run(**report_arguments(kwargs))
+        except HarnessError as error:
+            delegate_error = error
         finally:
             stop.set()
             worker.join(timeout=max(0, deadline - time.monotonic()) + 7)
@@ -803,8 +795,14 @@ class StartupResearchHarness:
                 self.errors.append("Evaluation worker unresolved; stop and reconcile")
         if self.errors:
             raise HarnessError("; ".join(self.errors))
+        if delegate_error is not None:
+            if deadline - time.monotonic() < 1:
+                raise BudgetExhausted("campaign_budget") from delegate_error
+            raise delegate_error
         receipt = self.results.get(iteration)
         if receipt is None:
+            if deadline - time.monotonic() < 1:
+                raise BudgetExhausted("campaign_budget")
             raise HarnessError(
                 "Execute did not complete its canonical evaluation submission"
             )
@@ -825,14 +823,22 @@ class StartupResearchHarness:
             ],
             "evidence": [row["receipt"] for row in receipt["cases"]],
         }
+        complete = receipt["status"] == "completed"
         return publish_execution(
-            kwargs["run_dir"], report, [artifact], [measurement], True
+            kwargs["run_dir"],
+            report,
+            [artifact],
+            [measurement] if complete else [],
+            complete,
         )
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("root", "source", "prepared-source", "codex-wrapper"):
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--resume-root", type=Path)
+    parser.add_argument("--deadline-unix", type=float)
+    for name in ("source", "prepared-source", "codex-wrapper"):
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("host", "remote-root", "remote-python"):
         parser.add_argument("--" + name, required=True)
@@ -845,6 +851,12 @@ def parse_args(argv=None):
     parser.add_argument("--max-iterations", type=int, default=2)
     parser.add_argument("--baseline-every", type=int, default=5)
     args = parser.parse_args(argv)
+    if bool(args.root) == bool(args.resume_root):
+        parser.error("Supply exactly one of --root or --resume-root")
+    if args.resume_root:
+        args.root = args.resume_root
+        if args.deadline_unix is None:
+            parser.error("--resume-root requires the original --deadline-unix")
     for name in ("root", "source", "prepared_source", "codex_wrapper"):
         setattr(args, name, getattr(args, name).resolve())
     if not args.gpu.isdecimal() or args.host.startswith("-"):
@@ -867,8 +879,289 @@ def parse_args(argv=None):
     return args
 
 
+def run_campaign(
+    args,
+    summary,
+    harness,
+    study,
+    baseline,
+    prior,
+    started,
+    deadline,
+    *,
+    first_number=1,
+    best=None,
+):
+    queue = TaskQueue(args.root / "study")
+    comparison_scope = scope_for(args.candidate_scope)
+    stop_reason = "iteration_budget"
+    for number in range(first_number, args.max_iterations + 1):
+        if (args.root / "STOP_AFTER_ROUND").exists():
+            stop_reason = "operator_scope_change"
+            break
+        if deadline - time.monotonic() < 1:
+            stop_reason = "campaign_budget"
+            break
+        request, control = round_task(
+            number,
+            baseline={"revision": baseline, "every": args.baseline_every},
+            prior=prior,
+            best=best,
+            candidate_scope=args.candidate_scope,
+        )
+        if number in harness.rounds:
+            request["id"] = f"round-{number:04d}"
+        else:
+            submitted = queue.submit(request)
+            harness.rounds[number] = {
+                "kind": request["title"],
+                "control": control,
+                "source_revision": submitted["source"]["revision"],
+                "base_experiment": request["base_experiment"],
+            }
+        state = study.run(iterations=1)
+        statuses = {row["id"]: row["status"] for row in queue.snapshot()}
+        if (
+            state.get("stop_reason") in {"campaign_budget", "time_budget"}
+            and not harness.errors
+        ):
+            stop_reason = "campaign_budget"
+            break
+        if (
+            statuses.get(request["id"]) != "reviewed"
+            or number not in harness.results
+            or harness.errors
+            or state.get("phase") != "done"
+            or state.get("status") == "needs_attention"
+        ):
+            raise HarnessError(
+                "Admitted round did not complete evaluation and full Review"
+            )
+        reviewed_iteration(args.root / "study", f"{number:04d}")
+        candidates = (
+            study.frontiers()["global"].get(comparison_scope, {}).get("candidates", [])
+        )
+        if candidates:
+            best = min(
+                candidates, key=lambda row: row["metrics"]["mean_startup_seconds"]
+            )["experiment_id"]
+        else:
+            best = None
+        summary.update(
+            status="running",
+            results=harness.results,
+            rounds=harness.rounds,
+            completed_rounds=number,
+            task_statuses=statuses,
+            best_experiment=best,
+            elapsed_seconds=time.monotonic() - started,
+            source_revision=args.revision,
+            instruction_only=args.candidate_scope == "docs",
+        )
+        _publish(args.root / "summary.json", summary)
+        if (args.root / "STOP_AFTER_ROUND").exists():
+            stop_reason = "operator_scope_change"
+            break
+        if harness.results[number]["status"] == "incomplete":
+            stop_reason = "campaign_budget"
+            break
+        if state.get("status") == "stopped" and number < args.max_iterations:
+            if deadline - time.monotonic() < 1:
+                stop_reason = "campaign_budget"
+                break
+            raise HarnessError(
+                "Review stopped before the continuing campaign budget; inspect its retained judgment"
+            )
+    summary.update(
+        status="completed",
+        results=harness.results,
+        source_revision=args.revision,
+        instruction_only=args.candidate_scope == "docs",
+        task_statuses={row["id"]: row["status"] for row in queue.snapshot()},
+        completed_rounds=sum(row["status"] == "reviewed" for row in queue.snapshot()),
+        unreviewed_rounds=[
+            number
+            for number in harness.rounds
+            if not (
+                args.root / "study/iterations" / f"{number:04d}" / "publication.json"
+            ).exists()
+        ],
+        stop_reason=stop_reason,
+        best_experiment=best,
+        rounds=harness.rounds,
+    )
+
+
+def resume_campaign(args):
+    """Recover the known prelaunch rejection without replaying candidate coding.
+
+    The immutable goal/Plan/config remain historical evidence. The explicit
+    original deadline authorizes the trusted adapter's corrected allowance.
+    """
+    summary = json.loads((args.root / "summary.json").read_text())
+    previous_summary = json.loads(json.dumps(summary))
+    started = time.monotonic() - summary.get("elapsed_seconds", 0)
+    deadline = time.monotonic() + args.deadline_unix - time.time()
+    harness = None
+    try:
+        if not math.isfinite(args.deadline_unix) or deadline <= time.monotonic():
+            raise ValueError("Original campaign deadline has expired")
+        recorded_deadline = summary.get("deadline_unix")
+        if recorded_deadline is not None and recorded_deadline != args.deadline_unix:
+            raise ValueError("Recovery cannot change the original campaign deadline")
+        args.candidate_scope = summary["candidate_scope"]
+        args.max_iterations = summary["max_iterations"]
+        args.baseline_every = summary["baseline_every"]
+        args.budget_seconds = summary["budget_seconds"]
+        args.revision = summary["source_revision"]
+        if git(args.source, "rev-parse", args.revision) != args.revision:
+            raise ValueError("Original frozen source revision is unavailable")
+        baseline = git(args.root / "workspace", "rev-list", "--max-parents=0", "HEAD")
+        config = HarnessConfig(
+            **json.loads((args.root / "study/study.json").read_text())["harness"]
+        )
+        # Keep canonical config unchanged; this trusted adapter owns the actual
+        # runtime timeout under the operator's original campaign deadline.
+        harness = StartupResearchHarness(args, config, baseline, deadline=deadline)
+        harness.results = {
+            int(key): value for key, value in summary.get("results", {}).items()
+        }
+        harness.rounds = {int(key): value for key, value in summary["rounds"].items()}
+        harness.case_count = summary["evaluation_cases_started"]
+        study = Study(args.root / "study", harness=harness)
+        state = study.status()
+        number = state["iteration"]
+        folder = args.root / "study/iterations" / f"{number:04d}"
+        workspace = Path(
+            json.loads((folder / "iteration.json").read_text())["workspace"]
+        )
+        expected = "HarnessError: Insufficient Execute budget for all three fixed cases"
+        result_path = workspace / submission.RESULT
+        prior_result = json.loads(result_path.read_text())
+        if (
+            state["phase"] != "execute"
+            or state["status"] != "needs_attention"
+            or prior_result != {"status": "error", "error": expected, "retry": False}
+            or json.loads((workspace / submission.RECEIPT).read_text())
+            != {"action": "evaluate"}
+            or (args.root / "controller" / f"{number:04d}").exists()
+            or harness.case_count
+            != sum(len(row["cases"]) for row in harness.results.values())
+        ):
+            raise HarnessError(
+                "Recovery requires the exact certified prelaunch rejection; reconcile other effects separately"
+            )
+        # Core independently verifies every retained actor has stopped before
+        # calling this certifier. No canonical state or old receipt is edited.
+        authorization = args.root / "recovery-authorization.json"
+        if authorization.exists():
+            raise HarnessError(
+                "Recovery was already authorized; inspect retained effects before another attempt"
+            )
+        _publish(
+            authorization,
+            {
+                "original_deadline_unix": args.deadline_unix,
+                "source_iteration": number,
+                "source_attempt": state["calls"]["execute"],
+                "prior_summary": previous_summary,
+                "budget_policy": "single campaign deadline overrides historical 240/1500/420 stage caps and Plan recommendation; no three-case reservation",
+                "authorization": "explicit operator request to resume the same campaign after correcting the prelaunch budget rejection",
+                "candidate_workspace": str(workspace),
+                "retained_result": prior_result,
+            },
+        )
+        # This check is read-only. It prevents launching evaluation while a
+        # retained actor is still alive, using the core's own process evidence.
+        for relative in state["calls"].values():
+            study._check_attempt_stopped(study.root / relative)
+        receipt = harness.evaluate(workspace, number, threading.Event(), deadline)
+        harness.results[number] = receipt
+        _publish(workspace / ARTIFACT, receipt)
+        artifact = {
+            "path": str(workspace / ARTIFACT),
+            "version": receipt["candidate"]["id"],
+        }
+        complete = receipt["status"] == "completed"
+        response = {
+            "outcome": "completed" if complete else "incomplete",
+            "markdown": "Trusted operator recovery evaluated the retained candidate without replaying its coding. Original Execute report and terminal rejection remain in recovery evidence. "
+            + str(authorization),
+            "artifacts": [artifact],
+            "measurements": [
+                {
+                    "candidate_id": f"startup-{number:04d}",
+                    "artifact": artifact,
+                    "evaluation_id": harness.scope,
+                    "comparison_scope": harness.scope,
+                    "metrics": [
+                        {"name": name, "value": value}
+                        for name, value in receipt["metrics"].items()
+                    ],
+                    "evidence": [row["receipt"] for row in receipt["cases"]],
+                }
+            ]
+            if complete
+            else [],
+        }
+        study.reconcile_execution(
+            recovery_id=f"campaign-deadline-{number:04d}",
+            certify=lambda current: {
+                "source_iteration": f"{number:04d}",
+                "source_attempt": state["calls"]["execute"],
+                "plan_ref": state["plan_ref"],
+                "action": "settle",
+                "effect": "terminal",
+                "summary": "Known host prelaunch rejection had no evaluator effects. Operator-authorized trusted evaluation now has terminal receipts; preserve original candidate and complete independent Review.",
+                "proof_refs": [
+                    str(authorization),
+                    str(args.root / "controller" / f"{number:04d}" / "receipt.json"),
+                ],
+                "response": response,
+            },
+        )
+        summary.pop("error", None)
+        summary.pop("minimum_round_seconds", None)
+        summary.update(
+            deadline_unix=args.deadline_unix,
+            budget_policy="single campaign deadline; fixed individual benchmark cases",
+            unresolved_errors=[],
+        )
+        prior_path = args.root / "prior-evidence.json"
+        prior = json.loads(prior_path.read_text()) if prior_path.exists() else None
+        run_campaign(
+            args,
+            summary,
+            harness,
+            study,
+            baseline,
+            prior,
+            started,
+            deadline,
+            first_number=number,
+            best=summary.get("best_experiment"),
+        )
+    except Exception as error:
+        summary.update(status="error", error=f"{type(error).__name__}: {error}")
+    finally:
+        summary.update(
+            state=json.loads((args.root / "study/state.json").read_text()),
+            elapsed_seconds=time.monotonic() - started,
+            results=harness.results if harness else summary.get("results", {}),
+            evaluation_cases_started=harness.case_count
+            if harness
+            else summary.get("evaluation_cases_started", 0),
+            unresolved_errors=harness.errors if harness else [],
+        )
+        _publish(args.root / "summary.json", summary)
+    print(json.dumps(summary, ensure_ascii=False, allow_nan=False), flush=True)
+    return 0 if summary["status"] == "completed" else 1
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.resume_root:
+        return resume_campaign(args)
     started = time.monotonic()
     deadline = started + args.budget_seconds
     comparison_scope = scope_for(args.candidate_scope)
@@ -881,7 +1174,8 @@ def main(argv=None):
         "budget_seconds": args.budget_seconds,
         "max_iterations": args.max_iterations,
         "baseline_every": args.baseline_every,
-        "minimum_round_seconds": ROUND_SECONDS,
+        "deadline_unix": time.time() + args.budget_seconds,
+        "budget_policy": "single campaign deadline; fixed individual benchmark cases",
         "prior_study": str(args.prior_study) if args.prior_study else None,
         "history_studies": [str(path) for path in args.history_study],
     }
@@ -932,7 +1226,7 @@ def main(argv=None):
             f"\nCampaign authorization: at most {args.budget_seconds} wall seconds, "
             f"{args.max_iterations} reviewed rounds and {args.max_iterations * REPEATS} "
             f"fresh GPU cases; original baseline control every {args.baseline_every}th round. "
-            f"A round needs {ROUND_SECONDS}s remaining before admission.\n"
+            "No per-stage cap or worst-case round reservation applies.\n"
             f"Original frozen workspace baseline commit: {baseline}.\n"
         )
         if args.candidate_scope == "api":
@@ -973,7 +1267,7 @@ def main(argv=None):
             model="gpt-6.1-sol",
             reasoning="medium",
             executable=str(args.codex_wrapper),
-            timeout_seconds=EXECUTE_SECONDS,
+            timeout_seconds=args.budget_seconds,
         )
         initialize(
             args.root / "study",
@@ -987,89 +1281,9 @@ def main(argv=None):
             max_seconds=args.budget_seconds,
             strategy={"selection": "direct", "review": "full"},
         )
-        queue = TaskQueue(args.root / "study")
         harness = StartupResearchHarness(args, config, baseline, deadline=deadline)
         study = Study(args.root / "study", harness=harness)
-        best = None
-        stop_reason = "iteration_budget"
-        for number in range(1, args.max_iterations + 1):
-            if (args.root / "STOP_AFTER_ROUND").exists():
-                stop_reason = "operator_scope_change"
-                break
-            if deadline - time.monotonic() < ROUND_SECONDS:
-                stop_reason = "campaign_budget"
-                break
-            request, control = round_task(
-                number,
-                baseline={"revision": baseline, "every": args.baseline_every},
-                prior=prior,
-                best=best,
-                candidate_scope=args.candidate_scope,
-            )
-            submitted = queue.submit(request)
-            harness.rounds[number] = {
-                "kind": request["title"],
-                "control": control,
-                "source_revision": submitted["source"]["revision"],
-                "base_experiment": request["base_experiment"],
-            }
-            state = study.run(iterations=1)
-            statuses = {row["id"]: row["status"] for row in queue.snapshot()}
-            if (
-                statuses.get(request["id"]) != "reviewed"
-                or number not in harness.results
-                or harness.errors
-                or state.get("phase") != "done"
-                or state.get("status") == "needs_attention"
-            ):
-                raise HarnessError(
-                    "Admitted round did not complete evaluation and full Review"
-                )
-            reviewed_iteration(args.root / "study", f"{number:04d}")
-            candidates = (
-                study.frontiers()["global"]
-                .get(comparison_scope, {})
-                .get("candidates", [])
-            )
-            if candidates:
-                best = min(
-                    candidates, key=lambda row: row["metrics"]["mean_startup_seconds"]
-                )["experiment_id"]
-            else:
-                best = None
-            summary.update(
-                status="running",
-                results=harness.results,
-                rounds=harness.rounds,
-                completed_rounds=number,
-                task_statuses=statuses,
-                best_experiment=best,
-                elapsed_seconds=time.monotonic() - started,
-                source_revision=args.revision,
-                instruction_only=args.candidate_scope == "docs",
-            )
-            _publish(args.root / "summary.json", summary)
-            if (args.root / "STOP_AFTER_ROUND").exists():
-                stop_reason = "operator_scope_change"
-                break
-            if state.get("status") == "stopped" and number < args.max_iterations:
-                if deadline - time.monotonic() < ROUND_SECONDS:
-                    stop_reason = "campaign_budget"
-                    break
-                raise HarnessError(
-                    "Review stopped before the continuing campaign budget; inspect its retained judgment"
-                )
-        summary.update(
-            status="completed",
-            results=harness.results,
-            source_revision=args.revision,
-            instruction_only=args.candidate_scope == "docs",
-            task_statuses={row["id"]: row["status"] for row in queue.snapshot()},
-            completed_rounds=len(harness.results),
-            stop_reason=stop_reason,
-            best_experiment=best,
-            rounds=harness.rounds,
-        )
+        run_campaign(args, summary, harness, study, baseline, prior, started, deadline)
     except Exception as error:
         summary.update(status="error", error=f"{type(error).__name__}: {error}")
     finally:

@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -15,8 +16,9 @@ def publish(path, value):
     temporary.replace(path)
 
 
-def mirror(root, host, destination):
-    archive = root.with_suffix(".tar.gz")
+def mirror(root, host, destination, record_root=None):
+    record_root = record_root or root
+    archive = record_root.with_suffix(".tar.gz")
     subprocess.run(
         [
             "tar",
@@ -32,9 +34,9 @@ def mirror(root, host, destination):
             *[
                 p.name
                 for p in (
-                    root.with_name(root.name + "-supervisor.json"),
-                    root.with_suffix(".stdout"),
-                    root.with_suffix(".stderr"),
+                    record_root.with_name(record_root.name + "-supervisor.json"),
+                    record_root.with_suffix(".stdout"),
+                    record_root.with_suffix(".stderr"),
                 )
                 if p.exists()
             ],
@@ -59,8 +61,11 @@ def mirror(root, host, destination):
     )
 
 
-def supervise(root, seconds, host, destination, command):
-    state_path = root.with_name(root.name + "-supervisor.json")
+def supervise(root, seconds, host, destination, command, *, attempt_id=None):
+    if attempt_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", attempt_id):
+        raise ValueError("Invalid supervision attempt identity")
+    record_root = root.with_name(root.name + "-" + attempt_id) if attempt_id else root
+    state_path = record_root.with_name(record_root.name + "-supervisor.json")
     state = {
         "pid": os.getpid(),
         "status": "starting",
@@ -79,8 +84,8 @@ def supervise(root, seconds, host, destination, command):
     child = None
     try:
         with (
-            root.with_suffix(".stdout").open("x") as out,
-            root.with_suffix(".stderr").open("x") as err,
+            record_root.with_suffix(".stdout").open("x") as out,
+            record_root.with_suffix(".stderr").open("x") as err,
         ):
             child = subprocess.Popen(
                 command, stdout=out, stderr=err, start_new_session=True
@@ -134,7 +139,7 @@ def supervise(root, seconds, host, destination, command):
         publish(state_path, state)
         if root.exists():
             try:
-                mirror(root, host, destination)
+                mirror(root, host, destination, record_root)
                 state["artifact_mirror_status"] = "completed"
             except Exception as error:
                 state["artifact_mirror_status"] = "failed"
@@ -147,6 +152,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--budget-seconds", type=int, required=True)
+    parser.add_argument(
+        "--attempt-id",
+        help="New supervisor receipt identity for an authorized recovery",
+    )
     parser.add_argument("--host", required=True)
     parser.add_argument("--remote-archive", required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -166,6 +175,7 @@ def main():
         args.host,
         args.remote_archive,
         command,
+        attempt_id=args.attempt_id,
     )
     print(json.dumps(state), flush=True)
     return 0 if state["status"] == "completed" else 1

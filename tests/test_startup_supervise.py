@@ -113,3 +113,27 @@ class SupervisorTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait()
+
+    def test_recovery_keeps_previous_supervisor_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "study"
+            root.mkdir()
+            (root / "summary.json").write_text(json.dumps({"status": "completed"}))
+            original = root.with_name("study-supervisor.json")
+            original.write_text(json.dumps({"status": "failed", "pid": 123}))
+            with patch("benchmarks.startup.supervise.mirror"):
+                result = supervise(
+                    root,
+                    5,
+                    "unused",
+                    "/unused",
+                    [sys.executable, "-c", "pass"],
+                    attempt_id="recovery-001",
+                )
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(
+                json.loads(original.read_text()), {"status": "failed", "pid": 123}
+            )
+            self.assertTrue(
+                root.with_name("study-recovery-001-supervisor.json").exists()
+            )
