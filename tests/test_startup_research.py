@@ -1,11 +1,12 @@
 import contextlib
 import io
+import json
 from pathlib import Path
 import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from benchmarks.startup import research
 from research_loop import submission
@@ -27,7 +28,12 @@ class CampaignDelegate(RecordedHarness):
                 revision = (
                     task["instruction"].split("workspace commit ", 1)[1].split()[0]
                 )
-                for name in research.EDITABLE:
+                mode = (
+                    "api"
+                    if context["global_evaluation"]["id"] == research.API_SCOPE
+                    else "docs"
+                )
+                for name in research.editable_for(mode):
                     (workspace / name).write_text(
                         research.git(workspace, "show", f"{revision}:{name}") + "\n"
                     )
@@ -64,6 +70,7 @@ def synthetic_evaluate(harness, workspace, iteration, stop, deadline):
         unchanged=current["control"],
         change_base=current["source_revision"],
         require_change=current["kind"] == "optimize",
+        candidate_scope=harness.candidate_scope,
     )
     mean = 200 if current["control"] else 100 - iteration
     cases = []
@@ -78,7 +85,7 @@ def synthetic_evaluate(harness, workspace, iteration, stop, deadline):
         "status": "completed",
         "candidate": candidate,
         "cases": cases,
-        "comparison_scope": research.SCOPE,
+        "comparison_scope": harness.scope,
         "baseline_control": current["control"],
         "metrics": {
             "mean_startup_seconds": mean,
@@ -99,6 +106,10 @@ class StartupResearchTests(unittest.TestCase):
         (self.source / "SKILL.md").write_text("Original instructions.\n")
         (self.source / "references/operations.md").write_text("Original operations.\n")
         (self.source / "frozen.py").write_text("original = True\n")
+        for name in research.API_EDITABLE[len(research.EDITABLE) :]:
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("original_api = True\n")
         research.git(self.source, "init", "-q")
         research.git(self.source, "add", ".")
         research.git(
@@ -250,6 +261,149 @@ class StartupResearchTests(unittest.TestCase):
                 )
         popen.assert_not_called()
         self.assertEqual(harness.case_count, 0)
+
+    def test_api_scope_freezes_only_four_allowed_files(self):
+        baseline = research.git(self.source, "rev-parse", "HEAD")
+        api = self.source / "benchmarks/startup/client.py"
+        api.write_text("improved_api = True\n")
+        with self.assertRaisesRegex(ValueError, "protected"):
+            research.freeze_candidate(
+                self.source,
+                baseline,
+                self.source,
+                baseline,
+                self.root / "docs-rejected",
+                unchanged=False,
+            )
+        candidate = research.freeze_candidate(
+            self.source,
+            baseline,
+            self.source,
+            baseline,
+            self.root / "api-accepted",
+            unchanged=False,
+            candidate_scope="api",
+        )
+        self.assertEqual(candidate["editable_scope"], list(research.API_EDITABLE))
+        self.assertEqual(
+            (
+                Path(candidate["runtime_snapshot"]) / api.relative_to(self.source)
+            ).read_text(),
+            api.read_text(),
+        )
+        (self.source / "frozen.py").write_text("protected_change = True\n")
+        with self.assertRaisesRegex(ValueError, "protected"):
+            research.freeze_candidate(
+                self.source,
+                baseline,
+                self.source,
+                baseline,
+                self.root / "api-rejected",
+                unchanged=False,
+                candidate_scope="api",
+            )
+
+    def test_api_history_links_partial_study_without_importing_scores(self):
+        previous = self.root / "docs"
+        self.campaign(previous)
+        state_path = previous / "study/state.json"
+        state = read(state_path)
+        state.update(iteration=3, phase="execute", status="needs_attention")
+        state_path.write_text(json.dumps(state))
+        before = state_path.read_bytes()
+        current = self.root / "api"
+        result = self.campaign(
+            current, "--candidate-scope", "api", "--history-study", str(previous)
+        )
+        self.assertEqual(result["comparison_scope"], research.API_SCOPE)
+        self.assertEqual(result["rounds"]["1"]["kind"], "baseline-control")
+        self.assertEqual(result["rounds"]["1"]["base_experiment"], None)
+        self.assertEqual(result["results"]["1"]["candidate"]["changed_files"], [])
+        self.assertEqual(
+            set(read(current / "study/frontiers.json")["global"]), {research.API_SCOPE}
+        )
+        history = read(current / "history-evidence.json")["histories"][0]
+        self.assertEqual(len(history["results"]), 2)
+        self.assertEqual(history["results"][0]["comparison_scope"], research.SCOPE)
+        self.assertEqual(state_path.read_bytes(), before)
+        goal = (current / "study/goal.md").read_text()
+        for name in research.API_EDITABLE:
+            self.assertIn(name, goal)
+        self.assertIn(
+            str(research.FIXED_ROOT / "src/research_loop/submission.py"), goal
+        )
+
+    def test_api_evaluator_flag_and_cooperative_stop(self):
+        args = research.parse_args(
+            [*self.argv(self.root / "evaluation"), "--candidate-scope", "api"]
+        )
+        args.root.mkdir()
+        args.revision = research.git(self.source, "rev-parse", "HEAD")
+        harness = research.StartupResearchHarness(
+            args, HarnessConfig(), args.revision, deadline=time.monotonic() + 3000
+        )
+        harness.rounds[1] = {
+            "kind": "baseline-control",
+            "control": True,
+            "source_revision": args.revision,
+            "base_experiment": None,
+        }
+        candidate = research.freeze_candidate(
+            self.source,
+            args.revision,
+            self.source,
+            args.revision,
+            args.root / "frozen",
+            unchanged=True,
+            candidate_scope="api",
+        )
+        (args.root / "controller/0001").mkdir(parents=True)
+
+        def launch(command, **kwargs):
+            self.assertEqual(command[-2:], ["--candidate-scope", "api"])
+            case = Path(command[command.index("--root") + 1])
+            case.mkdir()
+            (case / "benchmark-result.json").write_text(
+                json.dumps(
+                    {
+                        "outer": {
+                            "exit_code": 0,
+                            "timed_out": False,
+                            "launch_error": None,
+                        },
+                        "display_verification": {"ok": True},
+                        "display_ready_seconds": 150,
+                        "host_worker_unresolved": False,
+                    }
+                )
+            )
+            return SimpleNamespace(returncode=0, wait=Mock())
+
+        with (
+            patch.object(research, "freeze_candidate", return_value=candidate),
+            patch.object(research.subprocess, "Popen", side_effect=launch) as launched,
+        ):
+            result = harness.evaluate(
+                self.source,
+                1,
+                SimpleNamespace(is_set=lambda: False),
+                time.monotonic() + 1500,
+            )
+        self.assertEqual(launched.call_count, 3)
+        self.assertEqual(result["comparison_scope"], research.API_SCOPE)
+        original = CampaignDelegate.response
+
+        def stop_after_review(delegate, phase, context, kwargs):
+            response = original(delegate, phase, context, kwargs)
+            if phase == "review":
+                (Path(kwargs["run_dir"]).parents[4] / "STOP_AFTER_ROUND").touch()
+            return response
+
+        with patch.object(CampaignDelegate, "response", stop_after_review):
+            summary = self.campaign(self.root / "stop", "--max-iterations", "6")
+        self.assertEqual(summary["stop_reason"], "operator_scope_change")
+        self.assertEqual(summary["completed_rounds"], 1)
+        self.assertEqual(set(summary["task_statuses"].values()), {"reviewed"})
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Bounded real Study campaign measuring fixed from-zero GPU/dashboard startup.
 
-Only instruction Markdown is editable. The trusted controller, scorer, Python
-runtime, original model/loss, Review and three-case success constraints stay fixed.
+Candidates edit instructions, optionally including the two sandbox API scripts.
+The host controller, scorer, backend, model/loss and success constraints stay fixed.
 This file prepares and runs the Study only when its CLI is explicitly invoked.
 """
 
@@ -32,7 +32,13 @@ from research_loop.tasks import TaskQueue
 
 
 EDITABLE = ("SKILL.md", "references/operations.md")
+API_EDITABLE = (
+    *EDITABLE,
+    "benchmarks/startup/client.py",
+    "src/research_loop/submission.py",
+)
 SCOPE = "startup-e2e-v3"
+API_SCOPE = "startup-e2e-api-v1"
 CASE_SECONDS = 420
 REPEATS = 3
 EXECUTE_SECONDS = 1500
@@ -117,6 +123,59 @@ These three development cases do not establish general speed improvement.
 """
 
 
+def editable_for(candidate_scope):
+    return API_EDITABLE if candidate_scope == "api" else EDITABLE
+
+
+def scope_for(candidate_scope):
+    return API_SCOPE if candidate_scope == "api" else SCOPE
+
+
+def evaluation_for(candidate_scope):
+    result = json.loads(json.dumps(EVALUATION))
+    result["id"] = result["comparison_scope"] = scope_for(candidate_scope)
+    if candidate_scope == "api":
+        result["protocol"] = result["protocol"].replace(
+            "Fixed scorer and Python.",
+            "Fixed host scorer/core/backend; candidate API scripts execute only in sandbox actors.",
+        )
+    return result
+
+
+def goal_for(candidate_scope):
+    if candidate_scope == "docs":
+        return GOAL
+    return (
+        GOAL.replace(
+            "instruction-only optimization", "instruction and sandbox API optimization"
+        )
+        .replace(
+            "install dependencies, or modify the scorer, backend, dashboard, tests or Python.\n"
+            "Allowed candidate edits are ONLY SKILL.md and references/operations.md.",
+            "install dependencies, or modify the host scorer, core, backend, dashboard or tests.\n"
+            "Allowed candidate edits are ONLY " + ", ".join(API_EDITABLE) + ". "
+            "The two Python API scripts run only in fresh sandbox actors. Host imports, "
+            "claiming, backend, GPU computation, telemetry and scorer remain fixed.",
+        )
+        .replace(
+            "python3 src/research_loop/submission.py submit --workspace . --action evaluate",
+            f"python3 {FIXED_ROOT / 'src/research_loop/submission.py'} submit --workspace . --action evaluate",
+        )
+        .replace(
+            "Optimize concrete instruction/context/setup-sequence overhead;",
+            "Inspect actual API discovery, preflight, composed start, status, wait and result "
+            "flows. Improve usable sandbox API code and instructions while preserving the "
+            "existing wire protocol and once-only accepted-request semantics. Candidate "
+            "Python must never become trusted host/controller code. Optimize concrete "
+            "interface/context/setup-sequence overhead;",
+        )
+        .replace(
+            "Do not create alternate snapshots, graders or launchers.",
+            "Do not create alternate host snapshots, graders or controller launchers.",
+        )
+    )
+
+
 def git(root, *words, binary=False):
     result = subprocess.run(
         ["git", "-C", str(root), *words],
@@ -154,9 +213,11 @@ def freeze_candidate(
     unchanged,
     change_base=None,
     require_change=True,
+    candidate_scope="docs",
 ):
+    editable = editable_for(candidate_scope)
     changed = changed_files(workspace, baseline) - HOST_FILES
-    allowed = set() if unchanged else set(EDITABLE)
+    allowed = set() if unchanged else set(editable)
     if changed - allowed:
         raise ValueError(
             f"Candidate changed protected tracked files: {sorted(changed - allowed)}"
@@ -166,7 +227,9 @@ def freeze_candidate(
         and require_change
         and not (changed_files(workspace, change_base or baseline) - HOST_FILES)
     ):
-        raise ValueError("Optimization must make one instruction-only source change")
+        raise ValueError(
+            "Optimization must make one source change within its editable scope"
+        )
     if (
         not unchanged
         and not require_change
@@ -186,12 +249,10 @@ def freeze_candidate(
             raise ValueError(f"Unauthorized untracked candidate file: {name}")
     archive(source, revision, destination)
     identity = hashlib.sha256(revision.encode())
-    for name in EDITABLE:
+    for name in editable:
         path = workspace / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 131072:
-            raise ValueError(
-                f"Editable instruction must be a regular file <=128KiB: {name}"
-            )
+            raise ValueError(f"Editable source must be a regular file <=128KiB: {name}")
         content = path.read_bytes()
         identity.update(name.encode() + b"\0" + content + b"\0")
         (destination / name).write_bytes(content)
@@ -200,8 +261,13 @@ def freeze_candidate(
         "baseline_revision": revision,
         "runtime_snapshot": str(destination),
         "changed_files": sorted(changed),
-        "editable_scope": list(EDITABLE),
-        "python_tests": "not repeated for instruction-only candidates; fixed baseline checks owned by operator",
+        "editable_scope": list(editable),
+        "candidate_scope": candidate_scope,
+        "python_tests": (
+            "fixed baseline checks owned by operator; API candidates require focused sandbox checks and full Review"
+            if candidate_scope == "api"
+            else "not repeated for instruction-only candidates; fixed baseline checks owned by operator"
+        ),
     }
 
 
@@ -225,12 +291,12 @@ def reviewed_iteration(study_root, identity):
     return metadata, review
 
 
-def eligible(receipt, review, identity):
+def eligible(receipt, review, identity, *, comparison_scope=SCOPE):
     metrics = receipt.get("metrics", {})
     mean = metrics.get("mean_startup_seconds")
     return (
         receipt.get("status") == "completed"
-        and receipt.get("comparison_scope") == SCOPE
+        and receipt.get("comparison_scope") == comparison_scope
         and metrics.get("success_rate") == 1
         and metrics.get("scalar_visibility_rate") == 1
         and type(mean) in (int, float)
@@ -310,6 +376,52 @@ def prior_evidence(root, revision):
     }
 
 
+def history_evidence(root, revision):
+    """Link published history without importing candidates or cross-scope scores."""
+    study = root / "study" if (root / "study").is_dir() else root
+    state = json.loads((study / "state.json").read_text())
+    rows = []
+    for publication in sorted((study / "iterations").glob("*/publication.json")):
+        identity = publication.parent.name
+        if int(identity) == state["iteration"] and state["phase"] != "done":
+            continue
+        metadata, review = reviewed_iteration(study, identity)
+        receipt_path = Path(metadata["workspace"]) / ARTIFACT
+        receipt = json.loads(receipt_path.read_text())
+        if receipt["candidate"]["baseline_revision"] != revision:
+            raise ValueError("Historical candidate has a different frozen baseline")
+        original_scope = receipt.get("comparison_scope")
+        rows.append(
+            {
+                "iteration": identity,
+                "comparison_scope": original_scope,
+                "metrics_in_original_scope_only": receipt["metrics"],
+                "reviewed_eligible_in_original_scope": eligible(
+                    receipt, review, identity, comparison_scope=original_scope
+                ),
+                "receipt": str(receipt_path),
+                "research": str(publication.parent / "route.after.md"),
+                "runtime_snapshot": receipt["candidate"]["runtime_snapshot"],
+                "workspace": metadata["workspace"],
+            }
+        )
+    if not rows:
+        raise ValueError("History Study has no fully published reviewed startup rounds")
+    return {
+        "study": str(study),
+        "research": str(study / "research.md"),
+        "goal": str(study / "goal.md"),
+        "linked_prior_evidence": str(study.parent / "prior-evidence.json")
+        if (study.parent / "prior-evidence.json").is_file()
+        else None,
+        "state_at_link": {
+            key: state.get(key) for key in ("iteration", "phase", "status")
+        },
+        "results": rows,
+        "use": "history only; no candidate seeding, score import or cross-scope ranking",
+    }
+
+
 def commit_workspace(workspace, message):
     git(workspace, "add", *EDITABLE)
     git(
@@ -325,7 +437,8 @@ def commit_workspace(workspace, message):
     )
 
 
-def round_task(number, *, baseline, prior, best):
+def round_task(number, *, baseline, prior, best, candidate_scope="docs"):
+    editable = ", ".join(editable_for(candidate_scope))
     control = (not prior and number == 1) or number % baseline["every"] == 0
     reproduction = bool(prior) and number == 1
     if reproduction:
@@ -336,21 +449,30 @@ def round_task(number, *, baseline, prior, best):
         )
     elif control:
         instruction = (
-            "Measure an original-baseline control. Restore ONLY SKILL.md and "
-            "references/operations.md to the original frozen workspace commit "
+            f"Measure an original-baseline control. Restore ONLY {editable} "
+            "to the original frozen workspace commit "
             f"{baseline['revision']} (git restore --source REV -- those paths). "
             "Do not optimize the control. Its trusted receipt must have no source "
             "changes relative to that original baseline."
         )
     else:
         instruction = (
-            "Read the prior evidence link in the goal, published receipts and current "
+            "Read the prior/history evidence links in the goal, published receipts and current "
             "research first; inspect the selected starting instructions. Make one "
-            "concrete new instruction-only startup optimization relative to this "
-            "task's selected starting revision in SKILL.md and/or "
-            "references/operations.md. Preserve useful previous optimizations; do "
+            "concrete new startup optimization relative to this "
+            f"task's selected starting revision within {editable}. "
+            "Preserve useful previous optimizations; do "
             "not rediscover them from scratch."
         )
+        if candidate_scope == "api":
+            instruction += (
+                " Improve actual discovery/preflight/composed-start/status/wait/result "
+                "usability in the two sandbox API scripts. Read historical reviewed "
+                "docs and API observations for ideas; history scores belong to their "
+                "original scope and never substitute for a fresh API evaluation. "
+                "Preserve wire protocol, receipt identity, permission, unknown-effect "
+                "and accepted-request gates; never run candidate Python as trusted host code."
+            )
     return {
         "id": f"round-{number:04d}",
         "title": "prior-best-reproduction"
@@ -360,7 +482,7 @@ def round_task(number, *, baseline, prior, best):
         else "optimize",
         "instruction": instruction
         + " Submit once for the same three-case protocol and complete full Review. "
-        "Python, scorer, model/loss, scalar verification and every success "
+        "Host Python/core/backend/scorer, model/loss, scalar verification and every success "
         "requirement are fixed. This round alone does not finish the campaign.",
         "priority": number,
         "allow_changes": not reproduction,
@@ -372,6 +494,8 @@ def round_task(number, *, baseline, prior, best):
 class StartupResearchHarness:
     def __init__(self, args, config, baseline, *, deadline):
         self.args, self.config, self.baseline = args, config, baseline
+        self.candidate_scope = getattr(args, "candidate_scope", "docs")
+        self.scope = scope_for(self.candidate_scope)
         self.deadline = deadline
         self.delegate = CodexHarness(config)
         self.results = {}
@@ -421,6 +545,7 @@ class StartupResearchHarness:
             unchanged=current["control"],
             change_base=current["source_revision"],
             require_change=current["kind"] == "optimize",
+            candidate_scope=self.candidate_scope,
         )
         rows = []
         for number in range(1, REPEATS + 1):
@@ -453,6 +578,8 @@ class StartupResearchHarness:
                 "--timeout-seconds",
                 str(CASE_SECONDS),
             ]
+            if self.candidate_scope == "api":
+                command.extend(["--candidate-scope", "api"])
             self.case_count += 1
             with (
                 (controller / f"case-{number:02d}.stdout").open("w") as stdout,
@@ -536,11 +663,13 @@ class StartupResearchHarness:
             "candidate": candidate,
             "cases": rows,
             "metrics": metrics,
-            "comparison_scope": SCOPE,
+            "comparison_scope": self.scope,
             "baseline_control": current["control"],
             "base_experiment": current["base_experiment"],
             "limitations": [
-                "instruction-only optimization; fixed executable code",
+                "sandbox API/instruction optimization; fixed trusted host code"
+                if self.candidate_scope == "api"
+                else "instruction-only optimization; fixed executable code",
                 "three development contexts per candidate; timing noise unestimated",
                 "synthetic denoising diagnostic, not scientific model performance",
             ],
@@ -688,8 +817,8 @@ class StartupResearchHarness:
         measurement = {
             "candidate_id": f"startup-{iteration:04d}",
             "artifact": artifact,
-            "evaluation_id": SCOPE,
-            "comparison_scope": SCOPE,
+            "evaluation_id": self.scope,
+            "comparison_scope": self.scope,
             "metrics": [
                 {"name": name, "value": value}
                 for name, value in receipt["metrics"].items()
@@ -709,6 +838,9 @@ def parse_args(argv=None):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--gpu", default="0")
     parser.add_argument("--prior-study", type=Path)
+    parser.add_argument("--history-study", type=Path, action="append", default=[])
+    parser.add_argument("--candidate-scope", choices=("docs", "api"), default="docs")
+    parser.add_argument("--ruff-executable", type=Path)
     parser.add_argument("--budget-seconds", type=int, default=3600)
     parser.add_argument("--max-iterations", type=int, default=2)
     parser.add_argument("--baseline-every", type=int, default=5)
@@ -725,6 +857,13 @@ def parse_args(argv=None):
         parser.error("--baseline-every must be at least 2")
     if args.prior_study:
         args.prior_study = args.prior_study.resolve()
+        if args.candidate_scope == "api":
+            parser.error(
+                "API scope uses --history-study, not --prior-study; it needs a fresh baseline"
+            )
+    args.history_study = [path.resolve() for path in args.history_study]
+    if args.ruff_executable:
+        args.ruff_executable = args.ruff_executable.resolve()
     return args
 
 
@@ -732,16 +871,19 @@ def main(argv=None):
     args = parse_args(argv)
     started = time.monotonic()
     deadline = started + args.budget_seconds
+    comparison_scope = scope_for(args.candidate_scope)
     args.root.mkdir(mode=0o700, parents=True, exist_ok=False)
     summary = {
         "status": "error",
-        "comparison_scope": SCOPE,
+        "comparison_scope": comparison_scope,
+        "candidate_scope": args.candidate_scope,
         "max_gpu_jobs": args.max_iterations * REPEATS,
         "budget_seconds": args.budget_seconds,
         "max_iterations": args.max_iterations,
         "baseline_every": args.baseline_every,
         "minimum_round_seconds": ROUND_SECONDS,
         "prior_study": str(args.prior_study) if args.prior_study else None,
+        "history_studies": [str(path) for path in args.history_study],
     }
     harness = None
     try:
@@ -781,13 +923,30 @@ def main(argv=None):
                 (workspace / name).write_bytes(path.read_bytes())
             commit_workspace(workspace, "Seed prior best reviewed startup instructions")
             _publish(args.root / "prior-evidence.json", prior)
-        goal = GOAL + (
+        histories = [
+            history_evidence(path, args.revision) for path in args.history_study
+        ]
+        if histories:
+            _publish(args.root / "history-evidence.json", {"histories": histories})
+        goal = goal_for(args.candidate_scope) + (
             f"\nCampaign authorization: at most {args.budget_seconds} wall seconds, "
             f"{args.max_iterations} reviewed rounds and {args.max_iterations * REPEATS} "
             f"fresh GPU cases; original baseline control every {args.baseline_every}th round. "
             f"A round needs {ROUND_SECONDS}s remaining before admission.\n"
             f"Original frozen workspace baseline commit: {baseline}.\n"
         )
+        if args.candidate_scope == "api":
+            goal += (
+                "After editing Python API files, run the already installed uv-managed "
+                "Ruff formatter and checker on those edited files, and the smallest "
+                "focused sandbox interface checks. Do not install tools or add "
+                "validation to each benchmark case. Report unavailable checks explicitly.\n"
+            )
+            if args.ruff_executable:
+                goal += (
+                    f"Prepared uv-managed Ruff executable: {args.ruff_executable}. "
+                    "Invoke it with format and check on the edited Python files.\n"
+                )
         if prior:
             goal += (
                 f"Linked completed prior Study: {prior['study']}.\n"
@@ -801,6 +960,15 @@ def main(argv=None):
                 "their completed authorization; this new campaign supersedes "
                 "those historical stop instructions only for this new budget.\n"
             )
+        if histories:
+            goal += (
+                f"Historical published evidence: {args.root / 'history-evidence.json'}. "
+                "Read linked research and reviewed instruction/API snapshots for existing "
+                "findings and unresolved questions. These are history only, including "
+                "partial/stopped Studies. Their scores, candidates and completion "
+                "judgments are not imported into this Study or its comparison scope. "
+                "Begin with the original unchanged baseline in the new scope.\n"
+            )
         config = HarnessConfig(
             model="gpt-6.1-sol",
             reasoning="medium",
@@ -813,7 +981,7 @@ def main(argv=None):
             harness=config,
             workspace=workspace,
             allow_write=True,
-            global_evaluation=EVALUATION,
+            global_evaluation=evaluation_for(args.candidate_scope),
             max_iterations=args.max_iterations,
             max_calls=None,
             max_seconds=args.budget_seconds,
@@ -825,6 +993,9 @@ def main(argv=None):
         best = None
         stop_reason = "iteration_budget"
         for number in range(1, args.max_iterations + 1):
+            if (args.root / "STOP_AFTER_ROUND").exists():
+                stop_reason = "operator_scope_change"
+                break
             if deadline - time.monotonic() < ROUND_SECONDS:
                 stop_reason = "campaign_budget"
                 break
@@ -833,6 +1004,7 @@ def main(argv=None):
                 baseline={"revision": baseline, "every": args.baseline_every},
                 prior=prior,
                 best=best,
+                candidate_scope=args.candidate_scope,
             )
             submitted = queue.submit(request)
             harness.rounds[number] = {
@@ -855,7 +1027,9 @@ def main(argv=None):
                 )
             reviewed_iteration(args.root / "study", f"{number:04d}")
             candidates = (
-                study.frontiers()["global"].get(SCOPE, {}).get("candidates", [])
+                study.frontiers()["global"]
+                .get(comparison_scope, {})
+                .get("candidates", [])
             )
             if candidates:
                 best = min(
@@ -872,9 +1046,12 @@ def main(argv=None):
                 best_experiment=best,
                 elapsed_seconds=time.monotonic() - started,
                 source_revision=args.revision,
-                instruction_only=True,
+                instruction_only=args.candidate_scope == "docs",
             )
             _publish(args.root / "summary.json", summary)
+            if (args.root / "STOP_AFTER_ROUND").exists():
+                stop_reason = "operator_scope_change"
+                break
             if state.get("status") == "stopped" and number < args.max_iterations:
                 if deadline - time.monotonic() < ROUND_SECONDS:
                     stop_reason = "campaign_budget"
@@ -886,7 +1063,7 @@ def main(argv=None):
             status="completed",
             results=harness.results,
             source_revision=args.revision,
-            instruction_only=True,
+            instruction_only=args.candidate_scope == "docs",
             task_statuses={row["id"]: row["status"] for row in queue.snapshot()},
             completed_rounds=len(harness.results),
             stop_reason=stop_reason,

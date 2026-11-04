@@ -138,3 +138,28 @@ success or failure. GPU outputs already live remotely; the terminal archive adds
 Study/model evidence and supervisor logs, excluding environments and temporary
 files. Run this supervisor detached from a short-lived terminal and retain its
 PID/logs. It has no automatic event-to-chat wakeup mechanism.
+
+## API candidate scope
+
+`--candidate-scope api` opens the two instruction files plus
+`benchmarks/startup/client.py` and `src/research_loop/submission.py`. Candidate
+Python runs only in the actor sandboxes: the client is copied into the outer
+workspace and submission into the inner workspace. The evaluator imports the
+immutable host controller, backend, submission authority and telemetry modules.
+Candidates can implement discovery, local preflight, composed preparation/launch,
+bounded waiting and useful result summaries over the unchanged wire protocol.
+They cannot modify the scorer, remote GPU program, claim/deduplication authority,
+budgets, model configuration or independent Review.
+
+This mode uses comparison scope `startup-e2e-api-v1` and starts with a fresh
+original-source control. Use repeatable `--history-study OLD_ROOT` links to retain
+published earlier evidence without importing its scores or modifying its state.
+`--prior-study` remains available only for same-scope document campaigns.
+An optional `--ruff-executable` supplies an already installed tool to sandbox
+Python edits; no credentials or new remote capabilities are provided.
+
+Create `ROOT/STOP_AFTER_ROUND` to stop this runner after the current complete
+reviewed round (or before the next admission). This is cooperative control, not
+remote cancellation. Earlier runner versions without this hook require explicit
+owned-process reconciliation. A scope change retains the original deadline;
+pass only the remaining wall budget to the linked new campaign.

@@ -15,6 +15,9 @@ import time
 import uuid
 
 
+FIXED_ROOT = Path(__file__).resolve().parents[2]
+
+
 BASELINE = """# Fixed synthetic GPU execution contract v3
 Only perform the authorized seed-43 three-update smoke, not a training study.
 The committed source/ contains the exact deployed model and original loss modules;
@@ -54,6 +57,60 @@ The host launches a real Study with real Terra Plan, Execute and Review roles.
 The client waits for Review and verified final scalars in the existing dashboard
 telemetry API. Request each operation once; inspect failures, do not retry effects.
 """
+API_FIXTURE = """# Prepared Study launch service
+Use the supplied research-loop SKILL and candidate API to start the user's study.
+Discover the API with `python3 client.py --help` and its describe/help commands;
+the candidate instructions may offer a composed preparation-and-launch operation.
+API_CONTRACT.md specifies the fixed host protocol, not a required client CLI.
+Only local reference source and generator are initially available (backend v3;
+B=2,L=16,K=4, seed43, three updates, one GPU job). No local Torch/data,
+installations or SSH are required. The controller GENERATES synthetic tensors
+from the committed gpu_smoke.py; no external data mounts are missing.
+No remote case environment/backend is ready yet. Request actual operator setup
+and wait for prepared status before launching the Study. Preparation stages a
+fresh remote case environment/source without launching a GPU job. The host runs
+a real Study with real Terra Plan, Execute and Review roles. Wait for Review and
+verified final scalars in the existing dashboard telemetry API. Request effects
+once; inspect retained identities and failures rather than retrying effects.
+"""
+API_BASELINE = BASELINE.replace(
+    "During Execute use the canonical submission interface:\n"
+    "python3 submission.py submit --workspace . --action research\n"
+    "python3 submission.py status --workspace .\n",
+    "During Execute discover the candidate submission API with\n"
+    "python3 submission.py --help and its describe/help commands.\n"
+    "API_CONTRACT.md specifies the fixed host submission protocol.\n",
+)
+
+
+def pin_host_imports():
+    """Only the evaluator's fixed checkout supplies host Python modules."""
+    sys.path[:0] = [str(FIXED_ROOT), str(FIXED_ROOT / "src")]
+
+
+def copy_actor_inputs(runtime, case, baseline, candidate_scope):
+    """Copy candidate code as bytes for sandbox actors, never import it here."""
+    if candidate_scope not in ("docs", "api"):
+        raise ValueError("Unknown candidate scope")
+    actor_root = runtime if candidate_scope == "api" else FIXED_ROOT
+    for source, destination in (
+        (actor_root / "benchmarks/startup/client.py", case / "client.py"),
+        (actor_root / "src/research_loop/submission.py", baseline / "submission.py"),
+        (
+            FIXED_ROOT / "src/research_loop/telemetry.py",
+            baseline / "research_loop_events.py",
+        ),
+    ):
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("Actor source must be a regular file")
+            with destination.open("xb") as output:
+                shutil.copyfileobj(stream, output)
+    if candidate_scope == "api":
+        contract = FIXED_ROOT / "benchmarks/startup/api_contract.md"
+        shutil.copyfile(contract, case / "API_CONTRACT.md")
+        shutil.copyfile(contract, baseline / "API_CONTRACT.md")
 
 
 def write_json(path, value):
@@ -116,6 +173,7 @@ def main() -> int:
     for name in ("host", "remote-root", "remote-python", "source-revision"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--gpu", default="0")
+    parser.add_argument("--candidate-scope", choices=("docs", "api"), default="docs")
     parser.add_argument("--timeout-seconds", type=int, default=420)
     args = parser.parse_args()
     if (
@@ -125,8 +183,7 @@ def main() -> int:
     ):
         parser.error("Invalid GPU, SSH host or timeout")
     runtime = args.runtime_root.resolve()
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    sys.path.insert(0, str(runtime / "src"))
+    pin_host_imports()
     from benchmarks.startup.runner import run_case
     from benchmarks.startup.backend import FixedStartupBackend
     from benchmarks.startup.study_bridge import StartupBridge
@@ -141,8 +198,10 @@ def main() -> int:
     case, baseline = root / "case", root / "baseline"
     case.mkdir()
     baseline.mkdir()
-    shutil.copyfile(Path(__file__).with_name("client.py"), case / "client.py")
-    (baseline / "README.md").write_text(BASELINE)
+    copy_actor_inputs(runtime, case, baseline, args.candidate_scope)
+    (baseline / "README.md").write_text(
+        API_BASELINE if args.candidate_scope == "api" else BASELINE
+    )
     prepared = args.prepared_source.resolve()
     if not (prepared / "source").is_dir() or not (prepared / "gpu_smoke.py").is_file():
         raise ValueError("prepared-source requires source/ and deployed gpu_smoke.py")
@@ -155,11 +214,6 @@ def main() -> int:
     if not (baseline / "source").is_dir():
         raise ValueError("Prepared source contains no Python modules")
     shutil.copyfile(prepared / "gpu_smoke.py", baseline / "gpu_smoke.py")
-    for name, module in (
-        ("submission.py", "submission.py"),
-        ("research_loop_events.py", "telemetry.py"),
-    ):
-        shutil.copyfile(runtime / "src/research_loop" / module, baseline / name)
     write_json(
         baseline / "backend.json",
         {
@@ -175,8 +229,16 @@ def main() -> int:
             "input_identity": "versioned gpu_smoke.py synthetic generator; no external tensors",
             "trusted_command": "python gpu_smoke.py --source-root source --output <unique>/result.json --seed 43",
             "execution": "host-owned CUDA backend; no local execution dependencies required",
-            "operator_setup": "required client.py prepare; fresh remote case environment/source",
-            "execution_interface": "canonical submission.py submit/status; ExecutionBackend prepare/start/inspect",
+            "operator_setup": (
+                "candidate client API; fresh remote case environment/source before Study launch"
+                if args.candidate_scope == "api"
+                else "required client.py prepare; fresh remote case environment/source"
+            ),
+            "execution_interface": (
+                "candidate submission API over fixed IPC; ExecutionBackend prepare/start/inspect"
+                if args.candidate_scope == "api"
+                else "canonical submission.py submit/status; ExecutionBackend prepare/start/inspect"
+            ),
             "evaluation": "unranked synthetic diagnostic only; no research-quality claim",
         },
     )
@@ -190,6 +252,7 @@ def main() -> int:
             "source",
             "submission.py",
             "research_loop_events.py",
+            *(["API_CONTRACT.md"] if args.candidate_scope == "api" else []),
         ],
         [
             "-c",
@@ -215,7 +278,7 @@ def main() -> int:
     }
     write_json(case / "backend-identity.json", identity)
     (case / "README.md").write_text(
-        FIXTURE
+        (API_FIXTURE if args.candidate_scope == "api" else FIXTURE)
         + f"\nRead-only prepared baseline evidence: {baseline}\n"
         + f"Committed source identity: {identity['baseline_commit']}\n"
         + "Inspect backend.json, gpu_smoke.py and source/ there if needed; do not edit them.\n"
@@ -227,11 +290,17 @@ def main() -> int:
         "当前唯一授权的第一步是 synthetic B=2 L=16 K=4、seed43、三次更新 GPU smoke；"
         "保持 losses，不添加 hidden noise，只允许一个 GPU job。必须实际完成 Terra Plan Execute Review。"
         "从实际后端环境准备开始，使用既有接口启动研究，跑完GPU轮次并让最终标量在现有dashboard telemetry可见。"
-        "工作区 README 描述本地参考源码及prepare和launch接口。请执行并等待完成。"
+        + (
+            "工作区 README 描述固定实验协议；先用 python3 client.py --help 及其 describe/help 发现候选 API，"
+            "按候选说明完成准备、启动、等待及结果检查；允许组合操作。请执行并等待完成。"
+            if args.candidate_scope == "api"
+            else "工作区 README 描述本地参考源码及prepare和launch接口。请执行并等待完成。"
+        )
     )
     started = time.monotonic()
     stop = threading.Event()
     trusted = {
+        "candidate_scope": args.candidate_scope,
         "source_revision": args.source_revision,
         "remote_python": args.remote_python,
         "backend_identity": identity,
