@@ -130,12 +130,15 @@ study/
     publication.json
     plan|execute|review/attempt-001/
       prompt.md / context.json / schema.json
+      context-manifest.json          新调用的来源、策略版本与输入范围
       stdout.jsonl / stderr.txt
       response.json / completed.json / process.json
   workspace/                         按调查隔离的实验产物
 ```
 
 当前 `research.md` 保存全局理解，各路线文档保存该路线的当前理解；详细事实、条件、失败与来源留在实验节点。图中的 `base_experiment` 与 `references` 指向已发布节点，轮号只表示时间，不自动继承代码或证据。输入、输出版本与评价引用绑定具体调查。
+
+新调用通过 [Context 接口](context-feedback.md)保留原有输入与字段顺序，并保存 `context-manifest.json`。历史调用没有 Manifest 时不会补造来源；重用已完成调用不会重新生成输入，也不增加 Agent 调用。
 
 中断后再运行 `run` 会复用已有完成回执；未完成的只读阶段保留原输出后，以新的 attempt 继续。未完成 Execute 保留现场，需先核对外部效果。Agent 输出会实时写入日志，完成结果原子落盘；输出中途被打断时不承诺从最后一个 token 接续。具体边界见[恢复说明](recovery.md)。确认需要新 attempt 后执行：
 

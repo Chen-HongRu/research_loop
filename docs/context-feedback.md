@@ -1,0 +1,171 @@
+# Context and Feedback
+
+This is stage 2 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
+The input facade runs on new calls in the existing serial Study controller.
+The transactional Updater is available for isolated SQLite Studies; concurrent
+orchestration, knowledge publication and migration remain subsequent stages.
+
+## Frozen input
+
+```text
+ContextSnapshot.capture(...) -> ContextSnapshot
+build_context(snapshot, role, task, policy_ref, budget, policy=...) -> ContextPackage
+```
+
+A snapshot contains the Study identity, relevant revisions, inputs, one source
+record per top-level input field, protected keys and permitted evidence references.
+Source records contain `id`, `key`, `ref`, `revision`, `reason`, `allow_feedback`.
+Revisions are opaque JSON version identifiers supplied by the trusted controller.
+Snapshot and package values are captured immutably; accessors return detached
+copies. The default policy preserves all permitted input values and their order.
+
+The optional policy receives copies of eligible inputs, source metadata and the
+context selection budget (`policy(inputs, sources, budget)`) and
+returns field selections. It may include a field, omit an optional field, or keep
+a prefix of optional text with an explicit character count and reason. It cannot
+rewrite values, introduce fields, grant evidence access or remove protected
+constraints. Goal, Plan, evaluation, permissions and authorization budget fields
+are protected. The runtime also protects the exact task envelope. Materials
+marked `allow_feedback=false` never reach the policy or the resulting context.
+
+The package contains `context` and `manifest`. The manifest records Study/task/
+knowledge/execution versions, role, policy version, sources, selection reasons,
+provided/omitted/truncated dispositions, context quota and permitted evidence.
+The token estimate is the serialized context's character count divided by four,
+rounded up. It excludes protocol instructions, schema and tools; it is not measured
+model usage. `actual_usage` remains null. No summarization call or global token
+limit is introduced.
+
+`build_context(..., budget=...)` supplies the **context selection budget**. In the SQLite
+runtime it must match immutable `config.context_budget`, which defaults to `{}`.
+It is recorded and passed to the selected policy; this facade does not interpret
+arbitrary budget keys or enforce a universal token ceiling. A policy with a named
+limit must implement that limit or fail when protected inputs cannot fit.
+This is separate from `context.budget`, which contains the Study's authoritative
+iteration/call/time limits and admission deadline. Context policy does not change
+those limits, spent counters or STOP.
+
+Policies installed as Python callbacks and source catalogs are trusted controller
+code. The interface does not sandbox malicious Python or authenticate arbitrary
+source descriptions. Untrusted Agent decisions are data proposals, never live
+coordinator handles. Backend/tool boundaries remain responsible for preventing
+access to final-only data outside the provided context.
+
+## Validated output
+
+```text
+Updater(coordinator, validators={role: validator})
+bind_context(call_identity, package) -> context_ref
+validate_output(call_identity, output, evidence_refs) -> UpdateProposal
+apply_update(proposal, expected_revisions) -> UpdateReceipt
+```
+
+`CallIdentity.from_attempt(study_id, attempt)` binds the Study, attempt, role,
+iteration, expected revision, owner epoch and worker token. Context binding occurs
+once before dispatch. The updater compares frozen goal/evaluation/permissions,
+task, authorization limits and accepted Plan with authoritative records. Execute
+and Review require the original normalized, accepted Plan. The initial revision
+map is `{study: 1, task: revision-or-null, iteration: revision-or-null, knowledge: 0}`;
+knowledge publication will supply later knowledge versions.
+
+In the SQLite updater, permitted evidence references name existing immutable
+`artifacts/<uuid>.json` records. Their file identities are frozen at binding, so
+replacement between dispatch and the first response is rejected. Source metadata
+may also describe symbolic controller inputs or external provenance, but those
+descriptions alone do not grant access or become locally verified evidence.
+
+Each role requires an explicitly registered trusted validator with signature
+`validator(output, context) -> normalized_output`. Validation checks the bound
+identity and permitted input evidence references and returns an immutable proposal;
+it does not advance state. Unknown references, changed bindings, stale revisions
+and direct control-state changes are rejected. A structural validator accepting a
+report does not prove its scientific claim. Claims, measurements and corrections
+retain their existing scientific validators and backend evidence requirements.
+
+For an uncommitted proposal, `apply_update` revalidates raw output and verifies
+normalization, expected revisions and binding. A forged in-memory proposal does
+not bypass validation. The raw/normalized proposal is published to an immutable
+file before a short transaction records acceptance and advances only the associated
+iteration. Context-bound attempts cannot use raw `accept_attempt` to bypass this
+path. Rejection preserves the reservation and does not automatically retry work.
+
+An exact committed proposal returns its original receipt, even after restart or a
+validator upgrade. It does not invoke the current validator, allocate another
+output file or advance the iteration again. Different output or identity conflicts;
+unresolved prior-owner attempts remain fenced. STOP blocks new admissions while
+allowing an already reserved result to be recorded.
+
+Raw context and proposal records live in immutable files. SQLite stores their
+references, identity metadata and acceptance records. The updater reads specific
+control records to perform the requested validation or receipt lookup outside
+write transactions. It does not scan or hash datasets, checkpoints or evidence
+contents. Each permitted evidence record receives a bounded metadata check at
+binding; cited records are checked against that identity at validation/commit.
+This protects the frozen source version: a synthetic replacement after binding
+was observed to be accepted before this check was added. These checks run in the
+controller, not per training rank or loader worker; they read zero evidence or
+dataset content bytes. Runtime latency has not been benchmarked.
+
+## Existing Study calls
+
+New serial Agent attempts save `context-manifest.json` beside their unchanged
+`context.json`, schema and prompt. `legacy-context-v1` captures the existing role
+differences and controller-selected inputs. Every supplied field remains protected
+and provided; no extra Agent invocation is made. Captured JSON field references
+are provenance and citation scope, not a new OS filesystem sandbox.
+
+Review identifies the knowledge snapshot at review start; execution continuations
+retain the originating scientific input references. Dynamic controller-derived
+fields have controller source identities and the exact call revision. Cached
+successful attempts keep their original manifest. Historical attempts without
+one remain readable; their provenance is not retroactively invented.
+
+SQLite schema 2 introduces the binding and update records. Schema 1 test Studies
+must be retained as evidence or recreated in a new directory. No automatic
+conversion of existing Studies occurs in this stage.
+
+## Local API smoke
+
+This disposable example reserves one synthetic Scout call and accepts a strictly
+checked note. It calls no model or backend and makes no research claim.
+
+```python
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from research_loop.runtime import initialize
+from research_loop.runtime.context import ContextSnapshot, build_context
+from research_loop.runtime.updates import CallIdentity, Updater
+
+
+def validate_note(output, context):
+    if set(output) != {"note"} or not isinstance(output["note"], str):
+        raise ValueError("Expected one textual note")
+    return output
+
+
+with TemporaryDirectory() as directory:
+    config = {"goal": "Synthetic interface check", "permissions": {}}
+    store = initialize(Path(directory), config=config)
+    with store.coordinator() as owner:
+        attempt = owner.begin_attempt("scout", request_id="example-scout-1")
+        state = owner.snapshot()
+        call = CallIdentity.from_attempt(state["study_id"], attempt)
+        inputs = {**config, "task": None, "budget": state["limits"]}
+        revisions = {"study": 1, "task": None, "iteration": None, "knowledge": 0}
+        sources = [
+            {"id": f"controller:{key}", "key": key, "ref": f"input:{key}",
+             "revision": 1, "reason": "Fixed control input", "allow_feedback": True}
+            for key in inputs
+        ]
+        snapshot = ContextSnapshot.capture(
+            study_id=state["study_id"], revisions=revisions, inputs=inputs,
+            sources=sources, protected_keys=list(inputs), allowed_evidence=[],
+        )
+        package = build_context(snapshot, "scout", None, "example-v1", {})
+        updater = Updater(owner, validators={"scout": validate_note})
+        updater.bind_context(call, package)
+        proposal = updater.validate_output(call, {"note": "Synthetic note"}, [])
+        receipt = updater.apply_update(proposal, revisions)
+        assert updater.apply_update(proposal, revisions) == receipt
+        assert owner.snapshot()["counters"]["calls"] == 1
+```

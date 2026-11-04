@@ -17,10 +17,14 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DATABASE = "runtime.sqlite3"
 ROLES = {"scout", "advocate", "judge", "plan", "execute", "review"}
 PHASES = {"plan": "execute", "execute": "review", "review": "publication"}
+_CONTROL_METADATA = (
+    "study_id,max_iterations,max_calls,max_seconds,admission_deadline,calls,iterations,"
+    "elapsed_seconds,stop_reason,owner_epoch,owner_open,anchor"
+)
 
 
 class StateStoreError(RuntimeError):
@@ -74,6 +78,11 @@ CREATE TABLE attempts (
 );
 CREATE UNIQUE INDEX active_iteration_phase ON attempts(iteration_id, role)
  WHERE status='active' AND iteration_id IS NOT NULL;
+CREATE TABLE contexts (
+ attempt_id TEXT PRIMARY KEY REFERENCES attempts(id),
+ context_ref TEXT NOT NULL, identity_json TEXT NOT NULL, revisions_json TEXT NOT NULL,
+ evidence_identities_json TEXT NOT NULL
+);
 """
 
 
@@ -247,7 +256,9 @@ class StateStore:
                 raise OwnershipError("Another coordinator owns this store") from exc
             with self._connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                row = dict(conn.execute("SELECT * FROM control").fetchone())
+                row = dict(
+                    conn.execute(f"SELECT {_CONTROL_METADATA} FROM control").fetchone()
+                )
                 now = max(_timestamp(self._clock), row["anchor"])
                 elapsed = row["elapsed_seconds"]
                 if row["owner_open"]:
@@ -328,7 +339,11 @@ class Coordinator:
             with self.store._connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    row = dict(conn.execute("SELECT * FROM control").fetchone())
+                    row = dict(
+                        conn.execute(
+                            f"SELECT {_CONTROL_METADATA} FROM control"
+                        ).fetchone()
+                    )
                     if row["owner_epoch"] != self.owner_epoch or not row["owner_open"]:
                         raise OwnershipError("Coordinator epoch is stale")
                     now = max(_timestamp(self.store._clock), row["anchor"])
@@ -582,34 +597,126 @@ class Coordinator:
                 expected_revision,
                 allow_accepted_replay=True,
             )
-            if attempt["status"] == "accepted":
-                if (
-                    attempt["output_ref"] != output_ref
-                    or attempt["output_identity"] != identity
-                ):
-                    raise ConflictError("Accepted output differs from original receipt")
-                return attempt["receipt"]
-            if attempt["status"] != "active":
-                raise InvalidTransition("Attempt is no longer active")
-            iteration = self._iteration(conn, attempt)
-            receipt = {
-                "attempt_id": attempt_id,
-                "output_ref": output_ref,
-                "owner_epoch": self.owner_epoch,
-                "iteration_id": attempt["iteration_id"],
-                "revision": expected_revision,
-            }
-            if iteration is not None:
-                receipt["revision"] = iteration["revision"] + 1
-                conn.execute(
-                    "UPDATE iterations SET phase=?,revision=revision+1 WHERE id=?",
-                    (PHASES[attempt["role"]], iteration["id"]),
-                )
+            if conn.execute(
+                "SELECT 1 FROM contexts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone():
+                raise InvalidTransition("Context-bound attempts require the Updater")
+            return self._accept_record(conn, attempt, output_ref, identity)
+
+    def _accept_record(
+        self, conn, attempt, output_ref, identity, *, receipt_extra=None
+    ):
+        """Accept within the caller's fenced transaction; never open a nested one."""
+        if attempt["status"] == "accepted":
+            if (
+                attempt["output_ref"] != output_ref
+                or attempt["output_identity"] != identity
+            ):
+                raise ConflictError("Accepted output differs from original receipt")
+            return attempt["receipt"]
+        if attempt["status"] != "active":
+            raise InvalidTransition("Attempt is no longer active")
+        iteration = self._iteration(conn, attempt)
+        receipt = {
+            "attempt_id": attempt["id"],
+            "output_ref": output_ref,
+            "owner_epoch": self.owner_epoch,
+            "iteration_id": attempt["iteration_id"],
+            "revision": attempt["expected_revision"],
+        }
+        if iteration is not None:
+            receipt["revision"] = iteration["revision"] + 1
             conn.execute(
-                "UPDATE attempts SET status='accepted',output_ref=?,output_identity_json=?,receipt_json=? WHERE id=?",
-                (output_ref, _json(identity), _json(receipt), attempt_id),
+                "UPDATE iterations SET phase=?,revision=revision+1 WHERE id=?",
+                (PHASES[attempt["role"]], iteration["id"]),
             )
-            return receipt
+        if receipt_extra is not None:
+            receipt.update(receipt_extra)
+        conn.execute(
+            "UPDATE attempts SET status='accepted',output_ref=?,output_identity_json=?,receipt_json=? WHERE id=?",
+            (output_ref, _json(identity), _json(receipt), attempt["id"]),
+        )
+        return receipt
+
+    def _feedback_record(self, conn, call, *, metadata_only=False):
+        """Read and authenticate the exact call against its original reservation."""
+        attempt = self._attempt(
+            conn,
+            call["attempt_id"],
+            call["worker_token"],
+            call["expected_revision"],
+            allow_accepted_replay=True,
+        )
+        control = _decode(
+            conn.execute(
+                "SELECT study_id FROM control"
+                if metadata_only
+                else "SELECT * FROM control"
+            ).fetchone()
+        )
+        expected = {
+            key: attempt[key]
+            for key in (
+                "worker_token",
+                "owner_epoch",
+                "role",
+                "iteration_id",
+                "expected_revision",
+            )
+        }
+        expected.update(study_id=control["study_id"], attempt_id=attempt["id"])
+        if _json(call) != _json(expected):
+            raise ConflictError("Call identity differs from original reservation")
+        iteration = _decode(
+            conn.execute(
+                "SELECT * FROM iterations WHERE id=?", (attempt["iteration_id"],)
+            ).fetchone()
+        )
+        task = None
+        if iteration is not None:
+            columns = "id,revision" if metadata_only else "*"
+            task = _decode(
+                conn.execute(
+                    f"SELECT {columns} FROM tasks WHERE id=?", (iteration["task_id"],)
+                ).fetchone()
+            )
+        binding = _decode(
+            conn.execute(
+                "SELECT * FROM contexts WHERE attempt_id=?", (attempt["id"],)
+            ).fetchone()
+        )
+        plan = _decode(
+            conn.execute(
+                "SELECT attempts.id,attempts.output_ref,attempts.output_identity_json "
+                "FROM attempts JOIN contexts ON contexts.attempt_id=attempts.id "
+                "WHERE attempts.iteration_id=? AND attempts.role='plan' AND attempts.status='accepted'",
+                (attempt["iteration_id"],),
+            ).fetchone()
+        )
+        return dict(
+            control=control,
+            attempt=attempt,
+            iteration=iteration,
+            task=task,
+            binding=binding,
+            plan=plan,
+        )
+
+    def _feedback_snapshot(self, call):
+        self._live()
+        with self.store._connection(readonly=True) as conn:
+            conn.execute("BEGIN")
+            return self._feedback_record(conn, call)
+
+    @staticmethod
+    def _iteration_for_feedback(record):
+        attempt, iteration = record["attempt"], record["iteration"]
+        if attempt["iteration_id"] is None:
+            return
+        if iteration is None or iteration["revision"] != attempt["expected_revision"]:
+            raise ConflictError("Iteration revision mismatch")
+        if iteration["status"] != "active" or iteration["phase"] != attempt["role"]:
+            raise InvalidTransition("Iteration no longer accepts this phase")
 
     def fail_attempt(self, attempt_id, worker_token, reason, *, expected_revision):
         _text(reason, "reason")

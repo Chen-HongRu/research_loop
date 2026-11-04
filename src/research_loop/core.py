@@ -63,6 +63,7 @@ from .strategy import debate_rounds, review_guidance, validate_strategy
 from .submission import retire_unstarted_request
 from .tasks import TaskQueue, completed_results as task_results
 from .runtime.format import require_legacy
+from .runtime.legacy_context import capture_call
 
 
 class StudyError(RuntimeError):
@@ -1749,7 +1750,17 @@ class Study:
                 context["execution_recovery_current_attempt"] = str(
                     attempt.relative_to(self.root)
                 )
+            package = capture_call(
+                study_id=str(self.root),
+                iteration_ref=str(self._folder(state).relative_to(self.root)),
+                attempt_ref=str(attempt.relative_to(self.root)),
+                role=phase,
+                context=context,
+                state=state,
+            )
+            context = package.context
             _write(attempt / "context.json", context)
+            _write(attempt / "context-manifest.json", package.manifest)
             _write(attempt / "schema.json", self._agent_schema(phase, context))
             if feedback is not None:
                 _write(attempt / "feedback.json", feedback)
