@@ -180,7 +180,21 @@ class Updater:
             raise InvalidTransition(
                 "Execute/Review requires an accepted validated Plan"
             )
-        proposal = self._read_record(plan["output_ref"], plan["output_identity"])
+        return self._phase_output(plan, "plan")
+
+    def _phase_output(self, binding, role):
+        """Read an accepted native result or an explicitly translated legacy phase."""
+        proposal = self._read_record(binding["output_ref"], binding["output_identity"])
+        if binding.get("origin_kind") == "legacy":
+            origin = proposal.get("origin")
+            if (
+                proposal.get("kind") != "legacy_phase_binding"
+                or not isinstance(origin, dict)
+                or origin.get("role") != role
+                or not origin.get("source_refs")
+                or not origin.get("translator")
+            ):
+                raise ConflictError("Imported phase lacks its explicit source binding")
         return proposal["normalized_output"]
 
     def _planning_inputs(self, record):

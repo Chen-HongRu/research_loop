@@ -1,11 +1,11 @@
 # Transactional runtime
 
 This is the SQLite state foundation for [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
-SQLite schema 7 is available through Python APIs for new, isolated Studies.
+SQLite schema 8 is available through Python APIs for new, isolated Studies.
 The current `research-loop init/run` commands still use the serial document
 controller. The [concurrent coordinator](concurrent-runtime.md) is available through Python APIs.
 The [SQLite CLI and dashboard](concurrent-runtime.md) provide runtime interfaces;
-explicit migration and deployment remain phase 8. The
+[explicit migration and versioned deployment](runtime-migration.md) require operator evidence. The
 [backend lifecycle](backend-lifecycle.md) provides `Operations` and `BackendDriver`
 for explicit asynchronous operation transitions.
 The [Context / Feedback interface](context-feedback.md) binds immutable inputs
@@ -145,7 +145,7 @@ the database Study identity. The serial `Study` and `TaskQueue` reject either th
 marker or `runtime.sqlite3`, including partially initialized directories. The
 runtime refuses in-place creation over legacy `study.json` or `state.json`.
 The current SQLite schema is 7; earlier prototype schemas are explicitly rejected.
-Existing Studies require the later explicit migration procedure; creating a
+Existing legacy Studies require the [explicit migration procedure](runtime-migration.md); creating a
 database beside existing files is not migration. Old deployed binaries must be
 stopped during that procedure; they cannot be controlled by a check they lack.
 

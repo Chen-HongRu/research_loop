@@ -19,13 +19,13 @@ from pathlib import Path
 
 from .operation_contract import OPERATION_SCHEMA
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 DATABASE = "runtime.sqlite3"
 ROLES = {"scout", "advocate", "judge", "plan", "execute", "review"}
 PHASES = {"plan": "execute", "execute": "review", "review": "publication"}
 _CONTROL_METADATA = (
     "study_id,max_iterations,max_calls,max_seconds,admission_deadline,calls,iterations,"
-    "elapsed_seconds,stop_reason,owner_epoch,owner_open,anchor,pool_version"
+    "elapsed_seconds,stop_reason,owner_epoch,owner_open,anchor,pool_version,admission_mode"
 )
 _TASK_METADATA = "id,revision,source,priority,dependencies_json,cancelled"
 
@@ -63,7 +63,8 @@ CREATE TABLE control (
  calls INTEGER NOT NULL DEFAULT 0, iterations INTEGER NOT NULL DEFAULT 0,
  elapsed_seconds REAL NOT NULL DEFAULT 0, stop_reason TEXT,
  owner_epoch INTEGER NOT NULL DEFAULT 0, owner_open INTEGER NOT NULL DEFAULT 0,
- anchor REAL NOT NULL, pool_version INTEGER NOT NULL DEFAULT 0
+ anchor REAL NOT NULL, pool_version INTEGER NOT NULL DEFAULT 0,
+ admission_mode TEXT NOT NULL DEFAULT 'active'
 );
 CREATE TABLE tasks (
  id TEXT PRIMARY KEY, revision INTEGER NOT NULL, specification_json TEXT NOT NULL,
@@ -109,7 +110,8 @@ CREATE TABLE attempts (
  id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, role TEXT NOT NULL,
  iteration_id TEXT REFERENCES iterations(id), expected_revision INTEGER,
  owner_epoch INTEGER NOT NULL, worker_token TEXT NOT NULL, status TEXT NOT NULL,
- output_ref TEXT, output_identity_json TEXT, receipt_json TEXT, failure_reason TEXT
+ output_ref TEXT, output_identity_json TEXT, receipt_json TEXT, failure_reason TEXT,
+ origin_kind TEXT NOT NULL DEFAULT 'native'
 );
 CREATE UNIQUE INDEX active_iteration_phase ON attempts(iteration_id, role)
  WHERE status='active' AND iteration_id IS NOT NULL;
@@ -211,6 +213,9 @@ class StateStore:
         self.root = Path(root).resolve()
         self.path = self.root / DATABASE
         self._clock = clock
+        from .format import runtime_marker
+
+        marker = runtime_marker(self.root)
         try:
             with self._connection(readonly=True) as conn:
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -220,6 +225,23 @@ class StateStore:
                     )
                 if conn.execute("SELECT count(*) FROM control").fetchone()[0] != 1:
                     raise StateStoreError("Invalid runtime control record")
+                if marker is not None:
+                    study_id = conn.execute("SELECT study_id FROM control").fetchone()[
+                        0
+                    ]
+                    imported = conn.execute(
+                        "SELECT committed_at FROM migration_imports WHERE id=?",
+                        (marker.get("import_id"),),
+                    ).fetchone()
+                    if (
+                        marker.get("study_id") != study_id
+                        or marker.get("schema_version") != version
+                        or imported is None
+                        or imported[0] is None
+                    ):
+                        raise StateStoreError(
+                            "Runtime marker and import database differ"
+                        )
         except sqlite3.Error as exc:
             raise StateStoreError(f"Cannot open runtime store: {exc}") from exc
 
@@ -275,6 +297,9 @@ class StateStore:
                 from .controls import CONTROL_SCHEMA
 
                 conn.executescript(CONTROL_SCHEMA)
+                from .migration_schema import MIGRATION_SCHEMA
+
+                conn.executescript(MIGRATION_SCHEMA)
                 conn.execute(
                     "INSERT INTO control(singleton,study_id,config_json,max_iterations,"
                     "max_calls,max_seconds,admission_deadline,anchor) VALUES(1,?,?,?,?,?,?,?)",
@@ -323,9 +348,20 @@ class StateStore:
             conn.close()
 
     @contextmanager
-    def coordinator(self):
+    def coordinator(self, *, _lock_fd=None):
         """Acquire the nonblocking OS lock, then advance the durable owner epoch."""
-        fd = os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        # Migration lends the already-held legacy lock across the format switch.
+        # It remains owned by that outer scope, including after this owner closes.
+        borrowed = _lock_fd is not None
+        fd = (
+            _lock_fd
+            if borrowed
+            else os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        )
+        if borrowed:
+            expected, actual = (self.root / ".lock").stat(), os.fstat(fd)
+            if (expected.st_dev, expected.st_ino) != (actual.st_dev, actual.st_ino):
+                raise OwnershipError("Handoff descriptor is not the Study lock")
         acquired = False
         owner = None
         pid = os.getpid()
@@ -389,9 +425,10 @@ class StateStore:
             finally:
                 # A forked child inherits the same flock open-file description.
                 # LOCK_UN there would silently unlock the living parent's lock.
-                if acquired and os.getpid() == pid:
+                if acquired and not borrowed and os.getpid() == pid:
                     fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                if not borrowed:
+                    os.close(fd)
 
     def snapshot(self):
         """Read one consistent snapshot; never admit work or persist time here."""
@@ -421,6 +458,7 @@ class StateStore:
                 },
                 "owner_epoch": row["owner_epoch"],
                 "owner_open": bool(row["owner_open"]),
+                "admission_mode": row["admission_mode"],
                 "knowledge_version": conn.execute(
                     "SELECT COALESCE(MAX(id),0) FROM publications"
                 ).fetchone()[0],
@@ -494,6 +532,8 @@ class Coordinator:
 
     @staticmethod
     def _admit(control, *, deadline=False):
+        if control["admission_mode"] != "active":
+            raise BudgetExceeded("Migration permits reconciliation only")
         if control["stop_reason"] is not None:
             raise BudgetExceeded("STOP is latched")
         if control["elapsed_seconds"] >= control["max_seconds"]:
@@ -582,6 +622,14 @@ class Coordinator:
                 (task["id"],),
             ).fetchone()
         )
+        if (
+            prior is None
+            and conn.execute(
+                "SELECT 1 FROM migration_legacy_records WHERE kind='task' AND legacy_id=?",
+                (task["id"],),
+            ).fetchone()
+        ):
+            raise InvalidTransition("Imported legacy task identities remain reserved")
         if conn.execute(
             "SELECT 1 FROM iterations WHERE task_id=?", (task["id"],)
         ).fetchone():
@@ -1002,9 +1050,10 @@ class Coordinator:
         )
         plan = _decode(
             conn.execute(
-                "SELECT attempts.id,attempts.output_ref,attempts.output_identity_json "
-                "FROM attempts JOIN contexts ON contexts.attempt_id=attempts.id "
-                "WHERE attempts.iteration_id=? AND attempts.role='plan' AND attempts.status='accepted'",
+                "SELECT attempts.id,attempts.origin_kind,attempts.output_ref,attempts.output_identity_json "
+                "FROM attempts LEFT JOIN contexts ON contexts.attempt_id=attempts.id "
+                "WHERE attempts.iteration_id=? AND attempts.role='plan' AND attempts.status='accepted' "
+                "AND (contexts.attempt_id IS NOT NULL OR attempts.origin_kind='legacy')",
                 (attempt["iteration_id"],),
             ).fetchone()
         )

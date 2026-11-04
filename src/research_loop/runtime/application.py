@@ -33,7 +33,7 @@ def _adapter(value):
     return json.loads(_json(value))
 
 
-def _application(module_path, identity, adapter):
+def _application(module_path, identity, adapter, configuration):
     module = _load_module(module_path, identity)
     if _adapter(getattr(module, "APPLICATION_IDENTITY", None)) != adapter:
         raise ValueError("Application identity differs from the frozen worker adapter")
@@ -43,6 +43,14 @@ def _application(module_path, identity, adapter):
         raise ValueError(
             "Application must define validate(role, output, context, config)"
         )
+    validate_config = getattr(module, "validate_config", None)
+    if validate_config is not None:
+        if not callable(validate_config):
+            raise ValueError("Application validate_config must be callable")
+        # Pure trusted configuration checks precede any irreversible reservation.
+        # They must not invoke CLIs or external services.
+        validate_config(json.loads(configuration))
+        _check_module(module_path, identity)
     return module
 
 
@@ -58,7 +66,7 @@ def prepare_application(module_path, application_config, adapter):
     configuration = _json(application_config)
     path = Path(module_path).resolve()
     identity = _module_identity(path)
-    _application(path, identity, adapter)
+    _application(path, identity, adapter, configuration)
     return dict(
         module=str(path), module_identity=identity, config=json.loads(configuration)
     )
@@ -95,7 +103,9 @@ def load_application(owner):
         spec["config"],
         module_identity=spec["module_identity"],
     )
-    module = _application(spec["module"], spec["module_identity"], adapter)
+    module = _application(
+        spec["module"], spec["module_identity"], adapter, configuration
+    )
 
     def validator(role):
         def validate(output, context):

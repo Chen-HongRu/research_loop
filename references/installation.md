@@ -65,6 +65,13 @@ SQLite runtime applications are explicitly trusted and configured separately fro
 the installed skill. Keep a versioned immutable application module and private
 configuration outside the skill and repository; see [concurrent runtime](../docs/concurrent-runtime.md).
 The existing legacy Harness does not automatically become a SQLite application.
+The [native application](../integrations/native_runtime/README.md) specifies its
+Pi and environment requirements; installation alone does not validate model access.
+
+For an authorized cutover, use a versioned deployment with an immutable commit,
+environment and application specification. Support the matching Study-format
+entry points and follow [runtime migration](../docs/runtime-migration.md); installing
+a runtime neither migrates a Study nor fences old services.
 
 After installation, report the installed path and that the skill is available on
 the next turn. If discovery is stale, restart Codex. When installation/setup is the

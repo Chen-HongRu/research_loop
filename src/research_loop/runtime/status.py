@@ -23,10 +23,20 @@ def status_snapshot(root):
             conn.execute(
                 "SELECT study_id,max_iterations,max_calls,max_seconds,admission_deadline,"
                 "calls,iterations,elapsed_seconds,stop_reason IS NOT NULL AS stopped,"
-                "owner_epoch,owner_open,pool_version FROM control"
+                "owner_epoch,owner_open,pool_version,admission_mode FROM control"
             ).fetchone()
         )
         schema = conn.execute("PRAGMA user_version").fetchone()[0]
+        migrations = _rows(
+            conn,
+            "SELECT id,revision,committed_at,activation_ref IS NOT NULL AS activated,additional_elapsed_seconds,blockers_json FROM migration_imports",
+        )
+        legacy_records = _rows(
+            conn,
+            "SELECT import_id,kind,legacy_id,native_status FROM migration_legacy_records ORDER BY kind,legacy_id",
+        )
+        for migration in migrations:
+            migration["blockers"] = json.loads(migration.pop("blockers_json"))
         controls = _rows(
             conn,
             "SELECT request_id,kind,status FROM control_requests WHERE status!='applied' ORDER BY rowid",
@@ -246,6 +256,9 @@ def status_snapshot(root):
         owner_epoch=control["owner_epoch"],
         pool_version=control["pool_version"],
         publication_version=publication_version,
+        admission_mode=control["admission_mode"],
+        migrations=migrations,
+        legacy_records=legacy_records,
         stop={"requested": bool(control["stopped"])},
         limits={
             key: control[key]

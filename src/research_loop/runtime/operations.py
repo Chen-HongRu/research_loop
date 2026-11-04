@@ -133,7 +133,9 @@ class Operations:
                 (
                     auth,
                     _json(grant["backends"]),
-                    str(grant["max_operations"]),
+                    str(grant["max_operations"])
+                    if grant["max_operations"] is not None
+                    else None,
                     grant["deadline"],
                 ),
             )
@@ -191,6 +193,16 @@ class Operations:
             )
 
     @staticmethod
+    def imported(op):
+        origin = op.get("origin")
+        return bool(
+            op.get("submit_forbidden")
+            and isinstance(origin, dict)
+            and isinstance(origin.get("original_request_identity"), str)
+            and origin["original_request_identity"].strip()
+        )
+
+    @staticmethod
     def _get(conn, operation_id):
         row = _decode(
             conn.execute(
@@ -210,6 +222,7 @@ class Operations:
             "cancel_acknowledged",
             "feedback_sealed",
             "external_open",
+            "submit_forbidden",
         ):
             row[field] = bool(row[field])
         return row
@@ -289,6 +302,10 @@ class Operations:
         """Reserve inside a caller's transaction; dispatch can commit atomically."""
         integer(expected_revision, "expected_revision", minimum=1)
         op = self._get(conn, operation_id)
+        if op["submit_forbidden"]:
+            raise InvalidTransition(
+                "Imported operations can never prepare or submit again"
+            )
         if op["submission_token"] is not None:
             raise InvalidTransition(
                 "Operation already has a submit intent; inspect original identity"
@@ -304,8 +321,9 @@ class Operations:
             "SELECT * FROM operation_authorities WHERE id=?",
             (op["authorization_id"],),
         ).fetchone()
-        if authority["blocked_reason"] or authority["admitted_operations"] >= int(
-            authority["max_operations"]
+        if authority["blocked_reason"] or (
+            authority["max_operations"] is not None
+            and authority["admitted_operations"] >= int(authority["max_operations"])
         ):
             raise BudgetExceeded("Operation authorization is blocked or exhausted")
         for pool, amount in op["resources"].items():
@@ -456,6 +474,10 @@ class Operations:
     def _not_submitted(cls, conn, op, proof):
         if proof is None:
             raise InvalidTransition("No-submission outcome requires positive proof")
+        if cls.imported(op) and proof["basis"] == "no_submission_intent":
+            raise InvalidTransition(
+                "Imported absence requires original-sender or backend fencing proof"
+            )
         if (
             proof["basis"] == "no_submission_intent"
             and op["submission_token"] is not None
@@ -518,6 +540,10 @@ class Operations:
     def _apply(
         self, conn, op, kind, data, event_key, payload_ref, payload_identity, intake
     ):
+        if op["submit_forbidden"] and kind in {"prepare", "submission"}:
+            raise InvalidTransition(
+                "Imported operations cannot accept preparation or submission"
+            )
         if kind == "prepare":
             if op["state"] != "pending" or op["submission_token"] is not None:
                 raise InvalidTransition(
@@ -540,7 +566,11 @@ class Operations:
                         "A submission result requires its durable submit intent"
                     )
             self._job(conn, op, data["job_id"])
-            if op["submission_token"] is None and data["job_id"] is not None:
+            if (
+                op["submission_token"] is None
+                and data["job_id"] is not None
+                and not self.imported(op)
+            ):
                 self._quarantine(
                     conn,
                     op,
@@ -563,7 +593,11 @@ class Operations:
                     op["state"] = "submitted" if outcome == "accepted" else "unknown"
         elif kind == "inspection":
             self._job(conn, op, data["job_id"])
-            if op["submission_token"] is None and data["job_id"] is not None:
+            if (
+                op["submission_token"] is None
+                and data["job_id"] is not None
+                and not self.imported(op)
+            ):
                 self._quarantine(
                     conn,
                     op,
@@ -600,7 +634,7 @@ class Operations:
                     else:
                         op.update(state="terminal", terminal_outcome=data["outcome"])
             elif op["state"] != "terminal" and op["inconsistency"] is None:
-                if op["submission_token"] is None:
+                if op["submission_token"] is None and not self.imported(op):
                     raise InvalidTransition("Unsubmitted operation has no running job")
                 op["state"] = "submitted" if op["job_id"] else "unknown"
             if data["physical_released"]:
@@ -690,7 +724,8 @@ class Operations:
         self.owner._live()
         integer(expected_revision, "expected_revision", minimum=1)
         text(event_key, "event_key")
-        payload = validate_receipt(kind, payload)
+        imported = self.imported(self.get(operation_id))
+        payload = validate_receipt(kind, payload, allow_legacy_epoch=imported)
         with self.owner.store._connection(readonly=True) as conn:
             previous = _decode(
                 conn.execute(

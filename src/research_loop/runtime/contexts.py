@@ -77,6 +77,29 @@ class RuntimeContexts:
             if required:
                 protected.append(key)
 
+        with self.owner.store._connection(readonly=True) as conn:
+            imported_history = [
+                _decode(row)
+                for row in conn.execute(
+                    "SELECT id,context_ref,context_identity_json FROM migration_imports WHERE committed_at IS NOT NULL"
+                )
+            ]
+        # Legacy prose has no native per-entry feedback/evaluator provenance.
+        # It remains archived unless the trusted migration configuration permits
+        # this reviewed source. Never expose old numeric Frontiers as new facts.
+        for imported in (
+            imported_history if config.get("legacy_history_feedback") is True else []
+        ):
+            history = self.reader._read_record(
+                imported["context_ref"], imported["context_identity"]
+            )
+            source(
+                "legacy_history:" + imported["id"],
+                history,
+                imported["context_ref"],
+                imported["id"],
+            )
+
         if call.role in {"execute", "review"}:
             plan = record["plan"]
             source(
@@ -90,7 +113,7 @@ class RuntimeContexts:
             with self.owner.store._connection(readonly=True) as conn:
                 execute = _decode(
                     conn.execute(
-                        "SELECT id,output_ref,output_identity_json FROM attempts "
+                        "SELECT id,origin_kind,output_ref,output_identity_json FROM attempts "
                         "WHERE iteration_id=? AND role='execute' AND status='accepted'",
                         (call.iteration_id,),
                     ).fetchone()
@@ -99,9 +122,7 @@ class RuntimeContexts:
                 raise ConflictError("Review requires its accepted Execute")
             source(
                 "execute",
-                self.reader._read_record(
-                    execute["output_ref"], execute["output_identity"]
-                )["normalized_output"],
+                self.reader._phase_output(execute, "execute"),
                 execute["output_ref"],
                 execute["id"],
                 required=True,

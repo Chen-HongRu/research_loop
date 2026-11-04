@@ -2,10 +2,10 @@
 
 This is stage 2 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
 The input facade runs on new calls in the existing serial Study controller.
-The transactional Updater is available for new SQLite schema-7 Studies. The
+The transactional Updater is available for SQLite schema-8 Studies. The
 [backend lifecycle](backend-lifecycle.md) adds operation admission and trusted
 receipt intake; the [concurrent coordinator](concurrent-runtime.md) drives these
-interfaces. The [SQLite CLI and dashboard](concurrent-runtime.md) are available; migration and deployment remain phase 8. The
+interfaces. The [SQLite CLI and dashboard](concurrent-runtime.md) are available; [migration](runtime-migration.md) and deployment require operator evidence. The
 [publication interface](knowledge-publication.md) accepts Scout/Review knowledge
 and builds derived views from registered measurements and eligibility revisions.
 
@@ -146,7 +146,7 @@ fields have controller source identities and the exact call revision. Cached
 successful attempts keep their original manifest. Historical attempts without
 one remain readable; their provenance is not retroactively invented.
 
-SQLite schema 7 contains binding, update, publication, planning and operation
+SQLite schema 8 contains binding, update, publication, planning and operation
 records, including evaluator intake and separate resource/cost holds. Earlier SQLite
 test Studies must be retained as evidence or recreated in a new directory. No
 automatic conversion of existing Studies occurs in this stage.

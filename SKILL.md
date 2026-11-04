@@ -31,7 +31,9 @@ and `state.json` identify the legacy document controller. If markers conflict or
 the format is unclear, stop and inspect rather than guessing. Route SQLite Studies
 to `runtime ...` commands in [concurrent runtime](docs/concurrent-runtime.md) and
 [operations](references/operations.md); use the legacy commands below only for
-legacy Studies. Do not convert either format in place.
+legacy Studies. Do not automatically convert either format. For an explicitly requested migration,
+read [runtime migration](docs/runtime-migration.md), start with read-only preview,
+and follow its authorized operator translation, fencing and activation workflow.
 
 ## Choose the operation
 
@@ -52,6 +54,8 @@ The workflow below creates a legacy document Study. For a requested SQLite Study
 use the explicit trusted application and initialization contract in
 [concurrent runtime](docs/concurrent-runtime.md); the legacy Harness is not
 automatically integrated and its role schemas are different.
+The [native application](integrations/native_runtime/README.md) supports tool-free
+Pi roles and qualitative Execute, within its stated limits.
 
 ## Turn a question into a runnable Study
 
@@ -131,7 +135,7 @@ automatically integrated and its role schemas are different.
 
 ## Controller boundaries
 
-New legacy document Studies use version 3; SQLite Studies use schema 7. In the
+New legacy document Studies use version 3; SQLite Studies use schema 8. In the
 legacy controller, Plan's `markdown` freezes the scientific contract;
 top-level `timeout_seconds` bounds execution. Execute produces evidence; independent
 Review verifies it; only the controller publishes research documents and Frontiers.

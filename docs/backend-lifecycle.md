@@ -2,9 +2,9 @@
 
 Stage 5 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77) provides
 the `Operations` authority and `BackendDriver` through Python APIs for new SQLite
-Studies. Schema 7 rejects older prototype databases. The [concurrent coordinator](concurrent-runtime.md)
+Studies. Schema 8 rejects older prototype databases. The [concurrent coordinator](concurrent-runtime.md)
 schedules these actions through Python APIs. The SQLite CLI and dashboard are available; explicit migration and deployment
-remain phase 8. The serial
+require operator evidence; see [runtime migration](runtime-migration.md). The serial
 controller's separate launcher is documented in [execution backends](execution-backends.md).
 
 ## Accepted requests and authority
@@ -61,6 +61,9 @@ The immutable Study configuration supplies:
   }
 }
 ```
+
+`max_operations` is a nonnegative count ceiling, or `null` for no count ceiling;
+physical capacity, cost bounds, deadlines, study budgets and STOP still apply.
 
 These three configuration fields are protected Plan/Execute context inputs when
 configured. Operations require an accepted `Plan.timeout_seconds`; each requested

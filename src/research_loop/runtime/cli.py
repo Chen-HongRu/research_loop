@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import signal
 import sqlite3
@@ -119,7 +120,109 @@ def _parser():
                 "--priority", type=int, required=name == "edit", default=100
             )
             command.add_argument("--depends-on", action="append", default=[])
+    migrate = commands.add_parser(
+        "migrate", help="Explicit legacy preview, staging and authority transfer"
+    )
+    migration_commands = migrate.add_subparsers(dest="migration_command", required=True)
+    for name in ("preview", "prepare", "commit", "resolve", "bind-execute", "activate"):
+        command = migration_commands.add_parser(name)
+        command.add_argument("study", type=Path)
+        if name == "preview":
+            command.add_argument(
+                "--output",
+                type=Path,
+                help="Save private exact control inventory to a new file",
+            )
+            command.add_argument(
+                "--annex-spec",
+                type=Path,
+                help="JSON mapping of explicit controller document names to absolute paths",
+            )
+        elif name == "prepare":
+            command.add_argument("--import-id", required=True)
+            for item in (
+                "inventory",
+                "translation",
+                "config",
+                "fence",
+                "deployment",
+                "application",
+            ):
+                command.add_argument("--" + item, required=True, type=Path)
+            command.add_argument("--application-config", type=Path)
+        else:
+            command.add_argument("import_id")
+            if name in {"resolve", "bind-execute", "activate"}:
+                command.add_argument("--evidence", required=True, type=Path)
     return parser
+
+
+def migrate(args):
+    from .legacy_inventory import capture_control_annex, capture_legacy
+    from .migration import (
+        activate_import,
+        bind_imported_execute,
+        commit_import,
+        prepare_import,
+        resolve_import,
+    )
+
+    if args.migration_command == "preview":
+        inventory = capture_legacy(args.study)
+        if args.annex_spec is not None:
+            inventory = capture_control_annex(inventory, _object(args.annex_spec))
+        if args.output is not None:
+            descriptor = os.open(
+                args.output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+            )
+            with os.fdopen(descriptor, "w") as handle:
+                json.dump(inventory, handle, ensure_ascii=False, allow_nan=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+        return {
+            key: inventory[key]
+            for key in (
+                "version",
+                "source_root",
+                "source_identity",
+                "counters",
+                "limits",
+                "blockers",
+                "history",
+            )
+        }
+    if args.migration_command == "prepare":
+        config = _object(args.config)
+        settings = config.get("runtime")
+        validate_settings(settings)
+        if "application" in settings or args.application.resolve().is_relative_to(
+            args.study.resolve()
+        ):
+            raise ValueError(
+                "Select an external immutable application with --application"
+            )
+        settings["application"] = prepare_application(
+            args.application,
+            _object(args.application_config) if args.application_config else {},
+            settings["worker_adapter"],
+        )
+        return prepare_import(
+            args.study,
+            _object(args.inventory),
+            _object(args.translation),
+            config,
+            _object(args.fence),
+            _object(args.deployment),
+            import_id=args.import_id,
+        )
+    if args.migration_command == "commit":
+        return commit_import(args.study, args.import_id)
+    with StateStore(args.study).coordinator() as owner:
+        if args.migration_command == "bind-execute":
+            return bind_imported_execute(owner, args.import_id, _object(args.evidence))
+        if args.migration_command == "resolve":
+            return resolve_import(owner, args.import_id, _object(args.evidence))
+        return activate_import(owner, args.import_id, _object(args.evidence))
 
 
 def initialize(args):
@@ -295,6 +398,8 @@ def main(argv=None):
     try:
         if args.command == "init":
             result = initialize(args)
+        elif args.command == "migrate":
+            result = migrate(args)
         elif args.command == "run":
             result = run(args)
         elif args.command == "status":

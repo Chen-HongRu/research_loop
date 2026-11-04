@@ -32,7 +32,9 @@ ProTok 父 Study 初始化在受锁保护、带所有权记录的暂存目录完
 
 ProTok supervisor 按子 Study 异步调度长训任务。某个子 Study 等待处理时保留原调查，其他独立任务继续；各人工长训使用独立预算，自动提名共享的分配与核账门槛继续生效。每个 Study 内的阶段和父 Study 轮次仍顺序发布，详见[任务调度](docs/task-queue.md)。
 
-[#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端已推进到 schema 7。[SQLite 状态层](docs/transactional-runtime.md)提供独立 iteration 和统一账本；[Context / Feedback](docs/context-feedback.md)冻结来源并接纳受控输出；[知识发布](docs/knowledge-publication.md)按可信评价回执及资格修订重建双层 Frontier 与研究文档。[任务池与规划](docs/task-planning.md)保护人类任务及已认领版本，并行调用 Advocate，由 Judge 增改、排序未认领的自主任务。[Backend 生命周期](docs/backend-lifecycle.md)通过 `Operations` 和 `BackendDriver` Python API 分离有限 Execute 请求、一次提交、同一执行的检查、结果收集和费用结算；未知提交效果不会触发重提。[并发协调器](docs/concurrent-runtime.md)通过 Python API 调度本地调用并协调后端操作。[SQLite CLI 与 dashboard](docs/concurrent-runtime.md)提供显式应用配置、控制请求和只读状态。当前面向新建、隔离的 SQLite Study；显式迁移与部署属于第 8 阶段，现有串行 CLI 不自动迁移。
+[#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端已推进到 schema 8。[SQLite 状态层](docs/transactional-runtime.md)提供独立 iteration 和统一账本；[Context / Feedback](docs/context-feedback.md)冻结来源并接纳受控输出；[知识发布](docs/knowledge-publication.md)按可信评价回执及资格修订重建双层 Frontier 与研究文档。[任务池与规划](docs/task-planning.md)保护人类任务及已认领版本，并行调用 Advocate，由 Judge 增改、排序未认领的自主任务。[Backend 生命周期](docs/backend-lifecycle.md)通过 `Operations` 和 `BackendDriver` Python API 分离有限 Execute 请求、一次提交、同一执行的检查、结果收集和费用结算；未知提交效果不会触发重提。[并发协调器](docs/concurrent-runtime.md)通过 Python API 调度本地调用并协调后端操作。[SQLite CLI 与 dashboard](docs/concurrent-runtime.md)提供显式应用配置、控制请求和只读状态。[显式迁移](docs/runtime-migration.md)提供预览、暂存、提交和激活；迁移与版本化部署需要可信操作员提供翻译、隔离及证据，现有串行 CLI 不自动迁移。
+
+[原生应用](integrations/native_runtime/README.md)使用无工具 Pi 调用支持六种角色；当前 Execute 限于定性工作，ProTok 接入只支持已导入任务的清理。
 
 ## 快速体验
 

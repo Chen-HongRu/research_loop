@@ -27,6 +27,7 @@ th,td{white-space:nowrap}td:first-child{white-space:normal;overflow-wrap:anywher
 Elapsed time is the persisted ledger value. Terminal execution and retired callbacks do not prove physical release or final fees.</small>
 <section><h2>Tasks</h2><div id="tasks"></div></section>
 <section><h2>Pending or rejected requests</h2><div id="requests"></div></section>
+<section><h2>Imported legacy records</h2><div id="legacy"></div></section>
 <section><h2>Operations</h2><div id="operations"></div></section>
 <section><h2>Agent callbacks</h2><div id="attempts"></div></section>
 <script>
@@ -41,11 +42,12 @@ function table(id,columns,rows){
 }
 async function refresh(){try{
  const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw Error('Status temporarily unavailable');const data=await response.json();
- document.getElementById('summary').textContent=`Study ${data.study_id} · schema ${data.schema_version} · STOP ${data.stop.requested?'requested':'not requested'} · recorded owner ${data.owner_open?'open':'closed'} · calls ${data.counters.calls}/${data.limits.max_calls??'unlimited'} · iterations ${data.counters.iterations}/${data.limits.max_iterations??'unlimited'} · persisted elapsed ${Number(data.counters.elapsed_seconds).toFixed(2)}s/${data.limits.max_seconds}s · publication ${data.publication_version} · reported ${data.reported_at}`;
+ document.getElementById('summary').textContent=`Study ${data.study_id} · schema ${data.schema_version} · admission ${data.admission_mode} · STOP ${data.stop.requested?'requested':'not requested'} · recorded owner ${data.owner_open?'open':'closed'} · calls ${data.counters.calls}/${data.limits.max_calls??'unlimited'} · iterations ${data.counters.iterations}/${data.limits.max_iterations??'unlimited'} · persisted elapsed ${Number(data.counters.elapsed_seconds).toFixed(2)}s/${data.limits.max_seconds}s · publication ${data.publication_version} · reported ${data.reported_at}`;
  table('tasks',[['Task','id'],['Source','source'],['Status','status'],['Phase','phase'],['Ready','ready'],['Dependency blockers','blocked_dependencies'],['Execution','execution'],['Feedback sealed','feedback_sealed'],['Physical released','physical_released'],['Fees settled','fees_settled']],data.tasks);
  table('operations',[['Operation','id'],['Backend','backend'],['State','state'],['Outcome','terminal_outcome'],['Callback',row=>row.dispatch?.state],['Callback retired',row=>row.dispatch?.worker_retired],['Unresolved','unresolved'],['Physical released','physical_released'],['Resource holds','held_resources'],['Cost holds','held_costs'],['Actual costs','actual_costs'],['Fees final','costs_final'],['Collection','collection_state'],['Intake','intake'],['Feedback sealed','feedback_sealed']],data.operations);
  table('attempts',[['Attempt','id'],['Role','role'],['Status','status'],['Worker state',row=>row.dispatch?.state],['Callback retired',row=>row.dispatch?.worker_retired],['Applied',row=>row.dispatch?.settled],['Unresolved','unresolved']],data.attempts);
  table('requests',[['Request','request_id'],['Kind','kind'],['Status','status']],data.control_requests);
+ table('legacy',[['Kind','kind'],['Original ID','legacy_id'],['Original status','native_status']],data.legacy_records);
  document.getElementById('error').textContent='';
  }catch(error){document.getElementById('error').textContent=error.message;}}
 refresh();setInterval(refresh,3000);
