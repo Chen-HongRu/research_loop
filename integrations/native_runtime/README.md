@@ -16,6 +16,11 @@ are representation labels, never evidence. Strings remain opaque, and other
 roles keep the ordinary package format. Frozen inputs and retries are unchanged;
 this encoding does not summarize or drop evidence or add authority.
 
+The Review response schema lists only measurement IDs visible in the original
+frozen context. When none are registered, `reviews`, `corrections` and each
+knowledge entry's `measurement_ids` must be empty. Interpretation knowledge may
+still cite allowed evidence; operation, job and artifact IDs are not measurements.
+
 Set `runtime.worker_adapter` to `{"id": "native-runtime-v1", "version": "1"}`
 and select a versioned immutable copy of `application.py` with `--application`.
 Its package and dependencies must be available in the chosen runtime environment.

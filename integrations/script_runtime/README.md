@@ -109,6 +109,11 @@ interpretation with uncertainty and limitations; it must not turn script-reporte
 numbers into verified scientific claims. Imported legacy cleanup uses its separate
 application and cannot be routed through this native submission handler.
 
+When the frozen Review context has no registered measurements, its response schema
+requires empty `reviews`, `corrections` and knowledge `measurement_ids` arrays.
+Report-backed interpretation knowledge remains available through allowed evidence
+references; an operation or job ID cannot substitute for a measurement ID.
+
 Review uses the native lossless `shared-json-subtrees-v1` prompt encoding when
 repeated large nested objects can reduce bytes. Complete shared values and
 explicit replacement paths reconstruct the same frozen package; report wrappers,

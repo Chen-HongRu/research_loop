@@ -5,12 +5,14 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from integrations.native_runtime import application, policy
 from research_loop.harness import HarnessError
@@ -355,9 +357,71 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
 
     def test_local_timeout_reaps_cli(self):
         self.stub(hanging=True, spawn_child=False)
-        self.config["transport"]["timeout_seconds"] = 0.15
-        with self.assertRaises(subprocess.TimeoutExpired):
+        real_popen = subprocess.Popen
+        children = []
+
+        def start(arguments, **kwargs):
+            child = real_popen(arguments, **kwargs)
+            children.append(child)
+
+            def cleanup():
+                if child.returncode is None:
+                    child.kill()
+                    child.wait()
+
+            self.addCleanup(cleanup)
+            if "--list-models" not in arguments:
+                communicate = child.communicate
+                child.kill = Mock(wraps=child.kill)
+                child.wait = Mock(wraps=child.wait)
+
+                def ready_then_timeout(*, input, timeout):
+                    # Feed the real CLI, then wait for its response-stage handshake.
+                    # Process startup consumes no part of the short timeout under test.
+                    child.stdin.write(input)
+                    child.stdin.close()
+                    child.stdin = None
+                    ready_deadline = time.monotonic() + 5
+                    while not (self.root / "cli-ready").exists():
+                        self.assertLess(time.monotonic(), ready_deadline)
+                        time.sleep(0.005)
+                    return communicate(timeout=timeout)
+
+                child.communicate = ready_then_timeout
+            return child
+
+        # Replace only the transport's clock object, leaving subprocess's real
+        # timeout clock intact. Preflight gets 5s; the ready response gets 0.05s.
+        clock = SimpleNamespace(monotonic=Mock(side_effect=[0, 0, 4.95]))
+        with (
+            patch.object(application.transport, "time", clock),
+            patch.object(application.transport.subprocess, "Popen", side_effect=start),
+            self.assertRaises(subprocess.TimeoutExpired),
+        ):
             application.invoke("agent", self.payload("plan"), self.config)
+        self.assertEqual(len(children), 2)
+        response = children[1]
+        self.assertTrue((self.root / "cli-ready").exists())
+        response.kill.assert_called_once_with()
+        response.wait.assert_called_with()
+        self.assertEqual(response.returncode, -signal.SIGKILL)
+        # Do not poll: that could reap a zombie and hide a missing transport wait.
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(response.pid, os.WNOHANG)
+
+    def test_expired_budget_between_stages_does_not_start_response(self):
+        real_popen = subprocess.Popen
+        clock = SimpleNamespace(monotonic=Mock(side_effect=[0, 0, 6]))
+        with (
+            patch.object(application.transport, "time", clock),
+            patch.object(
+                application.transport.subprocess, "Popen", wraps=real_popen
+            ) as popen,
+            self.assertRaisesRegex(TimeoutError, "Pi invocation timeout"),
+        ):
+            application.invoke("agent", self.payload("plan"), self.config)
+        self.assertEqual(popen.call_count, 1)
+        self.assertIn("--list-models", popen.call_args.args[0])
 
     def test_supervised_cancellation_retires_cli_group_and_descendant(self):
         self.stub(hanging=True)
