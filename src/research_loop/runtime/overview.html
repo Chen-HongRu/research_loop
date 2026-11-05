@@ -1,0 +1,1310 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Study overview</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #19302c;
+        --muted: #687b74;
+        --paper: #f4f5ef;
+        --card: #fff;
+        --line: #dfe7de;
+        --green: #246550;
+        --lime: #ddebcc;
+        --amber: #a56b26;
+        --red: #a13d38;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font:
+          14px/1.55 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          "PingFang SC",
+          sans-serif;
+      }
+      button,
+      a {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      a {
+        color: var(--green);
+      }
+      .shell {
+        max-width: 1560px;
+        margin: auto;
+        padding: 26px 34px 60px;
+      }
+      .top {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        align-items: center;
+        border-bottom: 1px solid #d9e2d8;
+        padding-bottom: 20px;
+      }
+      .brand {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      .mark {
+        display: grid;
+        place-items: center;
+        background: var(--green);
+        color: white;
+        width: 36px;
+        height: 36px;
+        border-radius: 11px;
+        font-size: 19px;
+      }
+      .eyebrow {
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        font-weight: 750;
+        color: var(--green);
+        text-transform: uppercase;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .top-right {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+      .live {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--green);
+        font-size: 12px;
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #65a879;
+      }
+      .hero {
+        display: flex;
+        justify-content: space-between;
+        gap: 30px;
+        padding: 30px 0 24px;
+      }
+      .hero h1 {
+        font-size: clamp(27px, 3vw, 40px);
+        letter-spacing: -0.04em;
+        line-height: 1.2;
+        margin: 8px 0;
+      }
+      .hero p {
+        max-width: 850px;
+        margin: 0;
+        color: #556b61;
+        font-size: 15px;
+        overflow-wrap: anywhere;
+      }
+      .hero-side {
+        text-align: right;
+        min-width: 190px;
+      }
+      .hero-side strong {
+        display: block;
+        font-size: 13px;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.8fr);
+        gap: 18px;
+      }
+      .stack {
+        display: grid;
+        gap: 18px;
+        align-content: start;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 22px;
+        box-shadow: 0 3px 16px #263c2610;
+        min-width: 0;
+      }
+      .card-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: start;
+        margin-bottom: 17px;
+      }
+      .card h2 {
+        font-size: 17px;
+        letter-spacing: -0.02em;
+        margin: 0;
+      }
+      .card h3 {
+        font-size: 14px;
+        margin: 0;
+      }
+      .sub {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 3px;
+      }
+      .pill {
+        display: inline-block;
+        background: #edf3ec;
+        color: #466756;
+        border-radius: 99px;
+        padding: 4px 9px;
+        font-size: 11px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      .pill.warn {
+        background: #fff2dc;
+        color: #906220;
+      }
+      .pill.bad {
+        background: #fae8e5;
+        color: #9a4038;
+      }
+      .frontier {
+        min-height: 175px;
+        background: linear-gradient(180deg, #f8fbf5, #fff);
+        border: 1px solid #edf2eb;
+        border-radius: 12px;
+        padding: 18px;
+      }
+      .frontier-value {
+        font-size: 30px;
+        line-height: 1.2;
+        letter-spacing: -0.03em;
+        font-weight: 700;
+      }
+      .frontier svg {
+        width: 100%;
+        height: 105px;
+        display: block;
+      }
+      .keyline {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .empty {
+        color: var(--muted);
+        padding: 20px 0;
+        font-size: 13px;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+      }
+      .metric {
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        padding: 12px;
+      }
+      .metric strong {
+        display: block;
+        font-size: 19px;
+        line-height: 1.3;
+        margin: 4px 0;
+      }
+      .bar {
+        height: 5px;
+        background: #e8eee7;
+        border-radius: 10px;
+        margin-top: 9px;
+        overflow: hidden;
+      }
+      .bar i {
+        display: block;
+        background: #6fa484;
+        height: 100%;
+      }
+      .list {
+        display: grid;
+        gap: 9px;
+      }
+      .item {
+        width: 100%;
+        text-align: left;
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 11px;
+        padding: 13px;
+        transition: 0.15s;
+        color: inherit;
+      }
+      .item:hover,
+      .item.selected {
+        border-color: #7ba98b;
+        background: #f7fbf5;
+      }
+      .item-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 10px;
+      }
+      .goal-clamped,
+      .item-title,
+      .lineage button,
+      #signals .item {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        overflow-wrap: anywhere;
+      }
+      #goal-toggle {
+        border: 0;
+        background: transparent;
+        color: var(--green);
+        padding: 5px 0;
+      }
+      .item-title {
+        font-weight: 700;
+        overflow-wrap: anywhere;
+      }
+      .item p {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        margin: 5px 0 0;
+        color: #60746a;
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      .meta {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 8px;
+        overflow-wrap: anywhere;
+      }
+      .role-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 9px;
+      }
+      .role {
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        padding: 12px;
+        min-width: 0;
+      }
+      .role-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 6px;
+        align-items: center;
+      }
+      .role strong {
+        font-size: 13px;
+      }
+      .role p {
+        margin: 7px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      .detail {
+        background: #f7faf6;
+        border-radius: 11px;
+        padding: 14px;
+        margin-top: 12px;
+        overflow-wrap: anywhere;
+      }
+      .detail h3 {
+        margin-bottom: 6px;
+      }
+      .detail p {
+        margin: 5px 0;
+        font-size: 12px;
+      }
+      .detail dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 5px 10px;
+        font-size: 12px;
+        margin: 8px 0;
+      }
+      .detail dt {
+        color: var(--muted);
+      }
+      .detail dd {
+        margin: 0;
+      }
+      .section-title {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+      }
+      .section-title h2 {
+        margin: 0;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+      .footnote {
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.6;
+        margin-top: 12px;
+      }
+      .error {
+        color: var(--red);
+        font-size: 12px;
+      }
+      .id {
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+      .lineage {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+        align-items: center;
+      }
+      .lineage button {
+        border: 1px solid var(--line);
+        background: white;
+        color: var(--green);
+        border-radius: 8px;
+        padding: 6px 9px;
+        overflow-wrap: anywhere;
+        max-width: 100%;
+      }
+      @media (max-width: 1000px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+        .hero-side {
+          min-width: 140px;
+        }
+      }
+      @media (max-width: 600px) {
+        .shell {
+          padding: 18px 16px 40px;
+        }
+        .top-right {
+          gap: 8px;
+        }
+        .hero {
+          display: block;
+        }
+        .hero-side {
+          text-align: left;
+          margin-top: 18px;
+        }
+        .metrics {
+          grid-template-columns: 1fr;
+        }
+        .role-grid,
+        .split {
+          grid-template-columns: 1fr;
+        }
+        .card {
+          padding: 17px;
+        }
+        .top-right .live {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="top">
+        <div class="brand">
+          <div class="mark">✳</div>
+          <div>
+            <div class="eyebrow">Research loop</div>
+            <div class="muted">Study 研究工作台</div>
+          </div>
+        </div>
+        <div class="top-right">
+          <span class="live"><span class="dot"></span>只读视图</span
+          ><a href="ledger">查看运行账本 ↗</a>
+        </div>
+      </header>
+      <div class="hero">
+        <div>
+          <div class="eyebrow">研究目标</div>
+          <h1 id="headline">研究概览<span style="color: #7ca58a">.</span></h1>
+          <p id="goal" class="goal-clamped">正在读取研究目标…</p>
+          <button id="goal-toggle" type="button" aria-expanded="false">
+            展开完整目标
+          </button>
+        </div>
+        <div class="hero-side">
+          <span class="muted">STUDY ID</span
+          ><strong id="study" class="id">—</strong
+          ><span id="updated" class="muted">等待数据</span>
+          <div id="error" class="error" role="status"></div>
+        </div>
+      </div>
+      <div class="layout">
+        <div class="stack">
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>研究前沿</h2>
+                <div class="sub">全局评价 · 已发布且通过资格审核的测量</div>
+              </div>
+              <span id="frontier-mode" class="pill">—</span>
+            </div>
+            <div id="frontier" class="frontier"></div>
+            <p class="footnote">
+              横轴为发布版本。资格修订从对应的发布版本生效。
+            </p>
+          </section>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>任务与提案</h2>
+                <div class="sub">选择任务以查看状态、依赖与关联工作</div>
+              </div>
+              <span id="task-count" class="pill">—</span>
+            </div>
+            <div id="tasks" class="list"></div>
+            <div id="task-detail"></div>
+            <div class="section-title" style="margin: 20px 0 10px">
+              <h3>倡议提案</h3>
+              <span id="proposal-count" class="pill">—</span>
+            </div>
+            <div id="proposals" class="list"></div>
+            <div id="proposal-detail"></div>
+          </section>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>知识与信号</h2>
+                <div class="sub">来自已发布记录；选择条目查看上下文与关联</div>
+              </div>
+              <span id="knowledge-count" class="pill">—</span>
+            </div>
+            <div id="knowledge" class="list"></div>
+            <div id="knowledge-detail"></div>
+          </section>
+        </div>
+        <div class="stack">
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>预算与运行</h2>
+              </div>
+              <span id="admission" class="pill">—</span>
+            </div>
+            <div id="limits" class="metrics"></div>
+            <div id="budgets" class="list" style="margin-top: 12px"></div>
+            <p class="footnote">
+              时间为账本中持久化的累计值。持有、结算与剩余资源以授权记录为准。
+            </p>
+          </section>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>Agent 工作概览</h2>
+                <div class="sub">各角色最近一次尝试与交付状态</div>
+              </div>
+            </div>
+            <div id="roles" class="role-grid"></div>
+          </section>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>研究谱系</h2>
+                <div class="sub">所选任务的依赖与修正关系</div>
+              </div>
+            </div>
+            <div id="lineage"></div>
+            <p class="footnote">
+              关联来自记录的任务依赖与修正；点击节点可切换任务。
+            </p>
+          </section>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2>运行信号</h2>
+              </div>
+            </div>
+            <div id="signals"></div>
+            <p class="footnote">
+              Owner
+              状态是记录值，不代表实时存活；执行终止不代表资源已释放或费用已结清。
+            </p>
+          </section>
+        </div>
+      </div>
+    </main>
+    <script>
+      "use strict";
+      const $ = (id) => document.getElementById(id);
+      let selectedTask = null,
+        selectedKnowledge = null,
+        selectedProposal = null,
+        lastStatus = null,
+        lastOverview = null,
+        showAllProposals = false,
+        lastDataKey = null;
+      const txt = (v) =>
+        v === null || v === undefined || v === ""
+          ? "—"
+          : typeof v === "object"
+            ? JSON.stringify(v)
+            : String(v);
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined) n.textContent = txt(text);
+        return n;
+      };
+      const clear = (id) => $(id).replaceChildren();
+      const empty = (host, message) => host.append(el("div", "empty", message));
+      const labels = {
+        published: "已发布",
+        unresolved: "待解决",
+        reviewed: "已审阅",
+        cancelled: "已取消",
+        failed: "失败",
+        running: "运行中",
+        queued: "排队中",
+        waiting: "等待中",
+        active: "进行中",
+        accepted: "已接受",
+        rejected: "已拒绝",
+        terminal: "已终止",
+        unknown: "未知",
+      };
+      const label = (v) => labels[v] || txt(v);
+      const badge = (value) =>
+        el(
+          "span",
+          "pill" +
+            (["failed", "unresolved", "rejected"].includes(value)
+              ? " bad"
+              : ["waiting", "queued", "unknown"].includes(value)
+                ? " warn"
+                : ""),
+          label(value),
+        );
+      function item(host, title, subtitle, meta, selected, click, status) {
+        const b = el("button", "item" + (selected ? " selected" : ""));
+        b.type = "button";
+        const top = el("div", "item-top");
+        top.append(el("span", "item-title", title));
+        if (status) top.append(badge(status));
+        b.append(top);
+        if (subtitle) b.append(el("p", "", subtitle));
+        if (meta) b.append(el("div", "meta", meta));
+        b.onclick = click;
+        host.append(b);
+      }
+      function headline(x) {
+        return x.title || x.hypothesis || x.instruction || x.id || "未命名";
+      }
+      function proposalKey(p) {
+        return JSON.stringify([p.round_id, p.attempt_id, p.index]);
+      }
+      function detail(host, title, fields) {
+        const box = el("div", "detail");
+        box.append(el("h3", "", title));
+        const dl = el("dl");
+        for (const [k, v] of fields) {
+          if (v === null || v === undefined || v === "") continue;
+          dl.append(
+            el("dt", "", k),
+            el("dd", "", Array.isArray(v) ? v.join("、") : v),
+          );
+        }
+        box.append(dl);
+        host.replaceChildren(box);
+      }
+      function selectTask(id) {
+        selectedTask = id;
+        renderTasks(lastStatus, lastOverview);
+        renderLineage(lastOverview);
+        $("tasks").scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      function pointButton(o, point, prefix) {
+        const task = (o.tasks || []).find(
+          (t) => t.iteration_id === point.iteration_id,
+        );
+        const b = el(
+          "button",
+          "item",
+          `${prefix} · ${task ? headline(task) : txt(point.candidate_id)} · ${txt(point.metrics)}`,
+        );
+        if (task) b.onclick = () => selectTask(task.id);
+        else b.disabled = true;
+        return b;
+      }
+      function drawFrontier(o) {
+        const f = o.frontier || {},
+          host = $("frontier"),
+          objectives = o.evaluation?.objectives || [];
+        host.replaceChildren();
+        $("frontier-mode").textContent =
+          f.mode === "pareto"
+            ? "多目标 Pareto"
+            : f.mode === "single_objective"
+              ? "单目标"
+              : "前沿不可用";
+        const context = objectives
+          .map(
+            (x) =>
+              `${txt(x.name)} · ${txt(x.unit)} · ${x.direction === "maximize" ? "越大越好" : x.direction === "minimize" ? "越小越好" : txt(x.direction)}`,
+          )
+          .join("；");
+        host.append(
+          el(
+            "div",
+            "sub",
+            `${context || "未配置目标指标"} · 范围 ${txt(o.evaluation?.comparison_scope)}`,
+          ),
+        );
+        if (f.status !== "available") {
+          empty(host, f.message || "暂无可展示的前沿。");
+          return;
+        }
+        const current = f.current || [],
+          points = f.points || [];
+        if (f.mode === "pareto") {
+          host.append(
+            el("div", "frontier-value", `${current.length} 个前沿点`),
+            el("div", "sub", "当前非支配测量"),
+          );
+          for (const p of current) host.append(pointButton(o, p, "当前前沿"));
+          if (!current.length) empty(host, "尚无符合资格的全局测量。");
+          const history = el("details");
+          history.append(el("summary", "", "查看各发布版本的前沿"));
+          for (const version of points)
+            for (const p of version.frontier || [])
+              history.append(
+                pointButton(o, p, `版本 ${version.publication_id}`),
+              );
+          host.append(history);
+          return;
+        }
+        const objective = objectives[0],
+          value =
+            current.length && objective
+              ? current[0].metrics?.[objective.name]
+              : null;
+        host.append(el("div", "frontier-value", value ?? "—"));
+        for (const p of current) host.append(pointButton(o, p, "当前前沿"));
+        const valid = points.filter(
+          (p) =>
+            typeof p.best_value === "number" && Number.isFinite(p.best_value),
+        );
+        if (!valid.length) {
+          empty(host, "尚无符合资格的全局测量。");
+          return;
+        }
+        const ns = "http://www.w3.org/2000/svg",
+          svg = document.createElementNS(ns, "svg");
+        svg.setAttribute("viewBox", "0 0 600 105");
+        svg.setAttribute("preserveAspectRatio", "none");
+        const vals = valid.map((p) => p.best_value),
+          lo = Math.min(...vals),
+          hi = Math.max(...vals),
+          xmin = points[0].publication_id,
+          xmax = points[points.length - 1].publication_id;
+        const coords = (p) => [
+          20 +
+            560 *
+              (xmax === xmin ? 0.5 : (p.publication_id - xmin) / (xmax - xmin)),
+          85 - 65 * (hi === lo ? 0.5 : (p.best_value - lo) / (hi - lo)),
+        ];
+        let previous = null;
+        for (const p of points) {
+          if (
+            typeof p.best_value !== "number" ||
+            !Number.isFinite(p.best_value)
+          ) {
+            previous = null;
+            continue;
+          }
+          const [x, y] = coords(p);
+          if (previous) {
+            const line = document.createElementNS(ns, "line");
+            line.setAttribute("x1", previous[0]);
+            line.setAttribute("y1", previous[1]);
+            line.setAttribute("x2", x);
+            line.setAttribute("y2", y);
+            line.setAttribute("stroke", "#488365");
+            line.setAttribute("stroke-width", "3");
+            line.setAttribute("vector-effect", "non-scaling-stroke");
+            svg.append(line);
+          }
+          const circle = document.createElementNS(ns, "circle");
+          circle.setAttribute("cx", x);
+          circle.setAttribute("cy", y);
+          circle.setAttribute("r", "5");
+          circle.setAttribute("fill", "#246550");
+          const candidate = (p.frontier || []).find(
+              (c) => c.metrics?.[objective?.name] === p.best_value,
+            ),
+            task = (o.tasks || []).find(
+              (t) => t.iteration_id === candidate?.iteration_id,
+            );
+          if (task) {
+            circle.setAttribute("tabindex", "0");
+            circle.setAttribute("role", "button");
+            circle.setAttribute(
+              "aria-label",
+              `版本 ${p.publication_id}，查看 ${headline(task)}`,
+            );
+            circle.onclick = () => selectTask(task.id);
+            circle.onkeydown = (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                selectTask(task.id);
+              }
+            };
+          }
+          svg.append(circle);
+          previous = [x, y];
+        }
+        host.append(svg);
+        const axis = el("div", "keyline");
+        axis.append(
+          el("span", "", `发布版本 ${xmin}`),
+          el("span", "", `发布版本 ${xmax}`),
+        );
+        host.append(axis);
+        const history = el("details");
+        history.append(el("summary", "", "查看历史前沿点"));
+        for (const p of points)
+          for (const candidate of p.frontier || [])
+            history.append(
+              pointButton(o, candidate, `版本 ${p.publication_id}`),
+            );
+        host.append(history);
+      }
+      function renderTasks(s, o) {
+        const host = $("tasks"),
+          saved = $("task-detail");
+        host.before(saved);
+        clear("tasks");
+        const rows = o.tasks || [],
+          status = new Map((s.tasks || []).map((t) => [t.id, t]));
+        $("task-count").textContent = `${rows.length} 个任务`;
+        if (selectedTask && !rows.some((t) => t.id === selectedTask))
+          selectedTask = null;
+        if (!rows.length) empty(host, "暂无任务。");
+        for (const t of rows) {
+          const st = status.get(t.id) || {};
+          item(
+            host,
+            headline(t),
+            t.description || t.instruction || t.proposal,
+            `${t.id} · 阶段 ${txt(st.phase)} · 优先级 ${txt(t.priority)} · ${txt(t.source)}`,
+            selectedTask === t.id,
+            () => {
+              selectedTask = t.id;
+              renderTasks(s, o);
+              renderLineage(o);
+            },
+            st.status,
+          );
+        }
+        const selected = rows.find((t) => t.id === selectedTask),
+          d = $("task-detail");
+        d.replaceChildren();
+        if (selected) {
+          const st = status.get(selected.id) || {};
+          detail(d, headline(selected), [
+            ["任务 ID", selected.id],
+            ["描述", selected.description],
+            ["指令", selected.instruction],
+            ["提案", selected.proposal],
+            ["假设", selected.hypothesis],
+            ["干预", selected.intervention],
+            ["来源", selected.origin_kind],
+            ["来源 ID", selected.origin_id],
+            ["规划轮次", selected.round_id],
+            ["阶段", st.phase],
+            ["迭代", selected.iteration_id],
+            ["依赖", selected.dependencies],
+            [
+              "阻塞",
+              st.blocked_dependencies?.map((x) => `${x.id} (${x.reason})`),
+            ],
+            ["执行", st.execution],
+            ["反馈封存", st.feedback_sealed],
+            ["资源释放", st.physical_released],
+            ["费用结算", st.fees_settled],
+          ]);
+          const selectedButton = host.querySelector(".selected");
+          if (selectedButton) selectedButton.after(d);
+        }
+      }
+      function renderProposals(o) {
+        const host = $("proposals"),
+          saved = $("proposal-detail");
+        host.before(saved);
+        host.replaceChildren();
+        const rows = o.proposals || [];
+        $("proposal-count").textContent = `${rows.length} 个提案`;
+        if (
+          selectedProposal &&
+          !rows.some((p) => proposalKey(p) === selectedProposal)
+        )
+          selectedProposal = null;
+        if (!rows.length) empty(host, "暂无已接受的倡议提案。");
+        const shown = showAllProposals ? rows : rows.slice(-3);
+        for (const p of shown) {
+          item(
+            host,
+            headline(p),
+            p.description || p.instruction || p.reason,
+            `轮次 ${txt(p.round_id)} · 槽位 ${txt(p.slot)}`,
+            selectedProposal === proposalKey(p),
+            () => {
+              selectedProposal = proposalKey(p);
+              renderProposals(o);
+            },
+            null,
+          );
+        }
+        const p = rows.find((x) => proposalKey(x) === selectedProposal),
+          d = $("proposal-detail");
+        d.replaceChildren();
+        if (p) {
+          detail(d, headline(p), [
+            ["提案 ID", p.id],
+            ["轮次", p.round_id],
+            ["尝试", p.attempt_id],
+            ["指令", p.instruction],
+            ["假设", p.hypothesis],
+            ["干预", p.intervention],
+            ["描述", p.description],
+            ["理由", p.reason],
+            ["优先级", p.priority],
+            ["依赖", p.dependencies],
+          ]);
+          const related = (o.tasks || []).filter(
+            (t) => t.round_id && t.round_id === p.round_id,
+          );
+          if (related.length) {
+            const links = el("div", "lineage");
+            links.append(el("span", "muted", "同轮次任务："));
+            for (const t of related) {
+              const b = el("button", "", headline(t));
+              b.onclick = () => {
+                selectedTask = t.id;
+                renderTasks(lastStatus, lastOverview);
+                renderLineage(lastOverview);
+                $("tasks").scrollIntoView({
+                  behavior: "smooth",
+                  block: "start",
+                });
+              };
+              links.append(b);
+            }
+            d.append(links);
+          }
+          const selectedButton = host.querySelector(".selected");
+          if (selectedButton) selectedButton.after(d);
+        }
+        if (rows.length > 3) {
+          const b = el(
+            "button",
+            "item",
+            showAllProposals
+              ? "收起历史提案"
+              : `展开全部 ${rows.length} 个提案`,
+          );
+          b.onclick = () => {
+            showAllProposals = !showAllProposals;
+            renderProposals(o);
+          };
+          host.append(b);
+        }
+      }
+      function renderKnowledge(o) {
+        const host = $("knowledge"),
+          saved = $("knowledge-detail");
+        host.before(saved);
+        clear("knowledge");
+        const rows = o.knowledge || [];
+        $("knowledge-count").textContent = `${rows.length} 条记录`;
+        if (selectedKnowledge && !rows.some((k) => k.id === selectedKnowledge))
+          selectedKnowledge = null;
+        if (!rows.length) empty(host, "暂无已发布的知识记录。");
+        for (const k of rows) {
+          item(
+            host,
+            k.statement || k.id,
+            k.interpretation,
+            `${k.kind} · ${k.source_role} · 发布版本 ${k.publication_id}`,
+            selectedKnowledge === k.id,
+            () => {
+              selectedKnowledge = k.id;
+              renderKnowledge(o);
+            },
+            null,
+          );
+        }
+        const k = rows.find((x) => x.id === selectedKnowledge),
+          d = $("knowledge-detail");
+        d.replaceChildren();
+        if (k)
+          detail(d, k.id, [
+            ["内容", k.statement],
+            ["条件", k.conditions],
+            ["解释", k.interpretation],
+            ["限制", k.limitations],
+            ["关联测量", k.measurement_ids],
+            [
+              "测量状态",
+              (k.measurement_status || []).map(
+                (m) =>
+                  `${m.measurement_id}：${m.valid === false ? "已失效" : m.valid === true ? "有效" : "有效性未记录"}，${m.verified === true ? "已验证" : m.verified === false ? "未验证" : "验证状态未记录"}（版本 ${txt(m.publication_id)}）`,
+              ),
+            ],
+            ["修订", k.revision],
+            ["发布版本", k.publication_id],
+          ]);
+        if (k) {
+          const selectedButton = host.querySelector(".selected");
+          if (selectedButton) selectedButton.after(d);
+        }
+      }
+      function renderLineage(o) {
+        const host = $("lineage");
+        host.replaceChildren();
+        const selected = (o.tasks || []).find((t) => t.id === selectedTask);
+        if (selected) {
+          const reset = el("button", "item", "显示全部关系");
+          reset.onclick = () => {
+            selectedTask = null;
+            renderTasks(lastStatus, lastOverview);
+            renderLineage(lastOverview);
+          };
+          host.append(reset);
+          host.append(
+            el(
+              "p",
+              "meta",
+              `所选任务 ${selected.id} → 研究迭代 ${txt(selected.iteration_id)}`,
+            ),
+          );
+          for (const point of o.frontier?.current || [])
+            if (point.iteration_id === selected.iteration_id)
+              host.append(
+                el(
+                  "p",
+                  "meta",
+                  `当前前沿测量 ${txt(point.measurement_id)} · ${txt(point.metrics)}`,
+                ),
+              );
+        }
+        const edges = (o.graph?.edges || []).filter(
+          (e) =>
+            !selectedTask ||
+            e.source === selectedTask ||
+            e.target === selectedTask,
+        );
+        if (!edges.length) {
+          empty(
+            host,
+            selectedTask
+              ? "该任务没有记录的依赖或修正关系。"
+              : "暂无记录的依赖或修正关系。",
+          );
+          return;
+        }
+        for (const e of edges) {
+          const row = el("div", "lineage");
+          for (const [i, id] of [e.target, e.source].entries()) {
+            if (i)
+              row.append(
+                el(
+                  "span",
+                  "muted",
+                  e.kind === "task_correction" ? "修正" : "依赖",
+                ),
+              );
+            const t = (o.tasks || []).find((n) => n.id === id),
+              b = el("button", "", t ? headline(t) : id);
+            b.onclick = () => {
+              selectedTask = id;
+              renderTasks(lastStatus, lastOverview);
+              renderLineage(lastOverview);
+            };
+            row.append(b);
+          }
+          host.append(row);
+        }
+      }
+      function render(s, o) {
+        lastStatus = s;
+        lastOverview = o;
+        $("study").textContent = s.study_id;
+        $("headline").textContent = s.stop?.requested
+          ? "已请求停止"
+          : (s.tasks || []).some((t) => t.status === "running")
+            ? "研究进行中"
+            : (s.tasks || []).some((t) => t.status === "failed")
+              ? "研究概览 · 存在失败任务"
+              : "研究概览";
+        $("goal").textContent = o.goal || "尚未提供研究目标。";
+        $("goal-toggle").hidden = $("goal").classList.contains("goal-clamped") && $("goal").scrollHeight <= $("goal").clientHeight;
+        $("admission").textContent = s.stop?.requested
+          ? "已请求停止"
+          : `准入：${txt(s.admission_mode)}`;
+        drawFrontier(o);
+        renderTasks(s, o);
+        renderProposals(o);
+        renderKnowledge(o);
+        renderLineage(o);
+        const limits = $("limits");
+        limits.replaceChildren();
+        for (const [name, value, max, unit] of [
+          ["调用", s.counters?.calls, s.limits?.max_calls, "次"],
+          ["迭代", s.counters?.iterations, s.limits?.max_iterations, "次"],
+          [
+            "累计时间",
+            s.counters?.elapsed_seconds / 3600,
+            s.limits?.max_seconds / 3600,
+            "小时",
+          ],
+        ]) {
+          const m = el("div", "metric");
+          m.append(
+            el("span", "muted", name),
+            el(
+              "strong",
+              "",
+              `${typeof value === "number" ? Number(value.toFixed(1)) : txt(value)} / ${max ?? "∞"}`,
+            ),
+            el("span", "muted", unit),
+          );
+          if (typeof max === "number" && max > 0 && typeof value === "number") {
+            const bar = el("div", "bar"),
+              i = el("i");
+            i.style.width = `${Math.max(0, Math.min(100, (value / max) * 100))}%`;
+            bar.append(i);
+            m.append(bar);
+          }
+          limits.append(m);
+        }
+        const budgets = $("budgets");
+        budgets.replaceChildren();
+        for (const b of o.budgets || []) {
+          const row = el("div", "detail"),
+            scale = b.unit === "gpu_seconds" ? 3600 : 1,
+            unit = b.unit === "gpu_seconds" ? "GPU·h" : b.unit,
+            fmt = (v) =>
+              typeof v === "number" ? Number((v / scale).toFixed(2)) : txt(v);
+          row.append(
+            el("strong", "", `${txt(b.authorization_id)} · ${txt(unit)}`),
+            el(
+              "p",
+              "",
+              `上限 ${fmt(b.limit)} · 持有 ${fmt(b.held)} · 已结算 ${fmt(b.settled)} · 剩余 ${fmt(b.remaining)}`,
+            ),
+          );
+          budgets.append(row);
+        }
+        const roles = $("roles");
+        roles.replaceChildren();
+        for (const [role, name] of [
+          ["scout", "侦察"],
+          ["advocate", "倡议"],
+          ["judge", "裁决"],
+          ["plan", "计划"],
+          ["execute", "执行"],
+          ["review", "审阅"],
+        ]) {
+          const attempts = (s.attempts || []).filter((a) => a.role === role),
+            a = attempts[attempts.length - 1],
+            box = el("div", "role"),
+            head = el("div", "role-head");
+          head.append(
+            el("strong", "", `${name} · ${role}`),
+            el(
+              "span",
+              "pill",
+              attempts.filter((x) => x.status === "active").length
+                ? `${attempts.filter((x) => x.status === "active").length} 个在途调用`
+                : "当前无在途调用",
+            ),
+          );
+          box.append(head);
+          const active = attempts.filter((x) => x.status === "active");
+          for (const x of active) {
+            const task = (o.tasks || []).find(
+                (t) => t.iteration_id === x.iteration_id,
+              ),
+              proposal = (o.proposals || []).find((p) => p.attempt_id === x.id);
+            const b = el(
+              "button",
+              "item",
+              task
+                ? headline(task)
+                : proposal
+                  ? headline(proposal)
+                  : `尝试 ${x.id}`,
+            );
+            b.onclick = () => {
+              if (task) {
+                selectedTask = task.id;
+                renderTasks(lastStatus, lastOverview);
+                renderLineage(lastOverview);
+                $("tasks").scrollIntoView({
+                  behavior: "smooth",
+                  block: "start",
+                });
+              } else if (proposal) {
+                showAllProposals = true;
+                selectedProposal = proposalKey(proposal);
+                renderProposals(lastOverview);
+                $("proposals").scrollIntoView({
+                  behavior: "smooth",
+                  block: "start",
+                });
+              }
+            };
+            box.append(b);
+          }
+          if (!active.length)
+            box.append(el("p", "", a ? `最近尝试 ${a.id}` : "尚无工作记录"));
+          const delivered = attempts
+            .filter((x) => x.status === "accepted")
+            .at(-1);
+          if (delivered) {
+            const task = (o.tasks || []).find(
+                (t) =>
+                  (delivered.iteration_id &&
+                    t.iteration_id === delivered.iteration_id) ||
+                  t.origin_id === delivered.id,
+              ),
+              proposal = (o.proposals || []).find(
+                (p) => p.attempt_id === delivered.id,
+              );
+            const b = el(
+              "button",
+              "item",
+              `最近交付 · ${task ? headline(task) : proposal ? headline(proposal) : delivered.id} · ${delivered.published ? "已发布" : "已接受"}`,
+            );
+            if (task) b.onclick = () => selectTask(task.id);
+            else if (proposal)
+              b.onclick = () => {
+                showAllProposals = true;
+                selectedProposal = proposalKey(proposal);
+                renderProposals(lastOverview);
+                $("proposals").scrollIntoView({
+                  behavior: "smooth",
+                  block: "start",
+                });
+              };
+            else b.disabled = true;
+            box.append(b);
+          } else box.append(el("p", "", "尚无已接受交付"));
+          roles.append(box);
+        }
+        const signals = $("signals");
+        signals.replaceChildren();
+        const failed = (s.tasks || []).filter((t) => t.status === "failed");
+        for (const t of failed) {
+          const task = (o.tasks || []).find((x) => x.id === t.id),
+            b = el(
+              "button",
+              "item",
+              `失败 · ${task ? headline(task) : t.id} · 阶段 ${txt(t.phase)}`,
+            );
+          b.onclick = () => {
+            selectedTask = t.id;
+            renderTasks(lastStatus, lastOverview);
+            renderLineage(lastOverview);
+            $("tasks").scrollIntoView({ behavior: "smooth", block: "start" });
+          };
+          signals.append(b);
+        }
+        const unresolved = (s.tasks || []).filter((t) => t.unresolved).length,
+          ops = (s.operations || []).filter((x) => x.unresolved).length;
+        for (const [name, value] of [
+          ["记录的 owner", s.owner_open ? "开放" : "关闭"],
+          ["待解决任务", unresolved],
+          ["待解决操作", ops],
+          ["待处理控制请求", (s.control_requests || []).length],
+          ["发布版本", s.publication_version],
+        ]) {
+          const row = el("div", "keyline");
+          row.style.padding = "7px 0";
+          row.append(el("span", "", name), el("strong", "", value));
+          signals.append(row);
+        }
+      }
+      $("goal-toggle").onclick = () => {
+        const expanded =
+          $("goal-toggle").getAttribute("aria-expanded") === "true";
+        $("goal-toggle").setAttribute("aria-expanded", String(!expanded));
+        $("goal-toggle").textContent = expanded ? "展开完整目标" : "收起目标";
+        $("goal").classList.toggle("goal-clamped", expanded);
+      };
+      async function refresh() {
+        try {
+          const [sr, or] = await Promise.all([
+            fetch("api/status", { cache: "no-store" }),
+            fetch("api/overview", { cache: "no-store" }),
+          ]);
+          if (!sr.ok || !or.ok) throw Error("数据暂不可用");
+          const [s, o] = await Promise.all([sr.json(), or.json()]);
+          const key = JSON.stringify([s, o], (k, v) =>
+            k === "reported_at" ? undefined : v,
+          );
+          if (key !== lastDataKey) {
+            const focused = document.activeElement;
+            const focusText =
+              focused?.tagName === "BUTTON" ? focused.textContent : null;
+            const focusContainer = focused?.closest("[id]")?.id;
+            render(s, o);
+            lastDataKey = key;
+            if (focusText && focusContainer) {
+              const replacement = Array.from(
+                $(focusContainer)?.querySelectorAll("button") || [],
+              ).find((button) => button.textContent === focusText);
+              replacement?.focus({ preventScroll: true });
+            }
+          }
+          $("updated").textContent = `更新于 ${new Date(s.reported_at).toLocaleTimeString("zh-CN")}`;
+          $("error").textContent = "";
+        } catch (e) {
+          $("error").textContent = `刷新失败：${e.message}`;
+        }
+      }
+      async function poll() {
+        await refresh();
+        setTimeout(poll, 15000);
+      }
+      poll();
+    </script>
+  </body>
+</html>

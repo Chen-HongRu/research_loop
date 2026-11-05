@@ -78,6 +78,11 @@ def _parser():
             command.add_argument("--consumer", required=True)
         elif name == "dashboard":
             command.add_argument("--port", type=int, default=8000)
+            command.add_argument(
+                "--research",
+                action="store_true",
+                help="Show research content to trusted Study readers",
+            )
         elif name == "request-status":
             command.add_argument("request_id")
     for name in (
@@ -428,7 +433,7 @@ def main(argv=None):
         elif args.command == "dashboard":
             from .dashboard import serve
 
-            serve(args.study, port=args.port)
+            serve(args.study, port=args.port, research=args.research)
             return 0
         else:
             result = submit(args)
