@@ -55,6 +55,10 @@ class MeasurementRegistry:
                     "SELECT * FROM tasks WHERE id=?", (iteration["task_id"],)
                 ).fetchone()
             )
+            if task is None or task["revision"] != iteration["task_revision"]:
+                raise ConflictError(
+                    "Measurement task differs from its claimed revision"
+                )
             config = json.loads(
                 conn.execute("SELECT config_json FROM control").fetchone()[0]
             )

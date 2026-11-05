@@ -531,9 +531,20 @@ class Publisher:
                     "UPDATE iterations SET status='published',phase='done',revision=revision+1 WHERE id=?",
                     (call_identity.iteration_id,),
                 )
+                conn.execute("UPDATE control SET pool_version=pool_version+1")
             conn.execute(
                 "UPDATE publications SET receipt_json=? WHERE id=?",
                 (_json(receipt), publication_id),
+            )
+            self.coordinator._planning_event(
+                conn,
+                f"publication:{publication_id}",
+                "knowledge",
+                {
+                    "publication_id": publication_id,
+                    "role": call_identity.role,
+                    "iteration_id": call_identity.iteration_id,
+                },
             )
             return receipt
 
