@@ -12,62 +12,118 @@ from research_loop.runtime.operation_contract import json_value, validate_execut
 
 
 class Artifact(native.StrictModel):
-    path: native.Text
-    version: native.Text
+    path: native.Text = Field(description="Artifact path from the frozen context.")
+    version: native.Text = Field(
+        description="Exact version of the referenced artifact."
+    )
 
 
 class ScriptInput(native.StrictModel):
-    name: native.Text
-    source: native.Text
+    name: native.Text = Field(
+        description="Script-facing input name from the canonical mapping."
+    )
+    source: native.Text = Field(
+        description="Canonical source alias from the input mappings. The container mount path is provided separately for script access."
+    )
 
 
 class Execution(native.StrictModel):
-    mode: Literal["script"]
-    entrypoint: native.Text
-    gpu: bool
-    time_limit_seconds: Annotated[int, Field(ge=1, le=1800)]
-    inputs: list[ScriptInput]
-    outputs: list[native.Text]
+    mode: Literal["script"] = Field(
+        description="Execute a script through the trusted backend."
+    )
+    entrypoint: native.Text = Field(
+        description="Relative research/*.py entrypoint. Plan may name a file for Execute to create."
+    )
+    gpu: bool = Field(description="Must be true for this one-GPU backend.")
+    time_limit_seconds: Annotated[int, Field(ge=1, le=1800)] = Field(
+        description="GPU runtime limit in seconds, between 1 and 1800."
+    )
+    inputs: list[ScriptInput] = Field(
+        description="Explicit canonical input mappings. Each source and name must be unique."
+    )
+    outputs: list[native.Text] = Field(
+        description="Unique artifact paths relative to /output, such as report.json or train/summary.json. Source code writes these files under /output."
+    )
 
 
 class PlannedParameters(native.StrictModel):
-    baseline_ref: native.Text
-    execution: Execution
+    baseline_ref: native.Text = Field(
+        description="Exact frozen source baseline reference."
+    )
+    execution: Execution = Field(
+        description="Frozen script execution settings approved by Plan."
+    )
 
 
 class SourceFile(native.StrictModel):
-    path: native.Text
-    content: str
+    path: native.Text = Field(
+        description="Relative text file path within the operator's editable scope."
+    )
+    content: str = Field(description="Complete proposed text content for this file.")
 
 
 class Parameters(PlannedParameters):
-    source_files: list[SourceFile]
+    source_files: list[SourceFile] = Field(
+        description="Source proposals within operator scope. Execute adds only these files to the accepted operation parameters."
+    )
 
 
 class PlannedOperation(native.StrictModel):
-    id: native.Text
-    backend: native.Text
-    authorization_id: native.Text
-    resources: dict[str, int]
-    cost_bounds: dict[str, int]
-    timeout_seconds: Annotated[int, Field(gt=0)]
-    input_artifacts: list[Artifact]
-    parameters: PlannedParameters
+    id: native.Text = Field(description="Logical operation ID unique within this Plan.")
+    backend: native.Text = Field(
+        description="Configured script backend name matching the Plan."
+    )
+    authorization_id: native.Text = Field(
+        description="ID of the visible operation grant authorizing this backend and allocation."
+    )
+    resources: dict[str, int] = Field(
+        description="Exact resources map from the selected public backend contract. CPU and memory are operator settings."
+    )
+    cost_bounds: dict[str, int] = Field(
+        description="Exact configured cost-unit map with ceil(time_limit_seconds/60)*60 GPU seconds. Lifecycle headroom and candidate count do not increase this allocation."
+    )
+    timeout_seconds: Annotated[int, Field(gt=0)] = Field(
+        description="Lifecycle timeout in seconds, at least the rounded GPU allocation plus the backend staging headroom."
+    )
+    input_artifacts: list[Artifact] = Field(
+        description="Versioned artifact references used by this operation."
+    )
+    parameters: PlannedParameters = Field(
+        description="Frozen baseline and execution settings. Plan supplies these without source files."
+    )
 
 
 class Operation(PlannedOperation):
-    parameters: Parameters
+    parameters: Parameters = Field(
+        description="Accepted Plan parameters with only source_files added."
+    )
 
 
 class Plan(native.Plan):
-    baseline_ref: native.Text
-    backend: native.Text
-    operations: list[PlannedOperation]
+    baseline_ref: native.Text = Field(
+        description="Exact baseline reference from the frozen scientific contract."
+    )
+    backend: native.Text = Field(
+        description="Configured script backend used by every operation."
+    )
+    operations: list[PlannedOperation] = Field(
+        description="Bounded script operations for this investigation. Use an empty list for a qualitative question answerable from available context. Include operations when the task requires a diagnostic run."
+    )
+    local_evaluation: dict | None = Field(
+        description="Exact local_evaluation from the frozen scientific contract, or null when absent."
+    )
+    timeout_seconds: Annotated[int, Field(gt=0)] = Field(
+        description="Investigation lifetime in seconds, at least every operation timeout_seconds."
+    )
 
 
 class Execute(native.StrictModel):
-    operations: list[Operation]
-    artifacts: Annotated[list[Artifact], Field(max_length=0)]
+    operations: list[Operation] = Field(
+        description="Copy every accepted Plan operation exactly, adding only parameters.source_files. Return an empty list when the accepted Plan has no operations."
+    )
+    artifacts: Annotated[list[Artifact], Field(max_length=0)] = Field(
+        description="Return an empty list. The trusted backend creates artifacts after execution."
+    )
 
 
 MODELS = native.MODELS | {"plan": Plan, "execute": Execute}
@@ -195,14 +251,11 @@ def prepare_submission(role, package, config):
         science = package["context"][config["scientific_contract_source"]]
         mappings = science.get("execution_interface", {}).get("input_mappings", [])
         reminder = (
-            "Use the frozen scientific contract from context to choose operations. "
-            "Return operations inside output. Canonical input mappings:\n"
+            "Canonical input mappings:\n"
             + json.dumps(mappings, ensure_ascii=False)
-            + "\nEach execution.inputs item has only name and source. source is the selected mapping's canonical source "
-            "alias, name is its script-facing name, and mount is its container path for script access. Never put a "
-            "mount path in source or add mount to an execution.inputs item. "
-            "The root has exactly two sibling keys: output and evidence_refs. evidence_refs must not be inside output. "
+            + "\n"
         )
+
     return (
         "You are the native script research runtime role "
         + role
@@ -212,30 +265,8 @@ def prepare_submission(role, package, config):
         "Preserve the exact scientific contract at context["
         + json.dumps(config["scientific_contract_source"])
         + "]. "
-        "Plan may use operations=[] for a qualitative investigation that answers a concrete research question "
-        "using available context, with no resource allocation. State that question and the usable context in "
-        "experiment_definition; do not invent experiments, measurements or results. If the task requires an actual "
-        "diagnostic run, include its bounded script operations. For each operation freeze backend, baseline, execution, inputs, outputs, "
-        "authorization, resources, rounded GPU cost and lifecycle timeout. Its operations parameters contain only "
-        "baseline_ref and execution. Entrypoint must be a relative research/*.py path, such as research/diagnostic.py, "
-        "and gpu=true is required. Declared outputs must be paths relative to /output, such as report.json or "
-        "train/summary.json, without an /output/ prefix. Script source may write /output/report.json; that is distinct "
-        "from the relative outputs declaration. Rounded allocation is ceil(time_limit_seconds/60)*60 GPU seconds. "
-        "cost_bounds uses only that rounded allocation in the configured cost unit, never the longer lifecycle timeout. "
-        "Each operation timeout_seconds must be at least rounded allocation plus the headroom at the frozen scientific "
-        "contract's execution_interface.lifecycle_headroom_seconds (the configured staging_headroom_seconds). "
-        "Plan.timeout_seconds must be at least every operation timeout_seconds. "
-        "Do not generate source_files in Plan. Keep local_evaluation exactly as frozen "
-        "in the scientific contract (None if absent), never override the fixed global evaluation. "
-        "Execute must return operations=[] when accepted Plan operations are empty. Otherwise it copies every "
-        "accepted Plan operation exactly and adds only parameters.source_files, each a path/content "
-        "text edit within operator scope. Return artifacts=[]; the model cannot create artifact evidence. "
         "The trusted backend runs the script. Script reports are unverified interpretation evidence, not registered "
         "measurements or Frontier scores. Never fabricate measurements. Preserve conditions, uncertainty and limitations. "
-        "For each operation use the selected backend's exact resources map below, with no extra CPU or memory keys; "
-        "CPU and memory are hardware settings owned by the operator. cost_bounds must contain exactly the configured "
-        "cost unit and the rounded allocation for that operation, not lifecycle timeout or a multiple of candidate count. "
-        "For time_limit_seconds=1800, cost is exactly 1800, even when timeout_seconds is larger. "
         "Per-backend public operation contracts:\n"
         + json.dumps(contracts, sort_keys=True)
         + "\nContextPackage:\n"

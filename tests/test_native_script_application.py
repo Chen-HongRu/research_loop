@@ -386,7 +386,7 @@ class NativeScriptApplicationTests(unittest.TestCase):
         self.assertEqual(view, package)
         self.assertGreater(prompt.index("\nResponse contract:\n"), len(prompt) // 2)
         self.assertIn("Current role: plan", footer)
-        self.assertIn("Return operations inside output", footer)
+        self.assertIn("Call submit_result exactly once", footer)
         self.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
         required = schema["properties"]["output"]["required"]
         self.assertIn("operations", required)
@@ -440,7 +440,10 @@ class NativeScriptApplicationTests(unittest.TestCase):
         after = footer.split("Canonical input mappings:\n", 1)[1]
         self.assertEqual(json.loads(after.split("\n", 1)[0]), mappings)
         self.assertNotIn(science["protocol"], footer)
-        self.assertIn("Never put a mount path in source", footer)
+        self.assertIn(
+            "container mount path",
+            schema["$defs"]["ScriptInput"]["properties"]["source"]["description"],
+        )
         self.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
         self.assertEqual(self.validate("plan", plan), plan)
         invalid = deepcopy(plan)
@@ -467,19 +470,35 @@ class NativeScriptApplicationTests(unittest.TestCase):
             ):
                 application.invoke("agent", payload, self.config)
 
-    def test_script_prompts_explain_existing_paths_and_allocation_bounds(self):
+    def test_script_schema_explains_paths_and_allocation_bounds(self):
         for role in ("plan", "execute"):
-            prompt = policy.prompt(role, self.package(role).to_dict(), self.config)
-            with self.subTest(role=role):
-                for instruction in (
-                    "relative research/*.py",
-                    "gpu=true",
-                    "paths relative to /output",
-                    "ceil(time_limit_seconds/60)*60",
-                    "execution_interface.lifecycle_headroom_seconds",
-                    "Plan.timeout_seconds must be at least every operation timeout_seconds",
-                ):
-                    self.assertIn(instruction, prompt)
+            prompt, schema = policy.prepare_submission(
+                role, self.package(role).to_dict(), self.config
+            )
+            definitions = schema["$defs"]
+            execution = definitions["Execution"]["properties"]
+            self.assertIn("research/*.py", execution["entrypoint"]["description"])
+            self.assertIn("Must be true", execution["gpu"]["description"])
+            self.assertIn("relative to /output", execution["outputs"]["description"])
+            operation = definitions[
+                "PlannedOperation" if role == "plan" else "Operation"
+            ]["properties"]
+            self.assertIn(
+                "ceil(time_limit_seconds/60)*60",
+                operation["cost_bounds"]["description"],
+            )
+            self.assertIn(
+                "staging headroom", operation["timeout_seconds"]["description"]
+            )
+            if role == "plan":
+                self.assertIn(
+                    "at least every operation",
+                    schema["properties"]["output"]["properties"]["timeout_seconds"][
+                        "description"
+                    ],
+                )
+            prose = prompt.split("ContextPackage:", 1)[0]
+            self.assertNotIn("Entrypoint must", prose)
 
     def test_prompt_public_operation_contract_uses_config_without_private_settings(
         self,
@@ -516,9 +535,17 @@ class NativeScriptApplicationTests(unittest.TestCase):
                         }
                     },
                 )
-                self.assertIn("no extra CPU or memory keys", prompt)
+                schema = prompt_parts(prompt)[2]
+                operation = schema["$defs"][
+                    "PlannedOperation" if role == "plan" else "Operation"
+                ]["properties"]
                 self.assertIn(
-                    "not lifecycle timeout or a multiple of candidate count", prompt
+                    "CPU and memory are operator settings",
+                    operation["resources"]["description"],
+                )
+                self.assertIn(
+                    "Lifecycle headroom and candidate count",
+                    operation["cost_bounds"]["description"],
                 )
                 for key in (
                     "ssh_target",

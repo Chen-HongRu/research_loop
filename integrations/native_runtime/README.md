@@ -1,5 +1,10 @@
 # Native runtime application
 
+Role output fields are documented with Pydantic `Field(description=...)`.
+The generated JSON schema carries these descriptions into the role prompt and
+the `submit_result` tool parameters. Prompts supply role instructions and bound
+context, while Python validators enforce evidence and execution constraints.
+
 This trusted SQLite runtime application uses the Pi CLI for Scout, Advocate,
 Judge, Plan, Execute and Review. It passes each frozen ContextPackage through a
 role prompt and delivers the result through the terminating Pi tool `submit_result`. The application validates its arguments and evidence references.

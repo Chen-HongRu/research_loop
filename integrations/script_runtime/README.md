@@ -1,5 +1,10 @@
 # Native script runtime application
 
+Role output fields are documented with Pydantic `Field(description=...)`.
+The generated JSON schema carries these descriptions into the role prompt and
+the `submit_result` tool parameters. Prompts supply role instructions and bound
+context, while Python validators enforce evidence and execution constraints.
+
 This application runs Scout, Advocate, Judge, Plan, Execute and Review through the
 existing [Pi submission tool](../native_runtime/README.md). It adds typed,
 bounded script operations to the SQLite runtime. It contains no scientific task,

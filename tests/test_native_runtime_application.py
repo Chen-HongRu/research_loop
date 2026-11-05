@@ -104,13 +104,22 @@ def assert_prompt_envelope(testcase, prompt, output_model):
     testcase.assertIn(
         "Current role: " + expand_prompt_package(view)["manifest"]["role"], footer
     )
+    for model in [schema["properties"]["output"], *schema.get("$defs", {}).values()]:
+        for name, field in model.get("properties", {}).items():
+            testcase.assertTrue(field.get("description"), name)
     testcase.assertEqual(schema["type"], "object")
     testcase.assertEqual(set(schema["properties"]), {"output", "evidence_refs"})
     testcase.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
     testcase.assertIs(schema["additionalProperties"], False)
     testcase.assertEqual(
         schema["properties"]["evidence_refs"],
-        {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+        {
+            "type": "array",
+            "items": {"type": "string"},
+            "uniqueItems": True,
+            "title": "Evidence Refs",
+            "description": policy.Response.model_fields["evidence_refs"].description,
+        },
     )
     package = expand_prompt_package(view)
     context = package["context"] if package["manifest"]["role"] == "review" else None
@@ -651,9 +660,18 @@ class NativeApplicationTests(unittest.TestCase):
                         self.assertIn(
                             "Advocate proposals are advisory, not binding", prompt
                         )
-                        self.assertIn("visible in the frozen planning pool", prompt)
-                        self.assertIn("unclaimed, uncancelled autonomous tasks", prompt)
-                        self.assertIn("protect human tasks", prompt)
+                        schema = prompt_parts(prompt)[2]
+                        for name in ("UpdateTask", "CancelTask"):
+                            fields = schema["$defs"][name]["properties"]
+                            self.assertIn(
+                                "visible frozen planning pool",
+                                fields["expected_revision"]["description"],
+                            )
+                            self.assertIn(
+                                "unclaimed, uncancelled autonomous task",
+                                fields["action"]["description"],
+                            )
+                        self.assertIn("Protect human tasks", prompt)
 
     def repeated_package(self, role):
         base = self.package(role)
@@ -795,8 +813,14 @@ class NativeApplicationTests(unittest.TestCase):
         self.assertEqual(
             schema["$defs"]["Knowledge"]["properties"]["measurement_ids"]["maxItems"], 0
         )
-        self.assertIn("never operation, job or artifact IDs", prompt)
-        self.assertIn("Interpretations of research reports belong in knowledge", prompt)
+        fields = prompt_parts(prompt)[2]["$defs"]["Knowledge"]["properties"]
+        self.assertIn(
+            "Operation, job and artifact IDs", fields["measurement_ids"]["description"]
+        )
+        self.assertIn(
+            "interpretation records reasoning from reports",
+            fields["kind"]["description"],
+        )
         output = {"knowledge": [], "reviews": [], "corrections": []}
         self.stub(response={"output": output, "evidence_refs": []})
         payload = self.payload("review") | {"package": package.to_dict()}
@@ -895,11 +919,12 @@ class NativeApplicationTests(unittest.TestCase):
             {"output": output, "evidence_refs": [ref]},
         )
         prompt = policy.prompt("review", package.to_dict())
-        self.assertIn("exactly these nine fields", prompt)
-        self.assertIn("put explanatory notes in interpretation or limitations", prompt)
+        schema = prompt_parts(prompt)[2]
+        properties = schema["$defs"]["Knowledge"]["properties"]
         self.assertIn(
-            "Never cite the placeholder or invent unsupported conclusions", prompt
+            "supplementary notes", properties["interpretation"]["description"]
         )
+        self.assertNotIn("REPLACE_", prompt)
         invalid = deepcopy(output)
         invalid["knowledge"][0]["measurement_ids_note"] = "none"
         self.stub(response={"output": invalid, "evidence_refs": [ref]})
@@ -911,13 +936,17 @@ class NativeApplicationTests(unittest.TestCase):
         prompt = policy.prompt("review", package)
         view, footer, _ = prompt_parts(prompt)
         self.assertEqual(expand_prompt_package(view), package)
-        self.assertIn("expected_revision=0 for a new knowledge ID", footer)
-        self.assertIn("use its visible entry revision", footer)
-        self.assertIn("never the global publication or knowledge version", footer)
-        self.assertIn(
-            "only the root keys output and evidence_refs, as siblings", footer
+        schema = prompt_parts(prompt)[2]
+        description = schema["$defs"]["Knowledge"]["properties"]["expected_revision"][
+            "description"
+        ]
+        self.assertIn("Use 0 for a new knowledge ID", description)
+        self.assertIn("visible entry revision", description)
+        self.assertIn("never the global publication", description)
+        self.assertNotIn(
+            "visible entry revision",
+            footer.split("The complete response must satisfy")[0],
         )
-        self.assertIn("Never put evidence_refs inside output", footer)
 
     def test_review_schema_enumerates_only_original_visible_measurement_ids(self):
         package = self.repeated_package("review").to_dict()
