@@ -202,7 +202,7 @@ def prompt(role, package, config):
         + role
         + ". "
         + native.role_instructions(role)
-        + "Use only this frozen ContextPackage. No tools, filesystem access or source editing are available. "
+        + "Use only this frozen ContextPackage. Only the final submit_result tool is available. Filesystem access and source editing are disabled. "
         "Preserve the exact scientific contract at context["
         + json.dumps(config["scientific_contract_source"])
         + "]. "
@@ -223,7 +223,7 @@ def prompt(role, package, config):
         "in the scientific contract (None if absent), never override the fixed global evaluation. "
         "Execute must return operations=[] when accepted Plan operations are empty. Otherwise it copies every "
         "accepted Plan operation exactly and adds only parameters.source_files, each a path/content "
-        "text edit within operator scope. Return artifacts=[]; a tool-free model cannot create artifact evidence. "
+        "text edit within operator scope. Return artifacts=[]; the model cannot create artifact evidence. "
         "The trusted backend runs the script. Script reports are unverified interpretation evidence, not registered "
         "measurements or Frontier scores. Never fabricate measurements. Preserve conditions, uncertainty and limitations. "
         "For each operation use the selected backend's exact resources map below, with no extra CPU or memory keys; "

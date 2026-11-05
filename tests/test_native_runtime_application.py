@@ -181,6 +181,7 @@ class NativeApplicationTests(unittest.TestCase):
         hanging=False,
         spawn_child=True,
         extra_blocks=None,
+        event_case=None,
     ):
         script = f"""#!{sys.executable}
 import json, os
@@ -189,19 +190,27 @@ import subprocess, sys, time
 arguments = sys.argv[1:]
 with Path({str(self.root / "arguments.jsonl")!r}).open('a') as stream:
     stream.write(json.dumps(arguments)+'\\n')
-assert '--no-tools' in arguments
 assert '--no-context-files' in arguments
-assert arguments[arguments.index('--system-prompt')+1].startswith('You are a tool-free research assistant.')
+assert 'submit_result' in arguments[arguments.index('--system-prompt')+1]
 assert arguments[arguments.index('--append-system-prompt')+1] == ''
 assert '--no-mcp' in arguments and '--no-extensions' in arguments
 if '--list-models' in arguments:
-    assert '--offline' in arguments
+    assert '--offline' in arguments and '--no-tools' in arguments
+    assert '-e' not in arguments
     print('openai-codex {catalog}')
     sys.exit(0)
+assert '--no-tools' not in arguments
+assert '--no-builtin-tools' in arguments
+assert arguments[arguments.index('--tools')+1] == 'submit_result'
+assert arguments.count('-e') == 1
+extension = Path(arguments[arguments.index('-e')+1])
+assert extension.is_absolute() and extension.name == 'submit_result.ts' and extension.is_file()
 assert arguments[arguments.index('--provider')+1] == 'openai-codex'
 assert arguments[arguments.index('--model')+1] == 'synthetic-model'
 assert arguments[arguments.index('--thinking')+1] == 'medium'
 prompt = sys.stdin.read()
+schema = json.loads(prompt.split('The complete response must satisfy this JSON schema:\\n', 1)[1])
+assert json.loads(Path('response-schema.json').read_text()) == schema
 package = json.loads(prompt.split('ContextPackage:\\n', 1)[1].split('\\nResponse contract:\\n', 1)[0])
 if package.get('encoding') == 'shared-json-subtrees-v1':
     view = package
@@ -221,10 +230,44 @@ if {hanging!r}:
 outputs = {OUTPUTS!r}
 refs = {{'scout':['source:used'], 'review':['receipt:m']}}.get(role, [])
 answer = {response!r} if {response is not None!r} else {{'output': outputs[role], 'evidence_refs':refs}}
-message = {{'role':'assistant','stopReason':'stop','provider':'openai-codex','model':{model!r},'thinkingLevel':{thinking!r},
-           'content':{extra_blocks or []!r}+[{{'type':'text','text':json.dumps(answer)}}]}}
-print(json.dumps({{'type':'message_end','message':message}}))
-print(json.dumps({{'type':'agent_settled','aborted':False}}))
+tool_id = 'synthetic-submission'
+message = {{'role':'assistant','stopReason':'toolUse','provider':'openai-codex','model':{model!r},'thinkingLevel':{thinking!r},
+           'content':{extra_blocks or []!r}+[{{'type':'toolCall','id':tool_id,'name':'submit_result','arguments':answer}}]}}
+start = {{'type':'tool_execution_start','toolCallId':tool_id,'toolName':'submit_result','args':answer}}
+result = {{'content':[],'details':answer,'terminate':True}}
+end = {{'type':'tool_execution_end','toolCallId':tool_id,'toolName':'submit_result','result':result,'isError':False}}
+tool_result = {{'role':'toolResult','toolCallId':tool_id,'toolName':'submit_result','content':[],'details':answer,'isError':False}}
+events = [{{'type':'message_end','message':message}},start,end,{{'type':'message_end','message':tool_result}}]
+case = {event_case!r}
+if case == 'plain_text':
+    message['stopReason'] = 'stop'
+    message['content'] = [{{'type':'text','text':json.dumps(answer)}}]
+    events = events[:1]
+elif case == 'missing_end':
+    events = events[:2]
+elif case == 'failed_tool':
+    end['isError'] = True
+elif case == 'missing_terminate':
+    del result['terminate']
+elif case == 'wrong_tool':
+    message['content'][-1]['name'] = 'bash'
+elif case == 'mismatched_end_id':
+    end['toolCallId'] = 'forged-id'
+elif case == 'mismatched_result_id':
+    tool_result['toolCallId'] = 'forged-id'
+elif case == 'forged_end':
+    events = events[1:]
+elif case == 'mismatched_details':
+    end['result'] = {{'content':[],'details':{{'output':{{}},'evidence_refs':[]}},'terminate':True}}
+elif case == 'duplicate_tool':
+    message['content'].append({{'type':'toolCall','id':'extra-id','name':'submit_result','arguments':answer}})
+elif case == 'extra_assistant':
+    events.append({{'type':'message_end','message':{{**message,'stopReason':'stop','content':[{{'type':'text','text':'Additional response'}}]}}}})
+elif case == 'extra_execution':
+    events.append({{**end,'toolCallId':'extra-id','toolName':'bash'}})
+events.append({{'type':'agent_settled','aborted':case == 'aborted'}})
+for event in events:
+    print(json.dumps(event))
 """
         executable = Path(self.config["transport"]["executable"])
         executable.write_text(script)
@@ -1188,7 +1231,38 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
             self.assertEqual(snapshot["knowledge"][0]["kind"], "interpretation")
             self.assertEqual(snapshot["eligibility"], [])
 
-    def test_thinking_is_private_and_tool_calls_remain_forbidden(self):
+    def test_transport_requires_an_explicit_response_schema(self):
+        with self.assertRaises(TypeError):
+            application.transport.run("Synthetic prompt", self.config["transport"])
+        self.assertFalse((self.root / "arguments.jsonl").exists())
+
+    def test_only_one_successful_bound_submission_terminates_delivery(self):
+        for case in (
+            "plain_text",
+            "missing_end",
+            "failed_tool",
+            "missing_terminate",
+            "wrong_tool",
+            "mismatched_end_id",
+            "mismatched_result_id",
+            "forged_end",
+            "mismatched_details",
+            "duplicate_tool",
+            "extra_assistant",
+            "extra_execution",
+            "aborted",
+        ):
+            with self.subTest(case=case), self.assertRaises(HarnessError):
+                self.stub(event_case=case)
+                application.invoke("agent", self.payload("plan"), self.config)
+            streams = list(
+                (self.root / "private-calls").glob("call-*/response.stdout.jsonl")
+            )
+            self.assertEqual(len(streams), 1)
+            self.assertTrue(streams[0].read_text().strip())
+            shutil.rmtree(self.root / "private-calls")
+
+    def test_thinking_is_private_and_additional_active_content_is_rejected(self):
         blocks = [
             {"type": "thinking", "thinking": "Synthetic private reasoning"},
             {

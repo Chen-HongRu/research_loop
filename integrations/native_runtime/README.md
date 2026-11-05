@@ -2,7 +2,7 @@
 
 This trusted SQLite runtime application uses the Pi CLI for Scout, Advocate,
 Judge, Plan, Execute and Review. It passes each frozen ContextPackage through a
-tool-free prompt and validates the structured response and evidence references.
+role prompt and delivers the result through the terminating Pi tool `submit_result`. The application validates its arguments and evidence references.
 The initial Execute is qualitative only: its operations and artifacts lists are
 empty. It does not edit source or start training. Existing legacy Harness role
 schemas are separate and are not automatically adapted.
@@ -75,15 +75,21 @@ still ignore the field: client mode metadata does not prove server behavior.
 Check reported reasoning-token usage where available, without inspecting thought
 text. See the [DeepSeek thinking protocol](https://api-docs.deepseek.com/guides/thinking_mode/).
 
-An isolated native Pi model profile can request JSON syntax with
-`samplingParams: {"response_format": {"type": "json_object"}}`. Pi 1.5 forwards
-this parameter without enabling extensions, MCP or tools. Use a separate profile
-selected through `PI_CODING_AGENT_DIR` in the trusted executable wrapper when
-interactive sessions should retain their ordinary output mode. The complete
-`{output, evidence_refs}` schema is still supplied in the prompt and validated
-by the application; JSON mode alone does not enforce that schema. Provider support
-must be checked in the target environment. See
-[DeepSeek response formats](https://api-docs.deepseek.com/api/create-chat-completion/).
+Deploy [submit_result.ts](submit_result.ts) alongside `transport.py` in the
+versioned application environment. The controller writes the role's full
+JSON Schema to the private call directory and loads that extension explicitly.
+Pi exposes only `submit_result`. Its arguments are the entire
+`{output, evidence_refs}` object. The extension validates arguments locally
+and terminates the turn. Transport accepts a successful tool result tied to
+the matching assistant call and a settled session. Existing role, evidence
+and authorization checks then run on that result.
+
+Select a model with working Pi tool-call support. Model profiles need no
+structured text output settings. Remove wrappers that inject provider schemas.
+For OpenAI-compatible completions the extension removes a stale
+`response_format` from the outgoing payload. Disable agent and provider retries
+and compaction in the research profile to keep request accounting explicit.
+The extension aborts any follow-up inference turn in the same role invocation.
 
 An explicit `backend_handlers` entry can select `protok_cleanup` with `config`
 containing the frozen `inventory`, `backend_controls`, and optionally an absolute

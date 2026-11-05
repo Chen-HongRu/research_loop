@@ -1,4 +1,4 @@
-"""Native tool-free role composition with an explicitly configured script backend."""
+"""Native Pi role composition with an explicitly configured script backend."""
 
 import re
 
@@ -108,6 +108,9 @@ def invoke(kind, payload, config):
     response = transport.run(
         policy.prompt(role, package.to_dict(), config),
         config["transport"],
+        response_schema=policy.native.response_schema(
+            policy.MODELS[role], context=package.context if role == "review" else None
+        ),
         invocation={"call": payload["call"], "context_ref": payload["context_ref"]},
     )
     fields(response, {"output", "evidence_refs"}, "model response")

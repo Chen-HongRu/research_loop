@@ -34,7 +34,7 @@ ProTok supervisor 按子 Study 异步调度长训任务。某个子 Study 等待
 
 [#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端已推进到 schema 8。[SQLite 状态层](docs/transactional-runtime.md)提供独立 iteration 和统一账本；[Context / Feedback](docs/context-feedback.md)通过 Study 的 `role_access` 统一配置各角色的上下文、可引用证据与可提交动作；[知识发布](docs/knowledge-publication.md)按可信评价回执及资格修订重建双层 Frontier 与研究文档。[任务池与规划](docs/task-planning.md)保护人类任务及已认领版本，并行调用 Advocate，由 Judge 增改、排序未认领的自主任务。[Backend 生命周期](docs/backend-lifecycle.md)通过 `Operations` 和 `BackendDriver` Python API 分离有限 Execute 请求、一次提交、同一执行的检查、结果收集和费用结算；未知提交效果不会触发重提。[并发协调器](docs/concurrent-runtime.md)通过 Python API 调度本地调用并协调后端操作。[SQLite CLI 与 dashboard](docs/concurrent-runtime.md)提供显式应用配置、控制请求和只读状态。[显式迁移](docs/runtime-migration.md)提供预览、暂存、提交和激活；迁移与版本化部署需要可信操作员提供翻译、隔离及证据，现有串行 CLI 不自动迁移。
 
-[原生应用](integrations/native_runtime/README.md)使用无工具 Pi 调用支持六种角色；[脚本应用](integrations/script_runtime/README.md)可将冻结计划和源码提案交给有界 Slurm 后端执行。脚本报告仅作为未评分研究证据，不自动生成测量或 Frontier；原 ProTok 清理接入仍限于已导入任务。
+[原生应用](integrations/native_runtime/README.md)通过 Pi 的 `submit_result` 工具接收六种角色的结构化结果；[脚本应用](integrations/script_runtime/README.md)可将冻结计划和源码提案交给有界 Slurm 后端执行。脚本报告仅作为未评分研究证据，不自动生成测量或 Frontier；原 ProTok 清理接入仍限于已导入任务。
 
 ## 快速体验
 

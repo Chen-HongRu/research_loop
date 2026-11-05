@@ -569,6 +569,9 @@ class NativeScriptApplicationTests(unittest.TestCase):
                 self.assertEqual(result["output"], output)
                 prompt = run.call_args.args[0]
                 self.assertEqual(prompt_parts(prompt)[0], package.to_dict())
+                self.assertEqual(
+                    run.call_args.kwargs["response_schema"], prompt_parts(prompt)[2]
+                )
                 self.assertNotIn(
                     self.config["backend_handlers"]["script"]["config"]["ssh_target"],
                     prompt,

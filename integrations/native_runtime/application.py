@@ -1,4 +1,4 @@
-"""Native role composition: tool-free Pi calls and explicit imported cleanup.
+"""Native role composition: Pi tool submissions and explicit imported cleanup.
 
 This initial application supports qualitative Execute only. It neither edits
 source nor submits new training jobs. Importing the module performs no CLI calls.
@@ -74,6 +74,9 @@ def invoke(kind, payload, config):
     response = transport.run(
         policy.prompt(role, package.to_dict()),
         config["transport"],
+        response_schema=policy.response_schema(
+            policy.MODELS[role], context=package.context if role == "review" else None
+        ),
         invocation={"call": payload["call"], "context_ref": payload["context_ref"]},
     )
     fields(response, {"output", "evidence_refs"}, "model response")

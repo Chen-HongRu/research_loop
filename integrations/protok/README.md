@@ -4,7 +4,7 @@ For SQLite migration, `migration.py` supplies a pure explicit translator and
 bound cleanup for imported operations; it does not launch training or cancel jobs.
 The [migration guide](../../docs/runtime-migration.md) covers captured control
 annexes and operator evidence. The [native application](../native_runtime/README.md)
-can compose this cleanup with tool-free Pi roles; it is not the legacy runner.
+can compose this cleanup with Pi roles using the submit_result tool; it is not the legacy runner.
 The translator requires complete captured historical script coverage and binds
 accounting to original jobs and authorization. A nested `original_job`
 no-submission assertion must retain the exact captured job and original grant;

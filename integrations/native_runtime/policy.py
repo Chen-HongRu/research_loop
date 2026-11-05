@@ -135,7 +135,7 @@ def validate_output(role, output, context):
             )
         for item in value["artifacts"]:
             artifact(item)
-        # A tool-free qualitative callback cannot create or inspect artifacts.
+        # A qualitative submission callback cannot create or inspect artifacts.
         if value["artifacts"]:
             raise ValueError("Tool-free Execute cannot manufacture artifact evidence")
     if role == "judge":
@@ -398,7 +398,7 @@ def response_footer(role, output_model, *, context=None, reminder=""):
     return (
         "\nResponse contract:\nCurrent role: "
         + role
-        + ". Return exactly one JSON object with only the root keys "
+        + ". Call submit_result exactly once with one JSON object with only the root keys "
         "output and evidence_refs, as siblings. Never put evidence_refs inside output. output must contain every "
         "required field of this role's schema. evidence_refs must contain only actually used current "
         "manifest.allowed_evidence references. "
@@ -418,7 +418,7 @@ def prompt(role, package):
         + ". Use only the supplied ContextPackage. "
         + role_instructions(role)
         + encoding_instructions
-        + "No tools, filesystem access or source editing are available. Preserve uncertainty, conditions and limitations. "
+        + "Only the final submit_result tool is available. Filesystem access and source editing are disabled. Preserve uncertainty, conditions and limitations. "
         "Do not treat narratives or backend returns as scientific measurements. Plan states an explicit experiment definition. "
         "Execute is qualitative here and must return operations=[] and artifacts=[]. "
         "Scout/Review use only registered visible measurements and cited sources. "

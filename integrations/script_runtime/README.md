@@ -1,11 +1,11 @@
 # Native script runtime application
 
 This application runs Scout, Advocate, Judge, Plan, Execute and Review through the
-existing [tool-free Pi transport](../native_runtime/README.md). It adds typed,
+existing [Pi submission tool](../native_runtime/README.md). It adds typed,
 bounded script operations to the SQLite runtime. It contains no scientific task,
 metric, dataset, model architecture or deployment defaults. Installing a Pi
 network extension does not enable it here: calls retain `--no-extensions`,
-`--no-tools`, `--no-mcp`, disabled ambient context and exact configured model checks.
+`--tools submit_result`, an explicit trusted extension, `--no-mcp`, disabled ambient context and exact configured model checks.
 
 Select an immutable copy of `application.py` as described in the
 [concurrent runtime guide](../../docs/concurrent-runtime.md), with worker adapter
