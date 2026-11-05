@@ -83,11 +83,27 @@ OUTPUTS = {
 }
 
 
+def prompt_parts(prompt):
+    package_text, footer = prompt.split("\nContextPackage:\n", 1)[1].split(
+        "\nResponse contract:\n", 1
+    )
+    schema = json.loads(
+        footer.split("The complete response must satisfy this JSON schema:\n", 1)[1]
+    )
+    return json.loads(package_text), footer, schema
+
+
 def assert_prompt_envelope(testcase, prompt, output_model):
-    schema_text = prompt.split(
-        "The complete response must satisfy this JSON schema:\n", 1
-    )[1].split("\nContextPackage:\n", 1)[0]
-    schema = json.loads(schema_text)
+    view, footer, schema = prompt_parts(prompt)
+    testcase.assertEqual(
+        prompt.count("The complete response must satisfy this JSON schema:\n"), 1
+    )
+    testcase.assertGreater(
+        prompt.index("\nResponse contract:\n"), prompt.index("\nContextPackage:\n")
+    )
+    testcase.assertIn(
+        "Current role: " + expand_prompt_package(view)["manifest"]["role"], footer
+    )
     testcase.assertEqual(schema["type"], "object")
     testcase.assertEqual(set(schema["properties"]), {"output", "evidence_refs"})
     testcase.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
@@ -96,9 +112,7 @@ def assert_prompt_envelope(testcase, prompt, output_model):
         schema["properties"]["evidence_refs"],
         {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
     )
-    package = expand_prompt_package(
-        json.loads(prompt.split("\nContextPackage:\n", 1)[1])
-    )
+    package = expand_prompt_package(view)
     context = package["context"] if package["manifest"]["role"] == "review" else None
     expected = policy.response_schema(output_model, context=context)
     testcase.assertEqual(schema.get("$defs", {}), expected.get("$defs", {}))
@@ -188,7 +202,7 @@ assert arguments[arguments.index('--provider')+1] == 'openai-codex'
 assert arguments[arguments.index('--model')+1] == 'synthetic-model'
 assert arguments[arguments.index('--thinking')+1] == 'medium'
 prompt = sys.stdin.read()
-package = json.loads(prompt.split('ContextPackage:\\n', 1)[1])
+package = json.loads(prompt.split('ContextPackage:\\n', 1)[1].split('\\nResponse contract:\\n', 1)[0])
 if package.get('encoding') == 'shared-json-subtrees-v1':
     view = package
     package = view['package']
@@ -796,11 +810,7 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
         )
         package = build_context(snapshot, "review", None, "synthetic-v1", {})
         prompt = policy.prompt("review", package.to_dict())
-        schema = json.loads(
-            prompt.split("The complete response must satisfy this JSON schema:\n", 1)[
-                1
-            ].split("\nContextPackage:\n", 1)[0]
-        )
+        schema = prompt_parts(prompt)[2]
         properties = schema["properties"]["output"]["properties"]
         self.assertEqual(properties["reviews"]["maxItems"], 0)
         self.assertEqual(properties["corrections"]["maxItems"], 0)
@@ -918,15 +928,24 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
         with self.assertRaisesRegex(ValueError, "measurement_ids_note"):
             application.invoke("agent", payload, self.config)
 
+    def test_review_revision_reminder_follows_the_frozen_package(self):
+        package = self.repeated_package("review").to_dict()
+        prompt = policy.prompt("review", package)
+        view, footer, _ = prompt_parts(prompt)
+        self.assertEqual(expand_prompt_package(view), package)
+        self.assertIn("expected_revision=0 for a new knowledge ID", footer)
+        self.assertIn("use its visible entry revision", footer)
+        self.assertIn("never the global publication or knowledge version", footer)
+        self.assertIn(
+            "only the root keys output and evidence_refs, as siblings", footer
+        )
+        self.assertIn("Never put evidence_refs inside output", footer)
+
     def test_review_schema_enumerates_only_original_visible_measurement_ids(self):
         package = self.repeated_package("review").to_dict()
         original = deepcopy(package)
         prompt = policy.prompt("review", package)
-        schema = json.loads(
-            prompt.split("The complete response must satisfy this JSON schema:\n", 1)[
-                1
-            ].split("\nContextPackage:\n", 1)[0]
-        )
+        schema = prompt_parts(prompt)[2]
         self.assertIn("shared-json-subtrees-v1", prompt)
         self.assertEqual(package, original)
         for name in ("Decision", "Correction"):
@@ -1025,7 +1044,7 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
                         "call-synthetic-" + role + "-*/prompt.txt"
                     )
                 )
-                view = json.loads(folder.read_text().split("ContextPackage:\n", 1)[1])
+                view = prompt_parts(folder.read_text())[0]
                 self.assertEqual(
                     view.get("encoding") == "shared-json-subtrees-v1", role == "review"
                 )

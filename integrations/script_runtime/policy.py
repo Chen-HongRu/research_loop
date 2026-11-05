@@ -205,10 +205,16 @@ def prompt(role, package, config):
         "For time_limit_seconds=1800, cost is exactly 1800, even when timeout_seconds is larger. "
         "Per-backend public operation contracts:\n"
         + json.dumps(contracts, sort_keys=True)
-        + "\n"
-        "Return exactly one JSON object with output and evidence_refs. Cite only actually used manifest.allowed_evidence "
-        "references. The complete response must satisfy this JSON schema:\n"
-        + json.dumps(native.response_schema(MODELS[role]))
         + "\nContextPackage:\n"
         + json.dumps(package, ensure_ascii=False)
+        + native.response_footer(
+            role,
+            MODELS[role],
+            reminder=(
+                "For Plan, operations and scientific_contract are required sibling fields inside output, "
+                "alongside the other required Plan fields; neither belongs at the root or inside the other. "
+                if role == "plan"
+                else ""
+            ),
+        )
     )

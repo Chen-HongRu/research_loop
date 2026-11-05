@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import test_native_script_backend as fixture
-from test_native_runtime_application import assert_prompt_envelope
+from test_native_runtime_application import assert_prompt_envelope, prompt_parts
 from integrations.native_runtime import policy as native
 from integrations.script_runtime import application, backend, policy
 from research_loop.runtime.context import ContextSnapshot, build_context
@@ -367,6 +367,26 @@ class NativeScriptApplicationTests(unittest.TestCase):
                     output_model,
                 )
 
+    def test_plan_response_contract_is_after_large_unchanged_context(self):
+        self.context["provided:baseline_source"]["files"][0]["content"] += (
+            "# synthetic baseline context\n" * 12000
+        )
+        package = self.package("plan").to_dict()
+        prompt = policy.prompt("plan", package, self.config)
+        view, footer, schema = prompt_parts(prompt)
+        self.assertEqual(view, package)
+        self.assertGreater(prompt.index("\nResponse contract:\n"), len(prompt) // 2)
+        self.assertIn("Current role: plan", footer)
+        self.assertIn(
+            "operations and scientific_contract are required sibling fields inside output",
+            footer,
+        )
+        self.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
+        required = schema["properties"]["output"]["required"]
+        self.assertIn("operations", required)
+        self.assertIn("scientific_contract", required)
+        self.assertNotIn("evidence_refs", schema["properties"]["output"]["properties"])
+
     def test_script_prompts_explain_existing_paths_and_allocation_bounds(self):
         for role in ("plan", "execute"):
             prompt = policy.prompt(role, self.package(role).to_dict(), self.config)
@@ -461,9 +481,7 @@ class NativeScriptApplicationTests(unittest.TestCase):
                 )
                 self.assertEqual(result["output"], output)
                 prompt = run.call_args.args[0]
-                self.assertEqual(
-                    json.loads(prompt.split("ContextPackage:\n")[1]), package.to_dict()
-                )
+                self.assertEqual(prompt_parts(prompt)[0], package.to_dict())
                 self.assertNotIn(
                     self.config["backend_handlers"]["script"]["config"]["ssh_target"],
                     prompt,

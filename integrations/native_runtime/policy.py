@@ -388,6 +388,27 @@ def review_prompt_package(package):
     return package
 
 
+def response_footer(role, output_model, *, context=None, reminder=""):
+    revision = (
+        "For Review knowledge, expected_revision=0 for a new knowledge ID. For an existing entry, use its visible "
+        "entry revision, never the global publication or knowledge version. "
+        if role == "review"
+        else ""
+    )
+    return (
+        "\nResponse contract:\nCurrent role: "
+        + role
+        + ". Return exactly one JSON object with only the root keys "
+        "output and evidence_refs, as siblings. Never put evidence_refs inside output. output must contain every "
+        "required field of this role's schema. evidence_refs must contain only actually used current "
+        "manifest.allowed_evidence references. "
+        + revision
+        + reminder
+        + "The complete response must satisfy this JSON schema:\n"
+        + json.dumps(response_schema(output_model, context=context))
+    )
+
+
 def prompt(role, package):
     view = review_prompt_package(package) if role == "review" else package
     encoding_instructions = SHARED_SUBTREES_INSTRUCTIONS if view is not package else ""
@@ -401,13 +422,9 @@ def prompt(role, package):
         "Do not treat narratives or backend returns as scientific measurements. Plan states an explicit experiment definition. "
         "Execute is qualitative here and must return operations=[] and artifacts=[]. "
         "Scout/Review use only registered visible measurements and cited sources. "
-        "Return exactly one JSON object with output and evidence_refs. evidence_refs must contain only references actually used, "
-        "all present in manifest.allowed_evidence. The complete response must satisfy this JSON schema:\n"
-        + json.dumps(
-            response_schema(
-                MODELS[role], context=package["context"] if role == "review" else None
-            )
-        )
-        + "\nContextPackage:\n"
+        "\nContextPackage:\n"
         + _prompt_json(view)
+        + response_footer(
+            role, MODELS[role], context=package["context"] if role == "review" else None
+        )
     )
