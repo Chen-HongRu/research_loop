@@ -1,170 +1,28 @@
 # Research Loop
 
-**让研究进展留下可复核的证据。**
+Research Loop runs bounded, evidence-driven investigations using PiDurable 1.5 and official pi-env 1.5. A round freezes a Plan, executes an authorized local CPU operation, and publishes a trusted receipt and independent Review. Development feedback is adaptive and does not establish final-test generalization.
 
-A document-based research controller for bounded experiments, independent review,
-and recoverable execution. Built around your existing Codex or Pi CLI.
+The supported source entry is the root Node package. Node.js >= 22.19, Python and [uv](https://docs.astral.sh/uv/) are required. Native isolation uses macOS `sandbox-exec`; local macOS arm64 CPU is the verified platform. Other platforms, GPU and remote execution are not validated.
 
-![Research Loop 离线演示流程](docs/assets/offline-flow.svg)
-
-[快速体验](#快速体验) · [交互展示](docs/showcase.html) · [AeroArm 接入](docs/aeroarm.md) · [运行指南](docs/usage.md) · [MIT 许可](LICENSE)
-
-Research Loop 把研究目标拆成有边界的调查：选择路线、冻结计划、执行、独立评审，再发布研究理解和候选。代码版本、评价协议、执行结果与判断一起保存，便于合作者检查结论和接续工作。
-
-它适用于优化、诊断、复验、文献核查和推导。当前版本是研究原型；已有 Cactus 单次真实训练闭环记录，尚未证明跨任务研究收益。AeroArm 入口是接入模板，实际任务协议需由项目提供。
-
-## 能做什么
-
-| 能力 | 合作者得到什么 |
-| --- | --- |
-| 有界研究循环 | 明确的调用、时间和轮数预算；可选双提案辩论或直接选择 |
-| 冻结调查合同 | 每轮固定输入版本、起点、权限、评价与停止条件 |
-| 独立 Review | 执行完成、方法有效、知识变化和目标达成分别判断 |
-| 实验图与 Frontier | 代码继承与证据引用分开；只比较同协议下已核查的精确候选 |
-| 文档与恢复 | 两层研究文档、阶段回执和发布记录；保留中断现场供核对 |
-| 可选扩展 | Scout、实时观测、人工任务队列、独立预算的长训练 |
-
-控制器和研究后端分离：`src/research_loop/` 保存通用协议；`benchmarks/` 与 `integrations/` 保存任务边界。后端通过 prepare → start → inspect 分离准备、启动与同一执行的核对，接入方法见[执行后端指南](docs/execution-backends.md)。只读看板从 Study 评价定义与已发布 Frontier 展示通用指标，按来源和评价协议切换历史结果；ProTok 核账及长训保留为适用时启用的专用视图。其[横向关系树、实验卡片与下方进展面板](integrations/protok/dashboard.md#阅读方式)统一展示正在进行和已完成的任务，并支持手机阅读。
-
-可选 [Scout](docs/scout.md) 独立阅读论文与实现，提供外部洞见、反证和新视角。Reviewer 综合本地证据与未解问题，研究选择阶段决定下一步。宿主接入 Scout 后，默认每推进一轮且间隔至少五分钟可调用；结果在下一轮边界进入主循环，不改变当前 Plan。
-
-ProTok 父 Study 初始化在受锁保护、带所有权记录的暂存目录完成后原子发布；初始化、supervisor 与直接执行共用只读就绪检查。空的非符号链接 `study/` 可进入初始化；supervisor 在五次失败阈值内重试初始化，达到阈值后保留父任务阻断与暂存证据，独立授权的子任务继续。完成标记不能替代当前状态，旧版零轮次、仅有核心文件的部分初始化会保留并拒绝执行；已有运行证据的历史 Study 不要求永久保留初始三条路线。详见[初始化与恢复边界](integrations/protok/README.md#initialization-and-readiness)。
-
-ProTok supervisor 按子 Study 异步调度长训任务。某个子 Study 等待处理时保留原调查，其他独立任务继续；各人工长训使用独立预算，自动提名共享的分配与核账门槛继续生效。每个 Study 内的阶段和父 Study 轮次仍顺序发布，详见[任务调度](docs/task-queue.md)。
-
-[#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端已推进到 schema 8。[SQLite 状态层](docs/transactional-runtime.md)提供独立 iteration 和统一账本；[Context / Feedback](docs/context-feedback.md)通过 Study 的 `role_access` 统一配置各角色的上下文、可引用证据与可提交动作；[知识发布](docs/knowledge-publication.md)按可信评价回执及资格修订重建双层 Frontier 与研究文档。[任务池与规划](docs/task-planning.md)支持在 Study YAML 中配置待认领任务上限与研究预算，保护人类任务及已认领版本，并行调用 Advocate，由 Judge 增改、排序未认领的自主任务。[Backend 生命周期](docs/backend-lifecycle.md)通过 `Operations` 和 `BackendDriver` Python API 分离有限 Execute 请求、一次提交、同一执行的检查、结果收集和费用结算；未知提交效果不会触发重提。[并发协调器](docs/concurrent-runtime.md)通过 Python API 调度本地调用并协调后端操作。[SQLite CLI 与 dashboard](docs/concurrent-runtime.md)提供显式应用配置、控制请求和只读状态。[显式迁移](docs/runtime-migration.md)提供预览、暂存、提交和激活；迁移与版本化部署需要可信操作员提供翻译、隔离及证据，现有串行 CLI 不自动迁移。
-
-[原生应用](integrations/native_runtime/README.md)通过统一角色定义装配六种研究角色和 Knowledge Manager 的 Pi 调用。所有角色可用 Pi 原生文件工具读取获准知识库中的全部已发布文件，包括未被 Index 收录的文件。Manager 在私有草稿中编辑并通过 `submit_result` 发布。一次搜索也可能跨版本。CLI 和只读看板展示调用开始与结束时的发布版本；实际引用随决策保存，缺失的历史端点标为未记录。配置、决策查看与历史文件读取见[知识库使用说明](docs/study-knowledge.md)；[脚本应用](integrations/script_runtime/README.md)可将冻结计划和源码提案交给有界 Slurm 后端执行。脚本报告仅作为未评分研究证据，不自动生成测量或 Frontier；原 ProTok 清理接入仍限于已导入任务。
-
-## 快速体验
-
-要求 Python 3.11+、[uv](https://docs.astral.sh/uv/) 和 Git，运行环境为 macOS/Linux。
-
-也可以下载后直接用浏览器打开 [交互展示页](docs/showcase.html)，点击五个阶段查看示例记录；页面自包含，无需启动服务。GitHub 中的 HTML 链接显示源码，实际运行与字段说明见[展示导览](docs/showcase.md)。
-
-<details>
-<summary>查看交互展示预览</summary>
-
-![离线交互展示预览：固定脚本回复，不含真实实验数据](docs/assets/showcase-preview.png)
-
-</details>
-
-在仓库根目录运行：
-
-```bash
-uv sync --locked
-uv run python examples/offline_demo.py
-uv run research-loop status studies/demo
-uv run research-loop graph studies/demo
+```sh
+npm ci
+npm run build
+node dist/cli.js doctor
 ```
 
-离线演示不需要模型账号、GPU 或数据集。它用明确标记的脚本回复，走真实控制器的一轮选择 → Plan → Execute → Review → 发布，输出保存在 `studies/demo/`。**这验证流程接线，不是模型能力或 AeroArm 实验结果。** 已有目录不会被覆盖；完整说明见[展示导览](docs/showcase.md)。
+`doctor` makes no model call. It checks local prerequisites, compiled entry and locked dependency metadata; successful native isolation requires the native tests or an authorized smoke. For a bounded synthetic study, see the [runtime instructions](runtime/README.md). For existing Studies, read [recovery and authorization](docs/durable-research.md#recovery-and-authorization); for retired Studies, use the [retirement and history guide](docs/runtime-retirement.md).
 
-## 使用真实 Agent
+## Evidence and boundaries
 
-### 在 Codex 中安装和使用
+The [stage B evidence](docs/durable-research-evidence.md) records observed results and limitations. Source retirement does not establish that any production deployment has switched or that an old service has stopped. Existing installations and jobs require operator reconciliation; issues [#94](https://github.com/Chen-HongRu/research_loop/issues/94) and [#97](https://github.com/Chen-HongRu/research_loop/issues/97) remain open. Historical reports are identified in the [retirement index](docs/runtime-retirement.md#historical-material).
 
-整个仓库根目录也是一个可安装的 [research-loop skill](SKILL.md)，包含匹配的控制器源码、锁定依赖与操作指南。可以直接对 Codex 说：
+The [source and package checks](docs/runtime-retirement.md#source-and-package-verification) include 33 passing native tests and an independent installation of the compiled application archive, with one real CPU evaluation and no model call.
 
-> 使用 skill-installer 从 Chen-HongRu/research_loop 安装仓库根目录（`--path . --name research-loop`），然后检查运行环境，先不启动研究。
+## Development
 
-安装后，在下一轮对 Codex 说：
-
-> $research-loop 在当前仓库研究……。允许修改……，数据位置为……，资源预算为……。请补齐必要脚本、验证最小链路并启动第一轮。
-
-之后可以继续说“查看当前研究与证据”“再推进一轮”“提交这个指定调查”“停止当前运行”或“检查并恢复中断”。Codex 负责将请求落实为脚本和控制器操作；研究含义或资源授权不足时会询问缺失信息。已评审停止且目标未完成、预算仍有剩余时，新增 `resume --reason` 记录继续请求；它不会重置预算。安装指引见 [安装与环境检查](references/installation.md)，运行、恢复和更新见 [操作指南](references/operations.md)。
-
-安装需要 Python 3.11+、uv、Git 和已登录的 Codex CLI。skill 不安装模型或代办账号登录，也不会自动取得共享 GPU 权限。首次运行下载锁定依赖；`doctor` 不调用模型。具体实验仍需真实数据、评价器和适用的任务后端。
-
-已验证范围及实际遇到的安装、沙箱和型号限制见 [skill 验证记录](docs/skill-verification.md)；真实研究与脚本回复测试分别记录。
-
-现有串行 CLI 新建的 Study 使用 version 3。Plan 在 `markdown` 冻结科学合同，以顶层 `timeout_seconds` 限制执行；字段用途见[消费者审计](docs/plan-field-audit.md)。旧格式目录保留原样，不自动迁移，详见[使用说明](docs/usage.md)。
-
-结构化输入输出由 Pydantic v2 模型统一定义，生成给现有 CLI 的 JSON Schema 并执行本地严格校验；安装或更新依赖使用 `uv sync --locked`。预算、作业、源码身份和核账仍由控制器判断。
-
-尚未接纳的只读阶段输出若存在明确的参数错误，控制器保留原回复，将校验反馈返回同一阶段，在原任务和剩余调用/时间预算内修正。管线故障、身份或核账异常以及效果未知的作业继续阻断；输出校验失败不会自动重跑 Execute。ProTok 脚本请求在 claim 前检查入口文件、可修改源码与 Python 语法；明确的作者参数错误返回同一仍在运行的 Execute，在原 Plan 和剩余期限内修正。准备不分配计算资源，已提交或效果未知的作业不能由此重试。
-
-ProTok 在接纳 Plan 前复用后端输入引用解析：未知来源、非法 checkpoint 引用、未来或未发布来源可在同一 Plan 阶段按原调用/时间预算修正。该检查只读本地配置和发布凭据；已发布证据损坏仍阻断，远端文件存在性留到执行准备检查，已接纳 Plan 不会被替换。
-
-通用恢复入口 `Study.reconcile_execution(recovery_id=..., certify=...)` 由后端提供可信效果证明，控制器保存恢复记录、执行状态转换，并自动将原 attempt、冻结 Plan、恢复摘要与证明引用交给后续 Execute / Review。控制器的 `accepted` 不代表外部计算已提交；只有明确的未提交证明允许新 attempt，未知效果继续阻断。任务适配器无需自行拼接恢复提示或修改 Study 状态。可运行[离线恢复示例](examples/recovery_demo.py)验证这条链路。
-
-ProTok 的执行结案使用统一的 `--reconcile-execute` 入口：依据原执行记录确认未启动、已完成或已结算失败，在原 attempt 发布控制器回执；不重跑 Agent、不重提计算、不重置预算或 STOP。未知提交效果继续阻断，不兼容历史任务恢复。详见[后端约定](docs/execution-backends.md)。
-
-先安装并登录本机 Codex 或 Pi CLI，再创建新 Study：
-
-```bash
-uv run research-loop init studies/proof \
-  --goal examples/proof-goal.md \
-  --harness codex --model gpt-6.1-sol --reasoning medium \
-  --max-iterations 1 --max-calls 20 --max-seconds 900
-uv run research-loop run studies/proof
-uv run research-loop status studies/proof
+```sh
+npm run check
+RESEARCH_NATIVE_SANDBOX_TEST=1 UV_CACHE_DIR=/path/to/cache npm test
 ```
 
-`init` 不调用模型；`run` 会使用账号额度，最多推进一轮并受总预算限制。`status`、`graph`、`frontiers` 和 `knowledge` 为只读命令。支持的请求型号为 `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-luna`；实际可用性取决于客户端和账号，不会自动替换型号。
-
-默认只读。需要修改实验代码时，通过 `--workspace` 指定干净的 Git 基线，并显式加 `--allow-write`。每次调查使用独立工作区。仅有 `run` 权限不等于已授权远程计算；训练资源与受保护评价器由任务后端管理。
-
-JSON `Study` 的 `run --backend /absolute/task_adapter.py --backend-config /absolute/backend.json` 可接入[阻塞式 legacy 执行桥](docs/execution-backends.md#legacy-unified-launcher)，后续 `run` 沿用登记的适配器与配置；原有 CLI 默认行为不变。该桥与 SQLite 的异步操作 API 分属不同格式边界。
-
-详细参数、权限边界、评价 JSON、恢复及记录结构见[运行指南](docs/usage.md)。 Pi 的配置、验证和能力边界见 [Pi Harness](docs/pi-harness.md)。
-
-## 在 AeroArm 中使用
-
-先写清目标与允许范围，再固定开发评价和最终验收的边界：
-
-1. 从 [AeroArm 目标模板](examples/aeroarm-goal.md) 开始，填入项目实际任务、数据角色与成功条件。
-2. 按[接入指南](docs/aeroarm.md)连接项目自己的执行入口、评价器和结果回执。
-3. 用小预算完成一轮真实执行与独立 Review，再扩展到正式研究。
-
-模板中的目标是只读接入检查，不含假定的 AeroArm 指标，也不会启动训练。不要把通用的 [AUC 评价示例](examples/evaluation.json)直接当作 AeroArm 的评价协议。
-
-## 读一轮研究记录
-
-```text
-study/
-  goal.md / study.json / state.json   目标、配置与当前状态
-  research.md / frontiers.json        当前理解与候选视图
-  routes/                            路线知识与局部评价
-  iterations/0001/
-    context/                         本轮冻结输入
-    plan.md / execute.md / review.md  计划、执行与评审
-    publication.json                 实际发布清单
-    plan|execute|review/attempt-001/  调用回执与原始输出
-```
-
-实时指标在 Review 前属于未评审观测；重试和同结果的转述不增加独立证据。中断恢复先核对外部效果，未知的远程作业不能直接重放。
-
-## 文档地图
-
-| 入口 | 内容 |
-| --- | --- |
-| [展示导览](docs/showcase.md) | 可运行的离线示例、流程图与阅读顺序 |
-| [AeroArm 接入](docs/aeroarm.md) | 目标、评价边界、工作区和后端接口 |
-| [设计规范](docs/evidence-driven-design.md) | Study、路线、调查、证据及 Frontier 语义 |
-| [恢复](docs/recovery.md) / [失败诊断](docs/failure-diagnostics.md) | 阶段重入、未知效果和错误归属 |
-| [人工任务](docs/task-queue.md) / [实时观测](docs/telemetry.md) | 操作员请求及观测接口 |
-| [长训练](docs/long-training.md) / [Meta Loop](docs/meta-loop-design.md) | 可选研究扩展 |
-| [Cactus](benchmarks/cactus/README.md) / [ProTok](integrations/protok/README.md) | 任务适配器参考及外部依赖 |
-| [验证记录](docs/verification-v2.md) | 历史单次真实运行的设置、结果与限制 |
-| [公开分发说明](docs/public-release.md) | 脱敏范围、历史边界及源码快照导出 |
-| [PR Review](docs/pr-review.md) | Codex 自动评审设置、文档同步、脱敏与算法无关性规则 |
-
-## 开发
-
-Runtime 重构按 [#94 的三阶段计划](https://github.com/Chen-HongRu/research_loop/issues/94)推进。阶段 A 的[选型记录](docs/runtime-framework-decision.md)选择 Pi Durable 1.5；阶段 B 的[持久化研究运行时](runtime/README.md)使用官方 pi-env 1.5 提供有界研究流程。阶段 C 的生产切换和旧系统退出尚未完成，现有生产入口继续使用当前 Runtime。
-
-```bash
-uvx ruff check src tests benchmarks/cactus integrations examples
-uv run python -m unittest discover -s tests -v
-PYTHONPATH=src:tests:. uv run python -m unittest discover -s integrations/protok/tests -v
-node --test integrations/protok/tests/dashboard.test.cjs
-```
-
-修改 Python 后，对改动文件运行 `uvx ruff format` 和 `uvx ruff check`。测试使用临时目录、固定回复或模拟传输；真实训练另行配置，测试通过不代表研究效果。
-
-## 许可与共享
-
-本项目使用 [MIT License](LICENSE)。随仓库提供的 KaTeX、markdown-it 等第三方资产保留各自许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。数据集、外部模型和任务仓库遵守各自许可与访问要求。
-
-公开分支已移除私有研究输入及部署记录。已有 Git 历史仍保留旧版本；首次对外分发应使用[不携带历史的源码快照](docs/public-release.md)，完成历史处理前请保持原仓库私有。
+Native cases require the flag and macOS. Use `uv` for Python environments and run `uvx ruff format` and `uvx ruff check` on changed Python files, relevant tests and the smallest real smoke. See [contributing](CONTRIBUTING.md). Model, GPU and remote work require explicit account and resource authorization.

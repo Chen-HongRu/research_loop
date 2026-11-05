@@ -1,3 +1,5 @@
+> Historical record: commands and results describe the former runtime and do not validate the current system. See [current entry](../README.md) and [retirement](runtime-retirement.md).
+
 # Meta Loop 实现与验证
 
 > 历史验证摘要：以下数值来自开发时保留的记录，本次公开整理未重跑训练。原始运行产物未随源码分发，读者无法仅凭此摘要独立复核这些数值。
@@ -12,7 +14,7 @@
 - `meta_inner.py`：每个被测版本由独立进程加载，核对模块路径和 Git commit；结果写在源码目录外。可信桥强制两次训练使用完全相同的配置。固定 runner 源码按协议散列归档，后续子进程从归档启动。
 - `run_meta_smoke.py`：使用冻结 S 运行真实 Meta Study；Execute 请求候选冻结、S/C 开发评价和监督 canary；Review 更新两层研究文档与开发 Frontier。外层记录必须匹配实际策略产物及可信比值。
 
-代码入口：[Meta 驱动](../src/research_loop/meta.py)、[策略](../src/research_loop/strategy.py)、[真实 runner](../benchmarks/cactus/run_meta_smoke.py)。
+代码入口：[Meta 驱动](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/src/research_loop/meta.py)、[策略](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/src/research_loop/strategy.py)、[真实 runner](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/benchmarks/cactus/run_meta_smoke.py)。
 
 ## 固定开发协议
 

@@ -1,5 +1,7 @@
 # Durable research evidence
 
+This report records stage B at commit `8500ff71eb86801f9c17c2fe854da944a67605c0`. Its counts and results are historical measurements of that source. Current packaging and source-exit verification are recorded in [runtime retirement](runtime-retirement.md#source-and-package-verification).
+
 The sanitized [observations](../runtime/observations.json) record the checks and synthetic-study counters below. The original Study, saved inputs, seed, candidate and evaluation references, records and credentials remain outside the repository; this report does not rewrite them.
 
 ## Observed
@@ -10,7 +12,7 @@ The sanitized [observations](../runtime/observations.json) record the checks and
 - Both rounds had MSE 0.866224587 and MAE 0.812348423, compared with the frozen training-mean baseline MSE 2.369779875 and MAE 1.265868931 on the same development labels. Round two did not improve these metrics. Manager published twice; pending records and framework live tasks were both zero at observation.
 - The framework executes all nine business checkpoints: seven Loop phases and two Manager phases, rather than a parallel phase ledger. Under the counting convention in the observations, core runtime size is 2,509 lines including SDK glue, tools, schemas, prompts, CLI, config and platform code; the task adapter is 220 lines, tests and synthetic provider 1,552, Python tests 53, and the reporting tool 104.
 
-To run the native combined tests, from `runtime/` after `npm ci`:
+To run the current native combined tests, from the repository root after `npm ci`:
 
 ```sh
 RESEARCH_NATIVE_SANDBOX_TEST=1 UV_CACHE_DIR=/path/to/cache npm test
@@ -24,4 +26,4 @@ The equal aggregate metrics do not establish that prediction vectors were identi
 
 The usage count includes cache tokens; actual billing and server routing or thinking were not verified. Requesting thinking off does not establish that the server performed no reasoning. Ordinary storage failures can require stopping and manual intervention; the tested recovery cases do not establish automatic recovery from every failure.
 
-Linux, Windows, GPU, remote jobs and production deployment were not validated. Stage C still requires code exit and an actually authorized migration; this evidence does not complete or close [#94](https://github.com/Chen-HongRu/research_loop/issues/94) or [#97](https://github.com/Chen-HongRu/research_loop/issues/97).
+Linux, Windows, GPU, remote jobs and production deployment were not validated. These stage B results do not establish stage C production cutover or complete [#94](https://github.com/Chen-HongRu/research_loop/issues/94) or [#97](https://github.com/Chen-HongRu/research_loop/issues/97).

@@ -1,3 +1,5 @@
+> Historical record: this describes the former runtime. See [current entry](../README.md) and [retirement](runtime-retirement.md).
+
 # Agent input and output audit
 
 Scope: tracked research-loop source and benchmark/integration wrappers. Schemas constrain representation; scientific truth and successful execution still require independent evidence and Review. Raw CLI receipts remain evidence, not controller authority.

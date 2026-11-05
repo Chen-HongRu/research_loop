@@ -40,7 +40,7 @@ import {
   readRegular,
   writeJson,
 } from "./files.ts";
-import { createEnvironment } from "./environment.ts";
+import { createEnvironment, requireNativePlatform } from "./environment.ts";
 import { readReceipts, runExperiment } from "./experiments.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -210,6 +210,7 @@ export async function openStudy(
   root = resolve(root);
   const config = readConfig(root);
   const readOnly = options.readOnly ?? false;
+  if (!readOnly) requireNativePlatform();
   if (readOnly && !existsSync(join(root, "runtime.sqlite")))
     throw new Error("Study has not started");
   const environments = new Map<

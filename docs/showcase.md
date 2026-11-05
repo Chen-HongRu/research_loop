@@ -1,10 +1,12 @@
+> Historical record: commands and results describe the former runtime and do not validate the current system. See [current entry](../README.md) and [retirement](runtime-retirement.md).
+
 # Offline walkthrough
 
 Run one complete controller iteration with fixed, labeled responses. The example
-uses the elementary goal in [proof-goal.md](../examples/proof-goal.md): prove that
+uses the elementary goal in [proof-goal.md](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/examples/proof-goal.md): prove that
 `n²+n` is even for every nonnegative integer `n`.
 
-![One offline iteration through the real controller](assets/offline-flow.svg)
+![One offline iteration through the real controller](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/docs/assets/offline-flow.svg)
 
 ## Run
 
@@ -74,8 +76,8 @@ product is even. Its purpose here is to make the orchestration inspectable witho
 credentials, datasets, or compute. Live agent behavior and empirical research
 quality require separate evaluation.
 
-The [SVG flow diagram](assets/offline-flow.svg) is self-contained and can also be
-embedded from the repository README with `![Offline walkthrough](docs/assets/offline-flow.svg)`.
+The [SVG flow diagram](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/docs/assets/offline-flow.svg) is self-contained and can also be
+embedded from the repository README with `![Offline walkthrough](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/docs/docs/assets/offline-flow.svg)`.
 
 For a self-contained interactive walkthrough, open [showcase.html](showcase.html)
 by downloading it and opening it locally in a browser. GitHub's file view does not

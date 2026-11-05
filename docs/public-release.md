@@ -6,7 +6,7 @@
 
 - 移除了 ProTok 私有研究输入、原始历史报告和归档验证清单。
 - 将个人工作区、具体部署目录、访问别名和主机资源快照从公开说明中清除或泛化。
-- ProTok 不再默认绑定作者机器或历史最佳候选；初始化/历史导入需显式配置基线身份和指标。Cactus 远端入口需显式提供 SSH 主机。
+- 历史发行时移除了任务特定的默认部署绑定；当前退休范围见[运行时退休说明](runtime-retirement.md)。
 - 增加本地凭据、私有证据与实验产物的忽略规则。忽略规则不影响已经跟踪的文件，不能替代提交审阅。
 - 展示使用合成材料与脚本回复；历史 Cactus/Meta 数值仅保留为明确标记的历史报告，原始运行产物不随源码分发。
 - 项目代码使用 MIT 许可；第三方资产保留原有许可。
@@ -37,8 +37,9 @@ tar -tzf dist/research-loop-public.tar.gz
 ```sh
 tar -xzf research-loop-public.tar.gz
 cd research-loop
-uv sync --locked
-uv run python examples/offline_demo.py
+npm ci
+npm run build
+node dist/cli.js doctor
 ```
 
-模型 CLI、原始数据、外部任务仓库和训练资源都不在包内。MIT 许可不改变外部数据或模型的使用条件。
+模型账户配置与凭据、原始数据、外部任务仓库和训练资源都不在包内。MIT 许可不改变外部数据或模型的使用条件。

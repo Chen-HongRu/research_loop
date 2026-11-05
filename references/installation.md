@@ -1,78 +1,20 @@
-# Install and check
+# Installation
 
-Users can ask Codex:
-
-> Use skill-installer to install the repository root (`--path . --name research-loop`)
-> from Chen-HongRu/research_loop. Check the installed runtime. Do not start research yet.
-
-Use the available skill-installer helper rather than downloading an isolated
-SKILL.md. For a release or PR test use `--ref` with the exact commit/ref. The whole
-root must be copied: `src/`, `scripts/`, `pyproject.toml`, `uv.lock`, references,
-examples and docs must remain together. A GitHub archive needs no `.git` directory.
-Do not install the previous `skills/research-loop` draft; it is not the distribution.
-
-If the helper's archive download fails due to local TLS/network configuration, use
-its supported `--method git` with the chosen branch/tag and record the installed
-Git revision. Do not disable TLS verification. Some helper versions cannot fetch
-an arbitrary commit through shallow Git fallback; use a branch/tag containing the
-intended revision and verify HEAD, or fix archive transport for commit-pinned installs.
-
-Some helper versions implement `--path .` as a sparse root checkout and copy only
-root files. If the newly installed directory contains `.git` but lacks `scripts/`
-or `src/`, run `git -C /path/to/installed/research-loop sparse-checkout disable`.
-This hydrates the same checked-out revision; verify HEAD and required files before
-doctor. Do not apply it to the research target repository. If there is no Git
-metadata, the archive/install is incomplete: retain it for inspection and reinstall
-to a fresh destination rather than guessing a runtime.
-
-The built-in installer's destination may vary by Codex version. Use the path it
-actually reports and check discovery in the next turn. The currently documented
-user discovery location is `~/.agents/skills`; some clients/helpers install under
-`$CODEX_HOME/skills` (normally `~/.codex/skills`). If not discovered, link the installed
-directory into the supported discovery location, without replacing an existing
-skill. Do not change unrelated Codex settings. See [official skill docs](https://developers.openai.com/codex/skills).
-
-Requires macOS/Linux, Python 3.11+, uv, Git and an installed, logged-in Codex CLI.
-If a prerequisite is missing, have Codex install it using its supported installer
-within the user's authorization, or report the exact unavailable prerequisite.
-Authentication is interactive: direct the user to `codex login`; never read/copy
-tokens or create keys for this workflow. `doctor` checks CLI login status without
-reading credentials and prepares the locked Python environment:
+Install the complete repository at the intended revision, including root package files, `runtime/`, `benchmarks/`, references and docs. Do not install only `SKILL.md`. Verify the selected revision and materialized files. From the installation root:
 
 ```sh
-python3 /path/to/installed/research-loop/scripts/research_loop.py doctor
+npm ci
+npm run build
+node dist/cli.js doctor
 ```
 
-The first runtime command uses `uv run --locked --project SKILL_ROOT` and may download
-locked dependencies and create `.venv` in the installed directory. It needs network
-and write access there; use normal permission approval if required. Subsequent
-commands preserve the caller's working directory. No model calls occur in doctor;
-it does not prove the requested model is available to the account, that a GPU is
-accessible, or that a task-specific backend works. Only an authorized real run can
-establish those conditions. Never advertise automatic model installation/login.
+For an application deployment archive, run `npm run pack` in the source root. It builds `dist/research-loop-0.2.0.tgz` containing compiled JavaScript, the root `package-lock.json` and the necessary documentation and benchmarks. Extract it into a new directory, then run:
 
-The controller starts child Codex CLI processes. A controller launched inside an
-outer Codex command sandbox may be unable to initialize that child's app server
-or write the CLI state database even when `doctor` and login checks pass. If that
-specific failure occurs, retain the attempt and request normal host execution
-approval for the same controller command. Keep the controller's child-stage
-sandboxes enabled; do not use danger-full-access or bypass approval flags. A failed
-read-only selection can resume through `run` within the original budget. Inspect
-Execute effects before any recovery involving execution. If approval is unavailable,
-report the precise blocker rather than repeating commands or claiming success.
+```sh
+npm ci --omit=dev
+node dist/cli.js doctor
+```
 
-SQLite runtime applications are explicitly trusted and configured separately from
-the installed skill. Keep a versioned immutable application module and private
-configuration outside the skill and repository; see [concurrent runtime](../docs/concurrent-runtime.md).
-The existing legacy Harness does not automatically become a SQLite application.
-The [native application](../integrations/native_runtime/README.md) specifies its
-Pi and environment requirements; installation alone does not validate model access.
+The extracted application does not need TypeScript compilation. This is an application-root archive, not a registry package: do not use `npm install` on the archive or `npm pack` for this deployment. npm packages exclude `package-lock.json`, so that route does not preserve this transitive dependency lock. See [npm's lockfile documentation](https://docs.npmjs.com/cli/v12/configuring-npm/package-lock-json/#npm-shrinkwrapjson).
 
-For an authorized cutover, use a versioned deployment with an immutable commit,
-environment and application specification. Support the matching Study-format
-entry points and follow [runtime migration](../docs/runtime-migration.md); installing
-a runtime neither migrates a Study nor fences old services.
-
-After installation, report the installed path and that the skill is available on
-the next turn. If discovery is stale, restart Codex. When installation/setup is the
-only request, stop here; do not consume research/model/compute budget.
+Node.js >= 22.19, Python, uv and macOS `sandbox-exec` are required for the supported native path. The doctor checks prerequisites, compiled entry and locked dependency metadata without a model call; it does not prove sandbox isolation. Run the flagged native tests or an authorized smoke for that evidence. Local macOS arm64 is the verified platform. Use `node /path/to/installed/research-loop/dist/cli.js` or the installed `research-loop` bin for this release, not an unrelated global installation. See [runtime](../runtime/README.md).

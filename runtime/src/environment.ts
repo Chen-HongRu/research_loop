@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { accessSync, constants } from "node:fs";
 import {
   access,
   mkdir,
@@ -28,6 +29,13 @@ export interface EnvironmentOptions {
 }
 
 const run = promisify(execFile);
+export function requireNativePlatform() {
+  if (process.platform !== "darwin")
+    throw new Error(
+      "Native research isolation currently requires macOS sandbox-exec",
+    );
+  accessSync("/usr/bin/sandbox-exec", constants.X_OK);
+}
 const within = (path: string, root: string) =>
   root === sep || path === root || path.startsWith(root + sep);
 const overlaps = (a: string, b: string) => within(a, b) || within(b, a);
@@ -77,11 +85,7 @@ export async function createEnvironment(options: EnvironmentOptions): Promise<{
   env: RemoteExecutionEnv;
   close(): Promise<void>;
 }> {
-  if (process.platform !== "darwin")
-    throw new Error(
-      "Native research isolation currently requires macOS sandbox-exec",
-    );
-  await access("/usr/bin/sandbox-exec", 1);
+  requireNativePlatform();
   const workspace = await directory(options.workspace);
   const writable = await Promise.all(
     (options.writable ?? [workspace]).map(directory),

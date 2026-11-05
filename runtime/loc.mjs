@@ -40,7 +40,13 @@ const list = (folder) =>
   readdirSync(new URL(folder, import.meta.url))
     .filter((name) => name.endsWith(".ts"))
     .map((name) => folder + name);
-const runtime = [...list("src/"), "package.json", "tsconfig.json"];
+const runtime = [
+  ...list("src/"),
+  "../package.json",
+  "tsconfig.json",
+  "tsconfig.build.json",
+  "../tools/package.mjs",
+];
 const tests = list("tests/");
 const files = Object.fromEntries(
   [...runtime, ...tests, "loc.mjs"].map((path) => [path, count(path)]),

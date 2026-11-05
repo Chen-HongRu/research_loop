@@ -1,6 +1,6 @@
 # Durable research operating contract
 
-The [runtime entry point](../runtime/README.md) implements the stage B path with PiDurable 1.5 and official pi-env 1.5. It does not replace the current production runtime. The only currently supported native isolation is macOS `sandbox-exec`; use Node.js >= 22.19, Python, uv and the exact npm lockfile.
+The [runtime entry point](../runtime/README.md) uses PiDurable 1.5 and official pi-env 1.5. Source retirement does not establish a production cutover; see [retirement](runtime-retirement.md). Native isolation requires macOS `sandbox-exec`; use Node.js >= 22.19, Python, uv and the root npm lockfile. Local macOS arm64 CPU is the verified platform.
 
 ## Research and evidence
 

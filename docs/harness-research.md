@@ -1,3 +1,5 @@
+> Historical record: commands and results describe the former runtime and do not validate the current system. See [current entry](../README.md) and [retirement](runtime-retirement.md).
+
 # Harness 与现有研究循环系统调研
 
 查阅日期：2026-10-31。范围是官方文档、作者仓库关键代码和原始论文；除本项目验证记录外，没有运行这些系统或复现论文实验。远端仓库以查阅时 main 为准，未固定 commit，因此这里是选型依据，不是版本兼容承诺。
