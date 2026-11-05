@@ -57,6 +57,15 @@ unclaimed and unpublished prerequisites. Inspection changes no counters, events
 or admission state. The planning snapshot uses the underlying immutable task
 envelopes plus separate iteration records.
 
+The optional Study config field `task_pool.max_pending` sets the number of
+unclaimed, uncancelled tasks the pool can hold, including dependency-blocked
+tasks. An omitted field or `null` means unlimited. Zero blocks new tasks.
+Claiming or cancelling a pending task frees a slot. The cap applies in the same
+transaction as creation; Judge records a per-change `max_pending` conflict
+and continues its ordered batch. Migration retains all imported tasks.
+`runtime status` reports `task_pool.pending`, `ready` and `max_pending`.
+Worker slots govern concurrent callbacks; resource pools govern external jobs.
+
 ## Judge changes
 
 Judge receives the protected frozen pool and in-flight iteration metadata. Its

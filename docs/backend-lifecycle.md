@@ -41,25 +41,20 @@ operations that need neither.
 
 The immutable Study configuration supplies:
 
-```json
-{
-  "execution_backends": {
-    "configured-backend": {
-      "version": "adapter-v1",
-      "environment": {"id": "execution-environment", "version": "fixed-v1"}
-    }
-  },
-  "resource_pools": {"worker-slot": 2},
-  "operation_authorizations": {
-    "development-grant": {
-      "backends": ["configured-backend"],
-      "max_operations": 4,
-      "resource_limits": {"worker-slot": 1},
-      "cost_limits": {"accounting-unit": 60},
-      "deadline": null
-    }
-  }
-}
+```yaml
+execution_backends:
+  configured-backend:
+    version: adapter-v1
+    environment: {id: execution-environment, version: fixed-v1}
+resource_pools:
+  worker-slot: 2
+operation_authorizations:
+  development-grant:
+    backends: [configured-backend]
+    max_operations: 4
+    resource_limits: {worker-slot: 1}
+    cost_limits: {accounting-unit: 60}
+    deadline: null
 ```
 
 `max_operations` is a nonnegative count ceiling, or `null` for no count ceiling;

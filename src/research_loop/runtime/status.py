@@ -23,7 +23,8 @@ def status_snapshot(root):
             conn.execute(
                 "SELECT study_id,max_iterations,max_calls,max_seconds,admission_deadline,"
                 "calls,iterations,elapsed_seconds,stop_reason IS NOT NULL AS stopped,"
-                "owner_epoch,owner_open,pool_version,admission_mode FROM control"
+                "owner_epoch,owner_open,pool_version,admission_mode,"
+                "json_extract(config_json,'$.task_pool.max_pending') AS max_pending FROM control"
             ).fetchone()
         )
         schema = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -255,6 +256,13 @@ def status_snapshot(root):
         owner_open=bool(control["owner_open"]),
         owner_epoch=control["owner_epoch"],
         pool_version=control["pool_version"],
+        task_pool={
+            "max_pending": control["max_pending"],
+            "pending": sum(
+                t["iteration_id"] is None and not t["cancelled"] for t in tasks
+            ),
+            "ready": sum(t["ready"] for t in tasks),
+        },
         publication_version=publication_version,
         admission_mode=control["admission_mode"],
         migrations=migrations,
