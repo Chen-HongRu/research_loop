@@ -214,6 +214,8 @@ class Updater:
                 planning["snapshot_ref"], planning["identity"]
             )
         }
+        # The full round manifest can name libraries outside this role grant.
+        inputs["planning"].pop("knowledge_libraries", None)
         for advocate in planning.get("advocates", []):
             value = {"attempt_id": advocate["id"], "status": advocate["status"]}
             if advocate["status"] == "accepted":
@@ -406,8 +408,15 @@ class Updater:
             )
         return package, plan_output
 
+    def _granted_evidence(self, binding):
+        from .model_requests import retrieved_evidence
+
+        return binding["evidence_identities"] | retrieved_evidence(
+            self._root, binding["attempt_id"]
+        )
+
     def _check_evidence(self, binding, references, claimed_identities=None):
-        frozen = binding["evidence_identities"]
+        frozen = self._granted_evidence(binding)
         if not set(references) <= frozen.keys():
             raise ValueError("Output references evidence outside its frozen allowlist")
         identities = {reference: frozen[reference] for reference in references}
@@ -593,8 +602,6 @@ class Updater:
             ):
                 raise ConflictError("Worker output differs from its durable completion")
         package, _ = self._load_binding(captured)
-        if not set(evidence_refs) <= set(package.manifest["allowed_evidence"]):
-            raise ValueError("Output references evidence outside its frozen allowlist")
         identities = self._check_evidence(captured["binding"], evidence_refs)
         validator = self.validators.get(call_identity.role)
         if validator is None:
@@ -737,6 +744,12 @@ class Updater:
                 )
                 if operation_ids:
                     extra["operation_ids"] = operation_ids
+            if call.role == "knowledge_manager":
+                from .knowledge_manager import commit_maintenance
+
+                extra["knowledge"] = commit_maintenance(
+                    self.coordinator, conn, call, proposed["normalized_output"]
+                )
             receipt = self.coordinator._accept_record(
                 conn,
                 current["attempt"],

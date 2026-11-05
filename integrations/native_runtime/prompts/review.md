@@ -1,0 +1,1 @@
+Independently review the accepted Plan, Execute result and every required own measurement. Qualify each own measurement exactly once. Cite original receipts. Reports and narratives cannot certify measurements. Preserve uncertainty, conditions and limitations.

@@ -71,6 +71,46 @@ def _parser():
         action="store_true",
         help="Keep the owner available for new control requests while idle",
     )
+    context = commands.add_parser(
+        "context", help="Inspect a dispatched role's frozen model input"
+    )
+    context.add_argument("study", type=Path)
+    context.add_argument("attempt_id")
+    context.add_argument(
+        "--expand",
+        action="store_true",
+        help="Include model-visible content for this private Study",
+    )
+    read = commands.add_parser(
+        "knowledge-read",
+        help="Read the Index or a page using a historical call's scope",
+    )
+    read.add_argument("study", type=Path)
+    read.add_argument("attempt_id")
+    read.add_argument("page", nargs="?", default="index.md")
+    read.add_argument("--alias", default="study")
+    read.add_argument(
+        "--with-sources",
+        action="store_true",
+        help="Include the fixed citation and its dependencies",
+    )
+    read.add_argument(
+        "--reference",
+        type=json.loads,
+        help="Read an exact JSON reference obtained from a page or search",
+    )
+    roles = commands.add_parser(
+        "role-config", help="Replace one role's configuration within Study grants"
+    )
+    roles.add_argument("study", type=Path)
+    roles.add_argument("role")
+    roles.add_argument("--config", type=Path, required=True)
+    roles.add_argument("--request-id", default=None)
+    maintain = commands.add_parser(
+        "maintain", help="Retry pending knowledge maintenance"
+    )
+    maintain.add_argument("study", type=Path)
+    maintain.add_argument("--request-id", default=None)
     for name in ("status", "events", "dashboard", "request-status"):
         command = commands.add_parser(name)
         command.add_argument("study", type=Path)
@@ -273,6 +313,13 @@ def initialize(args):
 
 
 def _command(args):
+    if args.command == "role-config":
+        return "role_config", {
+            "role": args.role,
+            "definition": load_config(args.config),
+        }
+    if args.command == "maintain":
+        return "maintain", {}
     if args.command == "task":
         payload = {"id": args.id}
         if args.task_command != "create":
@@ -411,6 +458,25 @@ def main(argv=None):
             result = migrate(args)
         elif args.command == "run":
             result = run(args)
+        elif args.command == "knowledge-read":
+            from .call_context import read_at_call
+
+            result = read_at_call(
+                StateStore(args.study),
+                args.attempt_id,
+                args.alias,
+                args.reference if args.reference is not None else args.page,
+                with_sources=args.with_sources,
+            )
+            if isinstance(result, str):
+                sys.stdout.write(result)
+                return 0
+        elif args.command == "context":
+            from .call_context import preview
+
+            result = preview(
+                StateStore(args.study), args.attempt_id, expand=args.expand
+            )
         elif args.command == "status":
             from .status import status_snapshot
 

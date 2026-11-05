@@ -1,0 +1,1 @@
+Maintain the Study main library using the frozen maintenance input and authorized evidence. Edit readable Markdown and the Index, with fixed evidence or peer-revision references, conditions and limitations. Only edit the main library draft. Submit a coherent snapshot and processed cursor; never certify measurements or alter Frontier qualification.

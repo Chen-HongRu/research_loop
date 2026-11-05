@@ -11,6 +11,7 @@ ROLE_ACTIONS = {
     "scout": {"knowledge"},
     "advocate": {"proposals"},
     "judge": {"changes"},
+    "knowledge_manager": {"pages", "index_markdown"},
 }
 ROLES = frozenset(ROLE_ACTIONS)
 
@@ -25,11 +26,21 @@ def validate_role_access(config):
             "context_sources",
             "published_history",
             "actions",
+            "inputs",
+            "knowledge_bases",
+            "tools",
         }:
             raise ValueError(f"Unknown role_access rule for {role}")
         if type(rule.get("published_history", True)) is not bool:
             raise ValueError("published_history must be boolean")
-        for key in ("permissions", "context_sources", "actions"):
+        for key in (
+            "permissions",
+            "context_sources",
+            "actions",
+            "inputs",
+            "knowledge_bases",
+            "tools",
+        ):
             names = rule.get(key, [])
             if (
                 not isinstance(names, list)
@@ -53,7 +64,12 @@ class RoleAccess:
         if role not in ROLES:
             raise ValueError("Unknown runtime role")
         rules = config.get("role_access", {})
-        rule = rules.get(role, {})
+        rule = rules.get(role, {}).copy()
+        if "published_history" not in rule:
+            adapter = config.get("runtime", {}).get("worker_adapter", {}).get("id")
+            definition = config.get("role_definitions", {}).get(role, {})
+            if adapter in {"native-runtime-v1", "native-script-runtime-v1"}:
+                rule["published_history"] = "history" in definition.get("inputs", [])
         actions = set(rule.get("actions", ROLE_ACTIONS[role]))
         if role in rules:
             for permission, action in (
@@ -108,5 +124,10 @@ class RoleAccess:
         if not self.configured:
             return
         for action in ROLE_ACTIONS[self.role] - self.actions:
-            if output.get(action):
+            effect = (
+                output.get(action) is not None
+                if action == "index_markdown"
+                else bool(output.get(action))
+            )
+            if effect:
                 raise ValueError(f"Role {self.role} lacks permission for {action}")

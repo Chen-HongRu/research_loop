@@ -13,15 +13,24 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+from time import time as wall_time
 
 from research_loop.harness import HarnessError, iter_pi_events
 from research_loop.runtime.operation_contract import fields, json_value, text
+from research_loop.runtime.model_requests import register_trace
+
+from .tool_bridge import serve
 
 
 SYSTEM_PROMPT = (
     "Follow the supplied role and frozen ContextPackage. Finish by calling submit_result "
-    "exactly once with the complete output and evidence_refs. Its arguments are your final answer."
+    "exactly once with the complete output and evidence_refs. Use only the supplied tools. "
+    "You may retrieve authorized knowledge over multiple turns before submitting. "
+    "Call submit_result alone; its arguments are your final answer."
 )
+
+
+SUBMIT_DESCRIPTION = "Submit complete current-role output with exact evidence_refs to end this invocation."
 
 
 def validate_config(config):
@@ -52,112 +61,179 @@ def validate_config(config):
     return value
 
 
-def _assistant_submission(message, config):
-    if any(
-        message.get(key) != config[field]
-        for key, field in (
-            ("provider", "provider"),
-            ("model", "model"),
-            ("thinkingLevel", "reasoning"),
+def _same(left, right):
+    try:
+        return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(
+            right, sort_keys=True, allow_nan=False
         )
-    ):
-        raise HarnessError(
-            "Pi response provider/model/thinking differs from the exact request"
-        )
-    blocks = message.get("content")
-    if not isinstance(blocks, list) or any(
-        not isinstance(b, dict) or b.get("type") not in {"thinking", "text", "toolCall"}
-        for b in blocks
-    ):
-        raise HarnessError("Invalid Pi assistant content")
-    calls = [b for b in blocks if b["type"] == "toolCall"]
-    if len(calls) != 1 or calls[0].get("name") != "submit_result":
-        raise HarnessError("Pi must call submit_result exactly once")
-    call_id, arguments = calls[0].get("id"), calls[0].get("arguments")
-    if not isinstance(call_id, str) or not call_id or not isinstance(arguments, dict):
-        raise HarnessError("Invalid submit_result identity or arguments")
-    return call_id, arguments
+    except (ValueError, TypeError):
+        return False
 
 
-def _submission(path, config):
-    """Accept a single completed, terminating Pi tool call from the requested model."""
-    phase = "assistant"
-    call_id = None
-    arguments = None
-
-    def matches(event):
-        return (
-            event.get("toolCallId") == call_id
-            and event.get("toolName") == "submit_result"
-        )
-
-    def same_details(details):
-        return json.dumps(details, sort_keys=True, allow_nan=False) == json.dumps(
-            arguments, sort_keys=True, allow_nan=False
-        )
-
+def _submission(path, config, tools=()):
+    """Validate every completed turn and exactly one terminating submission."""
+    pending = {}
+    seen = set()
+    submitted = None
+    settled = False
+    allowed = {"submit_result", *tools}
     for event in iter_pi_events(path):
-        if phase == "settled":
+        if settled:
             raise HarnessError("Unexpected event after Pi submission")
         kind = event.get("type")
-        if kind in {"turn_start", "agent_start"} and phase != "assistant":
-            raise HarnessError("Pi started another turn after submission")
         if (
-            kind == "message_start"
+            submitted is not None
+            and kind == "message_start"
             and (event.get("message") or {}).get("role") == "assistant"
-            and phase != "assistant"
         ):
             raise HarnessError("Pi started another assistant response after submission")
+        if submitted is not None and kind in {"turn_start", "agent_start"}:
+            raise HarnessError("Pi started another turn after submission")
         if kind == "message_end":
             message = event.get("message") or {}
             role = message.get("role")
-            if role in {"system", "user"} and phase == "assistant":
+            if role in {"system", "user"} and not pending and submitted is None:
                 continue
             if role == "assistant":
+                if pending or submitted is not None:
+                    raise HarnessError("Unexpected Pi assistant response")
+                if any(
+                    message.get(key) != config[field]
+                    for key, field in (
+                        ("provider", "provider"),
+                        ("model", "model"),
+                        ("thinkingLevel", "reasoning"),
+                    )
+                ):
+                    raise HarnessError(
+                        "Pi response provider/model/thinking differs from the exact request"
+                    )
+                blocks = message.get("content")
+                if not isinstance(blocks, list) or any(
+                    not isinstance(block, dict)
+                    or block.get("type") not in {"thinking", "text", "toolCall"}
+                    for block in blocks
+                ):
+                    raise HarnessError("Invalid Pi assistant content")
+                calls = [block for block in blocks if block["type"] == "toolCall"]
                 if (
-                    phase != "assistant"
+                    not calls
                     or message.get("stopReason") not in {"toolUse", "stop"}
                     or message.get("errorMessage")
                 ):
-                    raise HarnessError("Pi assistant did not complete one submission")
-                call_id, arguments = _assistant_submission(message, config)
-                phase = "start"
-            elif (
-                role == "toolResult"
-                and phase == "receipt"
-                and matches(message)
-                and message.get("isError") is False
-                and same_details(message.get("details"))
-            ):
-                phase = "complete"
+                    raise HarnessError("Pi assistant did not complete a tool turn")
+                if (
+                    any(call.get("name") == "submit_result" for call in calls)
+                    and len(calls) != 1
+                ):
+                    raise HarnessError(
+                        "submit_result must be the only call in its turn"
+                    )
+                for call in calls:
+                    identity, name, args = (
+                        call.get("id"),
+                        call.get("name"),
+                        call.get("arguments"),
+                    )
+                    if (
+                        not isinstance(identity, str)
+                        or not identity
+                        or identity in seen
+                        or name not in allowed
+                        or not isinstance(args, dict)
+                    ):
+                        raise HarnessError(
+                            "Invalid, unauthorized, or duplicate Pi tool call"
+                        )
+                    seen.add(identity)
+                    pending[identity] = {
+                        "name": name,
+                        "arguments": args,
+                        "phase": "start",
+                    }
+            elif role == "toolResult":
+                item = pending.get(message.get("toolCallId"))
+                if (
+                    item is None
+                    or item["phase"] != "receipt"
+                    or message.get("toolName") != item["name"]
+                    or message.get("isError") is not False
+                    or not _same(message.get("details"), item["result"])
+                ):
+                    raise HarnessError("Unexpected Pi tool receipt")
+                del pending[message["toolCallId"]]
             else:
-                raise HarnessError("Unexpected Pi message or tool receipt")
-        elif kind == "tool_execution_start":
-            if phase != "start" or not matches(event):
+                raise HarnessError("Unexpected Pi message")
+        elif kind in {"tool_execution_start", "tool_execution_end"}:
+            item = pending.get(event.get("toolCallId"))
+            if item is None or event.get("toolName") != item["name"]:
                 raise HarnessError("Unexpected Pi tool execution")
-            phase = "end"
-        elif kind == "tool_execution_end":
-            result = event.get("result") or {}
-            if (
-                phase != "end"
-                or not matches(event)
-                or event.get("isError") is not False
-                or result.get("terminate") is not True
-                or not same_details(result.get("details"))
-            ):
-                raise HarnessError("Invalid terminating submit_result receipt")
-            phase = "receipt"
+            if kind == "tool_execution_start":
+                if item["phase"] != "start" or not _same(
+                    event.get("args"), item["arguments"]
+                ):
+                    raise HarnessError("Invalid Pi tool execution start")
+                item["phase"] = "end"
+            else:
+                result = event.get("result") or {}
+                if item["phase"] != "end" or event.get("isError") is not False:
+                    raise HarnessError("Pi tool execution failed or was interrupted")
+                if item["name"] == "submit_result":
+                    if (
+                        submitted is not None
+                        or result.get("terminate") is not True
+                        or not _same(result.get("details"), item["arguments"])
+                    ):
+                        raise HarnessError("Invalid terminating submit_result receipt")
+                    submitted = item["arguments"]
+                elif result.get("terminate"):
+                    raise HarnessError("Nonterminal tool terminated the invocation")
+                item["result"] = result.get("details")
+                item["phase"] = "receipt"
         elif kind == "agent_settled":
-            if phase != "complete" or event.get("aborted") is not False:
+            if pending or submitted is None or event.get("aborted") is not False:
                 raise HarnessError("Pi did not settle a completed submission")
-            phase = "settled"
-    if phase != "settled":
+            settled = True
+    if not settled:
         raise HarnessError("Incomplete Pi submit_result stream")
-    return json_value(arguments)
+    return json_value(submitted)
 
 
-def run(prompt, config, *, response_schema, invocation=None):
+def run(
+    prompt,
+    config,
+    *,
+    response_schema,
+    invocation=None,
+    tools=None,
+    tool_handler=None,
+    request_budget=None,
+    history=None,
+    system_prompt=None,
+    submit_description=None,
+):
     config = validate_config(config)
+    system_prompt = SYSTEM_PROMPT if system_prompt is None else system_prompt
+    submit_description = (
+        SUBMIT_DESCRIPTION if submit_description is None else submit_description
+    )
+    text(system_prompt, "system prompt")
+    text(submit_description, "submit description")
+    tools = json_value(tools or {})
+    if not isinstance(tools, dict) or "submit_result" in tools:
+        raise ValueError(
+            "Native tool bindings must be a mapping excluding submit_result"
+        )
+    for name, declaration in tools.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError("Invalid native tool name")
+        fields(declaration, {"description", "parameters"}, "native tool declaration")
+        text(declaration["description"], "tool description")
+        if not isinstance(declaration["parameters"], dict):
+            raise ValueError("Native tool parameters must be a JSON schema")
+    if tools and not callable(tool_handler):
+        raise ValueError("Native tools require a trusted Python handler")
+    history = [] if history is None else history
     metadata = None
     prefix = "native-call-"
     if invocation is not None:
@@ -170,10 +246,14 @@ def run(prompt, config, *, response_schema, invocation=None):
         text(metadata["context_ref"], "context reference")
         prefix = "call-" + re.sub(r"[^A-Za-z0-9_-]", "_", identity)[:128] + "-"
     root = config.get("private_calls_dir")
+    if root is None and request_budget is not None:
+        root = str(Path(request_budget["study_root"]) / "native-calls")
     if root:
         Path(root).mkdir(parents=True, exist_ok=True, mode=0o700)
     directory = Path(tempfile.mkdtemp(prefix=prefix, dir=root))
     os.chmod(directory, 0o700)
+    if request_budget is not None:
+        register_trace(request_budget, directory)
     if metadata is not None:
         (directory / "invocation.json").write_text(
             json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
@@ -182,7 +262,11 @@ def run(prompt, config, *, response_schema, invocation=None):
     (directory / "response-schema.json").write_text(
         json.dumps(response_schema, allow_nan=False), encoding="utf-8"
     )
-    deadline = time.monotonic() + config["timeout_seconds"]
+    seconds = config["timeout_seconds"]
+    if request_budget is not None and request_budget.get("deadline") is not None:
+        seconds = min(seconds, request_budget["deadline"] - wall_time())
+    deadline = time.monotonic() + seconds
+    deadline_ms = (wall_time() + seconds) * 1000
     common = [
         config["executable"],
         "--no-extensions",
@@ -192,7 +276,7 @@ def run(prompt, config, *, response_schema, invocation=None):
         "--no-approve",
         "--no-context-files",
         "--system-prompt",
-        SYSTEM_PROMPT,
+        system_prompt,
         "--append-system-prompt",
         "",
     ]
@@ -231,26 +315,44 @@ def run(prompt, config, *, response_schema, invocation=None):
         raise HarnessError(
             "Pi catalog lacks the exact configured provider/model; no fallback"
         )
-    execute(
-        [
-            *common,
-            "--no-builtin-tools",
-            "--tools",
-            "submit_result",
-            "-e",
-            str(Path(__file__).resolve().with_name("submit_result.ts")),
-            "--print",
-            "--mode",
-            "json",
-            "--provider",
-            config["provider"],
-            "--model",
-            config["model"],
-            "--thinking",
-            config["reasoning"],
-            "--no-session",
-        ],
-        "response",
-        prompt,
-    )
-    return _submission(directory / "response.stdout.jsonl", config)
+    with serve(directory, tools, tool_handler, request_budget, deadline, history) as (
+        socket_path,
+        state,
+    ):
+        (directory / "tool-binding.json").write_text(
+            json.dumps(
+                {
+                    "socket": socket_path,
+                    "tools": tools,
+                    "deadline_ms": deadline_ms,
+                    "submit_description": submit_description,
+                },
+                allow_nan=False,
+            ),
+            encoding="utf-8",
+        )
+        execute(
+            [
+                *common,
+                "--no-builtin-tools",
+                "--tools",
+                ",".join([*tools, "submit_result"]),
+                "-e",
+                str(Path(__file__).resolve().with_name("submit_result.ts")),
+                "--print",
+                "--mode",
+                "json",
+                "--provider",
+                config["provider"],
+                "--model",
+                config["model"],
+                "--thinking",
+                config["reasoning"],
+                "--no-session",
+            ],
+            "response",
+            prompt,
+        )
+        if state["failed"]:
+            raise HarnessError("Native tool or provider request admission failed")
+        return _submission(directory / "response.stdout.jsonl", config, tools)

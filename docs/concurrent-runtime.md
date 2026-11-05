@@ -1,5 +1,8 @@
 # Concurrent runtime
 
+For native Pi role grants, per-request budgets, Markdown maintenance and the
+read-only invocation preview, see [Study knowledge](study-knowledge.md).
+
 The concurrent coordinator runs on new, isolated SQLite schema 8 Studies through
 Python APIs and the runtime CLI. Older prototype databases are rejected; there is
 no automatic migration. The existing serial CLI is unchanged. [Explicit legacy

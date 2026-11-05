@@ -5,12 +5,14 @@ The generated JSON schema carries these descriptions into the role prompt and
 the `submit_result` tool parameters. Prompts supply role instructions and bound
 context, while Python validators enforce evidence and execution constraints.
 
-This application runs Scout, Advocate, Judge, Plan, Execute and Review through the
-existing [Pi submission tool](../native_runtime/README.md). It adds typed,
+This application uses the [shared Pi runtime](../native_runtime/README.md)
+for the six research roles and Knowledge Manager. Script Plan and Execute have
+their own [definitions](roles/). See [Study knowledge](../../docs/study-knowledge.md)
+for role configuration and call previews. It adds typed,
 bounded script operations to the SQLite runtime. It contains no scientific task,
 metric, dataset, model architecture or deployment defaults. Installing a Pi
 network extension does not enable it here: calls retain `--no-extensions`,
-`--tools submit_result`, an explicit trusted extension, `--no-mcp`, disabled ambient context and exact configured model checks.
+a frozen role-specific tool allowlist, an explicit trusted extension, `--no-mcp`, disabled ambient context and exact configured model checks.
 
 Select an immutable copy of `application.py` as described in the
 [concurrent runtime guide](../../docs/concurrent-runtime.md), with worker adapter

@@ -1,0 +1,24 @@
+{
+  "role": "knowledge_manager",
+  "instructions": "prompts/knowledge_manager.md",
+  "inputs": [
+    "task",
+    "budget",
+    "goal",
+    "evaluation",
+    "permissions",
+    "maintenance"
+  ],
+  "knowledge_bases": [
+    "study"
+  ],
+  "tools": [
+    "read_index",
+    "search",
+    "read",
+    "edit_page",
+    "edit_index",
+    "submit_result"
+  ],
+  "output": "KnowledgeManager"
+}

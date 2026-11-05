@@ -6,8 +6,11 @@ the `submit_result` tool parameters. Prompts supply role instructions and bound
 context, while Python validators enforce evidence and execution constraints.
 
 This trusted SQLite runtime application uses the Pi CLI for Scout, Advocate,
-Judge, Plan, Execute and Review. It passes each frozen ContextPackage through a
-role prompt and delivers the result through the terminating Pi tool `submit_result`. The application validates its arguments and evidence references.
+Judge, Plan, Execute, Review and Knowledge Manager. Each role has a
+[definition](roles/) binding instructions, inputs, libraries, tools and output.
+The controller freezes the effective model request for historical inspection.
+See [Study knowledge](../../docs/study-knowledge.md) for configuration,
+maintenance and the read-only context preview.
 The initial Execute is qualitative only: its operations and artifacts lists are
 empty. It does not edit source or start training. Existing legacy Harness role
 schemas are separate and are not automatically adapted.
@@ -80,7 +83,9 @@ text. See the [DeepSeek thinking protocol](https://api-docs.deepseek.com/guides/
 Deploy [submit_result.ts](submit_result.ts) alongside `transport.py` in the
 versioned application environment. The controller writes the role's full
 JSON Schema to the private call directory and loads that extension explicitly.
-Pi exposes only `submit_result`. Its arguments are the entire
+Pi exposes the frozen tool list. Research roles can read the Index, search
+authorized snapshots and read fixed revisions. The Manager can stage edits.
+The terminal tool is `submit_result`. Its arguments are the entire
 `{output, evidence_refs}` object. The extension validates arguments locally
 and terminates the turn. Transport accepts a successful tool result tied to
 the matching assistant call and a settled session. Existing role, evidence
@@ -89,8 +94,10 @@ and authorization checks then run on that result.
 Select a model with working Pi tool-call support. Model profiles need no
 structured text output settings. Remove wrappers that inject provider schemas.
 For OpenAI-compatible completions the extension removes a stale
-`response_format` from the outgoing payload. Disable agent and provider retries
-and compaction in the research profile to keep request accounting explicit.
+`response_format` from the outgoing payload. Set `retry.provider.maxRetries` to `0` in the active Pi profile and use
+`transport: "sse"` for `openai-codex-responses`. Internal retries and automatic
+transport fallback can send more than one request per provider hook. The native
+extension rejects an incompatible profile before sending the request.
 The extension aborts any follow-up inference turn in the same role invocation.
 
 An explicit `backend_handlers` entry can select `protok_cleanup` with `config`

@@ -233,19 +233,7 @@ def prepare_submission(role, package, config):
             schema,
         )
     schema = native.response_schema(MODELS[role])
-    contracts = {}
-    for name, handler in config["backend_handlers"].items():
-        settings = handler["config"]
-        contracts[name] = {
-            "resources": {settings["resource_pool"]: 1},
-            "cost_bounds": {settings["cost_unit"]: "ceil(time_limit_seconds/60)*60"},
-            "staging_headroom_seconds": settings["staging_headroom_seconds"],
-            "example": {
-                "time_limit_seconds": 1800,
-                "cost_bounds": {settings["cost_unit"]: 1800},
-                "minimum_timeout_seconds": 1800 + settings["staging_headroom_seconds"],
-            },
-        }
+    contracts = public_backend_contracts(config)
     reminder = ""
     if role == "plan":
         science = package["context"][config["scientific_contract_source"]]
@@ -261,7 +249,7 @@ def prepare_submission(role, package, config):
         + role
         + ". "
         + native.role_instructions(role)
-        + "Use only this frozen ContextPackage. Only the final submit_result tool is available. Filesystem access and source editing are disabled. "
+        + "Use only this frozen ContextPackage. Use only the tools in the frozen role grant. Filesystem access and source editing are disabled. "
         "Preserve the exact scientific contract at context["
         + json.dumps(config["scientific_contract_source"])
         + "]. "
@@ -274,3 +262,20 @@ def prepare_submission(role, package, config):
         + native.response_footer(role, schema, reminder=reminder),
         schema,
     )
+
+
+def public_backend_contracts(config):
+    contracts = {}
+    for name, handler in config["backend_handlers"].items():
+        settings = handler["config"]
+        contracts[name] = {
+            "resources": {settings["resource_pool"]: 1},
+            "cost_bounds": {settings["cost_unit"]: "ceil(time_limit_seconds/60)*60"},
+            "staging_headroom_seconds": settings["staging_headroom_seconds"],
+            "example": {
+                "time_limit_seconds": 1800,
+                "cost_bounds": {settings["cost_unit"]: 1800},
+                "minimum_timeout_seconds": 1800 + settings["staging_headroom_seconds"],
+            },
+        }
+    return contracts

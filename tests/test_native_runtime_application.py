@@ -1038,7 +1038,7 @@ class NativeApplicationTests(unittest.TestCase):
         self.assertIn("receipt:m", view["package"]["manifest"]["allowed_evidence"])
 
     def test_real_cli_stub_encodes_only_review_and_keeps_original_evidence_rules(self):
-        for role in policy.MODELS:
+        for role in OUTPUTS:
             payload = self.payload(role)
             payload["package"] = self.repeated_package(role).to_dict()
             with self.subTest(role=role):
