@@ -56,7 +56,7 @@ class RuntimeDashboardTests(StatusFixture, unittest.TestCase):
         self.assertTrue(headers["Content-Type"].startswith("text/html"))
         text = body.decode()
         for expected in (
-            "/api/status",
+            "api/status",
             "textContent",
             "Physical released",
             "Fees final",
@@ -66,6 +66,33 @@ class RuntimeDashboardTests(StatusFixture, unittest.TestCase):
             self.assertIn(expected, text)
         for forbidden in ("innerHTML", "cdn.", "PRIVATE_", "https://", "<script src="):
             self.assertNotIn(forbidden, text)
+
+    def test_research_content_requires_explicit_opt_in(self):
+        for path in ("/ledger", "/api/overview"):
+            self.assertEqual(self.request(path)[0], 404)
+        with make_server(self.root, research=True) as research_server:
+            thread = threading.Thread(
+                target=lambda: research_server.serve_forever(poll_interval=0.01),
+                daemon=True,
+            )
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", research_server.server_port, timeout=2
+                )
+                for path, term in (
+                    ("/", "Frontier"),
+                    ("/ledger", "Physical released"),
+                    ("/api/overview", '"study_id"'),
+                ):
+                    connection.request("GET", path)
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200, path)
+                    self.assertIn(term, response.read().decode())
+                connection.close()
+            finally:
+                research_server.shutdown()
+                thread.join(timeout=2)
 
     def test_host_header_blocks_rebinding_and_preserves_loopback_requests(self):
         for host in (

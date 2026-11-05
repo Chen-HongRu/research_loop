@@ -79,6 +79,15 @@ publication as distinct facts. `events STUDY --consumer NAME` and `ack-event`
 provide durable outbox consumption and acknowledgement; no agent wakeup consumer
 or automatic follow-up is installed.
 
+For a trusted Study reader, run `research-loop runtime dashboard STUDY --research`.
+The overview at `/` includes research text from the configured goal, tasks,
+accepted proposals and published knowledge. It reads the same Study as the
+operational ledger at `/ledger`. The richer projection lives at
+`/api/overview`; the default dashboard exposes only the operational status.
+When reverse proxying the research view, require authenticated Study-reader
+access, preserve the trailing slash on the mount and forward a loopback Host.
+Neither view accepts control commands.
+
 Run the synthetic CLI demonstration with:
 
 ```sh

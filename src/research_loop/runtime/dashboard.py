@@ -41,7 +41,7 @@ function table(id,columns,rows){
  rows.forEach(row=>{const line=document.createElement('tr');columns.forEach(([,field])=>{const cell=document.createElement('td');cell.textContent=text(typeof field==='function'?field(row):row[field]);line.append(cell);});grid.append(line);});host.append(grid);
 }
 async function refresh(){try{
- const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw Error('Status temporarily unavailable');const data=await response.json();
+ const response=await fetch('api/status',{cache:'no-store'});if(!response.ok)throw Error('Status temporarily unavailable');const data=await response.json();
  document.getElementById('summary').textContent=`Study ${data.study_id} · schema ${data.schema_version} · admission ${data.admission_mode} · STOP ${data.stop.requested?'requested':'not requested'} · recorded owner ${data.owner_open?'open':'closed'} · calls ${data.counters.calls}/${data.limits.max_calls??'unlimited'} · iterations ${data.counters.iterations}/${data.limits.max_iterations??'unlimited'} · persisted elapsed ${Number(data.counters.elapsed_seconds).toFixed(2)}s/${data.limits.max_seconds}s · publication ${data.publication_version} · reported ${data.reported_at}`;
  table('tasks',[['Task','id'],['Source','source'],['Status','status'],['Phase','phase'],['Ready','ready'],['Dependency blockers','blocked_dependencies'],['Execution','execution'],['Feedback sealed','feedback_sealed'],['Physical released','physical_released'],['Fees settled','fees_settled']],data.tasks);
  table('operations',[['Operation','id'],['Backend','backend'],['State','state'],['Outcome','terminal_outcome'],['Callback',row=>row.dispatch?.state],['Callback retired',row=>row.dispatch?.worker_retired],['Unresolved','unresolved'],['Physical released','physical_released'],['Resource holds','held_resources'],['Cost holds','held_costs'],['Actual costs','actual_costs'],['Fees final','costs_final'],['Collection','collection_state'],['Intake','intake'],['Feedback sealed','feedback_sealed']],data.operations);
@@ -54,7 +54,7 @@ refresh();setInterval(refresh,3000);
 </script></html>"""
 
 
-def make_server(root, host="127.0.0.1", port=0):
+def make_server(root, host="127.0.0.1", port=0, *, research=False):
     """Create a local server without starting its blocking service loop."""
     host = "127.0.0.1" if host == "localhost" else host
     try:
@@ -66,6 +66,15 @@ def make_server(root, host="127.0.0.1", port=0):
     if type(port) is not int or not 0 <= port <= 65535:
         raise ValueError("Invalid dashboard port")
     root = Path(root).resolve()
+
+    pages = {"/": _HTML.encode()}
+    projections = {"/api/status": status_snapshot}
+    if research:
+        from .overview import overview_snapshot
+
+        pages["/ledger"] = pages["/"]
+        pages["/"] = Path(__file__).with_name("overview.html").read_bytes()
+        projections["/api/overview"] = overview_snapshot
 
     class Handler(BaseHTTPRequestHandler):
         def parse_request(self):
@@ -88,12 +97,12 @@ def make_server(root, host="127.0.0.1", port=0):
 
         def do_GET(self):
             path = urlsplit(self.path).path
-            if path == "/":
-                body, content_type = _HTML.encode(), "text/html; charset=utf-8"
-            elif path == "/api/status":
+            if path in pages:
+                body, content_type = pages[path], "text/html; charset=utf-8"
+            elif path in projections:
                 try:
                     body = json.dumps(
-                        status_snapshot(root), ensure_ascii=False, allow_nan=False
+                        projections[path](root), ensure_ascii=False, allow_nan=False
                     ).encode()
                 except (OSError, ValueError, StateStoreError, sqlite3.Error):
                     self.send_error(503, "Status unavailable")
@@ -126,9 +135,9 @@ def make_server(root, host="127.0.0.1", port=0):
     return Server((host, port), Handler)
 
 
-def serve(root, host="127.0.0.1", port=0):
+def serve(root, host="127.0.0.1", port=0, *, research=False):
     """Serve until interrupted; always close the listening socket."""
-    with make_server(root, host, port) as server:
+    with make_server(root, host, port, research=research) as server:
         display_host = f"[{host}]" if ":" in host else host
         print(
             f"Runtime dashboard: http://{display_host}:{server.server_port}", flush=True
