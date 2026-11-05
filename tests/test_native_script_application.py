@@ -387,6 +387,86 @@ class NativeScriptApplicationTests(unittest.TestCase):
         self.assertIn("scientific_contract", required)
         self.assertNotIn("evidence_refs", schema["properties"]["output"]["properties"])
 
+    def test_plan_footer_grounds_exact_contract_null_text_and_canonical_input_sources(
+        self,
+    ):
+        source_key = "provided:frozen_task_contract"
+        self.config["scientific_contract_source"] = source_key
+        mappings = [
+            {"source": "hidden_cache", "name": "cache", "mount": "/inputs/cache"},
+            {"source": "targets", "name": "targets", "mount": "/inputs/targets"},
+        ]
+        science = deepcopy(self.contract) | {
+            "protocol": "Evidence consists only of the frozen evaluator.",
+            "execution_interface": {"input_mappings": mappings},
+        }
+        self.context[source_key] = science
+        self.context["provided:baseline_source"]["files"][0]["content"] += (
+            "# unrelated baseline context\n" * 12000
+        )
+        settings = self.config["backend_handlers"]["script"]["config"]
+        settings["input_mappings"] = {
+            row["source"]: {
+                "path": "/synthetic/" + row["source"],
+                "mount": row["mount"],
+                "kind": "directory",
+            }
+            for row in mappings
+        }
+        plan = deepcopy(self.plan)
+        plan["scientific_contract"] = deepcopy(science)
+        plan["operations"][0]["parameters"]["execution"]["inputs"] = [
+            {"name": row["name"], "source": row["source"]} for row in mappings
+        ]
+        package = self.package("plan").to_dict()
+        before = deepcopy(package)
+        prompt = policy.prompt("plan", package, self.config)
+        view, footer, schema = prompt_parts(prompt)
+        self.assertEqual(package, before)
+        self.assertEqual(view, package)
+        displayed, after = footer.split("Exact frozen scientific_contract:\n", 1)[
+            1
+        ].split("\nCanonical input mappings:\n", 1)
+        self.assertEqual(json.loads(displayed), science)
+        self.assertIsNone(json.loads(displayed)["local_evaluation"])
+        self.assertEqual(json.loads(after.split("\n", 1)[0]), mappings)
+        self.assertIn("even a single protocol word", footer)
+        self.assertIn("Never put a mount path in source", footer)
+        self.assertIn("never put operations inside scientific_contract", footer)
+        self.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
+        self.assertEqual(self.validate("plan", plan), plan)
+        for change in ("missing_null", "paraphrased_protocol", "mount_as_source"):
+            invalid = deepcopy(plan)
+            if change == "missing_null":
+                del invalid["scientific_contract"]["local_evaluation"]
+            elif change == "paraphrased_protocol":
+                invalid["scientific_contract"]["protocol"] = science[
+                    "protocol"
+                ].replace("only of", "only by")
+            else:
+                invalid["operations"][0]["parameters"]["execution"]["inputs"][0][
+                    "source"
+                ] = mappings[0]["mount"]
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.validate("plan", invalid)
+        malformed = deepcopy(plan)
+        malformed["scientific_contract"]["operations"] = malformed.pop("operations")
+        malformed["evidence_refs"] = []
+        payload = {
+            "call": {"role": "plan", "attempt_id": "synthetic-plan"},
+            "context_ref": "synthetic-ref",
+            "package": package,
+        }
+        for response in (
+            {"output": malformed},
+            {"output": malformed, "evidence_refs": []},
+        ):
+            with (
+                patch.object(application.transport, "run", return_value=response),
+                self.assertRaises(ValueError),
+            ):
+                application.invoke("agent", payload, self.config)
+
     def test_script_prompts_explain_existing_paths_and_allocation_bounds(self):
         for role in ("plan", "execute"):
             prompt = policy.prompt(role, self.package(role).to_dict(), self.config)

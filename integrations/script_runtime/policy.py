@@ -170,6 +170,27 @@ def prompt(role, package, config):
                 "minimum_timeout_seconds": 1800 + settings["staging_headroom_seconds"],
             },
         }
+    reminder = ""
+    if role == "plan":
+        science = package["context"][config["scientific_contract_source"]]
+        mappings = science.get("execution_interface", {}).get("input_mappings", [])
+        reminder = (
+            "For Plan, operations and scientific_contract are required sibling fields inside output, "
+            "alongside the other required Plan fields; neither belongs at the root or inside the other. "
+            "Copy the entire frozen scientific_contract JSON below into output.scientific_contract, preserving every "
+            "field and value, including null, list order, numeric types and exact text. Do not omit, add, normalize "
+            "or paraphrase anything, even a single protocol word.\nExact frozen scientific_contract:\n"
+            + json.dumps(science, ensure_ascii=False)
+            + "\nCanonical input mappings:\n"
+            + json.dumps(mappings, ensure_ascii=False)
+            + "\nEach execution.inputs item has only name and source. source is the selected mapping's canonical source "
+            "alias, name is its script-facing name, and mount is its container path for script access. Never put a "
+            "mount path in source or add mount to an execution.inputs item. "
+            "The root has exactly two sibling keys: output and evidence_refs. evidence_refs must not be inside output. "
+            "Inside output, scientific_contract and operations are separate required sibling fields; never put "
+            "operations inside scientific_contract. Copy scientific_contract verbatim, including null and all text, "
+            "without paraphrasing. "
+        )
     return (
         "You are the native script research runtime role "
         + role
@@ -210,11 +231,6 @@ def prompt(role, package, config):
         + native.response_footer(
             role,
             MODELS[role],
-            reminder=(
-                "For Plan, operations and scientific_contract are required sibling fields inside output, "
-                "alongside the other required Plan fields; neither belongs at the root or inside the other. "
-                if role == "plan"
-                else ""
-            ),
+            reminder=reminder,
         )
     )
