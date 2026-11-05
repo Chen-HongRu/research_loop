@@ -191,6 +191,40 @@ class RuntimeOperationsTests(unittest.TestCase):
             ),
         )
 
+    def test_free_preparation_without_submit_intent_finalizes_zero_costs(self):
+        _, ids = self.execution()
+        identity = ids[0]
+        self.event(
+            identity,
+            "prepare",
+            {
+                "ready": False,
+                "reason": "Free preparation failed",
+                "effective_parameters": {},
+            },
+        )
+        operation = self.ops.get(identity)
+        self.assertEqual(operation["actual_costs"], {"ticks": 0, "fee": 0})
+        self.assertTrue(operation["costs_final"])
+        self.assertIsNone(operation["submission_token"])
+
+    def test_no_intent_proof_preserves_contradictory_actual_charges(self):
+        _, ids = self.execution()
+        identity = ids[0]
+        self.event(identity, "settlement", {"final_costs": {"ticks": 2}})
+        self.event(
+            identity,
+            "prepare",
+            {
+                "ready": False,
+                "reason": "Free preparation failed",
+                "effective_parameters": {},
+            },
+        )
+        operation = self.ops.get(identity)
+        self.assertEqual(operation["actual_costs"], {"ticks": 2})
+        self.assertEqual(operation["inconsistency"], "cost_without_submission_intent")
+
     def submit(self, operation_id):
         if self.ops.get(operation_id)["state"] == "pending":
             self.prepare(operation_id)

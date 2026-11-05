@@ -546,6 +546,17 @@ class Publisher:
                     "iteration_id": call_identity.iteration_id,
                 },
             )
+            from .dispatch import RuntimeEvents
+
+            RuntimeEvents.emit(
+                conn,
+                f"publication:{publication_id}",
+                "knowledge_published",
+                call_identity.iteration_id or call_identity.attempt_id,
+                payload_ref=attempt["output_ref"],
+                identity=attempt["output_identity"],
+                payload={"publication_id": publication_id, "role": call_identity.role},
+            )
             return receipt
 
     def snapshot(self):

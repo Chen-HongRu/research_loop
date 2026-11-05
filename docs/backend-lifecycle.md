@@ -2,8 +2,9 @@
 
 Stage 5 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77) provides
 the `Operations` authority and `BackendDriver` through Python APIs for new SQLite
-Studies. Schema 5 rejects older prototype databases. Concurrent scheduling,
-SQLite CLI dispatch and explicit migration remain subsequent work. The serial
+Studies. Schema 6 rejects older prototype databases. The [concurrent coordinator](concurrent-runtime.md)
+schedules these actions through Python APIs. SQLite CLI, skill and dashboard are
+phase 7; explicit migration is phase 8. The serial
 controller's separate launcher is documented in [execution backends](execution-backends.md).
 
 ## Accepted requests and authority
@@ -132,8 +133,11 @@ settled actual cost + unresolved cost holds + new bound <= authorized limit
 ```
 
 Resource release and fee settlement are independent. Positive physical release
-can free a slot while fees remain unknown. A missing actual cost is never zero;
-explicit zero settles that unit. Authoritative overruns are recorded even when
+can free a slot while fees remain unknown. A missing actual cost after submission
+intent is never zero; explicit zero settles that unit. Before any submit intent,
+positive `no_submission_intent` proof and the free-preparation contract finalize
+declared units at zero. Existing nonzero actual charges are preserved as a
+contract inconsistency and block the authorization. Authoritative overruns are recorded even when
 they exceed a bound or total authorization, and block further admissions under
 that authorization. They are not rejected to preserve a misleading budget.
 

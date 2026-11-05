@@ -193,7 +193,9 @@ class PlanningLedger:
             ).fetchone()
             if existing:
                 return _decode(existing)
-            if row["owner_epoch"] != self.owner.owner_epoch:
+            from .dispatch import DispatchLedger
+
+            if not DispatchLedger.can_use_round(conn, round_id, self.owner.owner_epoch):
                 raise OwnershipError(
                     "Unresolved prior-owner planning round requires reconciliation"
                 )
@@ -319,6 +321,8 @@ class PlanningLedger:
         )
 
     def finish(self, round_id, status, *, error=None, receipt=None):
+        from .dispatch import DispatchLedger, RuntimeEvents
+
         if status not in {"applied", "failed"}:
             raise ValueError("Invalid planning terminal status")
         if status == "failed" and (not isinstance(error, str) or not error.strip()):
@@ -349,7 +353,9 @@ class PlanningLedger:
                     raise InvalidTransition(
                         "Applied planning requires its committed Judge batch"
                     )
-            elif row["owner_epoch"] != self.owner.owner_epoch:
+            elif not DispatchLedger.can_use_round(
+                conn, round_id, self.owner.owner_epoch
+            ):
                 raise OwnershipError(
                     "Unresolved prior-owner round cannot be silently discarded"
                 )
@@ -369,6 +375,13 @@ class PlanningLedger:
             conn.execute(
                 "UPDATE planning_rounds SET status=?,error=?,receipt_json=? WHERE id=?",
                 (status, error, _json(receipt), round_id),
+            )
+            RuntimeEvents.emit(
+                conn,
+                f"planning-terminal:{round_id}",
+                "planning_terminal",
+                round_id,
+                payload={"status": status, "error": error},
             )
             return _decode(
                 conn.execute(
