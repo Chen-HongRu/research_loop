@@ -2,8 +2,10 @@
 
 This is stage 2 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
 The input facade runs on new calls in the existing serial Study controller.
-The transactional Updater is available for isolated SQLite Studies; concurrent
-orchestration and migration remain subsequent stages. The
+The transactional Updater is available for new SQLite schema-5 Studies. The
+[backend lifecycle](backend-lifecycle.md) adds operation admission and trusted
+receipt intake; a new SQLite CLI, concurrent experiment coordinator and migration
+remain subsequent stages. The
 [publication interface](knowledge-publication.md) accepts Scout/Review knowledge
 and builds derived views from registered measurements and eligibility revisions.
 
@@ -66,7 +68,12 @@ apply_update(proposal, expected_revisions) -> UpdateReceipt
 iteration, expected revision, owner epoch and worker token. Context binding occurs
 once before dispatch. The updater compares frozen goal/evaluation/permissions,
 task, authorization limits and accepted Plan with authoritative records. Execute
-and Review require the original normalized, accepted Plan. The initial revision
+and Review require the original normalized, accepted Plan. Plan and Execute
+contexts additionally protect the exact configured `execution_backends`,
+`resource_pools`, and `operation_authorizations` dictionaries when present.
+Selection policy cannot omit or rewrite backend identities, resource limits or
+cost authority. These inputs do not make an Agent a backend/controller.
+The initial revision
 map is `{study: 1, task: revision-or-null, iteration: revision-or-null, knowledge: version}`.
 Knowledge starts at zero and advances by publication sequence, independently of
 iteration identity. A snapshot captured before another independent publication
@@ -98,8 +105,15 @@ For an uncommitted proposal, `apply_update` revalidates raw output and verifies
 normalization, expected revisions and binding. A forged in-memory proposal does
 not bypass validation. The raw/normalized proposal is published to an immutable
 file before a short transaction records acceptance and advances only the associated
-iteration. Context-bound attempts cannot use raw `accept_attempt` to bypass this
-path. Rejection preserves the reservation and does not automatically retry work.
+iteration. For Execute, the updater validates a finite optional `operations`
+list against the accepted Plan and configured backend, resource and cost
+authorizations before acceptance. Nonempty operations and their immutable request
+references are admitted in the same acceptance transaction; the Execute is
+accepted before external completion. Later collection never amends that sealed
+output. Review reservation remains blocked until operation knowledge and
+collection are terminal, evaluator intake is resolved and feedback is sealed;
+fee settlement is an independent ledger. Context-bound attempts cannot use raw
+`accept_attempt` to bypass this path. Rejection preserves the reservation and does not automatically retry work.
 
 An exact committed proposal returns its original receipt, even after restart or a
 validator upgrade. It does not invoke the current validator, allocate another
@@ -132,7 +146,8 @@ fields have controller source identities and the exact call revision. Cached
 successful attempts keep their original manifest. Historical attempts without
 one remain readable; their provenance is not retroactively invented.
 
-SQLite schema 4 contains binding, update, publication and planning records. Earlier SQLite
+SQLite schema 5 contains binding, update, publication, planning and operation
+records, including evaluator intake and separate resource/cost holds. Earlier SQLite
 test Studies must be retained as evidence or recreated in a new directory. No
 automatic conversion of existing Studies occurs in this stage.
 

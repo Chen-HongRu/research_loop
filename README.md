@@ -32,7 +32,7 @@ ProTok 父 Study 初始化在受锁保护、带所有权记录的暂存目录完
 
 ProTok supervisor 按子 Study 异步调度长训任务。某个子 Study 等待处理时保留原调查，其他独立任务继续；各人工长训使用独立预算，自动提名共享的分配与核账门槛继续生效。每个 Study 内的阶段和父 Study 轮次仍顺序发布，详见[任务调度](docs/task-queue.md)。
 
-[#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端正在分阶段实现。[SQLite 状态层](docs/transactional-runtime.md)提供独立 iteration 和统一账本；[Context / Feedback](docs/context-feedback.md)冻结来源并接纳受控输出；[知识发布](docs/knowledge-publication.md)按可信评价回执及资格修订重建双层 Frontier 与研究文档。[任务池与规划](docs/task-planning.md)保护人类任务及已认领版本，并行调用 Advocate，由 Judge 增改、排序未认领的自主任务。当前均为新建 SQLite Study 的 Python API，现有串行 CLI 不自动迁移；backend 生命周期和并发实验协调器仍在后续阶段。
+[#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端已推进到 schema 5。[SQLite 状态层](docs/transactional-runtime.md)提供独立 iteration 和统一账本；[Context / Feedback](docs/context-feedback.md)冻结来源并接纳受控输出；[知识发布](docs/knowledge-publication.md)按可信评价回执及资格修订重建双层 Frontier 与研究文档。[任务池与规划](docs/task-planning.md)保护人类任务及已认领版本，并行调用 Advocate，由 Judge 增改、排序未认领的自主任务。[Backend 生命周期](docs/backend-lifecycle.md)通过 `Operations` 和 `BackendDriver` Python API 分离有限 Execute 请求、一次提交、同一执行的检查、结果收集和费用结算；未知提交效果不会触发重提。当前面向新建 SQLite Study；新 SQLite CLI、并发实验协调器和显式迁移仍在后续阶段，现有串行 CLI 不自动迁移。
 
 ## 快速体验
 
@@ -76,7 +76,7 @@ uv run research-loop graph studies/demo
 
 已验证范围及实际遇到的安装、沙箱和型号限制见 [skill 验证记录](docs/skill-verification.md)；真实研究与脚本回复测试分别记录。
 
-新 Study 使用 version 3。Plan 在 `markdown` 冻结科学合同，以顶层 `timeout_seconds` 限制执行；字段用途见[消费者审计](docs/plan-field-audit.md)。旧格式目录保留原样，不自动迁移，详见[使用说明](docs/usage.md)。
+现有串行 CLI 新建的 Study 使用 version 3。Plan 在 `markdown` 冻结科学合同，以顶层 `timeout_seconds` 限制执行；字段用途见[消费者审计](docs/plan-field-audit.md)。旧格式目录保留原样，不自动迁移，详见[使用说明](docs/usage.md)。
 
 结构化输入输出由 Pydantic v2 模型统一定义，生成给现有 CLI 的 JSON Schema 并执行本地严格校验；安装或更新依赖使用 `uv sync --locked`。预算、作业、源码身份和核账仍由控制器判断。
 
@@ -102,6 +102,8 @@ uv run research-loop status studies/proof
 `init` 不调用模型；`run` 会使用账号额度，最多推进一轮并受总预算限制。`status`、`graph`、`frontiers` 和 `knowledge` 为只读命令。支持的请求型号为 `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-luna`；实际可用性取决于客户端和账号，不会自动替换型号。
 
 默认只读。需要修改实验代码时，通过 `--workspace` 指定干净的 Git 基线，并显式加 `--allow-write`。每次调查使用独立工作区。仅有 `run` 权限不等于已授权远程计算；训练资源与受保护评价器由任务后端管理。
+
+JSON `Study` 的 `run --backend /absolute/task_adapter.py --backend-config /absolute/backend.json` 可接入[阻塞式 legacy 执行桥](docs/execution-backends.md#legacy-unified-launcher)，后续 `run` 沿用登记的适配器与配置；原有 CLI 默认行为不变。该桥与 SQLite 的异步操作 API 分属不同格式边界。
 
 详细参数、权限边界、评价 JSON、恢复及记录结构见[运行指南](docs/usage.md)。 Pi 的配置、验证和能力边界见 [Pi Harness](docs/pi-harness.md)。
 

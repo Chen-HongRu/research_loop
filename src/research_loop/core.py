@@ -924,9 +924,23 @@ class Study:
         if type(iterations) is not int or iterations < 1:
             raise ValueError("iterations must be positive")
         with self._lock():
-            self._recover_observations()
-            with self._observe("run"):
-                return self._run(iterations)
+            failure = None
+            try:
+                self._recover_observations()
+                with self._observe("run"):
+                    return self._run(iterations)
+            except BaseException as error:
+                failure = error
+                raise
+            finally:
+                close = getattr(self.harness, "close", None)
+                if close:
+                    try:
+                        close()
+                    except BaseException as cleanup:
+                        if failure is not None:
+                            raise failure from cleanup
+                        raise
 
     def _run(self, iterations: int) -> dict:
         state = self.status()
@@ -1886,7 +1900,14 @@ class Study:
             result,
             schema=schema,
         )
-        parameter_check(validate_design, phase, result, context)
+        design_context = context
+        if (
+            phase == "plan"
+            and result.get("execution") is None
+            and getattr(self.harness, "supports_qualitative_execution", False) is True
+        ):
+            design_context = {**context, "research_execution": None}
+        parameter_check(validate_design, phase, result, design_context)
         if not result["markdown"].strip():
             raise ParameterError("Stage report must be nonempty")
         if phase == "review":

@@ -1,10 +1,12 @@
 # Transactional runtime
 
 This is the SQLite state foundation for [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
-It is available through the Python API for new, isolated test Studies. The current
-`research-loop init/run` commands still use the serial document controller. The
-concurrent runner, backend lifecycle and
-explicit migration are subsequent deliverables tracked in #77.
+SQLite schema 5 is available through Python APIs for new, isolated Studies.
+The current `research-loop init/run` commands still use the serial document
+controller. A new SQLite CLI, concurrent experiment coordinator and explicit
+migration remain subsequent deliverables tracked in #77. The
+[backend lifecycle](backend-lifecycle.md) provides `Operations` and `BackendDriver`
+for explicit asynchronous operation transitions.
 The [Context / Feedback interface](context-feedback.md) binds immutable inputs
 and validates output before accepting context-bound attempts.
 The [knowledge publication API](knowledge-publication.md) appends Scout/Review
@@ -32,8 +34,10 @@ not to a second application state store.
 The configuration stored in SQLite is not editable through the state API.
 Snapshots are detached JSON-serializable values. Modifying a snapshot or a
 `state.json` file cannot modify the database. No whole-state replacement API is
-provided. Knowledge and publication have independent append transitions; backend
-operations remain subsequent work. Neither may restore an old Study snapshot.
+provided. Knowledge publication and backend operations have independent append
+transitions; neither may restore an old Study snapshot. Operations bind the
+accepted Plan, Execute, backend/environment and authorization. Their trusted
+receipts and resource/cost holds remain separate from Agent narratives.
 
 ## Ownership and transitions
 
@@ -68,6 +72,17 @@ iteration. Standalone Scout, Advocate and Judge attempts share the Study ledger
 without acquiring an iteration. Publishing an accepted Review advances only its
 iteration from `publication` to `done`, with status `published`.
 
+An Execute may be accepted with a finite `operations` list before those external
+operations complete. Request admission and the operation group commit with that
+accepted Execute; its artifact list is never extended by later collection.
+`BackendDriver` calls trusted adapters outside write transactions. Durable
+submission intent precedes the callback, and an unknown outcome retains the same
+identity and holds rather than authorizing resubmission. Physical release and
+fee settlement are independent. Review requires terminal operation knowledge,
+terminal collection, resolved evaluator intake and an explicitly sealed feedback
+group; unresolved fees alone do not block it. Direct v1 Execute-artifact
+measurements remain supported. See the [lifecycle contract](backend-lifecycle.md).
+
 `begin_attempt` atomically reserves one call before returning its identity. A
 repeated request ID must have the same intent and returns the original record,
 including its original epoch; it is not permission to dispatch again. Call
@@ -90,14 +105,20 @@ transaction, so two contenders cannot both spend the final call.
 
 Shared elapsed time counts the coordinator's active interval once, regardless of
 the number of concurrent workers. The wall-clock anchor and consumed total are
-persisted. Graceful close records the final interval and excludes the subsequent
-idle gap. After an unclean exit the open interval, including downtime, is charged
-conservatively on reacquisition. Backward clock movement never refunds time.
+persisted. Graceful close records the final interval. Its subsequent gap is
+excluded only when no operation has `external_open=1`. Live or unknown submission
+intent, and terminal work whose physical release is still unconfirmed, keep that
+gap chargeable on reacquisition even after graceful close. A billing-only gap
+after confirmed physical release is excluded when ownership was closed. After an
+unclean exit the open owner interval, including downtime, is charged
+conservatively. Backward clock movement never refunds time.
 This is local wall accounting, not a guarantee about an administrator changing
 the host clock.
 
-The optional absolute `admission_deadline` prevents new iteration claims. It is
-distinct from the shared time budget and future backend termination deadlines.
+The optional absolute `admission_deadline` prevents new iteration claims and
+backend submission admission. It is
+distinct from the shared time budget and each operation's frozen backend
+deadline. Reopening ownership does not renew an operation deadline.
 STOP is a persisted latch. STOP or exhausted admission budgets prevent new work,
 but do not prevent recording results or failures for previously reserved attempts.
 The foundation has no budget-reset, STOP-clear or automatic retry API.
@@ -121,7 +142,7 @@ New runtime initialization publishes `runtime.json` with `format: sqlite-v1` and
 the database Study identity. The serial `Study` and `TaskQueue` reject either this
 marker or `runtime.sqlite3`, including partially initialized directories. The
 runtime refuses in-place creation over legacy `study.json` or `state.json`.
-The current SQLite schema is 4; earlier prototype schemas are explicitly rejected.
+The current SQLite schema is 5; earlier prototype schemas are explicitly rejected.
 Existing Studies require the later explicit migration procedure; creating a
 database beside existing files is not migration. Old deployed binaries must be
 stopped during that procedure; they cannot be controlled by a check they lack.

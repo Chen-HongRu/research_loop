@@ -79,6 +79,16 @@ class SyntheticSession:
         inputs = {
             key: config[key] for key in ("goal", "permissions", "global_evaluation")
         }
+        if role in {"plan", "execute"}:
+            inputs.update(
+                (key, config[key])
+                for key in (
+                    "execution_backends",
+                    "resource_pools",
+                    "operation_authorizations",
+                )
+                if key in config
+            )
         inputs.update(task=record["task"], budget=self.store.snapshot()["limits"])
         if role in {"execute", "review"}:
             plan = record["plan"]
