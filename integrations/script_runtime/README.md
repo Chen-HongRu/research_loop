@@ -52,7 +52,8 @@ effective actions. The application validates the file edit permission before
 the controller admits an operation.
 
 Plan returns `timeout_seconds`, `local_evaluation`, `experiment_definition`,
-`baseline_ref`, `backend`, `scientific_contract`, and an `operations` list.
+`baseline_ref`, `backend`, and an `operations` list. Both Plan and Execute read
+the frozen scientific contract directly from their configured context source.
 An empty list explicitly selects qualitative investigation with no external
 execution or allocation. Its `experiment_definition` must identify a concrete
 research question and the available context used to answer it; it must not

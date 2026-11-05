@@ -62,7 +62,6 @@ class Operation(PlannedOperation):
 class Plan(native.Plan):
     baseline_ref: native.Text
     backend: native.Text
-    scientific_contract: dict
     operations: list[PlannedOperation]
 
 
@@ -94,8 +93,6 @@ def _validate_plan(output, context, config):
         or not {"baseline_ref", "global_evaluation"} <= contract.keys()
     ):
         raise ValueError("Frozen scientific contract is absent or incomplete")
-    if not _same(value["scientific_contract"], contract):
-        raise ValueError("Plan changed the frozen scientific contract")
     if not _same(contract["global_evaluation"], context.get("global_evaluation")):
         raise ValueError("Scientific contract differs from fixed global evaluation")
     if not _same(value["local_evaluation"], contract.get("local_evaluation")):
@@ -138,7 +135,18 @@ def validate_output(role, output, context, config):
     if role != "execute":
         return native.validate_output(role, output, context)
     value = Execute.model_validate(json_value(output)).model_dump()
-    plan = _validate_plan(context.get("plan"), context, config)
+    accepted = context.get("plan")
+    if isinstance(accepted, dict) and "scientific_contract" in accepted:
+        # Previously accepted Plans carry a copy of the frozen operator input.
+        accepted = accepted.copy()
+        if not _same(
+            accepted.pop("scientific_contract"),
+            context.get(config["scientific_contract_source"]),
+        ):
+            raise ValueError(
+                "Accepted Plan differs from the frozen scientific contract"
+            )
+    plan = _validate_plan(accepted, context, config)
     if [_planned(item) for item in value["operations"]] != plan["operations"]:
         raise ValueError("Execute must match accepted Plan except source_files")
     for item in value["operations"]:
@@ -187,21 +195,13 @@ def prepare_submission(role, package, config):
         science = package["context"][config["scientific_contract_source"]]
         mappings = science.get("execution_interface", {}).get("input_mappings", [])
         reminder = (
-            "For Plan, operations and scientific_contract are required sibling fields inside output, "
-            "alongside the other required Plan fields; neither belongs at the root or inside the other. "
-            "Copy the entire frozen scientific_contract JSON below into output.scientific_contract, preserving every "
-            "field and value, including null, list order, numeric types and exact text. Do not omit, add, normalize "
-            "or paraphrase anything, even a single protocol word.\nExact frozen scientific_contract:\n"
-            + json.dumps(science, ensure_ascii=False)
-            + "\nCanonical input mappings:\n"
+            "Use the frozen scientific contract from context to choose operations. "
+            "Return operations inside output. Canonical input mappings:\n"
             + json.dumps(mappings, ensure_ascii=False)
             + "\nEach execution.inputs item has only name and source. source is the selected mapping's canonical source "
             "alias, name is its script-facing name, and mount is its container path for script access. Never put a "
             "mount path in source or add mount to an execution.inputs item. "
             "The root has exactly two sibling keys: output and evidence_refs. evidence_refs must not be inside output. "
-            "Inside output, scientific_contract and operations are separate required sibling fields; never put "
-            "operations inside scientific_contract. Copy scientific_contract verbatim, including null and all text, "
-            "without paraphrasing. "
         )
     return (
         "You are the native script research runtime role "

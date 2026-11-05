@@ -86,7 +86,6 @@ class NativeScriptApplicationTests(unittest.TestCase):
             "experiment_definition": "Run the synthetic script with frozen inputs",
             "baseline_ref": self.contract["baseline_ref"],
             "backend": "script",
-            "scientific_contract": deepcopy(self.contract),
             "operations": [planned],
         }
         self.execute = {"operations": [deepcopy(self.request)], "artifacts": []}
@@ -356,14 +355,17 @@ class NativeScriptApplicationTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 self.validate("plan", invalid)
 
-    def test_scientific_contract_uses_exact_json_scalar_types(self):
+    def test_execute_checks_legacy_plan_contract_against_its_bound_source(self):
         context = deepcopy(self.context)
         context["provided:science"]["repeats"] = 1
-        plan = deepcopy(self.plan)
-        plan["scientific_contract"] = deepcopy(context["provided:science"])
-        plan["scientific_contract"]["repeats"] = True
+        legacy = self.plan | {
+            "scientific_contract": deepcopy(context["provided:science"])
+        }
+        context["plan"] = legacy
+        self.assertEqual(self.validate("execute", self.execute, context), self.execute)
+        legacy["scientific_contract"]["repeats"] = True
         with self.assertRaisesRegex(ValueError, "frozen scientific"):
-            self.validate("plan", plan, context)
+            self.validate("execute", self.execute, context)
 
     def test_prompts_describe_complete_envelope_with_resolvable_script_refs(self):
         for role, output_model in policy.MODELS.items():
@@ -384,17 +386,16 @@ class NativeScriptApplicationTests(unittest.TestCase):
         self.assertEqual(view, package)
         self.assertGreater(prompt.index("\nResponse contract:\n"), len(prompt) // 2)
         self.assertIn("Current role: plan", footer)
-        self.assertIn(
-            "operations and scientific_contract are required sibling fields inside output",
-            footer,
-        )
+        self.assertIn("Return operations inside output", footer)
         self.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
         required = schema["properties"]["output"]["required"]
         self.assertIn("operations", required)
-        self.assertIn("scientific_contract", required)
+        self.assertNotIn(
+            "scientific_contract", schema["properties"]["output"]["properties"]
+        )
         self.assertNotIn("evidence_refs", schema["properties"]["output"]["properties"])
 
-    def test_plan_footer_grounds_exact_contract_null_text_and_canonical_input_sources(
+    def test_roles_read_frozen_contract_from_context_and_plan_uses_canonical_sources(
         self,
     ):
         source_key = "provided:frozen_task_contract"
@@ -421,7 +422,6 @@ class NativeScriptApplicationTests(unittest.TestCase):
             for row in mappings
         }
         plan = deepcopy(self.plan)
-        plan["scientific_contract"] = deepcopy(science)
         plan["operations"][0]["parameters"]["execution"]["inputs"] = [
             {"name": row["name"], "source": row["source"]} for row in mappings
         ]
@@ -431,33 +431,26 @@ class NativeScriptApplicationTests(unittest.TestCase):
         view, footer, schema = prompt_parts(prompt)
         self.assertEqual(package, before)
         self.assertEqual(view, package)
-        displayed, after = footer.split("Exact frozen scientific_contract:\n", 1)[
-            1
-        ].split("\nCanonical input mappings:\n", 1)
-        self.assertEqual(json.loads(displayed), science)
-        self.assertIsNone(json.loads(displayed)["local_evaluation"])
+        self.assertEqual(view["context"][source_key], science)
+        execute_view, _, _ = prompt_parts(
+            policy.prompt("execute", self.package("execute").to_dict(), self.config)
+        )
+        self.assertEqual(execute_view["context"][source_key], science)
+        self.assertNotIn("scientific_contract", execute_view["context"]["plan"])
+        after = footer.split("Canonical input mappings:\n", 1)[1]
         self.assertEqual(json.loads(after.split("\n", 1)[0]), mappings)
-        self.assertIn("even a single protocol word", footer)
+        self.assertNotIn(science["protocol"], footer)
         self.assertIn("Never put a mount path in source", footer)
-        self.assertIn("never put operations inside scientific_contract", footer)
         self.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
         self.assertEqual(self.validate("plan", plan), plan)
-        for change in ("missing_null", "paraphrased_protocol", "mount_as_source"):
-            invalid = deepcopy(plan)
-            if change == "missing_null":
-                del invalid["scientific_contract"]["local_evaluation"]
-            elif change == "paraphrased_protocol":
-                invalid["scientific_contract"]["protocol"] = science[
-                    "protocol"
-                ].replace("only of", "only by")
-            else:
-                invalid["operations"][0]["parameters"]["execution"]["inputs"][0][
-                    "source"
-                ] = mappings[0]["mount"]
-            with self.subTest(change=change), self.assertRaises(ValueError):
-                self.validate("plan", invalid)
+        invalid = deepcopy(plan)
+        invalid["operations"][0]["parameters"]["execution"]["inputs"][0]["source"] = (
+            mappings[0]["mount"]
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid/repeated canonical input"):
+            self.validate("plan", invalid)
         malformed = deepcopy(plan)
-        malformed["scientific_contract"]["operations"] = malformed.pop("operations")
+        malformed["scientific_contract"] = {"operations": malformed.pop("operations")}
         malformed["evidence_refs"] = []
         payload = {
             "call": {"role": "plan", "attempt_id": "synthetic-plan"},
