@@ -91,6 +91,9 @@ class BackendScheduler:
 
     @staticmethod
     def _allowed(op, kind):
+        imported = Operations.imported(op)
+        if op.get("submit_forbidden") and kind in {"prepare", "submit"}:
+            return False
         if kind == "prepare":
             return op["state"] == "pending" and op["inconsistency"] is None
         if kind == "submit":
@@ -107,11 +110,15 @@ class BackendScheduler:
             )
         if kind == "settlement":
             return not op["costs_final"] and (
-                op["submission_token"] is not None or op["job_id"] is not None
+                op["submission_token"] is not None
+                or op["job_id"] is not None
+                or imported
             )
         if kind == "inspection":
             return (
-                op["submission_token"] is not None or op["job_id"] is not None
+                op["submission_token"] is not None
+                or op["job_id"] is not None
+                or imported
             ) and (
                 op["state"] in {"submitting", "unknown", "submitted"}
                 or not op["physical_released"]
@@ -119,7 +126,9 @@ class BackendScheduler:
             )
         if kind == "cancellation":
             return (
-                op["submission_token"] is not None or op["job_id"] is not None
+                op["submission_token"] is not None
+                or op["job_id"] is not None
+                or imported
             ) and (not op["physical_released"] or op["external_open"])
         return False
 

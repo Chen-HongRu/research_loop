@@ -1,5 +1,17 @@
 # ProTok adapter
 
+For SQLite migration, `migration.py` supplies a pure explicit translator and
+bound cleanup for imported operations; it does not launch training or cancel jobs.
+The [migration guide](../../docs/runtime-migration.md) covers captured control
+annexes and operator evidence. The [native application](../native_runtime/README.md)
+can compose this cleanup with Pi roles using the submit_result tool; it is not the legacy runner.
+The translator requires complete captured historical script coverage and binds
+accounting to original jobs and authorization. A nested `original_job`
+no-submission assertion must retain the exact captured job and original grant;
+it remains an attributed operator assertion, not a new retirement proof.
+Cleanup configuration validates frozen bindings without filesystem I/O before
+admission; actual receipt observations remain separate.
+
 New Studies use the version-3 Plan: scientific intent is frozen in `markdown`,
 `timeout_seconds` bounds Execute, and optional top-level `execution` supplies
 script inputs/outputs and allocation bounds. Inputs use `name` and trusted `source`,

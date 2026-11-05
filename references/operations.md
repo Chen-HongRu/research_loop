@@ -98,6 +98,13 @@ Load only when asked or needed: [Scout](../docs/scout.md),
 [telemetry](../docs/telemetry.md), [long training](../docs/long-training.md),
 [Meta Loop](../docs/meta-loop-design.md). None is enabled automatically by this skill.
 
+For explicit legacy migration, begin with read-only `runtime migrate preview` and
+follow [runtime migration](../docs/runtime-migration.md). Do not infer external
+fencing or backend receipts from document shape; migration and deployment require
+the authorized operator to supply and verify them.
+The [native application](../integrations/native_runtime/README.md) supports
+qualitative Execute and imported ProTok cleanup, not new training or cancellation.
+
 For an update, finish or stop/reconcile owned work, retain the old runtime and
 Studies, install the new exact ref into a separate directory, run doctor, and check
 the Study version against its usage guide. Do not migrate Studies implicitly or

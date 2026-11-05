@@ -5,13 +5,39 @@ open denied evaluator receipts or infer measurements from backend narratives.
 """
 
 from .context import ContextPackage, ContextSnapshot, build_context
+from .context_grants import _issue_context
+from .context_sources import extend as extend_sources
 from .files import publish_artifact
 from .operations import Operations
 from .planning_state import PlanningLedger
+from .role_access import RoleAccess
 from .publication import Publisher
 from .publication_views import build_views, render_research
 from .store import ConflictError, _decode
 from .updates import Updater
+
+
+def own_operations(owner, iteration_id):
+    return [
+        {
+            key: operation[key]
+            for key in (
+                "id",
+                "revision",
+                "backend",
+                "backend_version",
+                "environment",
+                "state",
+                "terminal_outcome",
+                "collection_state",
+                "collection_ref",
+                "inconsistency",
+                "job_id",
+                "unexpected_job_ids",
+            )
+        }
+        for operation in Operations(owner).list(iteration_id=iteration_id)
+    ]
 
 
 class RuntimeContexts:
@@ -27,15 +53,20 @@ class RuntimeContexts:
             # Dispatch/recovery always uses the already selected input. A policy
             # change cannot silently reconstruct a reserved call's context.
             return self.reader._load_binding(record)[0]
-        retry = record.get("retry")
-        if retry is not None and retry["source_context_ref"] is not None:
-            return self.retry_review(
-                call, retry["source_context_ref"], retry["source_context_identity"]
-            )
         if record["planning"] is not None:
             return PlanningLedger(self.owner).context(call, policy=self.policy)
+        return _issue_context(self.reader, record, lambda: self._build(call, record))
+
+    def _build(self, call, record):
+        retry = record.get("retry")
+        if retry is not None and retry["source_context_ref"] is not None:
+            return self._retry_package(call, record, retry)
         config = record["control"]["config"]
-        knowledge = Publisher(self.owner).snapshot()
+        access = RoleAccess.resolve(config, call.role)
+        knowledge = Publisher(self.owner).snapshot(
+            history=access.published_history,
+            iteration_id=call.iteration_id if access.own_execution else None,
+        )
         publications = {
             row["id"]: self.reader._read_record(row["payload_ref"], row["identity"])[
                 "normalized_output"
@@ -46,7 +77,7 @@ class RuntimeContexts:
             key: config[key] for key in ("goal", "global_evaluation") if key in config
         }
         inputs.update(
-            permissions=config.get("permissions", {}),
+            **access.controls(config),
             task=record["task"],
             budget={
                 key: record["control"][key]
@@ -58,7 +89,7 @@ class RuntimeContexts:
                 )
             },
         )
-        if call.role in {"plan", "execute"}:
+        if access.resource_context:
             inputs.update(
                 (key, config[key])
                 for key in (
@@ -77,7 +108,33 @@ class RuntimeContexts:
             if required:
                 protected.append(key)
 
-        if call.role in {"execute", "review"}:
+        with self.owner.store._connection(readonly=True) as conn:
+            imported_history = [
+                _decode(row)
+                for row in conn.execute(
+                    "SELECT id,context_ref,context_identity_json FROM migration_imports WHERE committed_at IS NOT NULL"
+                )
+            ]
+        # Legacy prose has no native per-entry feedback/evaluator provenance.
+        # It remains archived unless the trusted migration configuration permits
+        # this reviewed source. Never expose old numeric Frontiers as new facts.
+        for imported in (
+            imported_history
+            if access.published_history
+            and config.get("legacy_history_feedback") is True
+            else []
+        ):
+            history = self.reader._read_record(
+                imported["context_ref"], imported["context_identity"]
+            )
+            source(
+                "legacy_history:" + imported["id"],
+                history,
+                imported["context_ref"],
+                imported["id"],
+            )
+
+        if access.accepted_plan:
             plan = record["plan"]
             source(
                 "plan",
@@ -86,11 +143,11 @@ class RuntimeContexts:
                 plan["id"],
                 required=True,
             )
-        if call.role == "review":
+        if access.own_execution:
             with self.owner.store._connection(readonly=True) as conn:
                 execute = _decode(
                     conn.execute(
-                        "SELECT id,output_ref,output_identity_json FROM attempts "
+                        "SELECT id,origin_kind,output_ref,output_identity_json FROM attempts "
                         "WHERE iteration_id=? AND role='execute' AND status='accepted'",
                         (call.iteration_id,),
                     ).fetchone()
@@ -99,35 +156,12 @@ class RuntimeContexts:
                 raise ConflictError("Review requires its accepted Execute")
             source(
                 "execute",
-                self.reader._read_record(
-                    execute["output_ref"], execute["output_identity"]
-                )["normalized_output"],
+                self.reader._phase_output(execute, "execute"),
                 execute["output_ref"],
                 execute["id"],
                 required=True,
             )
-            operations = [
-                {
-                    key: operation[key]
-                    for key in (
-                        "id",
-                        "revision",
-                        "backend",
-                        "backend_version",
-                        "environment",
-                        "state",
-                        "terminal_outcome",
-                        "collection_state",
-                        "collection_ref",
-                        "inconsistency",
-                        "job_id",
-                        "unexpected_job_ids",
-                    )
-                }
-                for operation in Operations(self.owner).list(
-                    iteration_id=call.iteration_id
-                )
-            ]
+            operations = own_operations(self.owner, call.iteration_id)
             if operations:
                 reference = publish_artifact(
                     self.owner.store.root, {"operations": operations}
@@ -148,7 +182,9 @@ class RuntimeContexts:
                 call.role == "review"
                 and measurement["iteration_id"] == call.iteration_id
             )
-            if measurement["id"] in visible or own_review:
+            if (
+                access.published_history and measurement["id"] in visible
+            ) or own_review:
                 source(
                     f"measurement:{measurement['id']}",
                     measurement,
@@ -156,16 +192,53 @@ class RuntimeContexts:
                     measurement["id"],
                     required=own_review,
                 )
-        research = {
-            "version": knowledge["version"],
-            "research": render_research(knowledge, publications),
-            "frontiers": build_views(knowledge, config["global_evaluation"])
-            if isinstance(config.get("global_evaluation"), dict)
-            else None,
-        }
-        reference = publish_artifact(self.owner.store.root, research)
-        source("research", research["research"], reference, knowledge["version"])
-        source("frontiers", research["frontiers"], reference, knowledge["version"])
+        if access.published_history:
+            research = {
+                "version": knowledge["version"],
+                "research": render_research(knowledge, publications),
+                "frontiers": build_views(knowledge, config["global_evaluation"])
+                if isinstance(config.get("global_evaluation"), dict)
+                else None,
+            }
+            reference = publish_artifact(self.owner.store.root, research)
+            source("research", research["research"], reference, knowledge["version"])
+            source("frontiers", research["frontiers"], reference, knowledge["version"])
+        sources = [
+            {
+                "id": key,
+                "key": key,
+                "ref": references.get(key, f"control:{key}"),
+                "revision": revisions.get(key, 1),
+                "reason": "Accepted controller input at invocation start",
+                "allow_feedback": True,
+            }
+            for key in inputs
+        ]
+        allowed = list(dict.fromkeys(references.values()))
+        if access.own_execution:
+            reports, _ = Operations(self.owner).research_evidence(call.iteration_id)
+            for entry in reports:
+                metadata = entry["source"]
+                body = None
+                if metadata["allow_feedback"]:
+                    body = self.reader._read_record(metadata["ref"], entry["identity"])
+                    if not isinstance(body, dict):
+                        raise ValueError(
+                            "Research report must be a JSON control object"
+                        )
+                    if metadata["ref"] not in allowed:
+                        allowed.append(metadata["ref"])
+                inputs[metadata["key"]] = body
+                sources.append(metadata)
+        extend_sources(
+            config,
+            call.role,
+            self.reader._read_record,
+            inputs,
+            sources,
+            protected,
+            allowed,
+        )
         snapshot = ContextSnapshot.capture(
             study_id=call.study_id,
             revisions={
@@ -175,19 +248,9 @@ class RuntimeContexts:
                 "knowledge": knowledge["version"],
             },
             inputs=inputs,
-            sources=[
-                {
-                    "id": key,
-                    "key": key,
-                    "ref": references.get(key, f"control:{key}"),
-                    "revision": revisions.get(key, 1),
-                    "reason": "Accepted controller input at invocation start",
-                    "allow_feedback": True,
-                }
-                for key in inputs
-            ],
+            sources=sources,
             protected_keys=protected,
-            allowed_evidence=list(dict.fromkeys(references.values())),
+            allowed_evidence=allowed,
         )
         return build_context(
             snapshot,
@@ -196,16 +259,28 @@ class RuntimeContexts:
             self.policy_ref,
             config.get("context_budget", {}),
             policy=self.policy,
+            visible_evidence_only=access.configured,
         )
 
     def retry_review(self, call, original_context_ref, original_identity):
         """Retain the failed Review's selected scientific inputs on explicit retry."""
         if call.role != "review":
             raise ValueError("Frozen review retry cannot be used for another role")
-        original = self.reader._read_record(original_context_ref, original_identity)
+        record = self.owner._feedback_snapshot(call.to_dict())
+        retry = record.get("retry")
+        if not retry or (original_context_ref, original_identity) != (
+            retry["source_context_ref"],
+            retry["source_context_identity"],
+        ):
+            raise ConflictError("Review retry must use its recorded original binding")
+        return self.build(call)
+
+    def _retry_package(self, call, record, retry):
+        original = self.reader._read_record(
+            retry["source_context_ref"], retry["source_context_identity"]
+        )
         package = ContextPackage.from_dict(original)
         value = package.to_dict()
-        record = self.owner._feedback_snapshot(call.to_dict())
         if value["manifest"]["task"] != record["task"]:
             raise ConflictError("Review retry task differs from its original input")
         value["manifest"]["revisions"]["iteration"] = call.expected_revision

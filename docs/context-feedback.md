@@ -2,10 +2,10 @@
 
 This is stage 2 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
 The input facade runs on new calls in the existing serial Study controller.
-The transactional Updater is available for new SQLite schema-7 Studies. The
+The transactional Updater is available for SQLite schema-8 Studies. The
 [backend lifecycle](backend-lifecycle.md) adds operation admission and trusted
 receipt intake; the [concurrent coordinator](concurrent-runtime.md) drives these
-interfaces. The [SQLite CLI and dashboard](concurrent-runtime.md) are available; migration and deployment remain phase 8. The
+interfaces. The [SQLite CLI and dashboard](concurrent-runtime.md) are available; [migration](runtime-migration.md) and deployment require operator evidence. The
 [publication interface](knowledge-publication.md) accepts Scout/Review knowledge
 and builds derived views from registered measurements and eligibility revisions.
 
@@ -54,6 +54,64 @@ code. The interface does not sandbox malicious Python or authenticate arbitrary
 source descriptions. Untrusted Agent decisions are data proposals, never live
 coordinator handles. Backend/tool boundaries remain responsible for preventing
 access to final-only data outside the provided context.
+
+## Role access in a SQLite Study
+
+Set `role_access` in the Study configuration at creation. Each named role has
+one rule shared by context construction, binding and validated output admission.
+Omitted roles keep their existing behavior. This example gives Review its own
+accepted Plan, Execute, collected reports and eligible measurements for the
+iteration. Advocate receives the frozen planning round and published research.
+
+```json
+{
+  "role_access": {
+    "review": {
+      "published_history": false,
+      "context_sources": [],
+      "permissions": [],
+      "actions": ["knowledge", "reviews"]
+    },
+    "advocate": {"published_history": true, "actions": ["proposals"]}
+  }
+}
+```
+
+The four rule fields are optional. `published_history` defaults to true and
+governs published research, Frontiers, historical measurements and imported
+history. The task, role-specific control inputs, and the planning pool for
+Advocate/Judge remain authoritative inputs. `context_sources` narrows the
+operator's named sources by intersecting with their existing role and
+feedback grants. `permissions` selects keys from the Study permission map
+and preserves their values. An empty list selects none. A configured role
+may cite only references represented by visible source fields.
+
+`actions` restricts nonempty sections of accepted output. Plan can propose
+`operations`; Execute can request `operations` and supply `source_edits`;
+Review can publish `knowledge`, `reviews` and `corrections`; Scout can publish
+`knowledge`; Advocate can make `proposals`; Judge can submit `changes`.
+A role receives its effective `allowed_actions` in protected context. The
+controller checks normalized output before admitting operations or applying
+updates. The script application checks source edits against this same action list when validating proposed files. Custom applications implement their own backend-specific edit checks. Study grants, protected sources and backend limits still apply.
+These rules govern frozen inputs and controller actions. Interactive Pi search,
+filesystem access and operating-system isolation have separate enforcement
+boundaries.
+
+For a configured role, the controller freezes the first selected package per
+attempt and atomically records its artifact reference and identity in
+`context-grants/`. Binding accepts that exact package, including every source
+reference and the supplied content. Rebuilding the attempt reuses the same
+selection. These receipts belong to the trusted Study control directory.
+
+To revise an existing knowledge entry, the configured role must have received
+the full published `research` field. The Publisher checks the target's revision
+at the frozen publication version and again against its current revision.
+An omitted or truncated research field allows new entries only. A conflict
+leaves the target unchanged. On upgrade, legacy **configured-role** bindings
+without an issuance receipt cannot authorize new feedback or a Review retry
+from that package. Use a fresh invocation for a new decision. Previously
+published receipts remain replayable; unconfigured roles retain their prior
+binding contract.
 
 ## Validated output
 
@@ -146,7 +204,7 @@ fields have controller source identities and the exact call revision. Cached
 successful attempts keep their original manifest. Historical attempts without
 one remain readable; their provenance is not retroactively invented.
 
-SQLite schema 7 contains binding, update, publication, planning and operation
+SQLite schema 8 contains binding, update, publication, planning and operation
 records, including evaluator intake and separate resource/cost holds. Earlier SQLite
 test Studies must be retained as evidence or recreated in a new directory. No
 automatic conversion of existing Studies occurs in this stage.
@@ -158,6 +216,34 @@ receipt references protected from policy omission. Other unpublished measurement
 and denied evaluator bodies are excluded. Once bound, the selected package is
 reused even if policy or published knowledge later changes. Managed dispatches
 can accept only the exact result in their durable worker completion record.
+
+Operator-supplied baseline source and research contracts can be published as
+small immutable JSON-object control artifacts and selected with
+`config.context_sources`. Each entry has exactly `name`, `ref`, `identity`,
+`revision`, `roles`, `allow_feedback` and `required`. `ref` is a Study-local
+`artifacts/<32-hex>.json` reference; `identity` contains its captured `device`,
+`inode`, `size` and `mtime_ns`. `revision` is an explicit finite JSON version;
+`roles` is a nonempty subset of `plan`, `execute`, `review`, `scout`, `advocate`
+and `judge`. Use a unique simple name such as `baseline` and store source text
+inside the object, for example `{"files": [{"path": "baseline.py", "content": "..."}]}`.
+
+Eligible objects enter both ordinary and planning contexts as `provided:<name>`
+and their original refs enter the evidence allowlist. Required objects are
+protected; optional objects may be omitted, but neither may be rewritten or
+summarized. Denied and other-role sources retain only explanatory manifest
+metadata and never have their bodies read. Updater independently checks content,
+configured version and stat identity, with metadata-only rechecks at commit.
+These inputs are explicit control artifacts, not dataset/checkpoint readers or
+scientific verification. Omitting `context_sources` preserves existing behavior.
+
+Own Review can additionally receive explicitly feedback-permitted unscored
+reports from its accepted operation collections, under
+`evidence:<operation-id>:<name>`. These immutable JSON report objects retain
+unverified-observation provenance and original evidence refs. Denied reports are
+never opened; other iterations and roles do not receive their bodies. Source
+content and collection bindings are independently checked before acceptance.
+Report citations can support only interpretation knowledge, never new verified
+measurements or Frontier entries. See [collection and Review](backend-lifecycle.md#collection-and-review).
 
 ## Local API smoke
 

@@ -86,6 +86,8 @@ class BackendDriver:
 
     def prepare(self, operation_id):
         operation, backend, request = self._inputs(operation_id)
+        if operation["submit_forbidden"]:
+            raise InvalidTransition("Imported operations cannot prepare again")
         if operation["state"] != "pending":
             raise InvalidTransition("Only an unprepared operation may prepare")
         return self._record(operation, "prepare", backend.prepare(request, operation))
@@ -121,6 +123,7 @@ class BackendDriver:
             kind in {"inspection", "cancellation", "settlement"}
             and not operation["submission_token"]
             and not observed_quarantine
+            and not self.operations.imported(operation)
         ):
             raise InvalidTransition("This operation has no external submission intent")
         if kind == "collection" and (

@@ -17,7 +17,7 @@ CREATE TABLE operation_groups (
  feedback_sealed INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE operation_authorities (
- id TEXT PRIMARY KEY, backends_json TEXT NOT NULL, max_operations TEXT NOT NULL,
+ id TEXT PRIMARY KEY, backends_json TEXT NOT NULL, max_operations TEXT,
  deadline REAL, admitted_operations INTEGER NOT NULL DEFAULT 0, blocked_reason TEXT
 );
 CREATE TABLE operation_pool_balances (pool TEXT PRIMARY KEY, capacity TEXT NOT NULL, held TEXT NOT NULL, blocked_reason TEXT);
@@ -46,6 +46,8 @@ CREATE TABLE operations (
  cancel_acknowledged INTEGER NOT NULL DEFAULT 0, inconsistency TEXT,
  external_open INTEGER NOT NULL DEFAULT 0,
  unexpected_job_ids_json TEXT NOT NULL DEFAULT '[]',
+ submit_forbidden INTEGER NOT NULL DEFAULT 0 CHECK(submit_forbidden IN (0,1)),
+ origin_json TEXT,
  UNIQUE(execute_attempt_id,logical_id)
 );
 CREATE INDEX open_external_operations ON operations(external_open) WHERE external_open=1;
@@ -219,7 +221,8 @@ def validate_execution(requests, plan, config):
             or len(set(allowed)) != len(allowed)
         ):
             raise ValueError("Authorization backends must be known unique names")
-        integer(grant["max_operations"], "max_operations")
+        if grant["max_operations"] is not None:
+            integer(grant["max_operations"], "max_operations")
         vector(grant["resource_limits"], "resource_limits")
         vector(grant["cost_limits"], "cost_limits")
         if not set(grant["resource_limits"]) <= pools.keys():
@@ -291,7 +294,7 @@ def validate_execution(requests, plan, config):
     return normalized
 
 
-def validate_receipt(kind, payload):
+def validate_receipt(kind, payload, *, allow_legacy_epoch=False):
     if not isinstance(kind, str) or kind not in RECEIPT_KINDS:
         raise ValueError("Unknown operation receipt kind")
     payload = json_value(payload)
@@ -313,7 +316,8 @@ def validate_receipt(kind, payload):
             raise ValueError("No token can carry an owner epoch")
     else:
         text(payload["submission_token"], "submission_token")
-        integer(payload["owner_epoch"], "owner_epoch", minimum=1)
+        if payload["owner_epoch"] is not None or not allow_legacy_epoch:
+            integer(payload["owner_epoch"], "owner_epoch", minimum=1)
     data = payload["data"]
     if kind == "prepare":
         fields(data, {"ready", "reason", "effective_parameters"}, "prepare receipt")
@@ -379,7 +383,8 @@ def validate_receipt(kind, payload):
         if (
             not isinstance(data, dict)
             or not {"artifacts", "evaluations"} <= data.keys()
-            or not data.keys() <= {"artifacts", "evaluations", "unavailable_reason"}
+            or not data.keys()
+            <= {"artifacts", "evaluations", "unavailable_reason", "research_evidence"}
         ):
             raise ValueError("Invalid collection receipt fields")
         if not isinstance(data["artifacts"], list) or not isinstance(
@@ -401,6 +406,42 @@ def validate_receipt(kind, payload):
             refs.append(entry["receipt_ref"])
         if len(set(refs)) != len(refs):
             raise ValueError("Duplicate collected evaluator receipt")
+        reports = data.get("research_evidence", [])
+        if not isinstance(reports, list):
+            raise ValueError("Research evidence must be an explicit list")
+        names = set()
+        for entry in reports:
+            fields(
+                entry,
+                {"name", "artifact", "ref", "identity", "allow_feedback"},
+                "research evidence",
+            )
+            name = entry["name"]
+            if (
+                not isinstance(name, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name)
+                or name in names
+            ):
+                raise ValueError("Research evidence names must be unique safe names")
+            names.add(name)
+            artifact(entry["artifact"])
+            if entry["artifact"] not in data["artifacts"]:
+                raise ValueError(
+                    "Research evidence artifact must belong to its collection"
+                )
+            if not isinstance(entry["ref"], str) or not re.fullmatch(
+                r"artifacts/[0-9a-f]{32}\.json", entry["ref"]
+            ):
+                raise ValueError("Research evidence requires an immutable report ref")
+            fields(
+                entry["identity"],
+                {"device", "inode", "size", "mtime_ns"},
+                "research evidence identity",
+            )
+            for value in entry["identity"].values():
+                integer(value, "research evidence identity")
+            if type(entry["allow_feedback"]) is not bool:
+                raise ValueError("Research evidence feedback flag must be boolean")
         data.setdefault("unavailable_reason", None)
         if data["unavailable_reason"] is not None:
             text(data["unavailable_reason"], "unavailable_reason")

@@ -2,7 +2,10 @@
 
 import uuid
 
+from .role_access import RoleAccess
 from .context import ContextSnapshot, build_context
+from .context_grants import _issue_context
+from .context_sources import extend as extend_sources
 from .files import publish_artifact
 from .publication import Publisher
 from .publication_views import build_views, render_research
@@ -231,11 +234,20 @@ class PlanningLedger:
         planning = record["planning"]
         if planning is None:
             raise InvalidTransition("Attempt has no planning round")
+        if record["binding"] is not None:
+            return self.reader._load_binding(record)[0]
+        return _issue_context(
+            self.reader, record, lambda: self._context(call, record, policy)
+        )
+
+    def _context(self, call, record, policy):
+        planning = record["planning"]
         inputs = self.reader._planning_inputs(record)
         frozen = inputs["planning"]
         config = record["control"]["config"]
+        access = RoleAccess.resolve(config, call.role)
         inputs.update(
-            permissions=config.get("permissions", {}),
+            **access.controls(config),
             task=None,
             budget={
                 key: record["control"][key]
@@ -251,14 +263,6 @@ class PlanningLedger:
             if key in config:
                 inputs[key] = config[key]
         protected = list(inputs)
-        knowledge = self.reader._read_record(
-            planning["knowledge_ref"], planning["knowledge_identity"]
-        )
-        if knowledge["version"] != frozen["knowledge_version"]:
-            raise ConflictError(
-                "Planning knowledge version differs from captured round"
-            )
-        inputs.update(research=knowledge["research"], frontiers=knowledge["frontiers"])
         references = {
             "planning": planning["snapshot_ref"],
             "research": planning["knowledge_ref"],
@@ -273,6 +277,21 @@ class PlanningLedger:
             "research": frozen["knowledge_version"],
             "frontiers": frozen["knowledge_version"],
         }
+        if access.published_history:
+            knowledge = self.reader._read_record(
+                planning["knowledge_ref"], planning["knowledge_identity"]
+            )
+            if knowledge["version"] != frozen["knowledge_version"]:
+                raise ConflictError(
+                    "Planning knowledge version differs from captured round"
+                )
+            inputs.update(
+                research=knowledge["research"], frontiers=knowledge["frontiers"]
+            )
+        else:
+            for key in ("research", "frontiers"):
+                references.pop(key)
+                revisions.pop(key)
         for advocate in planning.get("advocates", []):
             references[advocate["slot"]] = (
                 advocate["output_ref"]
@@ -294,6 +313,20 @@ class PlanningLedger:
             )
             for key in inputs
         ]
+        allowed = list(
+            dict.fromkeys(
+                ref for ref in references.values() if ref.startswith("artifacts/")
+            )
+        )
+        extend_sources(
+            config,
+            call.role,
+            self.reader._read_record,
+            inputs,
+            sources,
+            protected,
+            allowed,
+        )
         package = ContextSnapshot.capture(
             study_id=call.study_id,
             revisions=dict(
@@ -305,11 +338,7 @@ class PlanningLedger:
             inputs=inputs,
             sources=sources,
             protected_keys=protected,
-            allowed_evidence=list(
-                dict.fromkeys(
-                    ref for ref in references.values() if ref.startswith("artifacts/")
-                )
-            ),
+            allowed_evidence=allowed,
         )
         return build_context(
             package,
@@ -318,6 +347,7 @@ class PlanningLedger:
             "task-planning-v1",
             config.get("context_budget", {}),
             policy=policy,
+            visible_evidence_only=access.configured,
         )
 
     def finish(self, round_id, status, *, error=None, receipt=None):

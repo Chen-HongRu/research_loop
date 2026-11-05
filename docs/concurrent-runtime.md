@@ -1,9 +1,9 @@
 # Concurrent runtime
 
-The concurrent coordinator runs on new, isolated SQLite schema 7 Studies through
+The concurrent coordinator runs on new, isolated SQLite schema 8 Studies through
 Python APIs and the runtime CLI. Older prototype databases are rejected; there is
-no automatic migration. The existing serial CLI is unchanged. Explicit migration
-and deployment remain phase 8.
+no automatic migration. The existing serial CLI is unchanged. [Explicit legacy
+migration and versioned deployment](runtime-migration.md) require operator evidence.
 
 A single owner holds the Study coordinator lock and drives finite scheduling
 steps. Local worker processes receive detached JSON and publish durable results;
@@ -39,7 +39,13 @@ The explicitly trusted application exports `APPLICATION_IDENTITY` with nonblank
 `id` and `version` matching `runtime.worker_adapter`,
 `invoke(kind, payload, config)`, and `validate(role, output, context, config)`.
 The validator returns a normalized object; no default identity validators are
-provided. Module imports and validators must be pure and make no external calls.
+provided. An optional `validate_config(config)` hook is run before admission;
+module imports, configuration validation and validators must be pure and make no
+external calls. The [native application](../integrations/native_runtime/README.md)
+provides Pi roles with a single structured submission tool and qualitative Execute. The separately configured
+[script application](../integrations/script_runtime/README.md) adds bounded Slurm
+script execution with frozen Plan parameters and typed Execute source proposals;
+its collected reports remain unverified research evidence.
 Callbacks must keep local children in their process group and must not spawn
 untracked submitters. Use a versioned immutable module path outside the Study
 control directory and installed skill. Initialization freezes its absolute path,
@@ -153,6 +159,13 @@ while reconciliation, inspection, collection, settlement and requested
 cancellation can continue. Local worker retirement is proof about the local
 callback, not proof that an external job stopped; backend receipts determine
 external state and resource release.
+
+On normal return, error, timeout or cancellation, the worker observes the group
+leader's exit without reaping it, kills the process group, and checks `/bin/ps`
+PID, process-group and state fields before publishing a canonical receipt. Only
+dead or zombie descendants count as no executable descendants; an unverifiable
+result remains unknown. Linux uses `waitid` and macOS uses libc `waitid`; `/bin/ps`
+is required. This still depends on trusted callbacks keeping children in the group.
 
 `RuntimeEvents(owner).pending(consumer)` and `.ack(consumer, event_id)` expose
 a durable event outbox with per-consumer acknowledgements. No agent wakeup consumer

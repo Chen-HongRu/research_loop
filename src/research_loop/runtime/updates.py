@@ -9,6 +9,12 @@ import json
 from typing import Callable, Mapping
 
 from .context import ContextPackage
+from .role_access import RoleAccess
+from .context_grants import _require_grant
+from .context_sources import (
+    check_metadata as check_source_metadata,
+    validate_package as validate_source_package,
+)
 from .files import publish_artifact, validate_artifact_ref
 from .store import ConflictError, InvalidTransition, _json
 
@@ -173,14 +179,30 @@ class Updater:
         return value
 
     def _plan_output(self, record):
-        if record["attempt"]["role"] not in {"execute", "review"}:
+        if not RoleAccess.resolve(
+            record["control"]["config"], record["attempt"]["role"]
+        ).accepted_plan:
             return None
         plan = record["plan"]
         if plan is None:
             raise InvalidTransition(
                 "Execute/Review requires an accepted validated Plan"
             )
-        proposal = self._read_record(plan["output_ref"], plan["output_identity"])
+        return self._phase_output(plan, "plan")
+
+    def _phase_output(self, binding, role):
+        """Read an accepted native result or an explicitly translated legacy phase."""
+        proposal = self._read_record(binding["output_ref"], binding["output_identity"])
+        if binding.get("origin_kind") == "legacy":
+            origin = proposal.get("origin")
+            if (
+                proposal.get("kind") != "legacy_phase_binding"
+                or not isinstance(origin, dict)
+                or origin.get("role") != role
+                or not origin.get("source_refs")
+                or not origin.get("translator")
+            ):
+                raise ConflictError("Imported phase lacks its explicit source binding")
         return proposal["normalized_output"]
 
     def _planning_inputs(self, record):
@@ -229,6 +251,9 @@ class Updater:
         if not _same(manifest["task"], record["task"]):
             raise ConflictError("Context task envelope differs from immutable task")
         config = control["config"]
+        access = RoleAccess.resolve(config, attempt["role"])
+        validate_source_package(config, attempt["role"], package, self._read_record)
+        self._check_research_package(record, package)
         if not _same(manifest["budget"], config.get("context_budget", {})):
             raise ConflictError("Context quota differs from configured quota")
         limits = {
@@ -241,14 +266,14 @@ class Updater:
             )
         }
         required = dict(
-            permissions=config.get("permissions", {}),
+            **access.controls(config),
             task=record["task"],
             budget=limits,
         )
         for key in ("goal", "global_evaluation"):
             if key in config:
                 required[key] = config[key]
-        if attempt["role"] in {"plan", "execute"}:
+        if access.resource_context:
             for key in (
                 "execution_backends",
                 "resource_pools",
@@ -257,7 +282,7 @@ class Updater:
                 if key in config:
                     required[key] = config[key]
         required.update(self._planning_inputs(record))
-        if attempt["role"] in {"execute", "review"}:
+        if access.accepted_plan:
             if record["plan"] is None:
                 raise InvalidTransition(
                     "Execute/Review requires an accepted validated Plan"
@@ -268,6 +293,12 @@ class Updater:
         for key, value in required.items():
             if key not in context or not _same(context[key], value):
                 raise ConflictError(f"Context {key} differs from authoritative input")
+        if access.configured:
+            visible_refs = {
+                s["ref"] for s in manifest["sources"] if s["disposition"] != "omitted"
+            }
+            if set(manifest["allowed_evidence"]) - visible_refs:
+                raise ConflictError("Role cannot cite omitted context")
         retry = record.get("retry")
         if retry is not None and retry["source_context_ref"] is not None:
             original = self._read_record(
@@ -289,10 +320,77 @@ class Updater:
         elif attempt["status"] != "accepted":
             raise InvalidTransition("Attempt no longer accepts feedback")
 
+    def _check_research_package(self, record, package):
+        from .operations import Operations
+
+        attempt = record["attempt"]
+        reports, snapshots = (
+            Operations(self.coordinator).research_evidence(attempt["iteration_id"])
+            if attempt["role"] == "review"
+            else ([], [])
+        )
+        context, manifest = package.context, package.manifest
+        actual = {
+            source["key"]: source
+            for source in manifest["sources"]
+            if source["key"].startswith("evidence:")
+        }
+        expected = {entry["source"]["key"] for entry in reports}
+        if (
+            set(actual) != expected
+            or {key for key in context if key.startswith("evidence:")} - expected
+        ):
+            raise ConflictError(
+                "Research evidence is not from this Review's own collection"
+            )
+        refs = {entry["source"]["ref"] for entry in reports}
+        allowed = {
+            entry["source"]["ref"]
+            for entry in reports
+            if entry["source"]["allow_feedback"]
+        }
+        if attempt["role"] in record["control"]["config"].get("role_access", {}):
+            allowed &= {
+                s["ref"] for s in manifest["sources"] if s["disposition"] != "omitted"
+            }
+        if set(manifest["allowed_evidence"]) & refs != allowed:
+            raise ConflictError(
+                "Research evidence permissions differ from accepted collection"
+            )
+        for entry in reports:
+            source = entry["source"]
+            key = source["key"]
+            if not _same({field: actual[key][field] for field in source}, source):
+                raise ConflictError(
+                    "Research evidence source differs from accepted collection"
+                )
+            if not source["allow_feedback"]:
+                if key in context or actual[key]["disposition"] != "omitted":
+                    raise ConflictError(
+                        "Denied research report cannot provide feedback"
+                    )
+                continue
+            if key in context:
+                body = self._read_record(source["ref"], entry["identity"])
+                if (
+                    actual[key]["disposition"] != "provided"
+                    or not isinstance(body, dict)
+                    or not _same(body, context[key])
+                ):
+                    raise ConflictError(
+                        "Research report differs from accepted collection input"
+                    )
+        record["research_collections"] = snapshots
+        record["research_reports"] = reports
+
     def _load_binding(self, record):
         binding = record["binding"]
         if binding is None:
             raise InvalidTransition("Bind a context before validating worker output")
+        if RoleAccess.resolve(
+            record["control"]["config"], record["attempt"]["role"]
+        ).configured:
+            _require_grant(self._root, record)
         package = ContextPackage.from_dict(
             self._read_record(binding["context_ref"], binding["identity"])
         )
@@ -348,6 +446,25 @@ class Updater:
         if current["plan"] is not None:
             plan = current["plan"]
             self._check_identity(plan["output_ref"], plan["output_identity"])
+        check_source_metadata(
+            captured["control"]["config"],
+            current["attempt"]["role"],
+            self._check_identity,
+        )
+        if captured.get("research_collections"):
+            from .operations import Operations
+
+            with self.coordinator.store._connection(readonly=True) as source_conn:
+                for snapshot in captured["research_collections"]:
+                    op = Operations._get(source_conn, snapshot["id"])
+                    if not _same(Operations.research_snapshot(op), snapshot):
+                        raise ConflictError("Accepted research collection changed")
+                    self._check_identity(
+                        snapshot["collection_ref"], snapshot["collection_identity"]
+                    )
+            for entry in captured["research_reports"]:
+                if entry["source"]["allow_feedback"]:
+                    self._check_identity(entry["source"]["ref"], entry["identity"])
         for key in ("dispatch", "reconciliation", "retry"):
             if not _same(current.get(key), captured.get(key)):
                 raise ConflictError("Invocation or recovery binding changed")
@@ -389,6 +506,16 @@ class Updater:
         package = ContextPackage.from_dict(package.to_dict())
         call = call_identity.to_dict()
         captured = self.coordinator._feedback_snapshot(call)
+        grant = None
+        if RoleAccess.resolve(
+            captured["control"]["config"], call_identity.role
+        ).configured:
+            grant = _require_grant(self._root, captured)
+            issued = self._read_record(grant["ref"], grant["identity"])
+            if _package_text(ContextPackage.from_dict(issued)) != _package_text(
+                package
+            ):
+                raise ConflictError("Context differs from issued role/iteration scope")
         plan_output = self._plan_output(captured)
         self._check_package(captured, package, plan_output)
         existing = captured["binding"]
@@ -409,8 +536,11 @@ class Updater:
                 ref: _identity(self._root, ref)
                 for ref in package.manifest["allowed_evidence"]
             }
-            reference = publish_artifact(self._root, package.to_dict())
-            identity = _identity(self._root, reference)
+            if grant is None:
+                reference = publish_artifact(self._root, package.to_dict())
+                identity = _identity(self._root, reference)
+            else:
+                reference, identity = grant["ref"], grant["identity"]
         revisions_json = _json(package.manifest["revisions"])
         with self.coordinator._transaction() as (conn, _):
             current = self.coordinator._feedback_record(conn, call, metadata_only=True)
@@ -473,8 +603,23 @@ class Updater:
         if not isinstance(normalized, dict):
             raise ValueError("Validator must return a normalized object")
         normalized = json.loads(_json(normalized))
+        RoleAccess.resolve(
+            captured["control"]["config"], call_identity.role
+        ).check_output(normalized)
         if _FORBIDDEN & normalized.keys():
             raise ValueError("Normalized output cannot update control or authorization")
+        reports = {
+            entry["source"]["ref"] for entry in captured.get("research_reports", [])
+        }
+        for entry in normalized.get("knowledge", []):
+            if (
+                isinstance(entry, dict)
+                and reports.intersection(entry.get("source_refs", []))
+                and entry.get("kind") != "interpretation"
+            ):
+                raise ValueError(
+                    "Unverified research reports may only support interpretation knowledge"
+                )
         if call_identity.role == "execute":
             from .operations import Operations
 

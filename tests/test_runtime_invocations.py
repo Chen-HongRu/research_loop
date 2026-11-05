@@ -1,5 +1,6 @@
 """Real exec-based callbacks and durable local launch fencing, without SQLite."""
 
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -9,11 +10,16 @@ from unittest.mock import patch
 
 from research_loop.runtime.files import publish_artifact
 from research_loop.runtime import invocations
+from research_loop.runtime import worker_process
 from research_loop.runtime.invocations import LocalProcessInvoker, _locked
 
 
 MODULE = """
 from pathlib import Path
+import json
+import os
+import subprocess
+import sys
 import time
 
 def invoke(kind, payload, config):
@@ -22,6 +28,30 @@ def invoke(kind, payload, config):
     with (directory / 'calls').open('a') as stream:
         stream.write(payload['id'] + '\\n')
     (directory / ('ready-' + payload['id'])).write_text('ready')
+    if payload.get('descendant'):
+        code = '''
+import json, os, signal, sys, time
+from pathlib import Path
+directory, name = Path(sys.argv[1]), sys.argv[2]
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+ready = directory / ('descendant-' + name + '.json')
+temporary = ready.with_suffix('.tmp')
+temporary.write_text(json.dumps({'pid':os.getpid(), 'group':os.getpgrp()}))
+temporary.replace(ready)
+gate = directory / ('after-completion-' + name)
+deadline = time.monotonic() + 5
+while not gate.exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+if gate.exists():
+    time.sleep(0.05)
+    (directory / ('late-write-' + name)).write_text('late descendant effect')
+'''
+        subprocess.Popen([sys.executable, '-c', code, str(directory), payload['id']])
+        deadline = time.monotonic() + 3
+        while not (directory / ('descendant-' + payload['id'] + '.json')).exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Descendant did not start')
+            time.sleep(0.01)
     if payload.get('barrier'):
         deadline = time.monotonic() + 5
         while len(list(directory.glob('ready-*'))) < 2:
@@ -155,6 +185,68 @@ class RuntimeInvocationTests(unittest.TestCase):
         self.assertLess(value["exit_code"], 0)
         self.assertIsNone(value["result"])
         self.assertEqual((self.root / "calls").read_text().splitlines(), ["timeout"])
+
+    def test_same_group_descendant_cannot_write_after_any_completion(self):
+        for outcome in ("completed", "failed", "timed_out", "cancelled"):
+            with self.subTest(outcome=outcome):
+                payload = dict(descendant=True)
+                if outcome == "failed":
+                    payload["raise"] = True
+                if outcome in {"timed_out", "cancelled"}:
+                    payload["sleep"] = 30
+                token = "descendant-" + outcome
+                deadline = time.time() + (1 if outcome == "timed_out" else 8)
+                self.invoker.launch(
+                    token, "agent", self.input(outcome, **payload), deadline
+                )
+                gate = self.root / ("after-completion-" + outcome)
+                try:
+                    ready = self.root / ("descendant-" + outcome + ".json")
+                    started = time.monotonic() + 3
+                    while not ready.exists() and time.monotonic() < started:
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists())
+                    identity = json.loads(ready.read_text())
+                    self.assertNotEqual(identity["pid"], identity["group"])
+                    if outcome == "cancelled":
+                        self.invoker.cancel(token, "Synthetic descendant cancellation")
+                    value = self.completion(self.wait_for(token))
+                    self.assertEqual(value["status"], outcome)
+                    if outcome == "completed":
+                        self.assertEqual(value["exit_code"], 0)
+                        self.assertEqual(value["result"]["marker"], "captured")
+                    elif outcome == "failed":
+                        self.assertEqual(value["exit_code"], 1)
+                        self.assertIn("RuntimeError", value["error"])
+                    else:
+                        self.assertLess(value["exit_code"], 0)
+                finally:
+                    # If this regresses, release the bounded writer so it exits
+                    # after its forbidden write instead of leaving a live child.
+                    gate.touch()
+                time.sleep(0.3)
+                self.assertFalse((self.root / ("late-write-" + outcome)).exists())
+
+    def test_unverifiable_group_cleanup_keeps_invocation_unknown(self):
+        token = "unverified-cleanup"
+        folder = invocations._ensure_folder(self.root, token)
+        binding = dict(kind="agent", input_ref=self.input(), deadline=time.time() + 8)
+        invocations.publish_json(
+            folder / "claimed.json", self.invoker._claim(token, binding)
+        )
+        with (
+            patch.object(
+                worker_process,
+                "_live_group_members",
+                side_effect=OSError("Synthetic unavailable kernel metadata"),
+            ),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            self.assertEqual(worker_process._supervise(self.root, token), 1)
+        self.assertFalse((folder / "completion.json").exists())
+        observed = self.invoker.inspect(token)
+        self.assertEqual(observed["status"], "unknown")
+        self.assertIsNone(observed["proof_ref"])
 
     def test_cancel_survives_new_invoker_and_needs_no_parent_pid_kill(self):
         binding = dict(

@@ -27,10 +27,10 @@ class MeasurementRegistry:
         return {
             row["role"]: _decode(row)
             for row in conn.execute(
-                "SELECT a.id,a.role,a.output_ref,a.output_identity_json "
-                "FROM attempts a JOIN contexts c ON c.attempt_id=a.id "
+                "SELECT a.id,a.role,a.origin_kind,a.output_ref,a.output_identity_json "
+                "FROM attempts a LEFT JOIN contexts c ON c.attempt_id=a.id "
                 "WHERE a.iteration_id=? AND a.status='accepted' "
-                "AND a.role IN ('plan','execute')",
+                "AND a.role IN ('plan','execute') AND (c.attempt_id IS NOT NULL OR a.origin_kind='legacy')",
                 (iteration_id,),
             )
         }
@@ -269,6 +269,12 @@ class MeasurementRegistry:
             raise ConflictError("Evaluator receipt belongs to a different Execute")
         sources = captured["operation_sources"]
         asynchronous = self._operation_artifact(receipt, sources)
+        if not asynchronous and any(
+            row["origin_kind"] == "legacy" for row in accepted.values()
+        ):
+            raise InvalidTransition(
+                "Imported phases require an actual operation collection receipt"
+            )
         if asynchronous and (
             sources["group"]["plan_attempt_id"] != accepted["plan"]["id"]
             or sources["group"]["execute_attempt_id"] != accepted["execute"]["id"]
@@ -278,10 +284,7 @@ class MeasurementRegistry:
                 "Operation collection belongs to different accepted calls"
             )
         outputs = {
-            role: self.reader._read_record(row["output_ref"], row["output_identity"])[
-                "normalized_output"
-            ]
-            for role, row in accepted.items()
+            role: self.reader._phase_output(row, role) for role, row in accepted.items()
         }
         for key in ("candidate_id", "evaluation_id", "comparison_scope"):
             _text(receipt[key], key)

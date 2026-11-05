@@ -3,7 +3,8 @@
 This guide describes the serial document controller. For SQLite Studies use the
 [runtime CLI recovery contract](concurrent-runtime.md#recovery-and-stopping).
 It preserves unresolved attempts and can reconcile exact recorded completions
-across owner epochs; migration is not provided. Legacy entry points reject the
+across owner epochs. [Explicit migration](runtime-migration.md) stages and commits
+a translated legacy Study with a resumable fail-closed marker. Legacy entry points reject the
 SQLite marker or database instead of replaying `state.json` over SQLite state.
 
 See [Failure diagnostics and recovery](failure-diagnostics.md) for workspace versus
