@@ -10,6 +10,8 @@ import tempfile
 import time
 import unittest
 
+from ruamel.yaml import YAML
+
 from examples import coordinator_fixture
 from examples.concurrent_runtime import configuration
 from research_loop.cli import main
@@ -25,9 +27,9 @@ class RuntimeCLITests(unittest.TestCase):
         self.root = self.base / "study"
         self.module = self.base / "application.py"
         self.module.write_text(Path(coordinator_fixture.__file__).read_text())
-        self.configuration = self.base / "config.json"
-        self.configuration.write_text(json.dumps(configuration()))
-        self.application = self.base / "application.json"
+        self.configuration = self.base / "config.yaml"
+        YAML(typ="safe", pure=True).dump(configuration(), self.configuration)
+        self.application = self.base / "application.yaml"
         self.spec = self.base / "task.json"
         self.spec.write_text(json.dumps({"instruction": "Synthetic command path"}))
 
@@ -39,7 +41,9 @@ class RuntimeCLITests(unittest.TestCase):
         return json.loads(stdout.getvalue()) if stdout.getvalue() else stderr.getvalue()
 
     def initialize(self, **fixture):
-        self.application.write_text(json.dumps({"root": str(self.root), **fixture}))
+        YAML(typ="safe", pure=True).dump(
+            {"root": str(self.root), **fixture}, self.application
+        )
         return self.cli(
             "init",
             self.root,
@@ -70,6 +74,10 @@ class RuntimeCLITests(unittest.TestCase):
             *extra,
         )
 
+    def test_init_accepts_yml_configuration(self):
+        self.configuration = self.configuration.rename(self.base / "config.yml")
+        self.assertEqual(self.initialize()["state"], "initialized")
+
     def test_initialize_task_run_publication_and_readonly_status(self):
         initialized = self.initialize(
             backend_tasks=["one"], lost_ack=["one"], fail_collection_once=["one"]
@@ -92,6 +100,60 @@ class RuntimeCLITests(unittest.TestCase):
         ]
         self.assertEqual(actions.count("submit"), 1)
         self.assertEqual(actions.count("collection"), 2)
+
+    def test_init_from_single_config_freezes_window_and_pool_limit(self):
+        config = configuration() | {
+            "budget": {
+                "max_iterations": None,
+                "max_calls": None,
+                "window_seconds": 36000,
+            },
+            "task_pool": {"max_pending": 1},
+        }
+        YAML(typ="safe", pure=True).dump(config, self.configuration)
+        YAML(typ="safe", pure=True).dump({"root": str(self.root)}, self.application)
+        args = (
+            "init",
+            self.root,
+            "--config",
+            self.configuration,
+            "--application",
+            self.module,
+            "--application-config",
+            self.application,
+        )
+        self.assertIn("not both", self.cli(*args, "--max-calls", "5", expected=1))
+        before = time.time()
+        self.cli(*args)
+        status = self.cli("status", self.root)
+        limits = status["limits"]
+        self.assertIsNone(limits["max_calls"])
+        self.assertIsNone(limits["max_iterations"])
+        self.assertEqual(limits["max_seconds"], 36000)
+        self.assertLessEqual(before + 36000, limits["admission_deadline"])
+        self.assertLessEqual(limits["admission_deadline"], time.time() + 36000)
+        self.assertEqual(self.task()["status"], "applied")
+        self.assertEqual(
+            self.cli("status", self.root)["task_pool"],
+            {"max_pending": 1, "pending": 1, "ready": 1},
+        )
+        self.assertEqual(self.cli("status", self.root)["limits"], limits)
+
+    def test_config_budget_rejects_ambiguous_or_missing_limits_before_creation(self):
+        for budget in [
+            {"window_seconds": 36000},
+            {
+                "max_iterations": None,
+                "max_calls": None,
+                "window_seconds": 100,
+                "admission_deadline": 123,
+            },
+            {"max_iterations": None, "max_calls": None, "window_seconds": 0},
+            {"max_iterations": None, "max_call": 1, "window_seconds": 10},
+        ]:
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                StateStore.create(self.root, config={"budget": budget})
+            self.assertFalse(self.root.exists())
 
     def test_mutations_and_stop_work_without_loading_changed_application(self):
         self.initialize()
@@ -237,7 +299,8 @@ class RuntimeCLITests(unittest.TestCase):
                         self.fail(errors.read_text())
                     time.sleep(0.01)
                 self.assertTrue(StateStore(self.root).snapshot()["owner_open"])
-                self.assertEqual(self.task()["status"], "queued")
+                # The watch owner may already have consumed the inbox pointer.
+                self.assertIn(self.task()["status"], {"queued", "pending", "applied"})
                 while (
                     not list((self.root / "fixture").glob("call-*.json"))
                     and time.monotonic() < deadline
@@ -251,7 +314,7 @@ class RuntimeCLITests(unittest.TestCase):
                     "--request-id",
                     "live-stop",
                 )
-                self.assertEqual(stopped["status"], "queued")
+                self.assertIn(stopped["status"], {"queued", "pending", "applied"})
                 process.wait(timeout=8)
                 self.assertEqual(process.returncode, 0, errors.read_text())
             finally:
@@ -259,6 +322,7 @@ class RuntimeCLITests(unittest.TestCase):
                     process.terminate()
                     process.wait(timeout=5)
         self.assertTrue(json.loads(output.read_text())["stop"]["requested"])
+        self.assertEqual(receipt(self.root, "task-one")["status"], "applied")
         self.assertEqual(receipt(self.root, "live-stop")["status"], "applied")
         self.assertEqual(
             [row["role"] for row in StateStore(self.root).snapshot()["attempts"]],
@@ -267,7 +331,7 @@ class RuntimeCLITests(unittest.TestCase):
 
     def test_invalid_settings_fail_before_creating_study(self):
         config = configuration(worker_slots=0)
-        self.configuration.write_text(json.dumps(config))
+        YAML(typ="safe", pure=True).dump(config, self.configuration)
         self.application.write_text("{}")
         self.cli(
             "init",

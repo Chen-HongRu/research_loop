@@ -14,6 +14,7 @@ import uuid
 
 from ..evaluation import validate_evaluation
 from .application import load_application, prepare_application
+from .config_yaml import load_config
 from .controls import ControlInbox, receipt, submit_command
 from .coordinator import ConcurrentCoordinator, validate_settings
 from .store import OwnershipError, StateStore, _decode
@@ -35,6 +36,18 @@ def _count(value):
     return number
 
 
+def _add_config_arguments(command):
+    command.add_argument(
+        "--config", required=True, type=Path, help="Study configuration (.yaml or .yml)"
+    )
+    command.add_argument("--application", required=True, type=Path)
+    command.add_argument(
+        "--application-config",
+        type=Path,
+        help="Trusted application configuration (.yaml or .yml)",
+    )
+
+
 def _parser():
     parser = argparse.ArgumentParser(prog="research-loop runtime")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -42,13 +55,11 @@ def _parser():
         "init", help="Create a new SQLite Study without invoking callbacks"
     )
     init.add_argument("study", type=Path)
-    init.add_argument("--config", required=True, type=Path)
-    init.add_argument("--application", required=True, type=Path)
-    init.add_argument("--application-config", type=Path)
-    init.add_argument("--max-iterations", required=True, type=_count)
-    init.add_argument("--max-calls", required=True, type=_count)
-    init.add_argument("--max-seconds", required=True, type=float)
-    init.add_argument("--admission-deadline", type=float)
+    _add_config_arguments(init)
+    init.add_argument("--max-iterations", default=argparse.SUPPRESS, type=_count)
+    init.add_argument("--max-calls", default=argparse.SUPPRESS, type=_count)
+    init.add_argument("--max-seconds", default=argparse.SUPPRESS, type=float)
+    init.add_argument("--admission-deadline", default=argparse.SUPPRESS, type=float)
     run = commands.add_parser(
         "run", help="Own scheduling until idle, interrupted, or a tick limit"
     )
@@ -145,16 +156,9 @@ def _parser():
             )
         elif name == "prepare":
             command.add_argument("--import-id", required=True)
-            for item in (
-                "inventory",
-                "translation",
-                "config",
-                "fence",
-                "deployment",
-                "application",
-            ):
+            _add_config_arguments(command)
+            for item in ("inventory", "translation", "fence", "deployment"):
                 command.add_argument("--" + item, required=True, type=Path)
-            command.add_argument("--application-config", type=Path)
         else:
             command.add_argument("import_id")
             if name in {"resolve", "bind-execute", "activate"}:
@@ -197,7 +201,7 @@ def migrate(args):
             )
         }
     if args.migration_command == "prepare":
-        config = _object(args.config)
+        config = load_config(args.config)
         settings = config.get("runtime")
         validate_settings(settings)
         if "application" in settings or args.application.resolve().is_relative_to(
@@ -208,7 +212,7 @@ def migrate(args):
             )
         settings["application"] = prepare_application(
             args.application,
-            _object(args.application_config) if args.application_config else {},
+            load_config(args.application_config) if args.application_config else {},
             settings["worker_adapter"],
         )
         return prepare_import(
@@ -231,7 +235,7 @@ def migrate(args):
 
 
 def initialize(args):
-    config = _object(args.config)
+    config = load_config(args.config)
     if not isinstance(config.get("goal"), str) or not config["goal"].strip():
         raise ValueError("Configuration requires a nonblank goal")
     if not isinstance(config.get("permissions"), dict):
@@ -250,17 +254,22 @@ def initialize(args):
         )
     settings["application"] = prepare_application(
         args.application,
-        _object(args.application_config) if args.application_config else {},
+        load_config(args.application_config) if args.application_config else {},
         settings["worker_adapter"],
     )
-    store = StateStore.create(
-        args.study,
-        config=config,
-        max_iterations=args.max_iterations,
-        max_calls=args.max_calls,
-        max_seconds=args.max_seconds,
-        admission_deadline=args.admission_deadline,
-    )
+    limits = {
+        key: getattr(args, key)
+        for key in ("max_iterations", "max_calls", "max_seconds", "admission_deadline")
+        if hasattr(args, key)
+    }
+    if (
+        "budget" not in config
+        and not {"max_iterations", "max_calls", "max_seconds"} <= limits.keys()
+    ):
+        raise ValueError(
+            "Supply config.budget or all three --max-iterations, --max-calls and --max-seconds"
+        )
+    store = StateStore.create(args.study, config=config, **limits)
     return {
         "study_id": store.snapshot()["study_id"],
         "state": "initialized",

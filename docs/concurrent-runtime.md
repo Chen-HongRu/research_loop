@@ -17,20 +17,48 @@ in synthetic examples do not establish scientific validity.
 
 Use `research-loop runtime --help` and each subcommand's `--help` for arguments.
 The bundled skill launcher accepts the same `runtime` arguments. Initialize a new
-empty Study directory with an explicit JSON configuration and trusted application:
+empty Study directory with an explicit YAML configuration and trusted application:
 
 ```sh
-research-loop runtime init /path/to/study --config /path/to/config.json \
+research-loop runtime init /path/to/study --config /path/to/config.yaml \
   --application /path/to/versioned/application.py \
-  --application-config /path/to/private-application-config.json \
-  --max-iterations 10 --max-calls 40 --max-seconds 3600
+  --application-config /path/to/private-application-config.yaml
 research-loop runtime run /path/to/study
 research-loop runtime status /path/to/study
 ```
 
-`--application-config` is optional. `--max-iterations` and `--max-calls` accept a
-nonnegative integer or `none`; `--max-seconds` is required, and
-`--admission-deadline` is optional. Configuration requires a nonblank `goal`,
+Place controller budgets and pool capacity alongside `runtime`, `resource_pools`
+and `operation_authorizations` in the Study YAML. These are fields of the full
+configuration, for example:
+
+```yaml
+budget:
+  window_seconds: 36000  # 10 hours
+  max_calls: null
+  max_iterations: null
+task_pool:
+  max_pending: null
+```
+
+`null` means unlimited for counts. `window_seconds` fixes both the elapsed
+limit and an absolute admission deadline at creation. Reopening a Study keeps
+that deadline, including for new model calls after the owner was closed. For separate limits, supply `max_seconds` and optionally an
+absolute Unix `admission_deadline` instead of `window_seconds`. An external
+supervisor controls cancellation of running work and post-deadline cleanup.
+Backend grants still independently restrict resources, cost and admission.
+
+For existing commands without a `budget` block, supply all three CLI flags
+`--max-iterations`, `--max-calls` and `--max-seconds`; the optional
+`--admission-deadline` remains available. Combining budget sources is rejected.
+The Python API accepts the same config block or explicit limits. The
+[local CLI example](../examples/runtime_cli.py) uses the complete synthetic
+[Study configuration](../examples/runtime_config.yaml) and exercises file-based budgets.
+
+Both configuration files must have a `.yaml` or `.yml` extension and use safe
+YAML 1.2. Duplicate keys and YAML 1.1 merge keys (`<<`) are rejected. Other CLI
+documents, including task specifications and migration inventory, remain JSON.
+
+`--application-config` is optional. Configuration requires a nonblank `goal`,
 explicit object `permissions`, and the runtime fields below. Initialization imports
 the application but invokes no callbacks. Keep private application configuration
 in the user's Study environment, outside Git.

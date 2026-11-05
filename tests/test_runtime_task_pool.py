@@ -1,6 +1,7 @@
 """Human ownership and snapshot-bound Judge mutations on real SQLite state."""
 
 from contextlib import contextmanager
+import json
 from pathlib import Path
 import tempfile
 import threading
@@ -58,6 +59,128 @@ class RuntimeTaskPoolTests(unittest.TestCase):
     def auto(self, identity, **kwargs):
         return self.owner.create_task(
             identity, {"instruction": identity}, source="autonomous", **kwargs
+        )
+
+    def pending_limit(self, limit):
+        with self.owner._transaction() as (conn, _):
+            conn.execute(
+                "UPDATE control SET config_json=?",
+                (json.dumps({"task_pool": {"max_pending": limit}}),),
+            )
+
+    def test_pending_limit_validation_and_zero(self):
+        for index, settings in enumerate(
+            (
+                None,
+                [],
+                {"max_pending": True},
+                {"max_pending": -1},
+                {"max_pending": 1.5},
+                {"max_pendng": 1},
+            )
+        ):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                StateStore.create(
+                    self.root / f"invalid-{index}", config={"task_pool": settings}
+                )
+        self.pending_limit(0)
+        before = self.store.snapshot()
+        with self.assertRaisesRegex(ConflictError, "max_pending"):
+            self.auto("direct")
+        with self.assertRaisesRegex(ConflictError, "max_pending"):
+            self.pool.create_human("human", {}, request_id="human")
+        self.assertEqual(self.store.snapshot(), before)
+        self.assertEqual(self.rows("task_revisions"), [])
+        self.assertEqual(self.rows("task_requests"), [])
+
+    def test_pending_limit_counts_blocked_and_excludes_cancelled_and_claimed(self):
+        self.pending_limit(2)
+        self.auto("dependency")
+        self.pool.create_human(
+            "blocked", {}, request_id="blocked", dependencies=["dependency"]
+        )
+        with self.assertRaisesRegex(ConflictError, "max_pending"):
+            self.auto("full")
+        self.owner.claim_task("dependency")
+        receipt = self.pool.create_human("human", {}, request_id="human")
+        self.assertEqual(
+            self.pool.create_human("human", {}, request_id="human"), receipt
+        )
+        self.pool.cancel_human("human", 1, request_id="cancel-human")
+        self.auto("replacement")
+        with self.assertRaisesRegex(ConflictError, "max_pending"):
+            self.auto("still-full")
+
+    def test_pending_limit_preserves_over_capacity_history_and_allows_edits(self):
+        self.auto("old-a")
+        self.auto("old-b")
+        self.auto("old-c")
+        history = self.rows("task_revisions")
+        # Imported histories can already contain more pending tasks than the cap.
+        self.pending_limit(1)
+        self.assertEqual(self.rows("task_revisions"), history)
+        self.pool.edit_human(
+            "old-a", 1, request_id="edit", specification={}, priority=0, dependencies=[]
+        )
+        self.pool.cancel_human("old-a", 2, request_id="cancel-a")
+        self.pool.cancel_human("old-b", 1, request_id="cancel-b")
+        with self.assertRaisesRegex(ConflictError, "max_pending"):
+            self.auto("at-cap")
+        self.pool.cancel_human("old-c", 1, request_id="cancel-c")
+        self.auto("below-cap")
+
+    def test_pending_limit_serializes_competing_creates(self):
+        self.pending_limit(1)
+        barrier = threading.Barrier(3)
+        outcomes = []
+
+        def create_one(identity):
+            barrier.wait()
+            try:
+                self.pool.create_human(identity, {}, request_id=identity)
+                outcomes.append("created")
+            except ConflictError:
+                outcomes.append("full")
+
+        threads = [
+            threading.Thread(target=create_one, args=(name,)) for name in ("a", "b")
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertCountEqual(outcomes, ["created", "full"])
+        self.assertEqual(len(self.rows("task_revisions")), 1)
+
+    def test_judge_pending_limit_follows_batch_order_and_replays_conflicts(self):
+        self.auto("cancel-me")
+        call, _, _ = self.judge(
+            [
+                create("too-early"),
+                dict(action="cancel", id="cancel-me", expected_revision=1),
+                create("fits"),
+                create("too-late"),
+            ]
+        )
+        self.pending_limit(2)  # cancel-me plus the human planning trigger.
+        receipt = self.pool.apply_judge(call)
+        self.assertEqual(
+            receipt["applied"],
+            [{"id": "cancel-me", "revision": 2}, {"id": "fits", "revision": 1}],
+        )
+        self.assertEqual(
+            receipt["conflicts"],
+            [
+                {"index": 0, "id": "too-early", "reason": "max_pending"},
+                {"index": 3, "id": "too-late", "reason": "max_pending"},
+            ],
+        )
+        self.pending_limit(None)
+        self.assertEqual(self.pool.apply_judge(call), receipt)
+        self.assertNotIn(
+            "too-early", [task["id"] for task in self.store.snapshot()["tasks"]]
         )
 
     def judge(self, changes, *, cite_knowledge=False):

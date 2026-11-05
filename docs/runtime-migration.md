@@ -10,16 +10,18 @@ migration command as evidence that a deployment has migrated.
 research-loop runtime migrate preview /path/to/study --output /path/to/private-inventory.json
 research-loop runtime migrate prepare /path/to/study --import-id example-import \
   --inventory /path/to/private-inventory.json --translation /path/to/translation.json \
-  --config /path/to/config.json --fence /path/to/fence.json \
+  --config /path/to/config.yaml --fence /path/to/fence.json \
   --deployment /path/to/deployment.json --application /path/to/versioned/application.py \
-  --application-config /path/to/private-application-config.json
+  --application-config /path/to/private-application-config.yaml
 research-loop runtime migrate commit /path/to/study example-import
 research-loop runtime migrate resolve /path/to/study example-import --evidence /path/to/resolutions.json
 research-loop runtime migrate bind-execute /path/to/study example-import --evidence /path/to/execute-binding.json
 research-loop runtime migrate activate /path/to/study example-import --evidence /path/to/activation.json
 ```
 
-The application-config option is optional. Use `--help` for each command and
+The config and optional application-config files use safe YAML 1.2 with `.yaml`
+or `.yml` extensions; duplicate keys are rejected. The other documents shown
+above remain JSON. Use `--help` for each command and
 keep inventory, translation, application configuration, evidence and runtime
 artifacts private and outside Git. Preview captures exact legacy control records
 and reports blockers; it makes no cutover. The operator must inspect these records,

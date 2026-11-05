@@ -11,10 +11,8 @@ from tempfile import TemporaryDirectory
 
 if __package__:
     from examples import coordinator_fixture
-    from examples.concurrent_runtime import configuration
 else:
     import coordinator_fixture
-    from concurrent_runtime import configuration
 
 from research_loop.cli import main
 
@@ -26,21 +24,16 @@ def run_smoke(base=None):
     base = Path(base).resolve()
     base.mkdir(parents=True, exist_ok=True)
     root = base / "study"
-    config = base / "config.json"
-    application_config = base / "application.json"
+    config = Path(__file__).with_name("runtime_config.yaml")
+    application_config = base / "application.yaml"
     specification = base / "task.json"
-    config.write_text(json.dumps(configuration()))
     application_config.write_text(
-        json.dumps(
-            {
-                "root": str(root),
-                "plan_barrier": ["a", "b"],
-                "fail_execute": ["a"],
-                "backend_tasks": ["b"],
-                "lost_ack": ["b"],
-                "fail_collection_once": ["b"],
-            }
-        )
+        f"root: {json.dumps(str(root))}\n"
+        "plan_barrier: [a, b]\n"
+        "fail_execute: [a]\n"
+        "backend_tasks: [b]\n"
+        "lost_ack: [b]\n"
+        "fail_collection_once: [b]\n"
     )
     specification.write_text(json.dumps({"instruction": "Synthetic CLI example"}))
 
@@ -61,12 +54,6 @@ def run_smoke(base=None):
         coordinator_fixture.__file__,
         "--application-config",
         application_config,
-        "--max-iterations",
-        "3",
-        "--max-calls",
-        "12",
-        "--max-seconds",
-        "60",
     )
     for name, dependency in (("a", None), ("b", None), ("c", "b")):
         command(

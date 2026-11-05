@@ -12,22 +12,20 @@ Select an immutable copy of `application.py` as described in the
 `{"id":"native-script-runtime-v1","version":"1"}`. The application configuration
 has exactly these fields:
 
-```json
-{
-  "transport": {
-    "backend": "pi",
-    "executable": "/path/to/pi",
-    "provider": "configured-provider",
-    "model": "configured-model",
-    "reasoning": "medium",
-    "timeout_seconds": 120,
-    "private_calls_dir": "/path/to/private-calls"
-  },
-  "scientific_contract_source": "provided:science",
-  "backend_handlers": {
-    "script": {"handler": "script", "config": "REPLACE_WITH_OPERATOR_CONFIG_OBJECT"}
-  }
-}
+```yaml
+transport:
+  backend: pi
+  executable: /path/to/pi
+  provider: configured-provider
+  model: configured-model
+  reasoning: medium
+  timeout_seconds: 120
+  private_calls_dir: /path/to/private-calls
+scientific_contract_source: provided:science
+backend_handlers:
+  script:
+    handler: script
+    config: REPLACE_WITH_OPERATOR_CONFIG_OBJECT
 ```
 
 The placeholder is not runnable configuration. Prepare the explicit backend

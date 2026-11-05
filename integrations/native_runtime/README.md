@@ -26,19 +26,16 @@ and select a versioned immutable copy of `application.py` with `--application`.
 Its package and dependencies must be available in the chosen runtime environment.
 An application configuration for qualitative work has this shape:
 
-```json
-{
-  "transport": {
-    "backend": "pi",
-    "executable": "/path/to/pi",
-    "provider": "configured-provider",
-    "model": "configured-model",
-    "reasoning": "off",
-    "timeout_seconds": 120,
-    "private_calls_dir": "/path/to/private-calls"
-  },
-  "backend_handlers": {}
-}
+```yaml
+transport:
+  backend: pi
+  executable: /path/to/pi
+  provider: configured-provider
+  model: configured-model
+  reasoning: 'off'
+  timeout_seconds: 120
+  private_calls_dir: /path/to/private-calls
+backend_handlers: {}
 ```
 
 `private_calls_dir` is optional and, when present, absolute; prompts and streams

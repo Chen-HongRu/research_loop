@@ -46,6 +46,23 @@ class ConflictError(StateStoreError):
     pass
 
 
+class PendingTaskLimitExceeded(ConflictError):
+    pass
+
+
+def validate_task_pool(config):
+    """Return the optional pending-task cap without counting retained history."""
+    settings = config.get("task_pool", {})
+    if not isinstance(settings, dict):
+        raise ValueError("task_pool must be an object")
+    if set(settings) - {"max_pending"}:
+        raise ValueError("Unknown task_pool fields")
+    limit = settings.get("max_pending")
+    if limit is not None and (type(limit) is not int or limit < 0):
+        raise ValueError("task_pool.max_pending must be a non-negative integer or null")
+    return limit
+
+
 class BudgetExceeded(StateStoreError):
     pass
 
@@ -206,6 +223,48 @@ def _decode(row):
     return result
 
 
+def _creation_budget(config, explicit, started_at):
+    defaults = dict(
+        max_iterations=10, max_calls=100, max_seconds=3600, admission_deadline=None
+    )
+    if "budget" not in config:
+        if explicit.keys() - defaults.keys():
+            raise TypeError(
+                "Unknown Study limit: "
+                + ", ".join(sorted(explicit.keys() - defaults.keys()))
+            )
+        return defaults | explicit
+    if explicit:
+        raise ValueError(
+            "Specify Study limits in config.budget or as arguments, not both"
+        )
+    budget = config["budget"]
+    if not isinstance(budget, dict) or budget.keys() - (
+        defaults.keys() | {"window_seconds"}
+    ):
+        raise ValueError("Unknown field or invalid object in config.budget")
+    if not {"max_calls", "max_iterations"} <= budget.keys():
+        raise ValueError(
+            "config.budget requires explicit max_calls and max_iterations (null for unlimited)"
+        )
+    if "window_seconds" in budget:
+        seconds = budget["window_seconds"]
+        _number(seconds, "window_seconds")
+        if {"max_seconds", "admission_deadline"} & budget.keys():
+            raise ValueError(
+                "window_seconds is exclusive with max_seconds and admission_deadline"
+            )
+        return dict(
+            max_iterations=budget["max_iterations"],
+            max_calls=budget["max_calls"],
+            max_seconds=seconds,
+            admission_deadline=started_at + seconds,
+        )
+    if "max_seconds" not in budget:
+        raise ValueError("config.budget requires window_seconds or max_seconds")
+    return defaults | budget
+
+
 class StateStore:
     """Open an existing store; creation is always explicit."""
 
@@ -246,20 +305,17 @@ class StateStore:
             raise StateStoreError(f"Cannot open runtime store: {exc}") from exc
 
     @classmethod
-    def create(
-        cls,
-        root,
-        *,
-        config,
-        max_iterations=10,
-        max_calls=100,
-        max_seconds=3600,
-        admission_deadline=None,
-        clock=time.time,
-    ):
+    def create(cls, root, *, config, clock=time.time, **limits):
         if not isinstance(config, dict):
             raise ValueError("config must be a dictionary")
         validate_role_access(config)
+        validate_task_pool(config)
+        started_at = _timestamp(clock)
+        budget = _creation_budget(config, limits, started_at)
+        max_iterations = budget["max_iterations"]
+        max_calls = budget["max_calls"]
+        max_seconds = budget["max_seconds"]
+        admission_deadline = budget["admission_deadline"]
         config_json = _json(config)
         _number(max_iterations, "max_iterations", nullable=True, integer=True)
         _number(max_calls, "max_calls", nullable=True, integer=True)
@@ -311,7 +367,7 @@ class StateStore:
                         max_calls,
                         max_seconds,
                         admission_deadline,
-                        _timestamp(clock),
+                        started_at,
                     ),
                 )
                 conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -641,6 +697,17 @@ class Coordinator:
             raise InvalidTransition("Human task ownership cannot be downgraded")
         if task["revision"] != (prior["revision"] + 1 if prior else 1):
             raise ConflictError("Task revision must advance exactly once")
+        if prior is None and not task["cancelled"]:
+            limit = conn.execute(
+                "SELECT json_extract(config_json,'$.task_pool.max_pending') FROM control"
+            ).fetchone()[0]
+            if limit is not None:
+                pending = conn.execute(
+                    "SELECT count(*) FROM tasks t WHERE t.cancelled=0 "
+                    "AND NOT EXISTS (SELECT 1 FROM iterations i WHERE i.task_id=t.id)"
+                ).fetchone()[0]
+                if pending >= limit:
+                    raise PendingTaskLimitExceeded("task_pool.max_pending reached")
         values = (
             task["id"],
             task["revision"],
@@ -800,6 +867,17 @@ class Coordinator:
                 raise ConflictError("Request id reused with different intent")
             return existing
         self._admit(control)
+        # A creation-relative window also closes model admission after downtime,
+        # even if the elapsed ledger paused while the owner was closed.
+        if (
+            control["admission_deadline"] is not None
+            and control["anchor"] >= control["admission_deadline"]
+            and conn.execute(
+                "SELECT json_extract(config_json,'$.budget.window_seconds') FROM control"
+            ).fetchone()[0]
+            is not None
+        ):
+            raise BudgetExceeded("Study admission window ended")
         if (
             control["max_calls"] is not None
             and control["calls"] >= control["max_calls"]

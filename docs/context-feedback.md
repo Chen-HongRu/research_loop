@@ -63,18 +63,16 @@ Omitted roles keep their existing behavior. This example gives Review its own
 accepted Plan, Execute, collected reports and eligible measurements for the
 iteration. Advocate receives the frozen planning round and published research.
 
-```json
-{
-  "role_access": {
-    "review": {
-      "published_history": false,
-      "context_sources": [],
-      "permissions": [],
-      "actions": ["knowledge", "reviews"]
-    },
-    "advocate": {"published_history": true, "actions": ["proposals"]}
-  }
-}
+```yaml
+role_access:
+  review:
+    published_history: false
+    context_sources: []
+    permissions: []
+    actions: [knowledge, reviews]
+  advocate:
+    published_history: true
+    actions: [proposals]
 ```
 
 The four rule fields are optional. `published_history` defaults to true and

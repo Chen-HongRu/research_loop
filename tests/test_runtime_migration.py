@@ -1,13 +1,18 @@
 """Synthetic authority-transfer crashes; never invoke a model or backend."""
 
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from ruamel.yaml import YAML
+
 from examples import coordinator_fixture
 from examples.concurrent_runtime import configuration
+from research_loop.cli import main
 from research_loop.core import Study, initialize
 from research_loop.runtime.application import prepare_application
 from research_loop.runtime.format import RuntimeFormatError
@@ -98,6 +103,45 @@ class RuntimeMigrationTests(unittest.TestCase):
             "reconciliation_evidence_refs": [],
             "additional_elapsed_seconds": 3.5,
         }
+
+    def test_cli_prepare_accepts_yaml_config_and_json_protocol_documents(self):
+        inventory, translation, config, fence, deployment = self.arguments()
+        del config["runtime"]["application"]
+        config_path = self.base / "config.yml"
+        YAML(typ="safe", pure=True).dump(config, config_path)
+        app_path = self.base / "application.yaml"
+        YAML(typ="safe", pure=True).dump({"root": str(self.root)}, app_path)
+        arguments = [
+            "runtime",
+            "migrate",
+            "prepare",
+            str(self.root),
+            "--import-id",
+            "cli",
+            "--config",
+            str(config_path),
+            "--application",
+            str(self.application),
+            "--application-config",
+            str(app_path),
+        ]
+        for name, value in (
+            ("inventory", inventory),
+            ("translation", translation),
+            ("fence", fence),
+            ("deployment", deployment),
+        ):
+            path = self.base / (name + ".json")
+            path.write_text(json.dumps(value))
+            arguments.extend(["--" + name, str(path)])
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(main(arguments), 0, errors.getvalue())
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["database"], ".runtime-imports/cli/runtime.sqlite3")
+        self.assertTrue((self.root / result["database"]).is_file())
+        self.assertEqual(result["import_id"], "cli")
+        self.assertFalse((self.root / "runtime.sqlite3").exists())
 
     def test_preserve_spending_stop_pending_task_and_exact_source(self):
         state_path = self.root / "state.json"
