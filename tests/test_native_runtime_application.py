@@ -236,6 +236,11 @@ print(json.dumps({{'type':'agent_settled','aborted':False}}))
             "permissions": {},
             "task": {"specification": {}},
             "budget": {},
+            "provided:science": {
+                "baseline_ref": "synthetic-baseline",
+                "global_evaluation": None,
+                "local_evaluation": None,
+            },
             "measurement:m": {"id": "m", "receipt_ref": "receipt:m"},
             "source": "Synthetic supplied source",
             "unused": "Uncited supplied source",
