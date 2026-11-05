@@ -66,26 +66,33 @@ def invoke(kind, payload, config):
         )
     if kind != "agent":
         raise ValueError("Unknown invocation kind")
+    return invoke_agent(
+        payload, config["transport"], policy.prepare_submission, policy.validate_output
+    )
+
+
+def invoke_agent(payload, transport_config, prepare_submission, validate_output):
+    """Bind the role, deliver its result, and check every cited reference."""
     fields(payload, {"call", "context_ref", "package"}, "agent invocation")
     role = payload["call"]["role"]
-    package = ContextPackage.from_dict(payload["package"])
-    if package.manifest["role"] != role:
+    frozen = ContextPackage.from_dict(payload["package"]).to_dict()
+    context, manifest = frozen["context"], frozen["manifest"]
+    if manifest["role"] != role:
         raise ValueError("Call role differs from bound context")
+    prompt, schema = prepare_submission(role, frozen)
     response = transport.run(
-        policy.prompt(role, package.to_dict()),
-        config["transport"],
-        response_schema=policy.response_schema(
-            policy.MODELS[role], context=package.context if role == "review" else None
-        ),
+        prompt,
+        transport_config,
+        response_schema=schema,
         invocation={"call": payload["call"], "context_ref": payload["context_ref"]},
     )
     fields(response, {"output", "evidence_refs"}, "model response")
-    normalized = policy.validate_output(role, response["output"], package.context)
+    normalized = validate_output(role, response["output"], context)
     if role in {"review", "scout"}:
         own_ids = (
             {
-                package.context[key]["id"]
-                for key in package.manifest["protected_keys"]
+                context[key]["id"]
+                for key in manifest["protected_keys"]
                 if key.startswith("measurement:")
             }
             if role == "review"
@@ -104,8 +111,8 @@ def invoke(kind, payload, config):
         or len(set(refs)) != len(refs)
     ):
         raise ValueError("Evidence references must be unique strings")
-    if not set(refs) <= set(package.manifest["allowed_evidence"]):
+    if not set(refs) <= set(manifest["allowed_evidence"]):
         raise ValueError("Model cited evidence outside the bound manifest")
-    if not set(policy.cited_refs(normalized, package.context)) <= set(refs):
+    if not set(policy.cited_refs(normalized, context)) <= set(refs):
         raise ValueError("Model omitted typed evidence references from evidence_refs")
     return {"output": normalized, "evidence_refs": refs}

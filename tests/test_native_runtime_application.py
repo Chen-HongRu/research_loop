@@ -183,94 +183,24 @@ class NativeApplicationTests(unittest.TestCase):
         extra_blocks=None,
         event_case=None,
     ):
-        script = f"""#!{sys.executable}
-import json, os
-from pathlib import Path
-import subprocess, sys, time
-arguments = sys.argv[1:]
-with Path({str(self.root / "arguments.jsonl")!r}).open('a') as stream:
-    stream.write(json.dumps(arguments)+'\\n')
-assert '--no-context-files' in arguments
-assert 'submit_result' in arguments[arguments.index('--system-prompt')+1]
-assert arguments[arguments.index('--append-system-prompt')+1] == ''
-assert '--no-mcp' in arguments and '--no-extensions' in arguments
-if '--list-models' in arguments:
-    assert '--offline' in arguments and '--no-tools' in arguments
-    assert '-e' not in arguments
-    print('openai-codex {catalog}')
-    sys.exit(0)
-assert '--no-tools' not in arguments
-assert '--no-builtin-tools' in arguments
-assert arguments[arguments.index('--tools')+1] == 'submit_result'
-assert arguments.count('-e') == 1
-extension = Path(arguments[arguments.index('-e')+1])
-assert extension.is_absolute() and extension.name == 'submit_result.ts' and extension.is_file()
-assert arguments[arguments.index('--provider')+1] == 'openai-codex'
-assert arguments[arguments.index('--model')+1] == 'synthetic-model'
-assert arguments[arguments.index('--thinking')+1] == 'medium'
-prompt = sys.stdin.read()
-schema = json.loads(prompt.split('The complete response must satisfy this JSON schema:\\n', 1)[1])
-assert json.loads(Path('response-schema.json').read_text()) == schema
-package = json.loads(prompt.split('ContextPackage:\\n', 1)[1].split('\\nResponse contract:\\n', 1)[0])
-if package.get('encoding') == 'shared-json-subtrees-v1':
-    view = package
-    package = view['package']
-    for replacement in view['replacements']:
-        parent = package
-        for key in replacement['path'][:-1]:
-            parent = parent[key]
-        parent[replacement['path'][-1]] = json.loads(json.dumps(view['shared_values'][replacement['value_id']]))
-role = package['manifest']['role']
-assert package['context']['goal'] == 'Synthetic native roles'
-if {hanging!r}:
-    if {spawn_child!r}:
-        subprocess.Popen([sys.executable, '-c', "import time; from pathlib import Path; time.sleep(3); Path("+repr({str(self.root / "late-child")!r})+").write_text('late')"])
-    Path({str(self.root / "cli-ready")!r}).write_text(str(os.getpgid(0)))
-    time.sleep(30)
-outputs = {OUTPUTS!r}
-refs = {{'scout':['source:used'], 'review':['receipt:m']}}.get(role, [])
-answer = {response!r} if {response is not None!r} else {{'output': outputs[role], 'evidence_refs':refs}}
-tool_id = 'synthetic-submission'
-message = {{'role':'assistant','stopReason':'toolUse','provider':'openai-codex','model':{model!r},'thinkingLevel':{thinking!r},
-           'content':{extra_blocks or []!r}+[{{'type':'toolCall','id':tool_id,'name':'submit_result','arguments':answer}}]}}
-start = {{'type':'tool_execution_start','toolCallId':tool_id,'toolName':'submit_result','args':answer}}
-result = {{'content':[],'details':answer,'terminate':True}}
-end = {{'type':'tool_execution_end','toolCallId':tool_id,'toolName':'submit_result','result':result,'isError':False}}
-tool_result = {{'role':'toolResult','toolCallId':tool_id,'toolName':'submit_result','content':[],'details':answer,'isError':False}}
-events = [{{'type':'message_end','message':message}},start,end,{{'type':'message_end','message':tool_result}}]
-case = {event_case!r}
-if case == 'plain_text':
-    message['stopReason'] = 'stop'
-    message['content'] = [{{'type':'text','text':json.dumps(answer)}}]
-    events = events[:1]
-elif case == 'missing_end':
-    events = events[:2]
-elif case == 'failed_tool':
-    end['isError'] = True
-elif case == 'missing_terminate':
-    del result['terminate']
-elif case == 'wrong_tool':
-    message['content'][-1]['name'] = 'bash'
-elif case == 'mismatched_end_id':
-    end['toolCallId'] = 'forged-id'
-elif case == 'mismatched_result_id':
-    tool_result['toolCallId'] = 'forged-id'
-elif case == 'forged_end':
-    events = events[1:]
-elif case == 'mismatched_details':
-    end['result'] = {{'content':[],'details':{{'output':{{}},'evidence_refs':[]}},'terminate':True}}
-elif case == 'duplicate_tool':
-    message['content'].append({{'type':'toolCall','id':'extra-id','name':'submit_result','arguments':answer}})
-elif case == 'extra_assistant':
-    events.append({{'type':'message_end','message':{{**message,'stopReason':'stop','content':[{{'type':'text','text':'Additional response'}}]}}}})
-elif case == 'extra_execution':
-    events.append({{**end,'toolCallId':'extra-id','toolName':'bash'}})
-events.append({{'type':'agent_settled','aborted':case == 'aborted'}})
-for event in events:
-    print(json.dumps(event))
-"""
         executable = Path(self.config["transport"]["executable"])
-        executable.write_text(script)
+        executable.with_suffix(".json").write_text(
+            json.dumps(
+                {
+                    "model": model,
+                    "thinking": thinking,
+                    "catalog": catalog,
+                    "response": response,
+                    "hanging": hanging,
+                    "spawn_child": spawn_child,
+                    "extra_blocks": extra_blocks,
+                    "event_case": event_case,
+                    "outputs": OUTPUTS,
+                }
+            )
+        )
+        fixture = Path(__file__).parent / "fixtures" / "native_pi_stub.py"
+        executable.write_text(f"#!{sys.executable}\n" + fixture.read_text())
         executable.chmod(0o700)
 
     def package(self, role):

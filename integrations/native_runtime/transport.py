@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 
-from research_loop.harness import HarnessError
+from research_loop.harness import HarnessError, iter_pi_events
 from research_loop.runtime.operation_contract import fields, json_value, text
 
 
@@ -52,6 +52,33 @@ def validate_config(config):
     return value
 
 
+def _assistant_submission(message, config):
+    if any(
+        message.get(key) != config[field]
+        for key, field in (
+            ("provider", "provider"),
+            ("model", "model"),
+            ("thinkingLevel", "reasoning"),
+        )
+    ):
+        raise HarnessError(
+            "Pi response provider/model/thinking differs from the exact request"
+        )
+    blocks = message.get("content")
+    if not isinstance(blocks, list) or any(
+        not isinstance(b, dict) or b.get("type") not in {"thinking", "text", "toolCall"}
+        for b in blocks
+    ):
+        raise HarnessError("Invalid Pi assistant content")
+    calls = [b for b in blocks if b["type"] == "toolCall"]
+    if len(calls) != 1 or calls[0].get("name") != "submit_result":
+        raise HarnessError("Pi must call submit_result exactly once")
+    call_id, arguments = calls[0].get("id"), calls[0].get("arguments")
+    if not isinstance(call_id, str) or not call_id or not isinstance(arguments, dict):
+        raise HarnessError("Invalid submit_result identity or arguments")
+    return call_id, arguments
+
+
 def _submission(path, config):
     """Accept a single completed, terminating Pi tool call from the requested model."""
     phase = "assistant"
@@ -69,103 +96,61 @@ def _submission(path, config):
             arguments, sort_keys=True, allow_nan=False
         )
 
-    with path.open(encoding="utf-8", newline="\n") as stream:
-        for line in stream:
-            if not line.endswith("\n"):
-                raise HarnessError("Pi emitted unterminated JSONL")
-            try:
-                event = json.loads(line)
-            except ValueError as error:
-                raise HarnessError("Pi emitted invalid JSONL") from error
-            if not isinstance(event, dict) or phase == "settled":
-                raise HarnessError(
-                    "Unexpected event after Pi submission or malformed stream"
-                )
-            kind = event.get("type")
-            if kind in {"turn_start", "agent_start"} and phase != "assistant":
-                raise HarnessError("Pi started another turn after submission")
-            if (
-                kind == "message_start"
-                and (event.get("message") or {}).get("role") == "assistant"
-                and phase != "assistant"
-            ):
-                raise HarnessError(
-                    "Pi started another assistant response after submission"
-                )
-            if kind == "message_end":
-                message = event.get("message") or {}
-                role = message.get("role")
-                if role in {"system", "user"} and phase == "assistant":
-                    continue
-                if role == "assistant":
-                    if (
-                        phase != "assistant"
-                        or message.get("stopReason") not in {"toolUse", "stop"}
-                        or message.get("errorMessage")
-                    ):
-                        raise HarnessError(
-                            "Pi assistant did not complete one submission"
-                        )
-                    if any(
-                        message.get(key) != config[field]
-                        for key, field in (
-                            ("provider", "provider"),
-                            ("model", "model"),
-                            ("thinkingLevel", "reasoning"),
-                        )
-                    ):
-                        raise HarnessError(
-                            "Pi response provider/model/thinking differs from the exact request"
-                        )
-                    blocks = message.get("content")
-                    if not isinstance(blocks, list) or any(
-                        not isinstance(b, dict)
-                        or b.get("type") not in {"thinking", "text", "toolCall"}
-                        for b in blocks
-                    ):
-                        raise HarnessError("Invalid Pi assistant content")
-                    calls = [b for b in blocks if b["type"] == "toolCall"]
-                    if len(calls) != 1 or calls[0].get("name") != "submit_result":
-                        raise HarnessError("Pi must call submit_result exactly once")
-                    call_id, arguments = calls[0].get("id"), calls[0].get("arguments")
-                    if (
-                        not isinstance(call_id, str)
-                        or not call_id
-                        or not isinstance(arguments, dict)
-                    ):
-                        raise HarnessError(
-                            "Invalid submit_result identity or arguments"
-                        )
-                    phase = "start"
-                elif (
-                    role == "toolResult"
-                    and phase == "receipt"
-                    and matches(message)
-                    and message.get("isError") is False
-                    and same_details(message.get("details"))
-                ):
-                    phase = "complete"
-                else:
-                    raise HarnessError("Unexpected Pi message or tool receipt")
-            elif kind == "tool_execution_start":
-                if phase != "start" or not matches(event):
-                    raise HarnessError("Unexpected Pi tool execution")
-                phase = "end"
-            elif kind == "tool_execution_end":
-                result = event.get("result") or {}
+    for event in iter_pi_events(path):
+        if phase == "settled":
+            raise HarnessError("Unexpected event after Pi submission")
+        kind = event.get("type")
+        if kind in {"turn_start", "agent_start"} and phase != "assistant":
+            raise HarnessError("Pi started another turn after submission")
+        if (
+            kind == "message_start"
+            and (event.get("message") or {}).get("role") == "assistant"
+            and phase != "assistant"
+        ):
+            raise HarnessError("Pi started another assistant response after submission")
+        if kind == "message_end":
+            message = event.get("message") or {}
+            role = message.get("role")
+            if role in {"system", "user"} and phase == "assistant":
+                continue
+            if role == "assistant":
                 if (
-                    phase != "end"
-                    or not matches(event)
-                    or event.get("isError") is not False
-                    or result.get("terminate") is not True
-                    or not same_details(result.get("details"))
+                    phase != "assistant"
+                    or message.get("stopReason") not in {"toolUse", "stop"}
+                    or message.get("errorMessage")
                 ):
-                    raise HarnessError("Invalid terminating submit_result receipt")
-                phase = "receipt"
-            elif kind == "agent_settled":
-                if phase != "complete" or event.get("aborted") is not False:
-                    raise HarnessError("Pi did not settle a completed submission")
-                phase = "settled"
+                    raise HarnessError("Pi assistant did not complete one submission")
+                call_id, arguments = _assistant_submission(message, config)
+                phase = "start"
+            elif (
+                role == "toolResult"
+                and phase == "receipt"
+                and matches(message)
+                and message.get("isError") is False
+                and same_details(message.get("details"))
+            ):
+                phase = "complete"
+            else:
+                raise HarnessError("Unexpected Pi message or tool receipt")
+        elif kind == "tool_execution_start":
+            if phase != "start" or not matches(event):
+                raise HarnessError("Unexpected Pi tool execution")
+            phase = "end"
+        elif kind == "tool_execution_end":
+            result = event.get("result") or {}
+            if (
+                phase != "end"
+                or not matches(event)
+                or event.get("isError") is not False
+                or result.get("terminate") is not True
+                or not same_details(result.get("details"))
+            ):
+                raise HarnessError("Invalid terminating submit_result receipt")
+            phase = "receipt"
+        elif kind == "agent_settled":
+            if phase != "complete" or event.get("aborted") is not False:
+                raise HarnessError("Pi did not settle a completed submission")
+            phase = "settled"
     if phase != "settled":
         raise HarnessError("Incomplete Pi submit_result stream")
     return json_value(arguments)

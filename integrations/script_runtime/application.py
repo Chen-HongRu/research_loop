@@ -1,10 +1,11 @@
 """Native Pi role composition with an explicitly configured script backend."""
 
+from functools import partial
 import re
 
 from integrations.native_runtime import transport
 from integrations.script_runtime import backend, policy
-from research_loop.runtime.context import ContextPackage
+from integrations.native_runtime.application import invoke_agent
 from research_loop.runtime.operation_contract import fields, integer, json_value, text
 
 APPLICATION_IDENTITY = {"id": "native-script-runtime-v1", "version": "1"}
@@ -100,48 +101,9 @@ def invoke(kind, payload, config):
         )
     if kind != "agent":
         raise ValueError("Unknown invocation kind")
-    fields(payload, {"call", "context_ref", "package"}, "agent invocation")
-    role = payload["call"]["role"]
-    package = ContextPackage.from_dict(payload["package"])
-    if package.manifest["role"] != role:
-        raise ValueError("Call role differs from bound context")
-    response = transport.run(
-        policy.prompt(role, package.to_dict(), config),
+    return invoke_agent(
+        payload,
         config["transport"],
-        response_schema=policy.native.response_schema(
-            policy.MODELS[role], context=package.context if role == "review" else None
-        ),
-        invocation={"call": payload["call"], "context_ref": payload["context_ref"]},
+        partial(policy.prepare_submission, config=config),
+        partial(policy.validate_output, config=config),
     )
-    fields(response, {"output", "evidence_refs"}, "model response")
-    normalized = policy.validate_output(
-        role, response["output"], package.context, config
-    )
-    if role in {"review", "scout"}:
-        own_ids = (
-            {
-                package.context[key]["id"]
-                for key in package.manifest["protected_keys"]
-                if key.startswith("measurement:")
-            }
-            if role == "review"
-            else set()
-        )
-        if {item["measurement_id"] for item in normalized["reviews"]} != own_ids:
-            raise ValueError("Review must qualify every own measurement exactly once")
-        if any(item["measurement_id"] in own_ids for item in normalized["corrections"]):
-            raise ValueError(
-                "Corrections require historical published measurement eligibility"
-            )
-    refs = response["evidence_refs"]
-    if (
-        not isinstance(refs, list)
-        or any(not isinstance(ref, str) for ref in refs)
-        or len(set(refs)) != len(refs)
-    ):
-        raise ValueError("Evidence references must be unique strings")
-    if not set(refs) <= set(package.manifest["allowed_evidence"]):
-        raise ValueError("Model cited evidence outside the bound manifest")
-    if not set(policy.cited_refs(normalized, package.context)) <= set(refs):
-        raise ValueError("Model omitted typed evidence references from evidence_refs")
-    return {"output": normalized, "evidence_refs": refs}

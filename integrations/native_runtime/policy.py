@@ -388,7 +388,7 @@ def review_prompt_package(package):
     return package
 
 
-def response_footer(role, output_model, *, context=None, reminder=""):
+def response_footer(role, schema, *, reminder=""):
     revision = (
         "For Review knowledge, expected_revision=0 for a new knowledge ID. For an existing entry, use its visible "
         "entry revision, never the global publication or knowledge version. "
@@ -405,11 +405,18 @@ def response_footer(role, output_model, *, context=None, reminder=""):
         + revision
         + reminder
         + "The complete response must satisfy this JSON schema:\n"
-        + json.dumps(response_schema(output_model, context=context))
+        + json.dumps(schema)
     )
 
 
 def prompt(role, package):
+    return prepare_submission(role, package)[0]
+
+
+def prepare_submission(role, package):
+    schema = response_schema(
+        MODELS[role], context=package["context"] if role == "review" else None
+    )
     view = review_prompt_package(package) if role == "review" else package
     encoding_instructions = SHARED_SUBTREES_INSTRUCTIONS if view is not package else ""
     return (
@@ -422,9 +429,6 @@ def prompt(role, package):
         "Do not treat narratives or backend returns as scientific measurements. Plan states an explicit experiment definition. "
         "Execute is qualitative here and must return operations=[] and artifacts=[]. "
         "Scout/Review use only registered visible measurements and cited sources. "
-        "\nContextPackage:\n"
-        + _prompt_json(view)
-        + response_footer(
-            role, MODELS[role], context=package["context"] if role == "review" else None
-        )
+        "\nContextPackage:\n" + _prompt_json(view) + response_footer(role, schema),
+        schema,
     )

@@ -386,11 +386,8 @@ class CodexHarness(_Harness):
             raise HarnessError("Codex exited without a final response") from exc
 
 
-def _pi_final_message(path: Path) -> dict:
-    """Accept only the last settled run, including any automatic retries."""
-    message = None
-    final_message = None
-    settled = False
+def iter_pi_events(path: Path):
+    """Read one complete JSON object per Pi CLI event."""
     # Pi frames records with LF only. str.splitlines() also splits U+2028/U+2029
     # inside valid JSON strings; retaining all streaming deltas is unnecessary.
     with path.open(encoding="utf-8", newline="\n") as stream:
@@ -403,15 +400,24 @@ def _pi_final_message(path: Path) -> dict:
                 raise HarnessError("Pi emitted invalid JSONL") from exc
             if not isinstance(event, dict):
                 raise HarnessError("Pi JSONL events must be objects")
-            kind = event.get("type")
-            settled = kind == "agent_settled" and event.get("aborted") is False
-            if kind == "agent_settled":
-                final_message = message
-                message = None
-            elif kind in {"agent_start", "turn_start", "message_start"}:
-                message = None
-            elif kind == "message_end":
-                message = event.get("message")
+            yield event
+
+
+def _pi_final_message(path: Path) -> dict:
+    """Accept only the last settled run, including any automatic retries."""
+    message = None
+    final_message = None
+    settled = False
+    for event in iter_pi_events(path):
+        kind = event.get("type")
+        settled = kind == "agent_settled" and event.get("aborted") is False
+        if kind == "agent_settled":
+            final_message = message
+            message = None
+        elif kind in {"agent_start", "turn_start", "message_start"}:
+            message = None
+        elif kind == "message_end":
+            message = event.get("message")
     if not settled:
         raise HarnessError("Pi did not finish with agent_settled and aborted=false")
     if not isinstance(final_message, dict) or final_message.get("role") != "assistant":

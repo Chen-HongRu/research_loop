@@ -156,13 +156,19 @@ def validate_output(role, output, context, config):
 
 
 def prompt(role, package, config):
+    return prepare_submission(role, package, config)[0]
+
+
+def prepare_submission(role, package, config):
     if role not in {"plan", "execute"}:
+        message, schema = native.prepare_submission(role, package)
         return (
             "Backend sources whose context keys start evidence: are unverified script reports. "
             "They may support interpretation knowledge only, never external/local_measurement knowledge, "
-            "registered measurements or Frontier scores.\n"
-            + native.prompt(role, package)
+            "registered measurements or Frontier scores.\n" + message,
+            schema,
         )
+    schema = native.response_schema(MODELS[role])
     contracts = {}
     for name, handler in config["backend_handlers"].items():
         settings = handler["config"]
@@ -234,9 +240,6 @@ def prompt(role, package, config):
         + json.dumps(contracts, sort_keys=True)
         + "\nContextPackage:\n"
         + json.dumps(package, ensure_ascii=False)
-        + native.response_footer(
-            role,
-            MODELS[role],
-            reminder=reminder,
-        )
+        + native.response_footer(role, schema, reminder=reminder),
+        schema,
     )
