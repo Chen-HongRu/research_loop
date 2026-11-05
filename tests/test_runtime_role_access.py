@@ -1,5 +1,7 @@
 """Configured role access narrows normal runtime inputs without losing own evidence."""
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -132,6 +134,65 @@ class RuntimeRoleAccessTests(unittest.TestCase):
         with self.assertRaisesRegex(ConflictError, "iteration scope"):
             self.updater.bind_context(call, ContextPackage.from_dict(forged))
         self.updater.bind_context(call, package)
+
+    def test_history_enabled_scout_cannot_rebind_goal_to_unassigned_evidence(self):
+        self.open_store(role_access={"scout": {"context_sources": []}})
+        outside = publish_artifact(self.root, {"claim": "outside this call"})
+        call = self.call("scout")
+        contexts = RuntimeContexts(self.owner)
+        package = contexts.build(call)
+        value = package.to_dict()
+        goal = next(s for s in value["manifest"]["sources"] if s["key"] == "goal")
+        goal["ref"] = outside
+        value["manifest"]["allowed_evidence"].append(outside)
+        with self.assertRaisesRegex(ConflictError, "issued role/iteration scope"):
+            self.updater.bind_context(call, ContextPackage.from_dict(value))
+        altered = package.to_dict()
+        altered["context"]["research"] = altered["context"]["research"].replace(
+            "#", "!", 1
+        )
+        with self.assertRaisesRegex(ConflictError, "issued role/iteration scope"):
+            self.updater.bind_context(call, ContextPackage.from_dict(altered))
+        other = self.call("scout")
+        with self.assertRaisesRegex(ConflictError, "controller-issued context grant"):
+            self.updater.bind_context(other, package)
+        # An independent builder still returns the originally issued selection.
+        self.assertEqual(
+            RuntimeContexts(self.owner).build(call).to_dict(), package.to_dict()
+        )
+        self.updater.bind_context(call, ContextPackage.from_dict(package.to_dict()))
+        output = {"knowledge": [], "reviews": [], "corrections": []}
+        with self.assertRaisesRegex(ValueError, "outside its frozen allowlist"):
+            self.updater.validate_output(call, output, [outside])
+        self.updater.validate_output(call, output, package.manifest["allowed_evidence"])
+
+    def test_racing_builders_freeze_one_selection_for_attempt(self):
+        self.open_store(role_access={"scout": {}})
+        call = self.call("scout")
+        both_selected = Barrier(2, timeout=5)
+
+        def build(action):
+            def select(*_):
+                both_selected.wait()
+                return {"research": {"action": action, "reason": "Synthetic policy"}}
+
+            return RuntimeContexts(self.owner, policy=select).build(call)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = pool.map(build, ("include", "omit"))
+        self.assertEqual(first.to_dict(), second.to_dict())
+        self.updater.bind_context(call, second)
+
+    def test_pre_upgrade_binding_without_issuance_cannot_authorize_new_feedback(self):
+        self.open_store(role_access={"scout": {}})
+        call = self.call("scout")
+        self.updater.bind_context(call, RuntimeContexts(self.owner).build(call))
+        # A pre-grant configured binding has a contexts row but no issuance receipt.
+        (self.root / "context-grants" / (call.attempt_id + ".json")).unlink()
+        with self.assertRaisesRegex(ConflictError, "controller-issued context grant"):
+            self.updater.validate_output(
+                call, {"knowledge": [], "reviews": [], "corrections": []}, []
+            )
 
     def test_unconfigured_scout_retains_history_and_study_permissions(self):
         self.open_store()

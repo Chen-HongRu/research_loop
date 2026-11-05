@@ -97,6 +97,22 @@ These rules govern frozen inputs and controller actions. Interactive Pi search,
 filesystem access and operating-system isolation have separate enforcement
 boundaries.
 
+For a configured role, the controller freezes the first selected package per
+attempt and atomically records its artifact reference and identity in
+`context-grants/`. Binding accepts that exact package, including every source
+reference and the supplied content. Rebuilding the attempt reuses the same
+selection. These receipts belong to the trusted Study control directory.
+
+To revise an existing knowledge entry, the configured role must have received
+the full published `research` field. The Publisher checks the target's revision
+at the frozen publication version and again against its current revision.
+An omitted or truncated research field allows new entries only. A conflict
+leaves the target unchanged. On upgrade, legacy **configured-role** bindings
+without an issuance receipt cannot authorize new feedback or a Review retry
+from that package. Use a fresh invocation for a new decision. Previously
+published receipts remain replayable; unconfigured roles retain their prior
+binding contract.
+
 ## Validated output
 
 ```text

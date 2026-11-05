@@ -5,6 +5,7 @@ open denied evaluator receipts or infer measurements from backend narratives.
 """
 
 from .context import ContextPackage, ContextSnapshot, build_context
+from .context_grants import _issue_context
 from .context_sources import extend as extend_sources
 from .files import publish_artifact
 from .operations import Operations
@@ -52,13 +53,14 @@ class RuntimeContexts:
             # Dispatch/recovery always uses the already selected input. A policy
             # change cannot silently reconstruct a reserved call's context.
             return self.reader._load_binding(record)[0]
-        retry = record.get("retry")
-        if retry is not None and retry["source_context_ref"] is not None:
-            return self.retry_review(
-                call, retry["source_context_ref"], retry["source_context_identity"]
-            )
         if record["planning"] is not None:
             return PlanningLedger(self.owner).context(call, policy=self.policy)
+        return _issue_context(self.reader, record, lambda: self._build(call, record))
+
+    def _build(self, call, record):
+        retry = record.get("retry")
+        if retry is not None and retry["source_context_ref"] is not None:
+            return self._retry_package(call, record, retry)
         config = record["control"]["config"]
         access = RoleAccess.resolve(config, call.role)
         knowledge = Publisher(self.owner).snapshot(
@@ -264,10 +266,21 @@ class RuntimeContexts:
         """Retain the failed Review's selected scientific inputs on explicit retry."""
         if call.role != "review":
             raise ValueError("Frozen review retry cannot be used for another role")
-        original = self.reader._read_record(original_context_ref, original_identity)
+        record = self.owner._feedback_snapshot(call.to_dict())
+        retry = record.get("retry")
+        if not retry or (original_context_ref, original_identity) != (
+            retry["source_context_ref"],
+            retry["source_context_identity"],
+        ):
+            raise ConflictError("Review retry must use its recorded original binding")
+        return self.build(call)
+
+    def _retry_package(self, call, record, retry):
+        original = self.reader._read_record(
+            retry["source_context_ref"], retry["source_context_identity"]
+        )
         package = ContextPackage.from_dict(original)
         value = package.to_dict()
-        record = self.owner._feedback_snapshot(call.to_dict())
         if value["manifest"]["task"] != record["task"]:
             raise ConflictError("Review retry task differs from its original input")
         value["manifest"]["revisions"]["iteration"] = call.expected_revision

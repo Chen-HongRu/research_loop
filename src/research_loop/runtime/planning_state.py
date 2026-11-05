@@ -4,6 +4,7 @@ import uuid
 
 from .role_access import RoleAccess
 from .context import ContextSnapshot, build_context
+from .context_grants import _issue_context
 from .context_sources import extend as extend_sources
 from .files import publish_artifact
 from .publication import Publisher
@@ -233,6 +234,14 @@ class PlanningLedger:
         planning = record["planning"]
         if planning is None:
             raise InvalidTransition("Attempt has no planning round")
+        if record["binding"] is not None:
+            return self.reader._load_binding(record)[0]
+        return _issue_context(
+            self.reader, record, lambda: self._context(call, record, policy)
+        )
+
+    def _context(self, call, record, policy):
+        planning = record["planning"]
         inputs = self.reader._planning_inputs(record)
         frozen = inputs["planning"]
         config = record["control"]["config"]

@@ -10,12 +10,13 @@ from typing import Callable, Mapping
 
 from .context import ContextPackage
 from .role_access import RoleAccess
+from .context_grants import _require_grant
 from .context_sources import (
     check_metadata as check_source_metadata,
     validate_package as validate_source_package,
 )
 from .files import publish_artifact, validate_artifact_ref
-from .store import ConflictError, InvalidTransition, _decode, _json
+from .store import ConflictError, InvalidTransition, _json
 
 
 @dataclass(frozen=True)
@@ -298,12 +299,6 @@ class Updater:
             }
             if set(manifest["allowed_evidence"]) - visible_refs:
                 raise ConflictError("Role cannot cite omitted context")
-            if (
-                not access.published_history
-                and record["binding"] is None
-                and not (record.get("retry") or {}).get("source_context_ref")
-            ):
-                self._check_iteration_scope(record, package, required, access)
         retry = record.get("retry")
         if retry is not None and retry["source_context_ref"] is not None:
             original = self._read_record(
@@ -324,79 +319,6 @@ class Updater:
             self.coordinator._iteration_for_feedback(record)
         elif attempt["status"] != "accepted":
             raise InvalidTransition("Attempt no longer accepts feedback")
-
-    def _check_iteration_scope(self, record, package, required, access):
-        """Pin evidence to authoritative inputs when Study history is out of scope."""
-        from .contexts import own_operations
-
-        ctx, manifest = package.context, package.manifest
-        sources = {s["key"]: s for s in manifest["sources"]}
-        expected = {key: f"control:{key}" for key in required}
-        protected = set(required)
-        iteration = record["attempt"]["iteration_id"]
-        if access.accepted_plan:
-            expected["plan"] = record["plan"]["output_ref"]
-        if access.own_execution:
-            with self.coordinator.store._connection(readonly=True) as conn:
-                execute = _decode(
-                    conn.execute(
-                        "SELECT * FROM attempts WHERE iteration_id=? AND role='execute' AND status='accepted'",
-                        (iteration,),
-                    ).fetchone()
-                )
-                rows = [
-                    _decode(r)
-                    for r in conn.execute(
-                        "SELECT * FROM measurements WHERE iteration_id=?", (iteration,)
-                    )
-                ]
-            if not execute or not _same(
-                ctx.get("execute"), self._phase_output(execute, "execute")
-            ):
-                raise ConflictError("Review requires its own Execute output")
-            expected["execute"] = execute["output_ref"]
-            protected.add("execute")
-            for row in rows:
-                key = "measurement:" + row["id"]
-                if not _same(ctx.get(key), row):
-                    raise ConflictError("Review requires its own measurement")
-                expected[key] = row["receipt_ref"]
-                protected.add(key)
-            operations = own_operations(self.coordinator, iteration)
-            if operations:
-                ref = sources.get("operations", {}).get("ref")
-                if (
-                    not _same(ctx.get("operations"), operations)
-                    or not ref
-                    or not _same(
-                        self._read_record(ref, _identity(self._root, ref)),
-                        {"operations": operations},
-                    )
-                ):
-                    raise ConflictError("Review operations differ from own iteration")
-                expected["operations"] = ref
-                protected.add("operations")
-        planning = record.get("planning")
-        if planning:
-            expected["planning"] = planning["snapshot_ref"]
-            for slot in planning.get("advocates", []):
-                expected[slot["slot"]] = (
-                    slot["output_ref"]
-                    if slot["status"] == "accepted"
-                    else "control:attempt:" + slot["id"]
-                )
-        # Both namespaces have already undergone independent identity and body checks.
-        for key, source in sources.items():
-            if key.startswith(("provided:", "evidence:")):
-                expected[key] = source["ref"]
-        if (
-            {key: s["ref"] for key, s in sources.items()} != expected
-            or not protected <= set(manifest["protected_keys"])
-            or any(
-                not ref.startswith("artifacts/") for ref in manifest["allowed_evidence"]
-            )
-        ):
-            raise ConflictError("Context exceeds the role's iteration scope")
 
     def _check_research_package(self, record, package):
         from .operations import Operations
@@ -465,6 +387,10 @@ class Updater:
         binding = record["binding"]
         if binding is None:
             raise InvalidTransition("Bind a context before validating worker output")
+        if RoleAccess.resolve(
+            record["control"]["config"], record["attempt"]["role"]
+        ).configured:
+            _require_grant(self._root, record)
         package = ContextPackage.from_dict(
             self._read_record(binding["context_ref"], binding["identity"])
         )
@@ -580,6 +506,16 @@ class Updater:
         package = ContextPackage.from_dict(package.to_dict())
         call = call_identity.to_dict()
         captured = self.coordinator._feedback_snapshot(call)
+        grant = None
+        if RoleAccess.resolve(
+            captured["control"]["config"], call_identity.role
+        ).configured:
+            grant = _require_grant(self._root, captured)
+            issued = self._read_record(grant["ref"], grant["identity"])
+            if _package_text(ContextPackage.from_dict(issued)) != _package_text(
+                package
+            ):
+                raise ConflictError("Context differs from issued role/iteration scope")
         plan_output = self._plan_output(captured)
         self._check_package(captured, package, plan_output)
         existing = captured["binding"]
@@ -600,8 +536,11 @@ class Updater:
                 ref: _identity(self._root, ref)
                 for ref in package.manifest["allowed_evidence"]
             }
-            reference = publish_artifact(self._root, package.to_dict())
-            identity = _identity(self._root, reference)
+            if grant is None:
+                reference = publish_artifact(self._root, package.to_dict())
+                identity = _identity(self._root, reference)
+            else:
+                reference, identity = grant["ref"], grant["identity"]
         revisions_json = _json(package.manifest["revisions"])
         with self.coordinator._transaction() as (conn, _):
             current = self.coordinator._feedback_record(conn, call, metadata_only=True)

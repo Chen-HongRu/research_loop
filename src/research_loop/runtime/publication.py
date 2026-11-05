@@ -8,8 +8,9 @@ import ipaddress
 import json
 from urllib.parse import urlsplit
 
+from .role_access import RoleAccess
 from .store import ConflictError, InvalidTransition, _decode, _json
-from .updates import CallIdentity, _identity, _same
+from .updates import CallIdentity, Updater, _identity, _same
 
 _KNOWLEDGE = {
     "id",
@@ -118,6 +119,24 @@ class Publisher:
                     "SELECT * FROM publications WHERE attempt_id=?", (attempt_id,)
                 ).fetchone()
             )
+
+    def _knowledge_history_visible(self, record):
+        access = RoleAccess.resolve(
+            record["control"]["config"], record["attempt"]["role"]
+        )
+        if not access.configured:
+            return True
+        # Revalidate the immutable binding against controller-owned inputs. A
+        # claimed research field alone is not proof that its contents were shown.
+        package, _ = Updater(self.coordinator, validators={})._load_binding(record)
+        if not access.published_history:
+            return False
+        return any(
+            source["key"] == "research"
+            and source["allow_feedback"]
+            and source["disposition"] == "provided"
+            for source in package.manifest["sources"]
+        )
 
     @staticmethod
     def _decision(entry, *, correction=False):
@@ -406,6 +425,7 @@ class Publisher:
                 self._check_ref(reference, identity)
             return prior["receipt"]
         proposal = self._read_proposal(captured)
+        knowledge_history_visible = self._knowledge_history_visible(captured)
         payload, own, measurements, used_refs = self._prepare(captured, proposal)
         with self.coordinator._transaction() as (conn, _):
             current = self._check_current(
@@ -473,11 +493,18 @@ class Publisher:
                     (entry["id"],),
                 ).fetchone()
                 actual = row["revision"] if row is not None else 0
-                visible = conn.execute(
-                    "SELECT COALESCE(MAX(revision),0) FROM knowledge "
-                    "WHERE id=? AND publication_id<=?",
-                    (entry["id"], knowledge_version),
-                ).fetchone()[0]
+                # A global snapshot version does not grant a configured role
+                # access to research omitted or truncated by its bound context.
+                # Only complete research provides predecessor revision authority.
+                visible = (
+                    conn.execute(
+                        "SELECT COALESCE(MAX(revision),0) FROM knowledge "
+                        "WHERE id=? AND publication_id<=?",
+                        (entry["id"], knowledge_version),
+                    ).fetchone()[0]
+                    if knowledge_history_visible
+                    else 0
+                )
                 reason = self._predecessor_conflict(
                     entry["expected_revision"], actual, visible, knowledge_version
                 )
