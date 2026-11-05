@@ -3,7 +3,9 @@
 This is stage 2 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
 The input facade runs on new calls in the existing serial Study controller.
 The transactional Updater is available for isolated SQLite Studies; concurrent
-orchestration, knowledge publication and migration remain subsequent stages.
+orchestration and migration remain subsequent stages. The
+[publication interface](knowledge-publication.md) accepts Scout/Review knowledge
+and builds derived views from registered measurements and eligibility revisions.
 
 ## Frozen input
 
@@ -65,8 +67,11 @@ iteration, expected revision, owner epoch and worker token. Context binding occu
 once before dispatch. The updater compares frozen goal/evaluation/permissions,
 task, authorization limits and accepted Plan with authoritative records. Execute
 and Review require the original normalized, accepted Plan. The initial revision
-map is `{study: 1, task: revision-or-null, iteration: revision-or-null, knowledge: 0}`;
-knowledge publication will supply later knowledge versions.
+map is `{study: 1, task: revision-or-null, iteration: revision-or-null, knowledge: version}`.
+Knowledge starts at zero and advances by publication sequence, independently of
+iteration identity. A snapshot captured before another independent publication
+may still bind and finish. Its knowledge version remains frozen; updates to an
+existing knowledge or eligibility record require that target's expected revision.
 
 In the SQLite updater, permitted evidence references name existing immutable
 `artifacts/<uuid>.json` records. Their file identities are frozen at binding, so
@@ -120,9 +125,9 @@ fields have controller source identities and the exact call revision. Cached
 successful attempts keep their original manifest. Historical attempts without
 one remain readable; their provenance is not retroactively invented.
 
-SQLite schema 2 introduces the binding and update records. Schema 1 test Studies
-must be retained as evidence or recreated in a new directory. No automatic
-conversion of existing Studies occurs in this stage.
+SQLite schema 3 contains binding, update and publication records. Earlier SQLite
+test Studies must be retained as evidence or recreated in a new directory. No
+automatic conversion of existing Studies occurs in this stage.
 
 ## Local API smoke
 

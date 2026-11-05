@@ -3,10 +3,12 @@
 This is the SQLite state foundation for [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
 It is available through the Python API for new, isolated test Studies. The current
 `research-loop init/run` commands still use the serial document controller. The
-concurrent runner, knowledge publication, backend lifecycle and
+concurrent runner, backend lifecycle and
 explicit migration are subsequent deliverables tracked in #77.
 The [Context / Feedback interface](context-feedback.md) binds immutable inputs
 and validates output before accepting context-bound attempts.
+The [knowledge publication API](knowledge-publication.md) appends Scout/Review
+records and projects research documents and Frontiers without replacing state.
 
 ## Authority and identities
 
@@ -28,8 +30,8 @@ not to a second application state store.
 The configuration stored in SQLite is not editable through the state API.
 Snapshots are detached JSON-serializable values. Modifying a snapshot or a
 `state.json` file cannot modify the database. No whole-state replacement API is
-provided. Backend operations, knowledge and publication records will have their
-own transitions; they must not restore an old Study snapshot.
+provided. Knowledge and publication have independent append transitions; backend
+operations remain subsequent work. Neither may restore an old Study snapshot.
 
 ## Ownership and transitions
 
@@ -53,7 +55,8 @@ Iteration phases are `plan → execute → review → publication`. Each phase p
 one active attempt. An accepted artifact advances only that iteration and its
 revision. A failed attempt retains its reason and fails only its associated
 iteration. Standalone Scout, Advocate and Judge attempts share the Study ledger
-without acquiring an iteration. Publication is not implemented by this foundation.
+without acquiring an iteration. Publishing an accepted Review advances only its
+iteration from `publication` to `done`, with status `published`.
 
 `begin_attempt` atomically reserves one call before returning its identity. A
 repeated request ID must have the same intent and returns the original record,
@@ -108,6 +111,7 @@ New runtime initialization publishes `runtime.json` with `format: sqlite-v1` and
 the database Study identity. The serial `Study` and `TaskQueue` reject either this
 marker or `runtime.sqlite3`, including partially initialized directories. The
 runtime refuses in-place creation over legacy `study.json` or `state.json`.
+The current SQLite schema is 3; earlier prototype schemas are explicitly rejected.
 Existing Studies require the later explicit migration procedure; creating a
 database beside existing files is not migration. Old deployed binaries must be
 stopped during that procedure; they cannot be controlled by a check they lack.

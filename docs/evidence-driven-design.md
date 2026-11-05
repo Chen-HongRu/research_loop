@@ -1,6 +1,6 @@
 # 证据驱动的研究循环设计
 
-当前 Study 格式为 version 3；旧目录保持原样，不自动迁移。
+本文规定当前串行文档控制器的 Study version 3 格式与研究语义；旧目录保持原样，不自动迁移。新建 SQLite 测试 Study 的身份、知识发布与可重建视图分别遵循[事务状态规范](transactional-runtime.md)和[知识发布规范](knowledge-publication.md)。两种格式使用不同入口，不能混写。
 
 研究循环由用户定义 Study 目标，Agent 自主探索 Route，并通过有边界的 iteration 获取证据。路线组织探索方向，实验节点保存调查及其结果，全局与路线 `research.md` 提供当前理解和证据入口。Global Frontier 评价整体研究成果，Local Frontier 指导路线内部的优化。
 
