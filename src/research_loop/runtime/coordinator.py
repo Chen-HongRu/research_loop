@@ -24,6 +24,37 @@ def _reason(error):
     return f"{type(error).__name__}: {error}"[:1000]
 
 
+def validate_settings(settings):
+    """Validate frozen scheduling settings before creating a CLI Study."""
+    if not isinstance(settings, dict):
+        raise ValueError("runtime settings must be an object")
+    slots = settings.get("worker_slots")
+    if type(slots) is not int or slots < 1:
+        raise ValueError("runtime.worker_slots must be positive")
+    adapter = settings.get("worker_adapter")
+    if not isinstance(adapter, dict) or set(adapter) != {"id", "version"}:
+        raise ValueError("runtime.worker_adapter requires id and version")
+    for value in adapter.values():
+        _text(value, "worker adapter binding")
+    for key in (
+        "call_timeout_seconds",
+        "action_timeout_seconds",
+        "inspection_interval_seconds",
+    ):
+        value = settings.get(key)
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"runtime.{key} must be finite and positive")
+    if (
+        type(settings.get("action_retries")) is not int
+        or settings["action_retries"] < 0
+    ):
+        raise ValueError("runtime.action_retries must be a nonnegative integer")
+    if type(settings.get("planning")) is not bool:
+        raise ValueError("runtime.planning must be explicit")
+    if settings["planning"] and slots < 2:
+        raise ValueError("Parallel planning needs at least two worker slots")
+
+
 class ConcurrentCoordinator:
     """One host owner, explicit validators, one configured durable invoker."""
 
@@ -31,27 +62,7 @@ class ConcurrentCoordinator:
         self.owner, self.invoker = owner, invoker
         self.ledger = DispatchLedger(owner)
         self.settings = owner.snapshot()["config"]["runtime"]
-        for key in (
-            "call_timeout_seconds",
-            "action_timeout_seconds",
-            "inspection_interval_seconds",
-        ):
-            value = self.settings.get(key)
-            if (
-                type(value) not in (int, float)
-                or not math.isfinite(value)
-                or value <= 0
-            ):
-                raise ValueError(f"runtime.{key} must be finite and positive")
-        if (
-            type(self.settings.get("action_retries")) is not int
-            or self.settings["action_retries"] < 0
-        ):
-            raise ValueError("runtime.action_retries must be a nonnegative integer")
-        if type(self.settings.get("planning")) is not bool:
-            raise ValueError("runtime.planning must be explicit")
-        if self.settings["planning"] and self.ledger.max_slots < 2:
-            raise ValueError("Parallel planning needs at least two worker slots")
+        validate_settings(self.settings)
         if invoker.identity != self.ledger.adapter:
             raise ConflictError("Invoker differs from the frozen worker adapter")
         validators = dict(validators)

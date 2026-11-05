@@ -49,7 +49,7 @@ class BackendScheduler:
             raise ConflictError(
                 "Scheduler settings differ from immutable runtime configuration"
             )
-        if not _same(invoker.identity, ledger.adapter):
+        if invoker is not None and not _same(invoker.identity, ledger.adapter):
             raise ConflictError(
                 "Invoker adapter differs from the frozen dispatch adapter"
             )
@@ -437,6 +437,8 @@ class BackendScheduler:
         )
 
     def schedule(self, now):
+        if self.invoker is None:
+            raise InvalidTransition("Dispatch requires a configured invoker")
         if type(now) not in (int, float) or not math.isfinite(now):
             raise ValueError("Scheduler time must be finite UTC")
         requests = self._requests()

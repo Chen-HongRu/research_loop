@@ -6,14 +6,17 @@ only a fenced retirement or an exited callback produces sender-retirement proof.
 
 from contextlib import contextmanager
 import fcntl
+import importlib.util
 import json
 import math
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import threading
+import uuid
 
 from .files import (
     _sync_directory,
@@ -46,6 +49,48 @@ def _json(value):
 
 def _read(path):
     return json.loads(Path(path).read_text())
+
+
+def _module_identity(path):
+    metadata = Path(path).stat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("Invocation module must be an existing local file")
+    return dict(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        size=metadata.st_size,
+        mtime_ns=metadata.st_mtime_ns,
+    )
+
+
+def _check_module(path, identity):
+    if _module_identity(path) != identity:
+        raise ValueError("Frozen invocation module identity changed")
+
+
+def _load_module(path, identity):
+    """Import the selected source, checking metadata on both sides of import.
+
+    Compiling that source directly avoids a timestamp-rounded bytecode cache
+    selecting an older module. Dependencies remain the trusted module's concern.
+    """
+    _check_module(path, identity)
+    specification = importlib.util.spec_from_file_location(
+        "runtime_application_" + uuid.uuid4().hex, path
+    )
+    if specification is None or specification.loader is None:
+        raise ValueError("Cannot load invocation module")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    try:
+        source = Path(path).read_bytes()
+        _check_module(path, identity)
+        exec(compile(source, str(path), "exec"), module.__dict__)
+        _check_module(path, identity)
+    except BaseException:
+        sys.modules.pop(specification.name, None)
+        raise
+    return module
 
 
 def _identity(root, reference):
@@ -130,11 +175,18 @@ def _publish_completion(
 
 
 class LocalProcessInvoker:
-    def __init__(self, root, module_path, identity, config=None, python=sys.executable):
+    def __init__(
+        self,
+        root,
+        module_path,
+        identity,
+        config=None,
+        python=sys.executable,
+        *,
+        module_identity=None,
+    ):
         self.root = Path(root).resolve()
         self.module_path = Path(module_path).resolve()
-        if not self.module_path.is_file():
-            raise ValueError("Invocation module must be an existing local file")
         if (
             not isinstance(identity, dict)
             or set(identity) != {"id", "version"}
@@ -146,10 +198,22 @@ class LocalProcessInvoker:
             raise ValueError("Adapter identity requires nonblank id and version")
         if config is not None and not isinstance(config, dict):
             raise ValueError("Invocation config must be an object")
+        module_identity = (
+            _module_identity(self.module_path)
+            if module_identity is None
+            else module_identity
+        )
+        if (
+            not isinstance(module_identity, dict)
+            or set(module_identity) != {"device", "inode", "size", "mtime_ns"}
+            or any(type(value) is not int for value in module_identity.values())
+        ):
+            raise ValueError("Module identity requires exact file metadata")
         self._configuration = _json(
             dict(
                 adapter=identity,
                 module_path=str(self.module_path),
+                module_identity=module_identity,
                 config={} if config is None else config,
                 python=str(python),
             )
@@ -168,10 +232,12 @@ class LocalProcessInvoker:
         )
 
     def _check_configuration(self, claim):
-        actual = {
-            key: claim[key] for key in ("adapter", "module_path", "config", "python")
-        }
-        if _json(actual) != self._configuration:
+        # Source replacement fences new effects, not access to an existing
+        # sender's completion/cancellation/retirement evidence.
+        keys = ("adapter", "module_path", "config", "python")
+        actual = {key: claim[key] for key in keys}
+        expected = json.loads(self._configuration)
+        if _json(actual) != _json({key: expected[key] for key in keys}):
             raise ValueError("Frozen invocation adapter configuration differs")
 
     def _check_binding(self, claim, binding):
@@ -263,6 +329,7 @@ class LocalProcessInvoker:
                 self._check_binding(_read(prior), binding)
             elif acquired:
                 claim = self._claim(launch_token, binding)
+                _check_module(claim["module_path"], claim["module_identity"])
                 publish_json(folder / "claimed.json", claim)
                 with (folder / "supervisor.log").open("ab") as log:
                     try:

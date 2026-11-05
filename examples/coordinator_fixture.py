@@ -12,6 +12,33 @@ import uuid
 from research_loop.runtime.files import publish_artifact, publish_json
 
 
+APPLICATION_IDENTITY = {"id": "concurrent-fixture", "version": "1"}
+
+
+def validate(role, output, context, config):
+    """Validate only this deterministic fixture's shapes, not scientific claims."""
+    expected = {
+        "plan": {"local_evaluation", "timeout_seconds"},
+        "execute": {"artifacts", "operations"},
+        "review": {"knowledge", "reviews", "corrections"},
+        "scout": {"knowledge", "reviews", "corrections"},
+        "advocate": {"suggestions"},
+        "judge": {"changes"},
+    }
+    if (
+        role not in expected
+        or not isinstance(output, dict)
+        or set(output) != expected[role]
+    ):
+        raise ValueError("Unexpected synthetic role output")
+    if role == "plan":
+        if output != {"local_evaluation": None, "timeout_seconds": 60}:
+            raise ValueError("Unexpected synthetic Plan")
+    elif any(not isinstance(value, list) for value in output.values()):
+        raise ValueError("Synthetic output fields must be lists")
+    return json.loads(json.dumps(output))
+
+
 def invoke(kind, payload, config):
     root = Path(config["root"])
     records = root / "fixture"

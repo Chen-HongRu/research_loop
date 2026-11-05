@@ -61,6 +61,11 @@ read-only selection can resume through `run` within the original budget. Inspect
 Execute effects before any recovery involving execution. If approval is unavailable,
 report the precise blocker rather than repeating commands or claiming success.
 
+SQLite runtime applications are explicitly trusted and configured separately from
+the installed skill. Keep a versioned immutable application module and private
+configuration outside the skill and repository; see [concurrent runtime](../docs/concurrent-runtime.md).
+The existing legacy Harness does not automatically become a SQLite application.
+
 After installation, report the installed path and that the skill is available on
 the next turn. If discovery is stale, restart Codex. When installation/setup is the
 only request, stop here; do not consume research/model/compute budget.

@@ -2,9 +2,9 @@
 
 Stage 5 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77) provides
 the `Operations` authority and `BackendDriver` through Python APIs for new SQLite
-Studies. Schema 6 rejects older prototype databases. The [concurrent coordinator](concurrent-runtime.md)
-schedules these actions through Python APIs. SQLite CLI, skill and dashboard are
-phase 7; explicit migration is phase 8. The serial
+Studies. Schema 7 rejects older prototype databases. The [concurrent coordinator](concurrent-runtime.md)
+schedules these actions through Python APIs. The SQLite CLI and dashboard are available; explicit migration and deployment
+remain phase 8. The serial
 controller's separate launcher is documented in [execution backends](execution-backends.md).
 
 ## Accepted requests and authority
