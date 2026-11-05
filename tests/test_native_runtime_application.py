@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from integrations.native_runtime import application, policy
+from fixtures.native_stub_application import command as synthetic_launcher
 from research_loop.harness import HarnessError
 from research_loop.runtime.context import ContextSnapshot, build_context
 from research_loop.runtime.files import publish_artifact
@@ -104,17 +105,31 @@ def assert_prompt_envelope(testcase, prompt, output_model):
     testcase.assertIn(
         "Current role: " + expand_prompt_package(view)["manifest"]["role"], footer
     )
+    for model in [schema["properties"]["output"], *schema.get("$defs", {}).values()]:
+        for name, field in model.get("properties", {}).items():
+            testcase.assertTrue(field.get("description"), name)
     testcase.assertEqual(schema["type"], "object")
     testcase.assertEqual(set(schema["properties"]), {"output", "evidence_refs"})
     testcase.assertEqual(set(schema["required"]), {"output", "evidence_refs"})
     testcase.assertIs(schema["additionalProperties"], False)
     testcase.assertEqual(
         schema["properties"]["evidence_refs"],
-        {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+        {
+            "type": "array",
+            "items": {"type": "string"},
+            "uniqueItems": True,
+            "title": "Evidence Refs",
+            "description": policy.Response.model_fields["evidence_refs"].description,
+        },
     )
     package = expand_prompt_package(view)
     context = package["context"] if package["manifest"]["role"] == "review" else None
-    expected = policy.response_schema(output_model, context=context)
+    expected = policy.response_schema(
+        policy.DraftSubmission
+        if package["manifest"]["role"] == "knowledge_manager"
+        else output_model,
+        context=context,
+    )
     testcase.assertEqual(schema.get("$defs", {}), expected.get("$defs", {}))
     testcase.assertEqual(
         schema["properties"]["output"], expected["properties"]["output"]
@@ -170,6 +185,13 @@ class NativeApplicationTests(unittest.TestCase):
             "backend_handlers": {},
         }
         self.stub()
+        launcher = patch.object(
+            application.transport.host_filesystem,
+            "command",
+            side_effect=synthetic_launcher,
+        )
+        launcher.start()
+        self.addCleanup(launcher.stop)
 
     def stub(
         self,
@@ -269,12 +291,17 @@ class NativeApplicationTests(unittest.TestCase):
         ]
         self.assertEqual(len(arguments), 12)
         self.assertEqual(sum("--list-models" in row for row in arguments), 6)
-        self.assertEqual(
-            len(
-                list((self.root / "private-calls").glob("call-*/response.stdout.jsonl"))
-            ),
-            6,
-        )
+        outcomes = list((self.root / "private-calls").glob("call-*/outcome.json"))
+        self.assertEqual(len(outcomes), 6)
+        for outcome in outcomes:
+            self.assertEqual(
+                json.loads(outcome.read_text()),
+                {"requests": 1, "submitted": True, "failed": False},
+            )
+            self.assertEqual(
+                {path.name for path in outcome.parent.iterdir()},
+                {"invocation.json", "outcome.json"},
+            )
 
     def test_prompts_describe_complete_envelope_with_resolvable_role_refs(self):
         for role, output_model in policy.MODELS.items():
@@ -367,7 +394,9 @@ class NativeApplicationTests(unittest.TestCase):
                 child.kill = Mock(wraps=child.kill)
                 child.wait = Mock(wraps=child.wait)
 
-                def ready_then_timeout(*, input, timeout):
+                def ready_then_timeout(*, input=None, timeout=None):
+                    if input is None:
+                        return communicate(timeout=timeout)
                     # Feed the real CLI, then wait for its response-stage handshake.
                     # Process startup consumes no part of the short timeout under test.
                     child.stdin.write(input)
@@ -384,7 +413,10 @@ class NativeApplicationTests(unittest.TestCase):
 
         # Replace only the transport's clock object, leaving subprocess's real
         # timeout clock intact. Preflight gets 5s; the ready response gets 0.05s.
-        clock = SimpleNamespace(monotonic=Mock(side_effect=[0, 0, 4.95]))
+        anchor = time.monotonic()
+        clock = SimpleNamespace(
+            monotonic=Mock(side_effect=[anchor, anchor, anchor + 4.95])
+        )
         with (
             patch.object(application.transport, "time", clock),
             patch.object(application.transport.subprocess, "Popen", side_effect=start),
@@ -395,7 +427,7 @@ class NativeApplicationTests(unittest.TestCase):
         response = children[1]
         self.assertTrue((self.root / "cli-ready").exists())
         response.kill.assert_called_once_with()
-        response.wait.assert_called_with()
+        response.wait.assert_called()
         self.assertEqual(response.returncode, -signal.SIGKILL)
         # Do not poll: that could reap a zombie and hide a missing transport wait.
         with self.assertRaises(ChildProcessError):
@@ -403,7 +435,10 @@ class NativeApplicationTests(unittest.TestCase):
 
     def test_expired_budget_between_stages_does_not_start_response(self):
         real_popen = subprocess.Popen
-        clock = SimpleNamespace(monotonic=Mock(side_effect=[0, 0, 6]))
+        anchor = time.monotonic()
+        clock = SimpleNamespace(
+            monotonic=Mock(side_effect=[anchor, anchor, anchor + 6])
+        )
         with (
             patch.object(application.transport, "time", clock),
             patch.object(
@@ -418,7 +453,7 @@ class NativeApplicationTests(unittest.TestCase):
     def test_supervised_cancellation_retires_cli_group_and_descendant(self):
         self.stub(hanging=True)
         (self.root / "runtime").mkdir()
-        module = Path(application.__file__)
+        module = Path(__file__).parent / "fixtures" / "native_stub_application.py"
         invoker = LocalProcessInvoker(
             self.root / "runtime", module, application.APPLICATION_IDENTITY, self.config
         )
@@ -440,6 +475,37 @@ class NativeApplicationTests(unittest.TestCase):
         )
         self.assertEqual(completion["status"], "cancelled")
         self.assertTrue(completion["sender_retired"])
+        time.sleep(3.1)
+        self.assertFalse((self.root / "late-child").exists())
+
+    def test_supervised_transport_timeout_retires_pipe_holding_descendant(self):
+        self.stub(hanging=True)
+        self.config["transport"]["timeout_seconds"] = 0.8
+        runtime = self.root / "runtime-timeout"
+        runtime.mkdir()
+        module = Path(__file__).parent / "fixtures" / "native_stub_application.py"
+        invoker = LocalProcessInvoker(
+            runtime, module, application.APPLICATION_IDENTITY, self.config
+        )
+        reference = publish_artifact(runtime, self.payload("plan"))
+        started = time.monotonic()
+        invoker.launch("call-timeout", "agent", reference, time.time() + 8)
+        deadline = started + 5
+        while time.monotonic() < deadline:
+            observed = invoker.inspect("call-timeout")
+            if observed["completion_ref"]:
+                break
+            time.sleep(0.02)
+        self.assertTrue((self.root / "cli-ready").exists())
+        self.assertTrue(
+            observed["completion_ref"],
+            "A descendant holding stdout must not block timeout retirement",
+        )
+        completion = json.loads((runtime / observed["completion_ref"]).read_text())
+        self.assertEqual(completion["status"], "failed")
+        self.assertTrue(completion["sender_retired"])
+        self.assertIn("TimeoutExpired", completion["error"])
+        self.assertLess(time.monotonic() - started, 5)
         time.sleep(3.1)
         self.assertFalse((self.root / "late-child").exists())
 
@@ -651,9 +717,18 @@ class NativeApplicationTests(unittest.TestCase):
                         self.assertIn(
                             "Advocate proposals are advisory, not binding", prompt
                         )
-                        self.assertIn("visible in the frozen planning pool", prompt)
-                        self.assertIn("unclaimed, uncancelled autonomous tasks", prompt)
-                        self.assertIn("protect human tasks", prompt)
+                        schema = prompt_parts(prompt)[2]
+                        for name in ("UpdateTask", "CancelTask"):
+                            fields = schema["$defs"][name]["properties"]
+                            self.assertIn(
+                                "visible frozen planning pool",
+                                fields["expected_revision"]["description"],
+                            )
+                            self.assertIn(
+                                "unclaimed, uncancelled autonomous task",
+                                fields["action"]["description"],
+                            )
+                        self.assertIn("Protect human tasks", prompt)
 
     def repeated_package(self, role):
         base = self.package(role)
@@ -795,8 +870,14 @@ class NativeApplicationTests(unittest.TestCase):
         self.assertEqual(
             schema["$defs"]["Knowledge"]["properties"]["measurement_ids"]["maxItems"], 0
         )
-        self.assertIn("never operation, job or artifact IDs", prompt)
-        self.assertIn("Interpretations of research reports belong in knowledge", prompt)
+        fields = prompt_parts(prompt)[2]["$defs"]["Knowledge"]["properties"]
+        self.assertIn(
+            "Operation, job and artifact IDs", fields["measurement_ids"]["description"]
+        )
+        self.assertIn(
+            "interpretation records reasoning from reports",
+            fields["kind"]["description"],
+        )
         output = {"knowledge": [], "reviews": [], "corrections": []}
         self.stub(response={"output": output, "evidence_refs": []})
         payload = self.payload("review") | {"package": package.to_dict()}
@@ -895,11 +976,12 @@ class NativeApplicationTests(unittest.TestCase):
             {"output": output, "evidence_refs": [ref]},
         )
         prompt = policy.prompt("review", package.to_dict())
-        self.assertIn("exactly these nine fields", prompt)
-        self.assertIn("put explanatory notes in interpretation or limitations", prompt)
+        schema = prompt_parts(prompt)[2]
+        properties = schema["$defs"]["Knowledge"]["properties"]
         self.assertIn(
-            "Never cite the placeholder or invent unsupported conclusions", prompt
+            "supplementary notes", properties["interpretation"]["description"]
         )
+        self.assertNotIn("REPLACE_", prompt)
         invalid = deepcopy(output)
         invalid["knowledge"][0]["measurement_ids_note"] = "none"
         self.stub(response={"output": invalid, "evidence_refs": [ref]})
@@ -911,13 +993,17 @@ class NativeApplicationTests(unittest.TestCase):
         prompt = policy.prompt("review", package)
         view, footer, _ = prompt_parts(prompt)
         self.assertEqual(expand_prompt_package(view), package)
-        self.assertIn("expected_revision=0 for a new knowledge ID", footer)
-        self.assertIn("use its visible entry revision", footer)
-        self.assertIn("never the global publication or knowledge version", footer)
-        self.assertIn(
-            "only the root keys output and evidence_refs, as siblings", footer
+        schema = prompt_parts(prompt)[2]
+        description = schema["$defs"]["Knowledge"]["properties"]["expected_revision"][
+            "description"
+        ]
+        self.assertIn("Use 0 for a new knowledge ID", description)
+        self.assertIn("visible entry revision", description)
+        self.assertIn("never the global publication", description)
+        self.assertNotIn(
+            "visible entry revision",
+            footer.split("The complete response must satisfy")[0],
         )
-        self.assertIn("Never put evidence_refs inside output", footer)
 
     def test_review_schema_enumerates_only_original_visible_measurement_ids(self):
         package = self.repeated_package("review").to_dict()
@@ -1009,7 +1095,7 @@ class NativeApplicationTests(unittest.TestCase):
         self.assertIn("receipt:m", view["package"]["manifest"]["allowed_evidence"])
 
     def test_real_cli_stub_encodes_only_review_and_keeps_original_evidence_rules(self):
-        for role in policy.MODELS:
+        for role in OUTPUTS:
             payload = self.payload(role)
             payload["package"] = self.repeated_package(role).to_dict()
             with self.subTest(role=role):
@@ -1017,12 +1103,26 @@ class NativeApplicationTests(unittest.TestCase):
                     application.invoke("agent", payload, self.config)["output"],
                     OUTPUTS[role],
                 )
-                folder = next(
-                    (self.root / "private-calls").glob(
-                        "call-synthetic-" + role + "-*/prompt.txt"
+                captured = [
+                    json.loads(line)
+                    for line in (self.root / "fixture-prompts.jsonl")
+                    .read_text()
+                    .splitlines()
+                ]
+                view = prompt_parts(
+                    next(
+                        row["prompt"]
+                        for row in reversed(captured)
+                        if row["role"] == role
                     )
-                )
-                view = prompt_parts(folder.read_text())[0]
+                )[0]
+                for folder in (self.root / "private-calls").glob(
+                    "call-synthetic-" + role + "-*"
+                ):
+                    self.assertEqual(
+                        {path.name for path in folder.iterdir()},
+                        {"invocation.json", "outcome.json"},
+                    )
                 self.assertEqual(
                     view.get("encoding") == "shared-json-subtrees-v1", role == "review"
                 )
@@ -1170,6 +1270,10 @@ class NativeApplicationTests(unittest.TestCase):
         for case in (
             "plain_text",
             "missing_end",
+            "missing_start",
+            "mismatched_start_args",
+            "missing_tool_result",
+            "mismatched_result_details",
             "failed_tool",
             "missing_terminate",
             "wrong_tool",
@@ -1185,12 +1289,21 @@ class NativeApplicationTests(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(HarnessError):
                 self.stub(event_case=case)
                 application.invoke("agent", self.payload("plan"), self.config)
-            streams = list(
-                (self.root / "private-calls").glob("call-*/response.stdout.jsonl")
-            )
-            self.assertEqual(len(streams), 1)
-            self.assertTrue(streams[0].read_text().strip())
+            outcomes = list((self.root / "private-calls").glob("call-*/outcome.json"))
+            self.assertEqual(len(outcomes), 1)
+            self.assertEqual(json.loads(outcomes[0].read_text())["requests"], 1)
+            self.assertFalse(list(outcomes[0].parent.glob("*.jsonl")))
             shutil.rmtree(self.root / "private-calls")
+
+    def test_json_events_use_lf_framing_with_literal_unicode_separators(self):
+        output = dict(
+            OUTPUTS["plan"], experiment_definition="Before\u2028middle\u2029after"
+        )
+        self.stub(response={"output": output, "evidence_refs": []})
+        self.assertEqual(
+            application.invoke("agent", self.payload("plan"), self.config),
+            {"output": output, "evidence_refs": []},
+        )
 
     def test_thinking_is_private_and_additional_active_content_is_rejected(self):
         blocks = [

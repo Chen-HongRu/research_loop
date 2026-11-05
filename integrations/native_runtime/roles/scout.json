@@ -1,0 +1,23 @@
+{
+  "role": "scout",
+  "instructions": "prompts/scout.md",
+  "inputs": [
+    "task",
+    "budget",
+    "goal",
+    "evaluation",
+    "permissions",
+    "operator_sources"
+  ],
+  "knowledge_bases": [
+    "study"
+  ],
+  "tools": [
+    "ls",
+    "find",
+    "grep",
+    "read",
+    "submit_result"
+  ],
+  "output": "Scout"
+}

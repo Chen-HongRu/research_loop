@@ -99,8 +99,11 @@ valid entries commit. Human requests with invalid dependencies fail atomically.
 
 The durable receipt is `{attempt_id, applied: [{id, revision}], conflicts:
 [{index, id, reason}]}`. Exact batch replay returns it without new revisions,
-model calls or output artifacts. Frozen planning knowledge, Advocate results,
-context and cited evidence identities are rechecked before applying or replaying.
+model calls or output artifacts. The captured pool, Advocate results, bound
+control context and accepted evidence references are checked before applying or
+replaying. The optional generic Publisher/Frontier projection retains its
+captured version. Native Study libraries remain live and are not included in
+the frozen pool or bound to a task knowledge baseline.
 An accepted but unapplied Judge from an explicitly failed round cannot later
 change the pool. Low-level manual dispatch must validate the same canonical
 change envelope before accepting Judge output; use `PlanningRunner` for this
@@ -134,7 +137,9 @@ observed condition. Judge's own pool writes do not emit planning events, prevent
 self-triggered model loops. No automatic repeat training is involved.
 
 `run_once()` captures the current event range, pool, in-flight metadata and
-knowledge version. It admits exactly one active round and reserves both Advocate
+generic Publisher projection version. This does not capture a native library
+snapshot. Native Advocates and Judge can read newly published files during
+the same round. It admits exactly one active round and reserves both Advocate
 calls atomically in the ordinary Study call ledger. Exhaustion during pair
 reservation rolls back the entire admission, without refunding earlier calls.
 Artifact construction and role calls occur outside write transactions.

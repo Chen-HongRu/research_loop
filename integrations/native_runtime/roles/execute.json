@@ -1,0 +1,25 @@
+{
+  "role": "execute",
+  "instructions": "prompts/execute.md",
+  "inputs": [
+    "task",
+    "budget",
+    "goal",
+    "evaluation",
+    "permissions",
+    "operation_grants",
+    "operator_sources",
+    "approved_plan"
+  ],
+  "knowledge_bases": [
+    "study"
+  ],
+  "tools": [
+    "ls",
+    "find",
+    "grep",
+    "read",
+    "submit_result"
+  ],
+  "output": "Execute"
+}

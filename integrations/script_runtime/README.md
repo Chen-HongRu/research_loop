@@ -1,11 +1,21 @@
 # Native script runtime application
 
-This application runs Scout, Advocate, Judge, Plan, Execute and Review through the
-existing [Pi submission tool](../native_runtime/README.md). It adds typed,
+Role output fields are documented with Pydantic `Field(description=...)`.
+The generated JSON schema carries these descriptions into the role prompt and
+the `submit_result` tool parameters. Prompts supply role instructions and bound
+context, while Python validators enforce evidence and execution constraints.
+
+This application uses the [shared Pi runtime](../native_runtime/README.md)
+for the six research roles and Knowledge Manager. Script Plan and Execute have
+their own [definitions](roles/). See [Study knowledge](../../docs/study-knowledge.md)
+for authorized live read directories, Manager drafts, fixed citations and decision version ranges.
+Ordinary Pi reads can observe a newer publication while Plan, Execute or Review is running.
+Execute still checks the approved scientific contract and operation identities. Host isolation
+and supported provider profiles are specified in the native application README. This application adds typed,
 bounded script operations to the SQLite runtime. It contains no scientific task,
 metric, dataset, model architecture or deployment defaults. Installing a Pi
 network extension does not enable it here: calls retain `--no-extensions`,
-`--tools submit_result`, an explicit trusted extension, `--no-mcp`, disabled ambient context and exact configured model checks.
+a frozen role-specific tool allowlist, an explicit trusted extension, `--no-mcp`, disabled ambient context and exact configured model checks.
 
 Select an immutable copy of `application.py` as described in the
 [concurrent runtime guide](../../docs/concurrent-runtime.md), with worker adapter
@@ -52,7 +62,8 @@ effective actions. The application validates the file edit permission before
 the controller admits an operation.
 
 Plan returns `timeout_seconds`, `local_evaluation`, `experiment_definition`,
-`baseline_ref`, `backend`, `scientific_contract`, and an `operations` list.
+`baseline_ref`, `backend`, and an `operations` list. Both Plan and Execute read
+the frozen scientific contract directly from their configured context source.
 An empty list explicitly selects qualitative investigation with no external
 execution or allocation. Its `experiment_definition` must identify a concrete
 research question and the available context used to answer it; it must not

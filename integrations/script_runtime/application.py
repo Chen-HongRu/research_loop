@@ -1,11 +1,14 @@
 """Native Pi role composition with an explicitly configured script backend."""
 
 from functools import partial
+from pathlib import Path
 import re
 
 from integrations.native_runtime import transport
 from integrations.script_runtime import backend, policy
+from integrations.native_runtime import application as native_application
 from integrations.native_runtime.application import invoke_agent
+from research_loop.runtime.role_assembly import assemble
 from research_loop.runtime.operation_contract import fields, integer, json_value, text
 
 APPLICATION_IDENTITY = {"id": "native-script-runtime-v1", "version": "1"}
@@ -107,3 +110,53 @@ def invoke(kind, payload, config):
         partial(policy.prepare_submission, config=config),
         partial(policy.validate_output, config=config),
     )
+
+
+def _definition_roots():
+    return [
+        Path(__file__).resolve().parent,
+        Path(native_application.__file__).resolve().parent,
+    ]
+
+
+def _models():
+    return native_application.model_registry(policy.MODELS) | {
+        "ScriptPlan": policy.Plan,
+        "ScriptExecute": policy.Execute,
+    }
+
+
+def validate_roles(study_config):
+    return native_application.validate_roles(
+        study_config, models=_models(), definition_root=_definition_roots()
+    )
+
+
+def prepare_agent(payload, config, *, study_config, study_root):
+    validate_config(config)
+    validate_roles(study_config)
+    return assemble(
+        payload,
+        config,
+        study_config=study_config,
+        study_root=study_root,
+        definition_root=_definition_roots(),
+        models=_models(),
+        prepare_submission=partial(policy.prepare_submission, config=config),
+        system_prompt=transport.SYSTEM_PROMPT,
+        input_values={"backend_contracts": policy.public_backend_contracts(config)}
+        if payload["call"]["role"] in {"plan", "execute"}
+        else None,
+    )
+
+
+def resolve_role(role, study_config):
+    from research_loop.runtime.role_assembly import definition
+
+    validate_roles(study_config)
+    return definition(
+        role,
+        study_config,
+        _definition_roots(),
+        _models(),
+    )[0]

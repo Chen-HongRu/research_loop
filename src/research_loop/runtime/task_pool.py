@@ -280,6 +280,9 @@ class TaskPool:
         snapshot = self.reader._read_record(
             round_record["snapshot_ref"], round_record["identity"]
         )
+        # Historical native rounds included library manifests that were never
+        # part of the protected planning input. They confer no read baseline.
+        snapshot.pop("knowledge_libraries", None)
         package = ContextPackage.from_dict(
             self.reader._read_record(binding["context_ref"], binding["identity"])
         )
@@ -443,6 +446,14 @@ class TaskPool:
                 "An unapplied Judge batch requires an active planning round"
             )
         changes = self._changes(proposal["normalized_output"])
+        if changes:
+            from .handoff_scope import authorize_task_publication
+
+            authorize_task_publication(
+                self.coordinator,
+                call_identity.attempt_id,
+                captured["control"]["config"],
+            )
         with self.coordinator._transaction() as (conn, _):
             current = self.coordinator._feedback_record(
                 conn, call_identity.to_dict(), metadata_only=True

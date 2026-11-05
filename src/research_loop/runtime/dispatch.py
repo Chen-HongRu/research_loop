@@ -225,6 +225,19 @@ class DispatchLedger:
         )
         if row is None:
             raise ConflictError("Unknown dispatch token")
+        endpoint = None
+        if (
+            row["attempt_id"] is not None
+            and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocation_knowledge'"
+            ).fetchone()
+        ):
+            endpoint = conn.execute(
+                "SELECT start_version,end_version FROM invocation_knowledge WHERE attempt_id=?",
+                (row["attempt_id"],),
+            ).fetchone()
+        row["kb_start_version"] = endpoint[0] if endpoint else None
+        row["kb_end_version"] = endpoint[1] if endpoint else None
         row["worker_retired"] = bool(row["worker_retired"])
         row["settled"] = bool(row["settled"])
         return row
@@ -358,6 +371,35 @@ class DispatchLedger:
                 ),
             )
             return dict(run=self._get(conn, token), created=True)
+
+    def knowledge_head(self):
+        """Observe the activated file publication, including version zero."""
+        from .knowledge import KnowledgeBase
+
+        return KnowledgeBase(self.owner.store.root).published_version()
+
+    def record_end(self, conn, attempt_id):
+        """Bind the observed terminal event; later result settlement cannot redate it."""
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocation_knowledge'"
+        ).fetchone():
+            conn.execute(
+                "UPDATE invocation_knowledge SET end_version=? WHERE attempt_id=?",
+                (self.knowledge_head(), attempt_id),
+            )
+
+    def record_start(self, token):
+        """Capture the head immediately before first dispatch; this is no read audit."""
+        with self.owner._transaction() as (conn, _):
+            run = self._get(conn, token)
+            if run["category"] == "call" and run["state"] == "intent":
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS invocation_knowledge (attempt_id TEXT PRIMARY KEY REFERENCES attempts(id), start_version INTEGER, end_version INTEGER)"
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO invocation_knowledge(attempt_id,start_version) VALUES(?,?)",
+                    (run["attempt_id"], self.knowledge_head()),
+                )
 
     def register_orphan_for_retirement(self, attempt_id, input_ref, adapter, deadline):
         identity, _ = self._capture_input(input_ref, adapter, deadline)
@@ -618,6 +660,8 @@ class DispatchLedger:
                         token,
                     ),
                 )
+                if current["category"] == "call":
+                    self.record_end(conn, current["attempt_id"])
                 RuntimeEvents.emit(
                     conn,
                     "dispatch-terminal:" + token,

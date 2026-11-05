@@ -62,6 +62,8 @@ class RuntimeDashboardTests(StatusFixture, unittest.TestCase):
             "Fees final",
             "Callback retired",
             "persisted elapsed",
+            "not a reading trace",
+            "Not recorded",
         ):
             self.assertIn(expected, text)
         for forbidden in ("innerHTML", "cdn.", "PRIVATE_", "https://", "<script src="):

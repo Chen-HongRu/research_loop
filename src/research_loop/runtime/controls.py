@@ -46,6 +46,8 @@ _FIELDS = {
     "task_cancel": {"id", "expected_revision"},
     "stop": {"reason", "cancel_running"},
     "scout": set(),
+    "maintain": set(),
+    "role_config": {"role", "definition"},
     "planning": {"reason"},
     "retry_review": {"iteration_id", "expected_revision", "reason", "proof_ref"},
     "cancel_operation": {"operation_id", "reason"},
@@ -265,6 +267,35 @@ class ControlInbox:
             return TaskPool(self.owner).cancel_human(
                 p["id"], p["expected_revision"], request_id=rid
             )
+        if kind == "maintain":
+            from .knowledge_manager import request_maintenance
+
+            from .application import load_application
+
+            resolve = getattr(
+                load_application(self.owner).invoker, "resolve_role", None
+            )
+            if resolve is None:
+                raise ValueError("This application has no Knowledge Manager")
+            return request_maintenance(self.owner, resolve, retry_id=rid)
+        if kind == "role_config":
+            from .application import load_application
+
+            app = load_application(self.owner)
+            validate = getattr(app.invoker, "validate_roles", None)
+            if validate is None:
+                raise ValueError(
+                    "This application does not expose configurable role definitions"
+                )
+            config = self.owner.snapshot()["config"]
+            definitions = config.setdefault("role_definitions", {})
+            if not isinstance(p["role"], str) or not isinstance(p["definition"], dict):
+                raise ValueError("Expected a role name and definition mapping")
+            definitions[p["role"]] = p["definition"]
+            validate(config)
+            with self.owner._transaction() as (conn, _):
+                conn.execute("UPDATE control SET config_json=?", (_json(config),))
+            return {"role": p["role"], "definition": p["definition"]}
         if kind == "scout":
             return self.owner.begin_attempt("scout", request_id="runtime:scout:" + rid)
         if kind == "planning":
@@ -363,7 +394,7 @@ class ControlInbox:
             _validate(command)
         except ValueError as exc:
             return self._finish(row["request_id"], "rejected", error=str(exc))
-        if command["kind"] in {"scout", "retry_review"} and not admit_calls:
+        if command["kind"] in {"scout", "retry_review", "maintain"} and not admit_calls:
             # A temporary CLI owner cannot execute the reserved attempt. Keep
             # its intent pending until a runner can reserve and tick as owner.
             return row

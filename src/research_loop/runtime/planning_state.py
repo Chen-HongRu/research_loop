@@ -105,17 +105,24 @@ class PlanningLedger:
         if captured is None:
             return None
         snapshot, knowledge, config = captured
+        uses_history = any(
+            RoleAccess.resolve(config, role).published_history
+            for role in ("advocate", "judge")
+        )
         publications = {
             row["id"]: self.reader._read_record(row["payload_ref"], row["identity"])[
                 "normalized_output"
             ]
             for row in knowledge["publications"]
+            if uses_history
         }
         research = {
             "version": knowledge["version"],
-            "research": render_research(knowledge, publications),
+            "research": render_research(knowledge, publications)
+            if uses_history
+            else "",
             "frontiers": build_views(knowledge, config["global_evaluation"])
-            if isinstance(config.get("global_evaluation"), dict)
+            if uses_history and isinstance(config.get("global_evaluation"), dict)
             else None,
         }
         root = self.owner.store.root

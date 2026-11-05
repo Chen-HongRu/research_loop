@@ -20,7 +20,7 @@ from .invocations import (
 )
 
 
-ROLES = ("scout", "advocate", "judge", "plan", "execute", "review")
+ROLES = ("scout", "advocate", "judge", "plan", "execute", "review", "knowledge_manager")
 
 
 def _adapter(value):
@@ -106,6 +106,43 @@ def load_application(owner):
     module = _application(
         spec["module"], spec["module_identity"], adapter, configuration
     )
+
+    prepare = getattr(module, "prepare_agent", None)
+    validate_roles = getattr(module, "validate_roles", None)
+    if prepare is not None:
+
+        def prepare_agent(payload, *, study_config, study_root):
+            _check_module(spec["module"], spec["module_identity"])
+            result = prepare(
+                payload,
+                json.loads(configuration),
+                study_config=study_config,
+                study_root=study_root,
+            )
+            _check_module(spec["module"], spec["module_identity"])
+            return json.loads(_json(result))
+
+        invoker.prepare_agent = prepare_agent
+    if validate_roles is not None:
+
+        def validate_role_definitions(study_config):
+            _check_module(spec["module"], spec["module_identity"])
+            result = validate_roles(study_config)
+            _check_module(spec["module"], spec["module_identity"])
+            return result
+
+        invoker.validate_roles = validate_role_definitions
+
+    resolve_role = getattr(module, "resolve_role", None)
+    if resolve_role is not None:
+
+        def resolve_role_definition(role, study_config):
+            _check_module(spec["module"], spec["module_identity"])
+            result = resolve_role(role, study_config)
+            _check_module(spec["module"], spec["module_identity"])
+            return json.loads(_json(result))
+
+        invoker.resolve_role = resolve_role_definition
 
     def validator(role):
         def validate(output, context):

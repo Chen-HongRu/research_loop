@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from .role_access import RoleAccess
 from .store import ConflictError, InvalidTransition, _decode, _json
-from .updates import CallIdentity, Updater, _identity, _same
+from .updates import CallIdentity, Updater, _same
 
 _KNOWLEDGE = {
     "id",
@@ -82,8 +82,7 @@ class Publisher:
         return self.coordinator.store.root
 
     def _check_ref(self, reference, identity):
-        if not _same(_identity(self._root, reference), identity):
-            raise ConflictError("Published evidence artifact identity changed")
+        Updater(self.coordinator, validators={})._check_identity(reference, identity)
 
     def _read_proposal(self, record):
         attempt = record["attempt"]
@@ -174,7 +173,9 @@ class Publisher:
             raise ValueError("Scout cannot originate measurement eligibility decisions")
         used_refs, measurements = {}, {}
         permitted = set(proposal["evidence_refs"])
-        frozen = record["binding"]["evidence_identities"]
+        frozen = Updater(self.coordinator, validators={})._granted_evidence(
+            record["binding"], proposal["evidence_refs"]
+        )
 
         def require_ref(reference):
             if reference not in permitted or reference not in frozen:
@@ -415,7 +416,9 @@ class Publisher:
             # Historical publication is independent of later target revisions.
             self._check_ref(prior["payload_ref"], prior["identity"])
             proposal = self._read_proposal(captured)
-            frozen = captured["binding"]["evidence_identities"]
+            frozen = Updater(self.coordinator, validators={})._granted_evidence(
+                captured["binding"], proposal["evidence_refs"]
+            )
             for reference in proposal["evidence_refs"]:
                 identity = proposal["evidence_identities"][reference]
                 if not _same(frozen.get(reference), identity):
@@ -425,7 +428,13 @@ class Publisher:
                 self._check_ref(reference, identity)
             return prior["receipt"]
         proposal = self._read_proposal(captured)
-        knowledge_history_visible = self._knowledge_history_visible(captured)
+        run = captured["dispatch"]
+        managed_library = run and "assembly" in Updater(
+            self.coordinator, validators={}
+        )._read_record(run["input_ref"], run["input_identity"])
+        knowledge_history_visible = (
+            not managed_library and self._knowledge_history_visible(captured)
+        )
         payload, own, measurements, used_refs = self._prepare(captured, proposal)
         with self.coordinator._transaction() as (conn, _):
             current = self._check_current(
@@ -487,7 +496,11 @@ class Publisher:
                 receipt,
                 knowledge_version=knowledge_version,
             )
-            for index, entry in enumerate(payload["knowledge"]):
+            # Assembled research calls contribute observations via EvidenceIntake.
+            # Only the Manager can publish a new canonical Markdown revision.
+            for index, entry in enumerate(
+                [] if managed_library else payload["knowledge"]
+            ):
                 row = conn.execute(
                     "SELECT revision,kind FROM knowledge WHERE id=? ORDER BY revision DESC LIMIT 1",
                     (entry["id"],),

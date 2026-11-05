@@ -99,6 +99,31 @@ class RuntimePlanningTests(unittest.TestCase):
         self.assertIsNone(runner.run_once())
         self.assertEqual(self.store.snapshot()["counters"]["calls"], 3)
 
+    def test_old_native_round_library_metadata_does_not_block_judge_application(self):
+        import json
+        from research_loop.runtime import planning_state
+
+        original = planning_state.publish_artifact
+
+        def historical_manifest(root, value):
+            if isinstance(value, dict) and "round_id" in value:
+                value = dict(
+                    value, knowledge_libraries=[{"alias": "study", "version": 99}]
+                )
+            return original(root, value)
+
+        self.trigger()
+        with patch.object(planning_state, "publish_artifact", historical_manifest):
+            result = self.runner().run_once()
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(
+            result["receipt"]["applied"], [{"id": "proposed", "revision": 1}]
+        )
+        record = self.rows("planning_rounds")[0]
+        raw = json.loads((self.root / record["snapshot_ref"]).read_text())
+        self.assertEqual(raw["knowledge_libraries"][0]["version"], 99)
+        self.assertEqual(self.store.snapshot()["counters"]["calls"], 3)
+
     def test_advocates_overlap_and_updates_remain_on_coordinator_thread(self):
         self.trigger()
         barrier = threading.Barrier(2)
