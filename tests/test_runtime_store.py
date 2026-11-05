@@ -450,6 +450,30 @@ class RuntimeStoreTests(unittest.TestCase):
         self.assertEqual(store.snapshot()["counters"]["elapsed_seconds"], 13)
         self.assertEqual(store.snapshot()["counters"]["iterations"], 0)
 
+    def test_creation_window_blocks_new_calls_after_closed_owner_downtime(self):
+        store = StateStore.create(
+            self.root,
+            config={
+                "budget": {
+                    "max_calls": None,
+                    "max_iterations": None,
+                    "window_seconds": 300,
+                }
+            },
+            clock=lambda: self.now,
+        )
+        with store.coordinator() as owner:
+            original = owner.begin_attempt("scout", request_id="before")
+            owner.fail_attempt(
+                original["id"], original["worker_token"], "done", expected_revision=None
+            )
+        self.now += 301
+        with store.coordinator() as owner:
+            with self.assertRaisesRegex(BudgetExceeded, "admission window"):
+                owner.begin_attempt("scout", request_id="after")
+            owner.set_stop("cleanup")
+        self.assertEqual(store.snapshot()["counters"]["calls"], 1)
+
     def test_deadline_blocks_claim_but_not_recovery_bookkeeping_or_active_work(self):
         store = self.store(admission_deadline=15)
         with store.coordinator() as owner:

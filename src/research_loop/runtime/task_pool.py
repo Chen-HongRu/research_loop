@@ -4,7 +4,14 @@ import json
 import re
 
 from .context import ContextPackage
-from .store import ConflictError, InvalidTransition, _decode, _json, _text
+from .store import (
+    ConflictError,
+    InvalidTransition,
+    PendingTaskLimitExceeded,
+    _decode,
+    _json,
+    _text,
+)
 from .updates import CallIdentity, Updater, _same
 
 _TASK_FIELDS = {
@@ -511,9 +518,15 @@ class TaskPool:
                                 for key in ("specification", "priority", "dependencies")
                             }
                         )
-                saved = self.coordinator._save_task(
-                    conn, task, "judge", call_identity.attempt_id
-                )
+                try:
+                    saved = self.coordinator._save_task(
+                        conn, task, "judge", call_identity.attempt_id
+                    )
+                except PendingTaskLimitExceeded:
+                    receipt["conflicts"].append(
+                        dict(index=index, id=change["id"], reason="max_pending")
+                    )
+                    continue
                 receipt["applied"].append(
                     dict(id=saved["id"], revision=saved["revision"])
                 )

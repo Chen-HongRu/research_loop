@@ -29,7 +29,16 @@ def run_smoke(base=None):
     config = base / "config.json"
     application_config = base / "application.json"
     specification = base / "task.json"
-    config.write_text(json.dumps(configuration()))
+    config.write_text(
+        json.dumps(
+            configuration()
+            | {
+                "budget": {"max_iterations": 3, "max_calls": 12, "window_seconds": 60},
+                "task_pool": {"max_pending": 3},
+            },
+            indent=2,
+        )
+    )
     application_config.write_text(
         json.dumps(
             {
@@ -61,12 +70,6 @@ def run_smoke(base=None):
         coordinator_fixture.__file__,
         "--application-config",
         application_config,
-        "--max-iterations",
-        "3",
-        "--max-calls",
-        "12",
-        "--max-seconds",
-        "60",
     )
     for name, dependency in (("a", None), ("b", None), ("c", "b")):
         command(

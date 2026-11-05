@@ -45,10 +45,10 @@ def _parser():
     init.add_argument("--config", required=True, type=Path)
     init.add_argument("--application", required=True, type=Path)
     init.add_argument("--application-config", type=Path)
-    init.add_argument("--max-iterations", required=True, type=_count)
-    init.add_argument("--max-calls", required=True, type=_count)
-    init.add_argument("--max-seconds", required=True, type=float)
-    init.add_argument("--admission-deadline", type=float)
+    init.add_argument("--max-iterations", default=argparse.SUPPRESS, type=_count)
+    init.add_argument("--max-calls", default=argparse.SUPPRESS, type=_count)
+    init.add_argument("--max-seconds", default=argparse.SUPPRESS, type=float)
+    init.add_argument("--admission-deadline", default=argparse.SUPPRESS, type=float)
     run = commands.add_parser(
         "run", help="Own scheduling until idle, interrupted, or a tick limit"
     )
@@ -248,14 +248,19 @@ def initialize(args):
         _object(args.application_config) if args.application_config else {},
         settings["worker_adapter"],
     )
-    store = StateStore.create(
-        args.study,
-        config=config,
-        max_iterations=args.max_iterations,
-        max_calls=args.max_calls,
-        max_seconds=args.max_seconds,
-        admission_deadline=args.admission_deadline,
-    )
+    limits = {
+        key: getattr(args, key)
+        for key in ("max_iterations", "max_calls", "max_seconds", "admission_deadline")
+        if hasattr(args, key)
+    }
+    if (
+        "budget" not in config
+        and not {"max_iterations", "max_calls", "max_seconds"} <= limits.keys()
+    ):
+        raise ValueError(
+            "Supply config.budget or all three --max-iterations, --max-calls and --max-seconds"
+        )
+    store = StateStore.create(args.study, config=config, **limits)
     return {
         "study_id": store.snapshot()["study_id"],
         "state": "initialized",
