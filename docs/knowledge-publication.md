@@ -1,5 +1,10 @@
 # Knowledge publication
 
+For native role calls the coordinator publishes Scout and Review observations as
+Evidence. Knowledge Manager owns Markdown revisions and the Index. Existing
+publications have a read-only Markdown representation. See [Study knowledge](study-knowledge.md).
+The ledger described below continues to govern measurement identity and eligibility.
+
 This is stage 3 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77),
 available through Python APIs on new SQLite Studies. The serial CLI retains its
 existing document format. [Planning](task-planning.md) consumes its frozen knowledge

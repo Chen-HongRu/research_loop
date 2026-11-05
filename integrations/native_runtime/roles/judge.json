@@ -1,0 +1,24 @@
+{
+  "role": "judge",
+  "instructions": "prompts/judge.md",
+  "inputs": [
+    "task",
+    "budget",
+    "goal",
+    "evaluation",
+    "permissions",
+    "operator_sources",
+    "planning",
+    "proposals"
+  ],
+  "knowledge_bases": [
+    "study"
+  ],
+  "tools": [
+    "read_index",
+    "search",
+    "read",
+    "submit_result"
+  ],
+  "output": "Judge"
+}

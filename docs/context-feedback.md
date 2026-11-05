@@ -75,7 +75,12 @@ role_access:
     actions: [proposals]
 ```
 
-The four rule fields are optional. `published_history` defaults to true and
+Native Pi roles also accept `inputs`, `knowledge_bases` and `tools` as
+authorization ceilings. Their default input contains library descriptors for
+on-demand retrieval. An explicit history provider can select the older direct
+projection when permitted. See [Study knowledge](study-knowledge.md).
+
+For the generic context builder, `published_history` defaults to true and
 governs published research, Frontiers, historical measurements and imported
 history. The task, role-specific control inputs, and the planning pool for
 Advocate/Judge remain authoritative inputs. `context_sources` narrows the

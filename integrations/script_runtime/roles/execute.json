@@ -1,0 +1,26 @@
+{
+  "role": "execute",
+  "instructions": "prompts/execute.md",
+  "inputs": [
+    "task",
+    "budget",
+    "goal",
+    "evaluation",
+    "permissions",
+    "operation_grants",
+    "operator_sources",
+    "approved_plan",
+    "scientific_contract",
+    "backend_contracts"
+  ],
+  "knowledge_bases": [
+    "study"
+  ],
+  "tools": [
+    "read_index",
+    "search",
+    "read",
+    "submit_result"
+  ],
+  "output": "ScriptExecute"
+}

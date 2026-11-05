@@ -1,0 +1,23 @@
+{
+  "role": "plan",
+  "instructions": "prompts/plan.md",
+  "inputs": [
+    "task",
+    "budget",
+    "goal",
+    "evaluation",
+    "permissions",
+    "operation_grants",
+    "operator_sources"
+  ],
+  "knowledge_bases": [
+    "study"
+  ],
+  "tools": [
+    "read_index",
+    "search",
+    "read",
+    "submit_result"
+  ],
+  "output": "Plan"
+}

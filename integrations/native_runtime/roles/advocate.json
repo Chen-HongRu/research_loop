@@ -1,0 +1,23 @@
+{
+  "role": "advocate",
+  "instructions": "prompts/advocate.md",
+  "inputs": [
+    "task",
+    "budget",
+    "goal",
+    "evaluation",
+    "permissions",
+    "operator_sources",
+    "planning"
+  ],
+  "knowledge_bases": [
+    "study"
+  ],
+  "tools": [
+    "read_index",
+    "search",
+    "read",
+    "submit_result"
+  ],
+  "output": "Advocate"
+}

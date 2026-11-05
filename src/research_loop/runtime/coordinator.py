@@ -85,6 +85,12 @@ class ConcurrentCoordinator:
         self.publisher = Publisher(owner)
         self.backend = BackendScheduler(owner, self.ledger, invoker, self.settings)
         self._projection_version = None
+        self.prepare_agent = getattr(invoker, "prepare_agent", None)
+        self.evidence_intake = None
+        if self.prepare_agent is not None:
+            from .knowledge_manager import EvidenceIntake
+
+            self.evidence_intake = EvidenceIntake(owner)
 
     def _clock(self):
         with self.owner._transaction() as (_, control):
@@ -437,19 +443,59 @@ class ConcurrentCoordinator:
         try:
             package = self.contexts.build(call)
             context_ref = self.updater.bind_context(call, package)
-            reference = publish_artifact(
-                self.owner.store.root,
-                {
-                    "call": call.to_dict(),
-                    "context_ref": context_ref,
-                    "package": package.to_dict(),
-                },
-            )
+            payload = {
+                "call": call.to_dict(),
+                "context_ref": context_ref,
+                "package": package.to_dict(),
+            }
+            deadline = now + self.settings["call_timeout_seconds"]
+            if self.prepare_agent is not None:
+                config = self.owner.snapshot()["config"]
+                record = self.owner._feedback_snapshot(call.to_dict())
+                if record["planning"]:
+                    planning = record["planning"]
+                    frozen_round = self.updater._read_record(
+                        planning["snapshot_ref"], planning["identity"]
+                    )
+                    payload["planning_libraries"] = frozen_round.get(
+                        "knowledge_libraries"
+                    )
+                prior = record.get("retry")
+                historical = None
+                if prior and prior["source_context_ref"]:
+                    from .call_context import dispatched_input
+
+                    historical = dispatched_input(
+                        self.owner.store, prior["source_attempt_id"]
+                    ).get("assembly")
+                if historical:
+                    # The scientific inputs, tools and read capabilities of a
+                    # retried Review stay bound to the original call.
+                    historical["context_ref"] = context_ref
+                    payload["assembly"] = historical
+                else:
+                    payload["assembly"] = self.prepare_agent(
+                        payload, study_config=config, study_root=self.owner.store.root
+                    )
+                payload.pop("planning_libraries", None)
+                payload["knowledge_config"] = {
+                    key: config[key]
+                    for key in ("knowledge_libraries", "role_access")
+                    if key in config
+                }
+                payload["request_budget"] = {
+                    "study_root": str(self.owner.store.root),
+                    "attempt_id": call.attempt_id,
+                    "worker_token": call.worker_token,
+                    "owner_epoch": call.owner_epoch,
+                    "deadline": deadline,
+                }
+            reference = publish_artifact(self.owner.store.root, payload)
             registration = self.ledger.register_call(
                 call,
                 reference,
                 self.invoker.identity,
-                now + self.settings["call_timeout_seconds"],
+                deadline,
             )
             return self._launch(registration)
         except BudgetExceeded as error:
@@ -586,6 +632,8 @@ class ConcurrentCoordinator:
         progress += self._settle(blocked)
         progress += self._feedback(blocked)
         progress += self._publish(blocked)
+        if self.evidence_intake is not None:
+            progress += self.evidence_intake.sync()
         progress += self._planning_progress(blocked)
         backend = self.backend.schedule(now)
         progress += backend["progress"]
@@ -606,6 +654,33 @@ class ConcurrentCoordinator:
                         progress += self._schedule_calls(now, blocked)
                 except BudgetExceeded as error:
                     blocked.append({"planning": True, "reason": _reason(error)})
+        if (
+            self.evidence_intake is not None
+            and not self.owner.snapshot()["stop"]["requested"]
+            and self.ledger.active_count() < self.ledger.max_slots
+        ):
+            from .knowledge_manager import request_maintenance
+
+            try:
+                job = request_maintenance(self.owner, self.invoker.resolve_role)
+                if job["state"] == "active":
+                    progress += self._schedule_calls(now, blocked)
+                elif job["state"] == "no_visible_work":
+                    blocked.append(
+                        {
+                            "maintenance": True,
+                            "reason": "Pending knowledge is outside the Manager’s frozen grants",
+                        }
+                    )
+                elif job["state"] == "failed":
+                    blocked.append(
+                        {
+                            "maintenance": job["attempt_id"],
+                            "reason": "Pending batch requires retry",
+                        }
+                    )
+            except BudgetExceeded as error:
+                blocked.append({"maintenance": True, "reason": _reason(error)})
         state = self.owner.snapshot()
         waiting = [
             run["token"] for run in self.ledger.list() if not run["worker_retired"]

@@ -1,0 +1,25 @@
+{
+  "role": "review",
+  "instructions": "prompts/review.md",
+  "inputs": [
+    "task",
+    "budget",
+    "goal",
+    "evaluation",
+    "permissions",
+    "operator_sources",
+    "approved_plan",
+    "execution",
+    "measurements"
+  ],
+  "knowledge_bases": [
+    "study"
+  ],
+  "tools": [
+    "read_index",
+    "search",
+    "read",
+    "submit_result"
+  ],
+  "output": "Publication"
+}
