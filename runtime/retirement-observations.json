@@ -37,7 +37,7 @@
     }
   },
   "sourceRetirement": {
-    "deletedTrackedFiles": 299,
+    "retiredTrackedPaths": 299,
     "legacyControllers": "entire src/research_loop tree removed",
     "oldLaunchers": "Python package/console script, launcher and examples removed from source",
     "adapters": "native/script and ProTok execution/service/supervisor removed",
