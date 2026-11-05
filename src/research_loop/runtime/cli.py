@@ -83,12 +83,23 @@ def _parser():
     )
     read = commands.add_parser(
         "knowledge-read",
-        help="Read the Index or a page using a historical call's scope",
+        help="Browse a fixed revision/version within a historical role scope (not a read trace)",
     )
     read.add_argument("study", type=Path)
     read.add_argument("attempt_id")
-    read.add_argument("page", nargs="?", default="index.md")
+    read.add_argument(
+        "page",
+        nargs="?",
+        default="index.md",
+        metavar="PATH",
+        help="Relative path in the published directory",
+    )
     read.add_argument("--alias", default="study")
+    read.add_argument(
+        "--version",
+        type=int,
+        help="Publication version of the selected library",
+    )
     read.add_argument(
         "--with-sources",
         action="store_true",
@@ -97,7 +108,7 @@ def _parser():
     read.add_argument(
         "--reference",
         type=json.loads,
-        help="Read an exact JSON reference obtained from a page or search",
+        help="Read a fixed record identified by its JSON library_id, kind, id and revision",
     )
     roles = commands.add_parser(
         "role-config", help="Replace one role's configuration within Study grants"
@@ -467,6 +478,7 @@ def main(argv=None):
                 args.alias,
                 args.reference if args.reference is not None else args.page,
                 with_sources=args.with_sources,
+                version=args.version,
             )
             if isinstance(result, str):
                 sys.stdout.write(result)

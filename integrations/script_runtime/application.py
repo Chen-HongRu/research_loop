@@ -8,7 +8,6 @@ from integrations.native_runtime import transport
 from integrations.script_runtime import backend, policy
 from integrations.native_runtime import application as native_application
 from integrations.native_runtime.application import invoke_agent
-from integrations.native_runtime import role_tools
 from research_loop.runtime.role_assembly import assemble
 from research_loop.runtime.operation_contract import fields, integer, json_value, text
 
@@ -144,9 +143,7 @@ def prepare_agent(payload, config, *, study_config, study_root):
         definition_root=_definition_roots(),
         models=_models(),
         prepare_submission=partial(policy.prepare_submission, config=config),
-        tool_registry=role_tools.TOOLS,
         system_prompt=transport.SYSTEM_PROMPT,
-        submit_description=transport.SUBMIT_DESCRIPTION,
         input_values={"backend_contracts": policy.public_backend_contracts(config)}
         if payload["call"]["role"] in {"plan", "execute"}
         else None,

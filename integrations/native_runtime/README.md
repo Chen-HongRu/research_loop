@@ -8,7 +8,8 @@ context, while Python validators enforce evidence and execution constraints.
 This trusted SQLite runtime application uses the Pi CLI for Scout, Advocate,
 Judge, Plan, Execute, Review and Knowledge Manager. Each role has a
 [definition](roles/) binding instructions, inputs, libraries, tools and output.
-The controller freezes the effective model request for historical inspection.
+The controller binds the scientific input, instructions, directory grants and output contract.
+Knowledge files use a stable live directory throughout the invocation.
 See [Study knowledge](../../docs/study-knowledge.md) for configuration,
 maintenance and the read-only context preview.
 The initial Execute is qualitative only: its operations and artifacts lists are
@@ -46,8 +47,7 @@ transport:
 backend_handlers: {}
 ```
 
-`private_calls_dir` is optional and, when present, absolute; prompts and streams
-are private. `reasoning` must be one of `off`, `minimal`, `low`, `medium`, `high`
+`private_calls_dir` is optional and, when present, absolute. It retains invocation metadata and outcome counts. The private dispatch record retains the role prompt and accepted output; native file-tool transcripts are not archived. `reasoning` must be one of `off`, `minimal`, `low`, `medium`, `high`
 or `xhigh`, subject to the selected model's actual supported settings. For a
 custom model without declared reasoning support, use `off`; that catalog flag
 does not itself disable reasoning at the endpoint. The executable's
@@ -80,25 +80,29 @@ still ignore the field: client mode metadata does not prove server behavior.
 Check reported reasoning-token usage where available, without inspecting thought
 text. See the [DeepSeek thinking protocol](https://api-docs.deepseek.com/guides/thinking_mode/).
 
-Deploy [submit_result.ts](submit_result.ts) alongside `transport.py` in the
-versioned application environment. The controller writes the role's full
-JSON Schema to the private call directory and loads that extension explicitly.
-Pi exposes the frozen tool list. Research roles can read the Index, search
-authorized snapshots and read fixed revisions. The Manager can stage edits.
-The terminal tool is `submit_result`. Its arguments are the entire
-`{output, evidence_refs}` object. The extension validates arguments locally
-and terminates the turn. Transport accepts a successful tool result tied to
-the matching assistant call and a settled session. Existing role, evidence
-and authorization checks then run on that result.
+Deploy the application package, including [submit_result.ts](submit_result.ts), in
+its versioned runtime. Pi supplies `ls/find/grep/read`. They read a stable
+`knowledge/<alias>/files/` directory directly, including files absent from any Index. Directory contents may change inside
+a single tool call. The Manager also receives `edit/write` for a private draft.
+`submit_result` validates and terminates a role's structural response. Source
+edits and backend operations still require their original role and Study grants.
 
-Select a model with working Pi tool-call support. Model profiles need no
-structured text output settings. Remove wrappers that inject provider schemas.
-For OpenAI-compatible completions the extension removes a stale
-`response_format` from the outgoing payload. Set `retry.provider.maxRetries` to `0` in the active Pi profile and use
-`transport: "sse"` for `openai-codex-responses`. Internal retries and automatic
-transport fallback can send more than one request per provider hook. The native
-extension rejects an incompatible profile before sending the request.
-The extension aborts any follow-up inference turn in the same role invocation.
+The process requires a managed or npm Pi installation, Node.js, and local
+`rg` and `fd` for the corresponding native tools. macOS uses `sandbox-exec`;
+Linux requires bubblewrap (`bwrap`) and an enabled user namespace. Missing
+isolation prevents model admission. Install dependencies and the Pi runtime
+outside private Study, deployment and credential directories. The sandbox can
+read its trusted runtime dependencies and authorized knowledge directories.
+It can never use the operator's original Pi profile as its working directory.
+
+Use an environment or API-key model profile. The launcher selects only the
+configured provider and keeps the original credentials outside the sandbox.
+OAuth credential files and shell-based credential values require a different
+credential boundary and are rejected. Use a versioned copy of the old
+application for old in-flight Studies. The isolated Pi session uses SSE,
+disables provider retries and compaction, and accounts for each model request
+before sending it. Choose a provider supporting tool calls and the exact
+requested model/reasoning. No production account is covered by the local smoke.
 
 An explicit `backend_handlers` entry can select `protok_cleanup` with `config`
 containing the frozen `inventory`, `backend_controls`, and optionally an absolute
@@ -109,11 +113,12 @@ filesystem I/O before admission. It cannot cancel, prepare, submit, or start
 training. See the
 [ProTok adapter](../protok/README.md) and [migration guide](../../docs/runtime-migration.md).
 
-Local tests exercise executable Pi stubs, process-group cleanup, coordinator
-recovery and actual CPU subprocess acceptance. An optional installed-Pi source
-check verifies ambient prompt-file isolation without contacting a model. These
-checks do not validate a deployment's account, endpoint or GPU access. Verify the
-exact configured model in its target environment before activating new calls;
-a connection smoke does not establish research correctness.
-Keep deployed runtime installations and private application configuration separate
-from repository examples.
+The following opt-in test uses an actual installed Pi CLI, a temporary SQLite
+Study, and a synthetic loopback HTTP endpoint. It exercises all seven roles,
+a Manager publishing while Plan is reading, explicit citations and historical
+inspection. The transport suite also exercises filesystem denial and request
+budgets. No paid endpoint, Slurm job or GPU is used.
+
+```sh
+NATIVE_PI_CLI=/path/to/pi PYTHONPATH=src:tests:. uv run python -m unittest -v test_runtime_knowledge_loop test_native_pi_submission
+```

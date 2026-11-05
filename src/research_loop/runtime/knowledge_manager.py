@@ -2,7 +2,6 @@
 
 from .call_context import dispatched_input
 from .knowledge import KnowledgeBase
-from .model_requests import consulted_refs
 from .operations import Operations
 from .source_scope import derived_dependencies, freeze_source_scope
 from .store import _decode
@@ -46,6 +45,9 @@ def commit_maintenance(owner, conn, call, output):
     # of the worker's result. Acceptance and publishing use one SQL transaction.
     packet = dispatched_input(owner.store, call.attempt_id)
     assembly = packet["assembly"]
+    from .handoff_scope import require_bound_assembly
+
+    require_bound_assembly(assembly)
     batch = assembly["inputs"]["maintenance"]
     minimum = batch["processed_through"] + (not batch["affected_pages"])
     if (
@@ -60,26 +62,19 @@ def commit_maintenance(owner, conn, call, output):
         config=packet["knowledge_config"],
         source_scope=assembly.get("source_scope", []),
     )
-    # A role can paraphrase a restricted snippet without citing it. Retain the
-    # disclosure boundary of the material actually returned by tools.
-    consulted = derived_dependencies(
-        assembly, library.library_id, consulted_refs(owner.store.root, call.attempt_id)
-    )
-    pages = []
-    for page in output["pages"]:
-        if not isinstance(page.get("dependencies", []), list):
-            raise ValueError("Page dependencies must be fixed references")
-        refs = list(page.get("dependencies", []))
-        refs.extend(ref for ref in consulted if ref not in refs)
-        pages.append(page | {"dependencies": refs})
+    # A native reader can paraphrase any material in its authorized directory.
+    # Retain that scope even when outputs omit citations.
+    disclosure = derived_dependencies(assembly, library.library_id)
     return library.commit(
         base_version=batch["base_version"],
-        pages=pages,
-        index_dependencies=consulted if output["index_markdown"] is not None else None,
-        index_markdown=output["index_markdown"],
+        pages=[],
+        index_markdown=None,
+        files=output["files"],
+        remove_paths=output.get("remove_paths", []),
+        file_dependencies=disclosure,
         processed_through=output["processed_through"],
         request_id=call.attempt_id,
-        manifest=assembly["knowledge_libraries"],
+        manifest=assembly["maintenance_libraries"],
         conn=conn,
     )
 
@@ -103,7 +98,7 @@ class EvidenceIntake:
             publications = [
                 _decode(r)
                 for r in conn.execute(
-                    "SELECT p.*, a.role, a.iteration_id, d.input_ref, d.input_identity_json "
+                    "SELECT p.*, a.role, a.iteration_id, d.input_ref, d.input_identity_json, d.adapter_json "
                     "FROM publications p JOIN attempts a ON a.id=p.attempt_id "
                     "LEFT JOIN dispatch_runs d ON d.attempt_id=a.id WHERE p.id>? ORDER BY p.id",
                     (cursor,),
@@ -125,6 +120,15 @@ class EvidenceIntake:
             else {}
         )
         assembled = "assembly" in packet
+        from .handoff_scope import require_bound_assembly
+
+        if assembled:
+            require_bound_assembly(packet["assembly"])
+        elif (row.get("adapter") or {}).get("id") in {
+            "native-runtime-v1",
+            "native-script-runtime-v1",
+        }:
+            require_bound_assembly({})
         # Keep original published identities for calls made before the Markdown
         # library. A new role's observations are evidence for the Manager.
         if not assembled:
@@ -146,11 +150,7 @@ class EvidenceIntake:
             "attempt_id": row["attempt_id"],
             "role": row["role"],
         }
-        dependencies = derived_dependencies(
-            packet["assembly"],
-            self.library.library_id,
-            consulted_refs(self.owner.store.root, row["attempt_id"]),
-        )
+        dependencies = derived_dependencies(packet["assembly"], self.library.library_id)
         for index, observation in enumerate(output["knowledge"]):
             self.library.publish_evidence(
                 f"observation-{version}-{index}",
@@ -178,7 +178,7 @@ class EvidenceIntake:
                 f"measurement-{version}-{i}",
                 "measurement",
                 self.reader._read_record(item["receipt_ref"], item["identity"]),
-                source_refs=[item["receipt_ref"]],
+                source_refs=[*dependencies, item["receipt_ref"]],
                 metadata={"measurement_id": item["id"], **provenance},
             )
         for i, decision in enumerate(output["reviews"] + output["corrections"]):
@@ -204,7 +204,7 @@ class EvidenceIntake:
                             "collection_state",
                         )
                     },
-                    source_refs=[op["collection_ref"]],
+                    source_refs=[*dependencies, op["collection_ref"]],
                     metadata=provenance,
                 )
         reports, _ = operations.research_evidence(row["iteration_id"])
@@ -220,6 +220,6 @@ class EvidenceIntake:
                         "report": source["id"],
                         "classification": "unscored_research_report",
                     },
-                    source_refs=[source["ref"]],
+                    source_refs=[*dependencies, source["ref"]],
                     metadata=provenance | {"source": source["revision"]},
                 )

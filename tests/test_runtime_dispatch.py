@@ -91,9 +91,98 @@ class RuntimeDispatchTests(unittest.TestCase):
         registered = self.ledger.register_call(call, ref, ADAPTER, deadline)
         return call, registered["run"], package
 
-    def completion(self, run, *, status="completed", result=None, sender_retired=True):
+    def test_live_endpoints_follow_dispatch_and_terminal_observation(self):
+        from research_loop.runtime.knowledge import KnowledgeBase
+
+        kb = KnowledgeBase(self.root)
+        kb.live(["study"], role="scout")
+        call, run, _ = self.register()
+        self.assertIsNone(run["kb_start_version"])
+        self.ledger.record_start(run["token"])
+        self.assertEqual(self.ledger.get(run["token"])["kb_start_version"], kb.head())
+        kb.commit(0, [], "# First", 0, "first-publication")
+        observation = self.completion(run, result={"observation": "synthetic"})
+        self.ledger.observe(run["token"], observation)
+        self.assertEqual(self.ledger.get(run["token"])["kb_end_version"], 1)
+        kb.commit(1, [], "# Second", 0, "second-publication")
+        proposal = self.updater.validate_output(call, {"observation": "synthetic"}, [])
+        receipt = self.updater.apply_update(proposal, proposal.revisions)
+        recorded = self.ledger.get(run["token"])
+        self.assertEqual(recorded["kb_end_version"], 1)
+        self.assertEqual(recorded["kb_start_version"], 0)
+        self.assertEqual(
+            receipt.output_ref, self.owner.snapshot()["attempts"][-1]["output_ref"]
+        )
+
+    def test_explicit_knowledge_citation_is_accepted_without_a_read_receipt(self):
+        from research_loop.runtime.knowledge import KnowledgeBase
+        from research_loop.runtime.model_requests import format_decision_reference
+
+        kb = KnowledgeBase(self.root)
+        fixed = kb.publish_evidence("E1", "scout", {"observation": "synthetic"})
+        citation = format_decision_reference(fixed)
+        call = self.reserve()
+        package = self.builder.build(call)
+        context_ref = self.updater.bind_context(call, package)
+        reference = publish_artifact(
+            self.root,
+            dict(
+                call=call.to_dict(),
+                context_ref=context_ref,
+                package=package.to_dict(),
+                knowledge_config={},
+                assembly=dict(
+                    role="scout",
+                    knowledge_libraries=[
+                        {"alias": "study", "library_id": kb.library_id}
+                    ],
+                    source_scope=[],
+                ),
+            ),
+        )
+        run = self.ledger.register_call(call, reference, ADAPTER, 1000)["run"]
+        observation = self.completion(
+            run, result={"observation": "cites"}, evidence_refs=[citation]
+        )
+        self.ledger.observe(run["token"], observation)
+        proposal = self.updater.validate_output(
+            call, {"observation": "cites"}, [citation]
+        )
+        receipt = self.updater.apply_update(proposal, proposal.revisions)
+        self.assertEqual(receipt.to_dict()["evidence_refs"], [citation])
+        self.assertEqual(
+            proposal.to_dict()["evidence_identities"][citation],
+            {"knowledge_reference": fixed},
+        )
+        with self.store._connection(readonly=True) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        self.assertFalse({"model_retrievals", "model_consulted"} & tables)
+        foreign = dict(fixed, library_id="unauthorized")
+        with self.assertRaises((PermissionError, ValueError)):
+            self.updater._knowledge_evidence(
+                self.owner._feedback_snapshot(call.to_dict())["binding"],
+                format_decision_reference(foreign),
+            )
+
+    def completion(
+        self,
+        run,
+        *,
+        status="completed",
+        result=None,
+        sender_retired=True,
+        evidence_refs=None,
+    ):
         if run["category"] == "call" and status == "completed":
-            result = {"output": result, "evidence_refs": []}
+            result = {
+                "output": result,
+                "evidence_refs": [] if evidence_refs is None else evidence_refs,
+            }
         ref = publish_artifact(
             self.root,
             dict(

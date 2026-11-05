@@ -35,14 +35,16 @@ def _granted(config, role, library_id):
     }
 
 
-def freeze_source_scope(library, config, role, manifest):
-    """Bind grants once per role assembly; the result stays outside its prompt."""
+def directory_source_scope(library, config, role, bindings):
+    """Resolve grants from directory metadata, bounded by any supplied authority."""
     grants = set()
-    for library_id, item in library._manifest(manifest).items():
+    for item in bindings:
+        library_id = item["library_id"]
         if item["root"] == library.root:
             grants.update(_granted(config, role, library_id))
             continue
         with library._connection(item["root"], readonly=True) as conn:
+            library._check_library_identity(conn, library_id)
             if (
                 conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='control'"
@@ -58,7 +60,16 @@ def freeze_source_scope(library, config, role, manifest):
         origin = json.loads(row["config_json"])
         universal = [_granted(origin, name, library_id) for name in ROLES]
         grants.update(set.intersection(*universal))
+    if library._source_scope_supplied:
+        grants.intersection_update(library._source_scope)
     return [json.loads(value) for value in sorted(grants)]
+
+
+def freeze_source_scope(library, config, role, manifest):
+    """Resolve a private maintenance/history scope, never an Agent read snapshot."""
+    return directory_source_scope(
+        library, config, role, list(library._manifest(manifest).values())
+    )
 
 
 def input_dependencies(assembly, library_id):
@@ -68,13 +79,15 @@ def input_dependencies(assembly, library_id):
         for source in assembly["input_sources"]
         if source["key"].startswith("provided:")
         and source["key"] in assembly["inputs"]
-        and source["allow_feedback"]
         and source["disposition"] != "omitted"
     ]
 
 
-def derived_dependencies(assembly, library_id, consulted):
-    result = deepcopy(consulted)
+def derived_dependencies(assembly, library_id):
+    result = deepcopy(assembly.get("inherited_dependencies", []))
+    for reference in assembly.get("knowledge_dependencies", []):
+        if reference not in result:
+            result.append(deepcopy(reference))
     for reference in input_dependencies(assembly, library_id):
         if reference not in result:
             result.append(reference)

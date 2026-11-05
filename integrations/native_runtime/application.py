@@ -4,15 +4,21 @@ This initial application supports qualitative Execute only. It neither edits
 source nor submits new training jobs. Importing the module performs no CLI calls.
 """
 
+import base64
+from contextlib import ExitStack
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from integrations.native_runtime import policy, transport
-from integrations.native_runtime import role_tools
+from integrations.native_runtime.filesystem import NATIVE_TOOLS
 from research_loop.runtime.role_assembly import assemble, definition
+from research_loop.runtime.role_access import check_draft_actions
 from research_loop.runtime.context import ContextPackage
 from research_loop.runtime.operation_contract import fields, json_value
+from research_loop.runtime.model_requests import parse_decision_reference
 
 APPLICATION_IDENTITY = {"id": "native-runtime-v1", "version": "1"}
+WRITE_TOOLS = {"edit", "write"}
 
 
 def validate_config(config):
@@ -75,15 +81,32 @@ def invoke(kind, payload, config):
     )
 
 
+def _collect_draft(draft, submitted, actions, writable):
+    changes = policy.DraftSubmission.model_validate(submitted)
+    files = {}
+    for path in draft.rglob("*"):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise ValueError("Only regular files can be published from a private draft")
+        if path.is_file():
+            name = path.relative_to(draft).as_posix()
+            body = path.read_bytes()
+            try:
+                files[name] = body.decode("utf-8")
+            except UnicodeDecodeError:
+                files[name] = {"base64": base64.b64encode(body).decode("ascii")}
+    paths = set(files).union(changes.remove_paths)
+    if paths and not writable:
+        raise ValueError("Knowledge publishing requires a writable Manager draft")
+    check_draft_actions(paths, actions)
+    return changes.model_dump() | {"files": files}
+
+
 def invoke_agent(payload, transport_config, prepare_submission, validate_output):
     """Bind the role, deliver its result, and check every cited reference."""
     fields(
         payload,
         {"call", "context_ref", "package"}
-        | (
-            {"assembly", "request_budget", "knowledge_config", "planning_libraries"}
-            & payload.keys()
-        ),
+        | ({"assembly", "request_budget", "knowledge_config"} & payload.keys()),
         "agent invocation",
     )
     role = payload["call"]["role"]
@@ -93,7 +116,6 @@ def invoke_agent(payload, transport_config, prepare_submission, validate_output)
         raise ValueError("Call role differs from bound context")
     assembly = payload.get("assembly")
     tool_kwargs = {}
-    draft = {}
     if assembly is not None:
         if (
             assembly["role"] != role
@@ -103,68 +125,47 @@ def invoke_agent(payload, transport_config, prepare_submission, validate_output)
         selected = ContextPackage.from_dict(assembly["package"]).to_dict()
         context, manifest = selected["context"], selected["manifest"]
         prompt, schema = assembly["prompt"], assembly["response_schema"]
-        history = json_value(assembly["history"])
         root = payload.get("request_budget", {}).get("study_root")
         if root is None:
             raise ValueError("Prepared role requires its private Study root")
-        tool_handler, draft = role_tools.handler(
-            assembly, study_root=root, config=payload.get("knowledge_config", {})
-        )
         tool_kwargs = dict(
-            tools={
-                name: value
-                for name, value in assembly["tools"].items()
-                if name != "submit_result"
-            },
-            history=history,
-            tool_handler=tool_handler,
+            tools=[name for name in assembly["tools"] if name != "submit_result"],
+            filesystem={**assembly["filesystem"], "write_root": None},
             request_budget=payload.get("request_budget"),
             system_prompt=assembly["system_prompt"],
-            submit_description=assembly["tools"]["submit_result"]["description"],
         )
     else:
         prompt, schema = prepare_submission(role, frozen)
-    response = transport.run(
-        prompt,
-        transport_config,
-        response_schema=schema,
-        invocation={"call": payload["call"], "context_ref": payload["context_ref"]},
-        **tool_kwargs,
-    )
-    fields(response, {"output", "evidence_refs"}, "model response")
-    submitted = response["output"]
-    if role == "knowledge_manager" and draft:
-        submitted = submitted.copy()
-        if not submitted.get("pages"):
-            submitted["pages"] = draft["pages"]
-        if submitted.get("index_markdown") is None:
-            submitted["index_markdown"] = draft["index_markdown"]
-    normalized = validate_output(role, submitted, context)
-    if role == "knowledge_manager" and assembly is not None:
-        for action, tool in (("pages", "edit_page"), ("index_markdown", "edit_index")):
-            effect = (
-                normalized.get(action) is not None
-                if action == "index_markdown"
-                else bool(normalized.get(action))
+    with ExitStack() as stack:
+        draft = None
+        if role == "knowledge_manager":
+            if assembly is None:
+                raise ValueError(
+                    "Knowledge maintenance requires a prepared private draft"
+                )
+            draft = Path(stack.enter_context(TemporaryDirectory(prefix="rl-kb-draft-")))
+            if WRITE_TOOLS.intersection(tool_kwargs["tools"]):
+                tool_kwargs["filesystem"]["write_root"] = str(draft)
+        response = transport.run(
+            prompt,
+            transport_config,
+            response_schema=schema,
+            invocation={"call": payload["call"], "context_ref": payload["context_ref"]},
+            **tool_kwargs,
+        )
+        fields(response, {"output", "evidence_refs"}, "model response")
+        submitted = response["output"]
+        if draft is not None:
+            actions = set(assembly["actions"]).intersection(
+                context.get("allowed_actions", assembly["actions"])
             )
-            if effect:
-                if tool not in assembly["tools"] and action not in assembly.get(
-                    "direct_actions", []
-                ):
-                    raise ValueError(
-                        f"Knowledge Manager lacks write capability for {action}"
-                    )
-                if action not in assembly["actions"]:
-                    raise ValueError(
-                        f"Role knowledge_manager lacks permission for {action}"
-                    )
-                if (
-                    "allowed_actions" in context
-                    and action not in context["allowed_actions"]
-                ):
-                    raise ValueError(
-                        f"Role knowledge_manager lacks permission for {action}"
-                    )
+            submitted = _collect_draft(
+                draft,
+                submitted,
+                actions,
+                tool_kwargs["filesystem"]["write_root"] is not None,
+            )
+    normalized = validate_output(role, submitted, context)
     if role in {"review", "scout"}:
         own_ids = (
             {
@@ -188,17 +189,24 @@ def invoke_agent(payload, transport_config, prepare_submission, validate_output)
         or len(set(refs)) != len(refs)
     ):
         raise ValueError("Evidence references must be unique strings")
-    retrieved = {
-        record["result"]["evidence_ref"]
-        for record in tool_kwargs.get("history", [])
-        if isinstance(record, dict)
-        and record.get("event") == "success"
-        and record.get("request", {}).get("name") == "read"
-        and isinstance(record.get("result"), dict)
-        and "evidence_ref" in record["result"]
-    }
-    if not set(refs) <= set(manifest["allowed_evidence"]) | retrieved:
-        raise ValueError("Model cited evidence outside the bound manifest")
+    explicit = set(refs) - set(manifest["allowed_evidence"])
+    if explicit:
+        if assembly is None or not all(ref.startswith("kb:") for ref in explicit):
+            raise ValueError("Model cited evidence outside the bound manifest")
+        from research_loop.runtime.knowledge import KnowledgeBase
+
+        library = KnowledgeBase(
+            root,
+            config=payload["knowledge_config"],
+            source_scope=assembly["source_scope"],
+        )
+        for ref in explicit:
+            library.authorize_reference(
+                parse_decision_reference(ref),
+                aliases=assembly["definition"]["knowledge_bases"],
+                role=role,
+                bindings=assembly["knowledge_libraries"],
+            )
     if not set(policy.cited_refs(normalized, context)) <= set(refs):
         raise ValueError("Model omitted typed evidence references from evidence_refs")
     return {"output": normalized, "evidence_refs": refs}
@@ -214,15 +222,12 @@ def validate_roles(study_config, *, models=None, definition_root=None):
     root = definition_root or Path(__file__).resolve().parent
     for role in policy.MODELS:
         value, _ = definition(role, study_config, root, registry)
-        unknown = set(value["tools"]) - role_tools.TOOLS.keys()
+        unknown = set(value["tools"]) - NATIVE_TOOLS - {"submit_result"}
         if unknown:
             raise ValueError(
                 f"Role {role} tools: unknown registered tool {sorted(unknown)}"
             )
-        if role != "knowledge_manager" and set(value["tools"]) & {
-            "edit_page",
-            "edit_index",
-        }:
+        if role != "knowledge_manager" and set(value["tools"]) & WRITE_TOOLS:
             raise ValueError(
                 f"Role {role} tools: draft editing requires Knowledge Manager"
             )
@@ -239,9 +244,7 @@ def prepare_agent(payload, config, *, study_config, study_root):
         definition_root=Path(__file__).resolve().parent,
         models=model_registry(),
         prepare_submission=policy.prepare_submission,
-        tool_registry=role_tools.TOOLS,
         system_prompt=transport.SYSTEM_PROMPT,
-        submit_description=transport.SUBMIT_DESCRIPTION,
     )
 
 

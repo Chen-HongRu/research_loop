@@ -26,7 +26,7 @@ class StrictModel(BaseModel):
 class Response(StrictModel):
     output: dict = Field(description="Complete structured result for the current role.")
     evidence_refs: list[str] = Field(
-        description="Unique references actually used from the frozen manifest or evidence_ref receipts returned by this call’s read tool. Include receipts for cited registered measurements.",
+        description="List supporting input receipts or fixed kb:<library_id>:<kind>:<id>@<revision> citations from supplied Evidence or revisions.json. Include receipts for cited registered measurements.",
         json_schema_extra={"uniqueItems": True},
     )
 
@@ -124,7 +124,7 @@ class Knowledge(StrictModel):
         description="Nonempty list of conditions under which the claim applies."
     )
     source_refs: list[Text] = Field(
-        description="Unique references to sources actually used, from permitted sources including immutable receipts returned by read. Required for external observations."
+        description="Unique, explicit fixed references to permitted evidence supporting the observation. Required for external observations."
     )
     measurement_ids: list[Text] = Field(
         description="Unique registered measurement IDs visible in context. Return an empty list when none are visible. Operation, job and artifact IDs cannot qualify measurements."
@@ -182,51 +182,23 @@ class Scout(Publication):
     )
 
 
-class FixedReference(StrictModel):
-    library_id: Text = Field(
-        description="Library ID from a frozen search hit, page citation or evidence record."
-    )
-    kind: Literal["evidence", "knowledge", "historical", "index", "source"] = Field(
-        description="Record type from the exact reference returned by the controller."
-    )
-    id: Text = Field(description="Stable ID of the cited record.")
-    revision: Annotated[int, Field(ge=1)] | str = Field(
-        description="Exact revision returned by the controller."
-    )
-
-
-class PageEdit(StrictModel):
-    id: Text = Field(
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$",
-        description="Stable main-library page ID.",
-    )
-    title: Text = Field(description="Human-readable search title.")
-    markdown: str = Field(
-        description="Full replacement article, including interpretation, conditions and limitations."
-    )
-    dependencies: list[FixedReference] = Field(
-        default_factory=list,
-        description="Fixed evidence and previously published page revisions supporting this text.",
-    )
-    archived: bool = Field(
-        default=False,
-        description="Remove this page from the current directory while retaining earlier revisions.",
-    )
-
-
-class DraftPage(StrictModel):
-    page: PageEdit
-
-
-class KnowledgeManager(StrictModel):
-    pages: list[PageEdit] = Field(
-        description="Main-library page edits with stable id, title, markdown and dependencies; empty permits cursor-only maintenance."
-    )
-    index_markdown: str | None = Field(
-        description="Complete replacement Markdown Index, or null to preserve the current Index."
-    )
+class DraftSubmission(StrictModel):
     processed_through: Revision = Field(
-        description="Processed evidence cursor bounded by the frozen maintenance input."
+        description="Last evidence sequence processed within the maintenance batch."
+    )
+    remove_paths: list[Text] = Field(
+        default_factory=list,
+        description="Explicit relative filenames to remove from the published library. All regular files written under draft/ are added or replaced.",
+    )
+
+
+class EncodedFile(StrictModel):
+    base64: str
+
+
+class KnowledgeManager(DraftSubmission):
+    files: dict[str, str | EncodedFile] = Field(
+        description="File edits collected by the controller from this invocation's private draft."
     )
 
 
@@ -478,7 +450,8 @@ def prompt(role, package):
 
 def prepare_submission(role, package):
     schema = response_schema(
-        MODELS[role], context=package["context"] if role == "review" else None
+        DraftSubmission if role == "knowledge_manager" else MODELS[role],
+        context=package["context"] if role == "review" else None,
     )
     view = review_prompt_package(package) if role == "review" else package
     encoding_instructions = SHARED_SUBTREES_INSTRUCTIONS if view is not package else ""
@@ -488,7 +461,7 @@ def prepare_submission(role, package):
         + ". Use only the supplied ContextPackage. "
         + role_instructions(role)
         + encoding_instructions
-        + "Use only the tools in the frozen role grant. Filesystem access and source editing are disabled. Preserve uncertainty, conditions and limitations. "
+        + "Use only the available tools and authorized directories. Preserve uncertainty, conditions and limitations. "
         "Do not treat narratives or backend returns as scientific measurements. "
         "Scout/Review use only registered visible measurements and cited sources. "
         "\nContextPackage:\n" + _prompt_json(view) + response_footer(role, schema),

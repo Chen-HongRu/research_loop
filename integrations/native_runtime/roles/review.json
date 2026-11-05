@@ -16,8 +16,9 @@
     "study"
   ],
   "tools": [
-    "read_index",
-    "search",
+    "ls",
+    "find",
+    "grep",
     "read",
     "submit_result"
   ],

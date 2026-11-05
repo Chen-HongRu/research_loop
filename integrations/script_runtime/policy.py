@@ -249,7 +249,7 @@ def prepare_submission(role, package, config):
         + role
         + ". "
         + native.role_instructions(role)
-        + "Use only this frozen ContextPackage. Use only the tools in the frozen role grant. Filesystem access and source editing are disabled. "
+        + "Use the approved scientific context and only the tools and directories granted to this role. "
         "Preserve the exact scientific contract at context["
         + json.dumps(config["scientific_contract_source"])
         + "]. "

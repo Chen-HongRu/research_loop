@@ -168,6 +168,14 @@ class Updater:
         )
 
     def _check_identity(self, reference, expected):
+        if reference.startswith("kb:"):
+            from .model_requests import parse_decision_reference
+
+            if not _same(
+                expected, {"knowledge_reference": parse_decision_reference(reference)}
+            ):
+                raise ConflictError("Fixed knowledge citation identity differs")
+            return
         if not _same(_identity(self._root, reference), expected):
             raise ConflictError("Immutable controller artifact identity changed")
 
@@ -408,24 +416,55 @@ class Updater:
             )
         return package, plan_output
 
-    def _granted_evidence(self, binding):
-        from .model_requests import retrieved_evidence
+    def _granted_evidence(self, binding, references=()):
+        return binding["evidence_identities"] | {
+            reference: self._knowledge_evidence(binding, reference)
+            for reference in references
+            if reference.startswith("kb:")
+        }
 
-        return binding["evidence_identities"] | retrieved_evidence(
-            self._root, binding["attempt_id"]
+    def _knowledge_evidence(self, binding, reference):
+        from .call_context import dispatched_input
+        from .knowledge import KnowledgeBase
+        from .model_requests import parse_decision_reference
+
+        packet = dispatched_input(self.coordinator.store, binding["attempt_id"])
+        assembly = packet.get("assembly")
+        if not isinstance(assembly, dict):
+            raise ValueError(
+                "Knowledge citations require an authorized dispatched role"
+            )
+        library = KnowledgeBase(
+            self._root,
+            config=packet["knowledge_config"],
+            source_scope=assembly.get("source_scope", []),
         )
+        fixed = library.authorize_reference(
+            parse_decision_reference(reference),
+            aliases=[entry["alias"] for entry in assembly["knowledge_libraries"]],
+            role=assembly["role"],
+            bindings=assembly["knowledge_libraries"],
+        )
+        return {"knowledge_reference": fixed}
 
     def _check_evidence(self, binding, references, claimed_identities=None):
-        frozen = self._granted_evidence(binding)
-        if not set(references) <= frozen.keys():
-            raise ValueError("Output references evidence outside its frozen allowlist")
-        identities = {reference: frozen[reference] for reference in references}
+        frozen = binding["evidence_identities"]
+        identities = {}
+        for reference in references:
+            if reference.startswith("kb:"):
+                identities[reference] = self._knowledge_evidence(binding, reference)
+            elif reference in frozen:
+                identity = frozen[reference]
+                self._check_identity(reference, identity)
+                identities[reference] = identity
+            else:
+                raise ValueError(
+                    "Output references evidence outside its frozen allowlist"
+                )
         if claimed_identities is not None and not _same(identities, claimed_identities):
             raise ConflictError(
-                "Proposal evidence differs from binding-time identities"
+                "Proposal evidence differs from authorized fixed identities"
             )
-        for reference, identity in identities.items():
-            self._check_identity(reference, identity)
         return identities
 
     def _check_frozen_refs(self, current, captured):
@@ -757,4 +796,20 @@ class Updater:
                 identity,
                 receipt_extra=extra,
             )
-            return UpdateReceipt.from_dict(receipt)
+        if call.role == "knowledge_manager":
+            from .knowledge import KnowledgeBase, LivePublicationError
+
+            try:
+                KnowledgeBase(self._root).refresh_live()
+            except LivePublicationError:
+                from .dispatch import RuntimeEvents
+
+                with self.coordinator._transaction() as (conn, _):
+                    RuntimeEvents.emit(
+                        conn,
+                        "live-pending:" + call.attempt_id,
+                        "live_publication_pending",
+                        call.attempt_id,
+                        payload={"state": "accepted", "recovery": "next_live_open"},
+                    )
+        return UpdateReceipt.from_dict(receipt)

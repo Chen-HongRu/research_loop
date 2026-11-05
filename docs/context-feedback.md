@@ -9,6 +9,13 @@ interfaces. The [SQLite CLI and dashboard](concurrent-runtime.md) are available;
 [publication interface](knowledge-publication.md) accepts Scout/Review knowledge
 and builds derived views from registered measurements and eligibility revisions.
 
+The immutable context contract below covers selected control inputs and the
+optional Publisher/Frontier projections. Native Pi roles read the authorized
+file libraries through live directories. Those libraries are not frozen by
+a call, planning round or task claim; later reads can see newly published content.
+Accepted Plan and evaluation protocols, role authorization and Judge's captured
+pool remain independent protected control inputs.
+
 ## Frozen input
 
 ```text
@@ -76,9 +83,10 @@ role_access:
 ```
 
 Native Pi roles also accept `inputs`, `knowledge_bases` and `tools` as
-authorization ceilings. Their default input contains library descriptors for
-on-demand retrieval. An explicit history provider can select the older direct
-projection when permitted. See [Study knowledge](study-knowledge.md).
+authorization ceilings. Their default input contains authorized live directory
+descriptors. Pi uses its native file tools; the runtime does not retain tool-read receipts or per-call
+Markdown snapshots. An explicit history provider can select the older direct
+Publisher/Frontier projection when permitted. See [Study knowledge](study-knowledge.md).
 
 For the generic context builder, `published_history` defaults to true and
 governs published research, Frontiers, historical measurements and imported
@@ -87,7 +95,8 @@ Advocate/Judge remain authoritative inputs. `context_sources` narrows the
 operator's named sources by intersecting with their existing role and
 feedback grants. `permissions` selects keys from the Study permission map
 and preserves their values. An empty list selects none. A configured role
-may cite only references represented by visible source fields.
+may cite artifact references only when represented by visible source fields;
+explicit fixed native-library citations follow the separate scope check below.
 
 `actions` restricts nonempty sections of accepted output. Plan can propose
 `operations`; Execute can request `operations` and supply `source_edits`;
@@ -106,8 +115,8 @@ attempt and atomically records its artifact reference and identity in
 reference and the supplied content. Rebuilding the attempt reuses the same
 selection. These receipts belong to the trusted Study control directory.
 
-To revise an existing knowledge entry, the configured role must have received
-the full published `research` field. The Publisher checks the target's revision
+To revise an existing entry in the generic Publisher ledger, the configured role
+must have received the full published `research` field. The Publisher checks the target's revision
 at the frozen publication version and again against its current revision.
 An omitted or truncated research field allows new entries only. A conflict
 leaves the target unchanged. On upgrade, legacy **configured-role** bindings
@@ -136,22 +145,31 @@ Selection policy cannot omit or rewrite backend identities, resource limits or
 cost authority. These inputs do not make an Agent a backend/controller.
 The initial revision
 map is `{study: 1, task: revision-or-null, iteration: revision-or-null, knowledge: version}`.
-Knowledge starts at zero and advances by publication sequence, independently of
-iteration identity. A snapshot captured before another independent publication
-may still bind and finish. Its knowledge version remains frozen; updates to an
-existing knowledge or eligibility record require that target's expected revision.
+This `knowledge` revision is the generic Publisher publication sequence, starting
+at zero independently of iteration identity. A captured projection can still bind
+and finish after an independent publication. Its projection version remains
+frozen, and updates to an existing Publisher knowledge or eligibility record
+require that target's expected revision. This revision does not pin the native
+Study library's `kb_library.version`.
 
 Planning calls additionally protect their exact captured task pool, in-flight
 iteration metadata and event range. Judge inputs include the two terminal
 Advocate results or failure summaries. These identities come from the reserved
 planning slots, not the worker's proposed replacements. Research text and
-Frontiers use separate frozen knowledge sources and remain selectable by context
-policy. Claimed task envelopes never change when pending tasks are revised.
+Frontiers use separate frozen projection sources when selected by context policy.
+Native Advocate/Judge knowledge directories remain live throughout that round;
+no library snapshot is embedded in the protected pool. Claimed task envelopes
+never change when pending tasks are revised.
 
-In the SQLite updater, permitted evidence references name existing immutable
-`artifacts/<uuid>.json` records. Their file identities are frozen at binding, so
-replacement between dispatch and the first response is rejected. Source metadata
-may also describe symbolic controller inputs or external provenance, but those
+The SQLite updater accepts bound immutable `artifacts/<uuid>.json` evidence
+references. Their file identities are frozen at binding, so replacement between
+dispatch and the first response is rejected. Native roles may also explicitly
+cite `kb:<library_id>:<kind>:<id>@<revision>` in `evidence_refs`, with kind
+`evidence`, `file`, `knowledge`, `historical` or `index`. The updater validates the fixed
+record and its dependencies against the dispatched role's authorized library
+entries and source scope. A citation records the accepted decision's declared
+sources; it does not establish that a file was read or preserve a tool result.
+Source metadata may also describe symbolic controller inputs or external provenance, but those
 descriptions alone do not grant access or become locally verified evidence.
 
 Each role requires an explicitly registered trusted validator with signature
@@ -201,8 +219,8 @@ differences and controller-selected inputs. Every supplied field remains protect
 and provided; no extra Agent invocation is made. Captured JSON field references
 are provenance and citation scope, not a new OS filesystem sandbox.
 
-Review identifies the knowledge snapshot at review start; execution continuations
-retain the originating scientific input references. Dynamic controller-derived
+In the serial controller, Review identifies its knowledge snapshot at review
+start; execution continuations retain the originating scientific input references. Dynamic controller-derived
 fields have controller source identities and the exact call revision. Cached
 successful attempts keep their original manifest. Historical attempts without
 one remain readable; their provenance is not retroactively invented.
@@ -213,11 +231,14 @@ test Studies must be retained as evidence or recreated in a new directory. No
 automatic conversion of existing Studies occurs in this stage.
 
 `RuntimeContexts` builds concurrent role inputs from frozen control fields,
-accepted Plan/Execute outputs and published knowledge. Review also receives its
+accepted Plan/Execute outputs and optional published projections. Native roles
+additionally receive live library entries, whose content can advance after
+binding. Review also receives its
 own feedback-permitted, unpublished measurements with their exact evaluator
 receipt references protected from policy omission. Other unpublished measurements
 and denied evaluator bodies are excluded. Once bound, the selected package is
-reused even if policy or published knowledge later changes. Managed dispatches
+reused even if policy or a selected projection later changes. Reusing that control
+package does not freeze the native library. Managed dispatches
 can accept only the exact result in their durable worker completion record.
 
 Operator-supplied baseline source and research contracts can be published as

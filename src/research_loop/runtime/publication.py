@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from .role_access import RoleAccess
 from .store import ConflictError, InvalidTransition, _decode, _json
-from .updates import CallIdentity, Updater, _identity, _same
+from .updates import CallIdentity, Updater, _same
 
 _KNOWLEDGE = {
     "id",
@@ -82,8 +82,7 @@ class Publisher:
         return self.coordinator.store.root
 
     def _check_ref(self, reference, identity):
-        if not _same(_identity(self._root, reference), identity):
-            raise ConflictError("Published evidence artifact identity changed")
+        Updater(self.coordinator, validators={})._check_identity(reference, identity)
 
     def _read_proposal(self, record):
         attempt = record["attempt"]
@@ -175,7 +174,7 @@ class Publisher:
         used_refs, measurements = {}, {}
         permitted = set(proposal["evidence_refs"])
         frozen = Updater(self.coordinator, validators={})._granted_evidence(
-            record["binding"]
+            record["binding"], proposal["evidence_refs"]
         )
 
         def require_ref(reference):
@@ -418,7 +417,7 @@ class Publisher:
             self._check_ref(prior["payload_ref"], prior["identity"])
             proposal = self._read_proposal(captured)
             frozen = Updater(self.coordinator, validators={})._granted_evidence(
-                captured["binding"]
+                captured["binding"], proposal["evidence_refs"]
             )
             for reference in proposal["evidence_refs"]:
                 identity = proposal["evidence_identities"][reference]

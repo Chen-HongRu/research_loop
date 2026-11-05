@@ -1,12 +1,13 @@
 """Real local storage, frozen scopes and publication failure boundaries."""
 
 from copy import deepcopy
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from research_loop.runtime.knowledge import KnowledgeBase
+from research_loop.runtime.knowledge import KnowledgeBase, LivePublicationError
 from research_loop.runtime.store import ConflictError, StateStore
 
 
@@ -111,10 +112,9 @@ class KnowledgeLibraryTests(unittest.TestCase):
             "split",
         )
         current = self.kb.freeze()
-        self.assertEqual(
-            {r["reference"]["id"] for r in self.kb.search(current, "Split")},
-            {"K2", "K3"},
-        )
+        live = self.kb.live(["study"], role="scout")
+        files = Path(live["entries"][0]["path"]) / "files/pages"
+        self.assertEqual({path.stem for path in files.glob("*.md")}, {"K2", "K3"})
         self.kb.commit(
             2,
             [
@@ -126,70 +126,8 @@ class KnowledgeLibraryTests(unittest.TestCase):
             2,
             "merge",
         )
-        self.assertFalse(self.kb.search(self.kb.freeze(), "Split"))
+        self.assertEqual({path.stem for path in files.glob("*.md")}, {"K4"})
         self.assertEqual(self.kb.read(current, "study", "K2"), "Split left")
-
-    def test_mount_fixed_versions_and_scope_transitive_dependencies(self):
-        secret = KnowledgeBase(self.root / "secret")
-        evidence = self.publish(secret, content="private forbidden finding")
-        secret.commit(
-            0,
-            [page("Private", "private forbidden finding", [evidence])],
-            "# Private secret",
-            1,
-            "secret",
-        )
-        secret_v1 = secret.freeze()[0]
-        private_ref = dict(
-            library_id=secret.library_id, kind="knowledge", id="Private", revision=1
-        )
-        config = {
-            "knowledge_libraries": [
-                dict(alias="secret", path=str(secret.root), version=1)
-            ]
-        }
-        self.kb.configure(config)
-        full = self.kb.freeze(aliases=["study", "secret"])
-        self.kb.commit(
-            0,
-            [
-                page("Shared", "private forbidden summary", [private_ref]),
-                page("Public", "public finding"),
-            ],
-            "# private forbidden summary",
-            0,
-            "shared",
-            manifest=full,
-        )
-        restricted = self.kb.freeze(aliases=["study"])
-        self.assertNotIn("private", self.kb.read_index(restricted).lower())
-        self.assertFalse(self.kb.search(restricted, "forbidden"))
-        with self.assertRaises(PermissionError):
-            self.kb.read(restricted, "study", "Shared")
-        with self.assertRaises(PermissionError):
-            self.kb.read(restricted, "secret", private_ref)
-        with self.assertRaises(PermissionError):
-            self.kb.commit(
-                1, [page("Shared", "laundered")], None, 0, "blind", manifest=restricted
-            )
-        with self.assertRaises(PermissionError):
-            self.kb.commit(1, [], "new index", 0, "blind-index", manifest=restricted)
-        # Updating the peer cannot change the mounted fixed version or evidence.
-        secret.publish_evidence("E2", "external", "future forbidden evidence")
-        secret.commit(
-            1, [page("Private", "updated private finding")], "# Updated", 2, "update"
-        )
-        still_fixed = self.kb.freeze(aliases=["study", "secret"])
-        peer = next(row for row in still_fixed if row["alias"] == "secret")
-        self.assertEqual(peer["version"], secret_v1["version"])
-        self.assertEqual(peer["evidence_through"], 1)
-        self.assertEqual(
-            self.kb.read(still_fixed, "secret", private_ref),
-            "private forbidden finding",
-        )
-        with self.assertRaises(PermissionError):
-            self.kb.read(still_fixed, "secret", "E2")
-        self.assertNotIn(str(secret.root), str(still_fixed))
 
     def test_evidence_provenance_is_also_scoped(self):
         secret = KnowledgeBase(self.root / "secret")
@@ -204,7 +142,7 @@ class KnowledgeLibraryTests(unittest.TestCase):
         )
         self.publish(content="derived forbidden", source_refs=[private])
         restricted = self.kb.freeze()
-        self.assertFalse(self.kb.search(restricted, "forbidden"))
+        self.assertNotIn("forbidden", self.kb.read_index(restricted))
         self.assertFalse(self.kb.pending(manifest=restricted)["evidence"])
         self.assertEqual(self.kb.pending(manifest=restricted)["evidence_through"], 0)
         with self.assertRaises(PermissionError):
@@ -259,7 +197,8 @@ class KnowledgeLibraryTests(unittest.TestCase):
             self.assertEqual(self.kb.status()["version"], 0)
             conn.rollback()
         self.assertEqual(self.kb.status()["processed_through"], 0)
-        self.assertFalse(self.kb.search(self.kb.freeze(), "Atomic"))
+        with self.assertRaises(PermissionError):
+            self.kb.read(self.kb.freeze(), "study", "K1")
         with store._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self.kb.commit(
@@ -274,20 +213,6 @@ class KnowledgeLibraryTests(unittest.TestCase):
             conn.commit()
         self.assertEqual(self.kb.status()["version"], 1)
         self.assertEqual(self.kb.status()["processed_through"], 1)
-
-    def test_search_uses_fts_not_page_body_scans_and_can_rebuild(self):
-        self.publish(content="Evidence apples")
-        self.kb.commit(0, [page("K1", "Knowledge apples")], "# Index", 1, "publish")
-        frozen = self.kb.freeze()
-        with patch.object(
-            KnowledgeBase, "_body", side_effect=AssertionError("body scan")
-        ):
-            self.assertEqual(len(self.kb.search(frozen, "apples")), 2)
-        with self.kb._connection(self.kb.root) as conn:
-            conn.execute("DELETE FROM kb_search")
-        self.assertFalse(self.kb.search(frozen, "apples"))
-        self.kb.rebuild_search_index()
-        self.assertEqual(len(self.kb.search(frozen, "apples")), 2)
 
     def test_legacy_original_identity_and_readonly_markdown(self):
         entry = dict(
@@ -319,7 +244,6 @@ class KnowledgeLibraryTests(unittest.TestCase):
         self.assertIn("Original revision: 1", body)
         self.assertIn("Publication: 7", body)
         self.assertEqual(refs[0]["id"], "Old claim")
-        self.assertEqual(self.kb.search(frozen, "Historical")[0]["reference"], refs[0])
         changed = deepcopy(publications)
         changed[7]["knowledge"][0]["statement"] = "Changed identity"
         with self.assertRaises(ConflictError):
@@ -356,6 +280,252 @@ class KnowledgeLibraryTests(unittest.TestCase):
         self.assertFalse(missing.exists())
         with self.assertRaises(ValueError):
             self.kb.commit(0, [page("../escape", "bad")], None, 0, "invalid")
+
+    def test_arbitrary_file_delta_binary_history_and_missing_index(self):
+        self.kb.commit(0, [], "# Actual index", 0, "initial")
+        entry = self.kb.live(["study"], role="plan")["entries"][0]
+        current = Path(entry["path"])
+        stable = Path(entry["isolation_root"]).stat().st_ino
+        self.kb.commit(
+            1,
+            [],
+            None,
+            0,
+            "files",
+            files={
+                "notes/rough/observation.txt": "plain\n",
+                "payload.bin": {"base64": "AP8="},
+            },
+            remove_paths=["index.md"],
+        )
+        self.assertEqual(
+            (current / "files/notes/rough/observation.txt").read_bytes(), b"plain\n"
+        )
+        self.assertEqual((current / "files/payload.bin").read_bytes(), b"\x00\xff")
+        self.assertFalse((current / "files/index.md").exists())
+        self.assertEqual(Path(entry["isolation_root"]).stat().st_ino, stable)
+        citation = f"kb:{self.kb.library_id}:file:notes/rough/observation.txt@1"
+        self.assertEqual(
+            json.loads((current / "revisions.json").read_text())[
+                "notes/rough/observation.txt"
+            ],
+            citation,
+        )
+        self.assertEqual(
+            self.kb.read(self.kb.history(1), "study", "index.md"), "# Actual index"
+        )
+        with self.assertRaises(PermissionError):
+            self.kb.read(self.kb.history(2), "study", "index.md")
+        self.kb.commit(
+            2, [], None, 0, "delete", remove_paths=["notes/rough/observation.txt"]
+        )
+        self.assertFalse((current / "files/notes/rough/observation.txt").exists())
+        self.assertEqual(
+            self.kb.read(self.kb.history(2), "study", "notes/rough/observation.txt"),
+            "plain\n",
+        )
+        self.assertEqual(
+            self.kb.read(self.kb.history(3), "study", "payload.bin"), {"base64": "AP8="}
+        )
+        self.kb.commit(
+            3, [], None, 0, "recreate", files={"notes/rough/observation.txt": "again"}
+        )
+        self.assertTrue(
+            json.loads((current / "revisions.json").read_text())[
+                "notes/rough/observation.txt"
+            ].endswith("@2")
+        )
+
+    def test_private_evidence_stays_outside_complete_ordinary_live_tree(self):
+        self.kb.publish_evidence("private", "synthetic", "private sentinel")
+        entry = self.kb.live(["study"], role="plan")["entries"][0]
+        current = Path(entry["path"])
+        self.assertEqual(list((current / "files").iterdir()), [])
+        self.assertNotIn(
+            "private sentinel",
+            "\n".join(
+                path.read_text() for path in current.rglob("*") if path.is_file()
+            ),
+        )
+        with patch.object(
+            KnowledgeBase,
+            "freeze",
+            side_effect=AssertionError("ordinary open froze content"),
+        ):
+            same = self.kb.live(["study"], role="scout")
+        self.assertEqual(same["entries"][0]["path"], str(current))
+        self.assertEqual(
+            same["references"],
+            [
+                dict(
+                    library_id=self.kb.library_id,
+                    kind="library",
+                    id="library",
+                    revision=0,
+                )
+            ],
+        )
+
+    def test_exchange_failure_keeps_old_complete_files_and_retry_activates(self):
+        from research_loop.runtime import live_knowledge
+
+        self.kb.commit(0, [], None, 0, "baseline", files={"old.txt": "old"})
+        entry = self.kb.live(["study"], role="plan")["entries"][0]
+        current, allowed = Path(entry["path"]), Path(entry["isolation_root"])
+        self.assertEqual(self.kb.published_version(), 1)
+        old = current.stat().st_ino
+
+        def fail(staged, target):
+            self.assertFalse(staged.is_relative_to(allowed))
+            self.assertEqual(target, current)
+            self.assertFalse((current / "files/nested/data.csv").exists())
+            raise OSError("synthetic exchange failure")
+
+        with patch.object(live_knowledge, "exchange", side_effect=fail) as operation:
+            with self.assertRaises(LivePublicationError):
+                self.kb.commit(
+                    1, [], None, 0, "accepted", files={"nested/data.csv": "a,b\n1,2\n"}
+                )
+            reopened = self.kb.live(["study"], role="plan")["entries"][0]
+            self.assertEqual(
+                (Path(reopened["path"]) / "files/old.txt").read_text(), "old"
+            )
+            self.assertFalse(
+                (Path(reopened["path"]) / "files/nested/data.csv").exists()
+            )
+        self.assertEqual(operation.call_count, 2)
+        self.assertEqual(current.stat().st_ino, old)
+        self.assertEqual({path.name for path in allowed.iterdir()}, {"current"})
+        self.assertTrue(self.kb.live_status()["publication_pending"])
+        self.assertEqual(self.kb.head(), 2)
+        self.assertEqual(self.kb.published_version(), 1)
+        receipt = self.kb.commit(
+            1, [], None, 0, "accepted", files={"nested/data.csv": "a,b\n1,2\n"}
+        )
+        self.assertEqual(receipt["version"], 2)
+        self.assertEqual((current / "files/nested/data.csv").read_text(), "a,b\n1,2\n")
+        self.assertFalse(self.kb.live_status()["publication_pending"])
+
+    def test_external_rollback_cannot_activate_or_publish_files(self):
+        StateStore.create(self.kb.root, config={})
+        self.kb = KnowledgeBase(self.kb.root)
+        current = Path(self.kb.live(["study"], role="plan")["entries"][0]["path"])
+        store = StateStore(self.kb.root)
+        with store._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self.kb.commit(
+                0, [], None, 0, "rolled-back", files={"future.txt": "future"}, conn=conn
+            )
+            self.kb.refresh_live()
+            self.assertFalse((current / "files/future.txt").exists())
+            self.assertEqual(self.kb.published_version(), 0)
+            conn.rollback()
+        self.assertEqual(self.kb.head(), 0)
+        self.assertFalse((current / "files/future.txt").exists())
+
+    def test_cas_same_base_file_managers_and_staging_failure(self):
+        self.kb.live(["study"], role="plan")
+        base = self.kb.freeze()
+        self.kb.commit(0, [], None, 0, "first", files={"a.txt": "A"}, manifest=base)
+        with self.assertRaises(ConflictError):
+            self.kb.commit(
+                0, [], None, 0, "second", files={"b.txt": "B"}, manifest=base
+            )
+        with patch(
+            "research_loop.runtime.knowledge._blob",
+            side_effect=OSError("synthetic disk failure"),
+        ):
+            with self.assertRaises(OSError):
+                self.kb.commit(1, [], None, 0, "failed", files={"b.txt": "B"})
+        self.assertEqual(self.kb.head(), 1)
+        self.assertEqual(self.kb.published_version(), 1)
+
+    def test_filesystem_case_collision_rejected_before_acceptance(self):
+        with TemporaryDirectory(dir=self.root) as folder:
+            (Path(folder) / "Probe").write_text("")
+            try:
+                with (Path(folder) / "probe").open("x"):
+                    pass
+            except FileExistsError:
+                pass
+            else:
+                self.skipTest("This filesystem permits case-distinct names")
+        current = Path(self.kb.live(["study"], role="plan")["entries"][0]["path"])
+        self.kb.commit(0, [], None, 0, "old", files={"note.md": "old"})
+        with self.assertRaises(ValueError):
+            self.kb.commit(1, [], None, 0, "collision", files={"Note.md": "new"})
+        self.assertEqual(self.kb.head(), 1)
+        self.assertEqual((current / "files/note.md").read_text(), "old")
+        self.kb.commit(
+            1, [], None, 0, "rename", files={"Note.md": "new"}, remove_paths=["note.md"]
+        )
+        self.assertEqual(self.kb.head(), 2)
+        self.assertEqual(self.kb.read(self.kb.history(1), "study", "note.md"), "old")
+
+    def test_file_directory_collision_is_rejected_and_next_commit_succeeds(self):
+        self.kb.live(["study"], role="plan")
+        self.kb.commit(0, [], None, 0, "old", files={"note": "old"})
+        with self.assertRaises(ValueError):
+            self.kb.commit(1, [], None, 0, "collision", files={"note/child": "new"})
+        self.assertEqual(self.kb.head(), 1)
+        self.kb.commit(
+            1,
+            [],
+            None,
+            0,
+            "replace",
+            files={"note/child": "new"},
+            remove_paths=["note"],
+        )
+        self.assertEqual(self.kb.read(self.kb.history(2), "study", "note/child"), "new")
+
+    def test_peer_fixed_tree_identity_and_its_own_history_boundary(self):
+        peer = KnowledgeBase(self.root / "peer")
+        replacement = KnowledgeBase(self.root / "replacement")
+        for library, data in ((peer, "A"), (replacement, "B")):
+            library.commit(0, [], None, 0, "initial", files={"notes/data": data})
+        config = {
+            "knowledge_libraries": [dict(alias="peer", path=str(peer.root), version=1)]
+        }
+        consumer = KnowledgeBase(self.kb.root, config=config)
+        live = consumer.live(["peer"], role="plan")
+        current = Path(live["entries"][0]["path"])
+        self.assertEqual((current / "files/notes/data").read_text(), "A")
+        peer.commit(1, [], None, 0, "next", files={"notes/data": "A2"})
+        self.assertEqual((current / "files/notes/data").read_text(), "A")
+        self.assertEqual(
+            consumer.read(consumer.history(1, alias="peer"), "peer", "notes/data"), "A"
+        )
+        with self.assertRaises(PermissionError):
+            consumer.history(2, alias="peer")
+        peer.root.rename(self.root / "saved-peer")
+        replacement.root.rename(peer.root)
+        with self.assertRaises(PermissionError):
+            KnowledgeBase(consumer.root, config=config).live(["peer"], role="plan")
+        self.assertEqual((current / "files/notes/data").read_text(), "A")
+        consumer.live(["study"], role="scout")
+
+    def test_post_exchange_error_is_an_activated_complete_publication(self):
+        from research_loop.runtime import live_knowledge
+
+        entry = self.kb.live(["study"], role="plan")["entries"][0]
+        actual = live_knowledge.exchange
+
+        def after(staged, current):
+            actual(staged, current)
+            raise OSError("synthetic error after successful exchange")
+
+        with patch.object(live_knowledge, "exchange", side_effect=after):
+            receipt = self.kb.commit(
+                0, [], None, 0, "active", files={"complete.txt": "complete"}
+            )
+        self.assertEqual(receipt["version"], 1)
+        self.assertEqual(self.kb.published_version(), 1)
+        self.assertEqual(
+            (Path(entry["path"]) / "files/complete.txt").read_text(), "complete"
+        )
+        self.kb.refresh_live()
+        self.assertFalse(self.kb.live_status()["publication_pending"])
 
 
 if __name__ == "__main__":

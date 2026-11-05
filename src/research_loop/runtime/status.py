@@ -53,11 +53,20 @@ def status_snapshot(root):
         )
         attempts = _rows(
             conn,
-            "SELECT id,role,iteration_id,status,owner_epoch FROM attempts ORDER BY rowid",
+            "SELECT id,role,iteration_id,status,owner_epoch,output_ref AS accepted_output_ref,"
+            "json_array_length(receipt_json,'$.evidence_refs') AS explicit_citation_count FROM attempts ORDER BY rowid",
         )
+        endpoints = {}
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocation_knowledge'"
+        ).fetchone():
+            endpoints = {
+                row["attempt_id"]: row
+                for row in conn.execute("SELECT * FROM invocation_knowledge")
+            }
         runs = _rows(
             conn,
-            "SELECT attempt_id,operation_id,category,action_kind,state,status,worker_retired,settled,owner_epoch "
+            "SELECT token,attempt_id,operation_id,category,action_kind,state,status,worker_retired,settled,owner_epoch "
             "FROM dispatch_runs ORDER BY rowid",
         )
         operations = _rows(
@@ -80,16 +89,25 @@ def status_snapshot(root):
             row[0] for row in conn.execute("SELECT attempt_id FROM publications")
         }
     by_iteration = {row["task_id"]: row for row in iterations}
+    task_by_iteration_id = {row["id"]: row["task_id"] for row in iterations}
     tasks_by_id = {row["id"]: row for row in tasks}
     runs_by_attempt = {
         row["attempt_id"]: row for row in runs if row["attempt_id"] is not None
     }
     for attempt in attempts:
         run = runs_by_attempt.get(attempt["id"])
+        attempt["task_id"] = task_by_iteration_id.get(attempt["iteration_id"])
+        endpoint = endpoints.get(attempt["id"])
+        attempt["knowledge_endpoints"] = dict(
+            start_version=endpoint["start_version"] if endpoint else None,
+            end_version=endpoint["end_version"] if endpoint else None,
+            meaning="Published versions at invocation start and end; not a reading trace. Missing values were not recorded",
+        )
         attempt["dispatch"] = (
             None
             if run is None
             else {
+                "invocation_id": run["token"],
                 "state": run["state"],
                 "status": run["status"],
                 "worker_retired": bool(run["worker_retired"]),
@@ -249,7 +267,11 @@ def status_snapshot(root):
             else "waiting"
         )
         task["queued"] = task["status"] == "queued"
+    from .knowledge import KnowledgeBase
+
+    knowledge = KnowledgeBase(store.root).live_status()
     return dict(
+        knowledge=knowledge,
         study_id=control["study_id"],
         schema_version=schema,
         reported_at=datetime.now(timezone.utc).isoformat(),

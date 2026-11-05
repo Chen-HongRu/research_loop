@@ -34,7 +34,7 @@ ProTok supervisor 按子 Study 异步调度长训任务。某个子 Study 等待
 
 [#77](https://github.com/Chen-HongRu/research_loop/issues/77) 的新后端已推进到 schema 8。[SQLite 状态层](docs/transactional-runtime.md)提供独立 iteration 和统一账本；[Context / Feedback](docs/context-feedback.md)通过 Study 的 `role_access` 统一配置各角色的上下文、可引用证据与可提交动作；[知识发布](docs/knowledge-publication.md)按可信评价回执及资格修订重建双层 Frontier 与研究文档。[任务池与规划](docs/task-planning.md)支持在 Study YAML 中配置待认领任务上限与研究预算，保护人类任务及已认领版本，并行调用 Advocate，由 Judge 增改、排序未认领的自主任务。[Backend 生命周期](docs/backend-lifecycle.md)通过 `Operations` 和 `BackendDriver` Python API 分离有限 Execute 请求、一次提交、同一执行的检查、结果收集和费用结算；未知提交效果不会触发重提。[并发协调器](docs/concurrent-runtime.md)通过 Python API 调度本地调用并协调后端操作。[SQLite CLI 与 dashboard](docs/concurrent-runtime.md)提供显式应用配置、控制请求和只读状态。[显式迁移](docs/runtime-migration.md)提供预览、暂存、提交和激活；迁移与版本化部署需要可信操作员提供翻译、隔离及证据，现有串行 CLI 不自动迁移。
 
-[原生应用](integrations/native_runtime/README.md)通过统一角色定义装配六种研究角色和 Knowledge Manager 的 Pi 调用。每次调用可按冻结授权检索 Study 知识库，并通过 `submit_result` 提交；配置、逐次预览与历史 Markdown 读取见[知识库使用说明](docs/study-knowledge.md)；[脚本应用](integrations/script_runtime/README.md)可将冻结计划和源码提案交给有界 Slurm 后端执行。脚本报告仅作为未评分研究证据，不自动生成测量或 Frontier；原 ProTok 清理接入仍限于已导入任务。
+[原生应用](integrations/native_runtime/README.md)通过统一角色定义装配六种研究角色和 Knowledge Manager 的 Pi 调用。所有角色可用 Pi 原生文件工具读取获准知识库中的全部已发布文件，包括未被 Index 收录的文件。Manager 在私有草稿中编辑并通过 `submit_result` 发布。一次搜索也可能跨版本。CLI 和只读看板展示调用开始与结束时的发布版本；实际引用随决策保存，缺失的历史端点标为未记录。配置、决策查看与历史文件读取见[知识库使用说明](docs/study-knowledge.md)；[脚本应用](integrations/script_runtime/README.md)可将冻结计划和源码提案交给有界 Slurm 后端执行。脚本报告仅作为未评分研究证据，不自动生成测量或 Frontier；原 ProTok 清理接入仍限于已导入任务。
 
 ## 快速体验
 

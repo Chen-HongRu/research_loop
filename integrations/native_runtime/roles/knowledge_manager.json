@@ -13,11 +13,12 @@
     "study"
   ],
   "tools": [
-    "read_index",
-    "search",
+    "ls",
+    "find",
+    "grep",
     "read",
-    "edit_page",
-    "edit_index",
+    "edit",
+    "write",
     "submit_result"
   ],
   "output": "KnowledgeManager"

@@ -1,8 +1,7 @@
-"""Study-owned immutable evidence and versioned Markdown knowledge snapshots.
+"""Immutable private Evidence, versioned ordinary files, and historical readback.
 
-SQLite publishes the snapshot pointer, dependency graph and processing cursor in
-one transaction. Markdown files are published first and are the authoritative
-page bodies. Mounted libraries are opened read-only and never initialized here.
+SQLite atomically accepts revisions, the complete file catalog and progress.
+A separate stable read-only directory activates complete committed file trees.
 """
 
 from __future__ import annotations
@@ -10,10 +9,12 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 import json
+import base64
 import os
 from pathlib import Path
 import re
 import sqlite3
+from tempfile import TemporaryDirectory
 import uuid
 
 from .files import _sync_directory
@@ -23,13 +24,17 @@ _DIRECTORY = "knowledge"
 _DATABASE = "knowledge.sqlite3"
 
 
+class LivePublicationError(OSError):
+    """SQL is committed; its native directory publication needs replay."""
+
+
 def _database(root):
     runtime = Path(root) / DATABASE
     return runtime if runtime.exists() else Path(root) / _DIRECTORY / _DATABASE
 
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}\Z")
-_KINDS = {"evidence", "knowledge", "historical", "index", "source"}
+_KINDS = {"evidence", "knowledge", "historical", "index", "source", "library", "file"}
 _SCHEMA = """
 CREATE TABLE kb_library(singleton INTEGER PRIMARY KEY CHECK(singleton=1),
  id TEXT NOT NULL, version INTEGER NOT NULL, processed INTEGER NOT NULL);
@@ -38,7 +43,7 @@ CREATE TABLE kb_evidence(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL
  metadata_json TEXT NOT NULL);
 CREATE TABLE kb_snapshots(version INTEGER PRIMARY KEY, pages_json TEXT NOT NULL,
  index_path TEXT NOT NULL, dependencies_json TEXT NOT NULL,
- evidence_through INTEGER NOT NULL,legacy_through INTEGER NOT NULL);
+ evidence_through INTEGER NOT NULL,legacy_through INTEGER NOT NULL,files_json TEXT);
 CREATE TABLE kb_revisions(id TEXT NOT NULL, revision INTEGER NOT NULL, version INTEGER NOT NULL,
  title TEXT NOT NULL, path TEXT NOT NULL, dependencies_json TEXT NOT NULL,
  archived INTEGER NOT NULL, PRIMARY KEY(id,revision));
@@ -50,7 +55,6 @@ CREATE TABLE kb_dependencies(page_id TEXT NOT NULL,page_revision INTEGER NOT NUL
 CREATE INDEX kb_dependency_target ON kb_dependencies(library_id,kind,id,revision);
 CREATE INDEX kb_dependency_page ON kb_dependencies(page_id,page_revision);
 
-CREATE VIRTUAL TABLE kb_search USING fts5(title,body,kind UNINDEXED,id UNINDEXED,revision UNINDEXED);
 CREATE TABLE kb_historical(id TEXT NOT NULL,revision INTEGER NOT NULL,
  publication_id INTEGER NOT NULL,path TEXT NOT NULL,metadata_json TEXT NOT NULL,
  PRIMARY KEY(id,revision));
@@ -79,7 +83,7 @@ def _reference(value):
         or not value["id"]
         or (
             (type(value["revision"]) is not int or value["revision"] < 1)
-            if value["kind"] != "source"
+            if value["kind"] not in {"source", "library"}
             else not (
                 (type(value["revision"]) is int and value["revision"] >= 0)
                 or (
@@ -93,9 +97,42 @@ def _reference(value):
         )
         or (value["kind"] == "index" and value["id"] != "index.md")
         or (value["kind"] == "evidence" and value["revision"] != 1)
+        or (
+            value["kind"] == "library"
+            and (
+                value["id"] != "library"
+                or type(value["revision"]) is not int
+                or value["revision"] < 0
+            )
+        )
     ):
         raise ValueError("Expected a fixed typed knowledge reference")
+    if value["kind"] == "file":
+        _file_path(value["id"])
     return deepcopy(value)
+
+
+def _file_path(value):
+    if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
+        raise ValueError("Expected a normal relative file path")
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in value.split("/")):
+        raise ValueError("Expected a normal relative file path")
+    return value
+
+
+def _file_data(value):
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if isinstance(value, bytes):
+        return value
+    if (
+        isinstance(value, dict)
+        and set(value) == {"base64"}
+        and isinstance(value["base64"], str)
+    ):
+        return base64.b64decode(value["base64"], validate=True)
+    raise ValueError("File contents must be text or a base64 object")
 
 
 def _references(values):
@@ -110,11 +147,15 @@ def _references(values):
 def _markdown(path, body):
     if not isinstance(body, str):
         raise ValueError("Markdown must be text")
+    _blob(path, body.encode("utf-8"))
+
+
+def _blob(path, body):
     if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
         raise ValueError("Knowledge files must not traverse symlinks")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("xb") as handle:
-        handle.write(body.encode("utf-8"))
+        handle.write(body)
         handle.flush()
         os.fchmod(handle.fileno(), 0o444)
         os.fsync(handle.fileno())
@@ -131,6 +172,7 @@ class KnowledgeBase:
         self._roots = {}
         self._mounts = []
         self._config = {}
+        self._source_scope_supplied = source_scope is not None
         self._source_scope = {_json(_reference(ref)) for ref in (source_scope or [])}
         if config is not None:
             self.configure(config)
@@ -161,19 +203,37 @@ class KnowledgeBase:
             root = Path(mount["path"])
             if not root.is_absolute():
                 root = self.root / root
+            binding_path = os.path.abspath(root)
             root = root.resolve()
             # A path denotes another Study, never an arbitrary database file.
-            row = self._library(root)
-            with self._connection(root, readonly=True) as conn:
-                if (
-                    conn.execute(
-                        "SELECT 1 FROM kb_snapshots WHERE version=?", (version,)
-                    ).fetchone()
-                    is None
-                ):
-                    raise ValueError(f"Unknown fixed knowledge version for {alias}")
-            self._roots[row["id"]] = root
-            checked.append(dict(mount, path=root, library_id=row["id"]))
+            bound = None
+            if self.path.exists():
+                with self._connection(self.root, readonly=True) as conn:
+                    if conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name='kb_mount_bindings'"
+                    ).fetchone():
+                        bound = conn.execute(
+                            "SELECT library_id FROM kb_mount_bindings WHERE alias=? AND path=? AND version=?",
+                            (alias, binding_path, version),
+                        ).fetchone()
+            if bound is None:
+                library_id = self._library(root)["id"]
+                with self._connection(root, readonly=True) as conn:
+                    if (
+                        conn.execute(
+                            "SELECT 1 FROM kb_snapshots WHERE version=?", (version,)
+                        ).fetchone()
+                        is None
+                    ):
+                        raise ValueError(f"Unknown fixed knowledge version for {alias}")
+            else:
+                # A configured path is not authority to substitute a new Study.
+                # Defer checking unused mounts so unrelated scopes remain usable.
+                library_id = bound["library_id"]
+            self._roots[library_id] = root
+            checked.append(
+                dict(mount, path=root, binding_path=binding_path, library_id=library_id)
+            )
         self._mounts = checked
         self._config = deepcopy(config)
         return self
@@ -210,6 +270,12 @@ class KnowledgeBase:
         except sqlite3.Error as exc:
             raise ValueError("Cannot read knowledge library") from exc
 
+    @staticmethod
+    def _check_library_identity(conn, library_id):
+        row = conn.execute("SELECT id FROM kb_library WHERE singleton=1").fetchone()
+        if row is None or row["id"] != library_id:
+            raise PermissionError("Knowledge library identity changed")
+
     def _ensure(self):
         if self.path.exists():
             with self._connection(self.root, readonly=True) as conn:
@@ -217,6 +283,16 @@ class KnowledgeBase:
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kb_library'"
                 ).fetchone()
             if initialized:
+                with self._connection(self.root, readonly=True) as conn:
+                    fields = {
+                        row[1]
+                        for row in conn.execute("PRAGMA table_info(kb_snapshots)")
+                    }
+                if "files_json" not in fields:
+                    with self._connection(self.root) as conn:
+                        conn.execute(
+                            "ALTER TABLE kb_snapshots ADD COLUMN files_json TEXT"
+                        )
                 row = self._library(self.root)
                 self._roots[row["id"]] = self.root
                 return
@@ -239,7 +315,10 @@ class KnowledgeBase:
                     conn.execute(
                         "INSERT INTO kb_library VALUES(1,?,0,0)", (uuid.uuid4().hex,)
                     )
-                    conn.execute("INSERT INTO kb_snapshots VALUES(0,'{}','','[]',0,0)")
+                    conn.execute(
+                        "INSERT INTO kb_snapshots VALUES(0,'{}','','[]',0,0,?)",
+                        (_json(dict(files={}, disclosure=[])),),
+                    )
                 conn.commit()
         else:
             # Atomic initialization prevents readers observing a partial schema.
@@ -250,7 +329,10 @@ class KnowledgeBase:
                 conn.execute(
                     "INSERT INTO kb_library VALUES(1,?,0,0)", (uuid.uuid4().hex,)
                 )
-                conn.execute("INSERT INTO kb_snapshots VALUES(0,'{}','','[]',0,0)")
+                conn.execute(
+                    "INSERT INTO kb_snapshots VALUES(0,'{}','','[]',0,0,?)",
+                    (_json(dict(files={}, disclosure=[])),),
+                )
                 conn.commit()
             finally:
                 conn.close()
@@ -268,6 +350,126 @@ class KnowledgeBase:
     def library_id(self):
         self._ensure()
         return self._library(self.root)["id"]
+
+    def head(self, conn=None):
+        """Return the committed head, or the head of an owned SQL transaction."""
+        self._ensure()
+        with (
+            nullcontext(conn)
+            if conn is not None
+            else self._connection(self.root, readonly=True) as reader
+        ):
+            return reader.execute(
+                "SELECT version FROM kb_library WHERE singleton=1"
+            ).fetchone()[0]
+
+    def live(self, aliases, *, role):
+        """Open a reusable authorized directory; its current pointer follows commits."""
+        from .live_knowledge import open_live
+
+        return open_live(self, aliases, role=role)
+
+    def refresh_live(self):
+        """Publish complete directories from committed SQL only; safe to replay."""
+        from .live_knowledge import refresh_live
+
+        return refresh_live(self)
+
+    def live_status(self):
+        """Inspect small publication descriptors without reading page bodies."""
+        from .live_knowledge import live_status
+
+        return live_status(self)
+
+    def published_version(self):
+        """Read the version activated by one atomic native publication selector."""
+        marker = self.folder / "published" / "current" / ".version"
+        try:
+            version = json.loads(marker.read_text())
+        except FileNotFoundError:
+            return None
+        if type(version) is not int or version < 0:
+            raise ValueError("Invalid published knowledge version")
+        return version
+
+    def directory_bindings(self, aliases):
+        """Read directory identity/grant metadata without freezing current content."""
+        if not isinstance(aliases, (list, tuple)) or len(set(aliases)) != len(aliases):
+            raise ValueError("Knowledge aliases must be a unique list")
+        self._ensure()
+        available = {mount["alias"]: mount for mount in self._mounts}
+        with self._connection(self.root, readonly=True) as conn:
+            own_id = conn.execute(
+                "SELECT id FROM kb_library WHERE singleton=1"
+            ).fetchone()[0]
+        available["study"] = dict(
+            path=self.root,
+            library_id=own_id,
+            version=None,
+            description="Study knowledge",
+        )
+        result = []
+        for alias in aliases:
+            mount = available.get(alias)
+            if mount is None:
+                raise ValueError(f"Unknown knowledge library alias: {alias}")
+            with self._connection(mount["path"], readonly=True) as conn:
+                self._check_library_identity(conn, mount["library_id"])
+            result.append(
+                dict(
+                    alias=alias,
+                    library_id=mount["library_id"],
+                    version=mount["version"],
+                    root=mount["path"],
+                    description=mount.get("description", ""),
+                )
+            )
+        return result
+
+    def check_bindings(self, bindings, *, aliases=None):
+        """Require historical alias identities to match the current trusted roots."""
+        if not isinstance(bindings, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("alias"), str)
+            or not isinstance(item.get("library_id"), str)
+            for item in bindings
+        ):
+            raise ValueError("Expected recorded knowledge alias bindings")
+        expected = {item["alias"]: item["library_id"] for item in bindings}
+        if len(expected) != len(bindings):
+            raise ValueError("Duplicate recorded knowledge alias")
+        actual = self.directory_bindings(list(expected) if aliases is None else aliases)
+        if any(expected.get(item["alias"]) != item["library_id"] for item in actual):
+            raise PermissionError("Recorded knowledge library identity changed")
+        return actual
+
+    def authorize_reference(self, reference, *, aliases, role, bindings=None):
+        """Validate a user citation using the same grants as its native directory."""
+        from .role_access import RoleAccess
+        from .source_scope import freeze_source_scope
+
+        reference = _reference(reference)
+        if reference["kind"] not in {
+            "evidence",
+            "knowledge",
+            "historical",
+            "index",
+            "file",
+        }:
+            raise PermissionError("Only immutable published records are citations")
+        allowed = RoleAccess.resolve(self._config, role).rule.get("knowledge_bases")
+        if allowed is not None and not set(aliases) <= set(allowed):
+            raise PermissionError("Knowledge aliases exceed the role's access")
+        if bindings is not None:
+            self.check_bindings(bindings, aliases=aliases)
+        manifest = self.freeze(aliases=aliases)
+        reader = KnowledgeBase(
+            self.root,
+            config=self._config,
+            source_scope=freeze_source_scope(self, self._config, role, manifest),
+        )
+        reader._authorized(reader._manifest(manifest), reference)
+        return reference
 
     def publish_evidence(
         self, evidence_id, source_type, content, *, source_refs=None, metadata=None
@@ -317,10 +519,6 @@ class KnowledgeBase:
                     "INSERT INTO kb_evidence(id,source_type,body_json,refs_json,metadata_json) VALUES(?,?,?,?,?)",
                     (evidence_id, *values),
                 )
-                conn.execute(
-                    "INSERT INTO kb_search(title,body,kind,id,revision) VALUES(?,?,'evidence',?,1)",
-                    (evidence_id, _json(content), evidence_id),
-                )
             conn.commit()
         return {
             "library_id": self.library_id,
@@ -349,6 +547,8 @@ class KnowledgeBase:
             with self._connection(root, readonly=True) as conn:
                 conn.execute("BEGIN")
                 row = dict(conn.execute("SELECT * FROM kb_library").fetchone())
+                if alias != "study" and row["id"] != mount["library_id"]:
+                    raise PermissionError("Mounted knowledge library identity changed")
                 self._roots[row["id"]] = root
                 version = row["version"] if alias == "study" else mount["version"]
                 through = conn.execute(
@@ -379,6 +579,36 @@ class KnowledgeBase:
             )
         return result
 
+    def history(self, version, *, aliases=None, alias="study"):
+        """Resolve a committed historical version for explicit human readback."""
+        if type(version) is not int or version < 0:
+            raise ValueError("Historical knowledge version must be nonnegative")
+        manifest = self.freeze(aliases=[alias] if aliases is None else aliases)
+        target = next((item for item in manifest if item["alias"] == alias), None)
+        if target is None or version > target["version"]:
+            raise PermissionError(
+                "Historical version exceeds the authorized library boundary"
+            )
+        root = self._manifest(manifest)[target["library_id"]]["root"]
+        with self._connection(root, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT evidence_through,legacy_through FROM kb_snapshots WHERE version=?",
+                (version,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Unknown historical knowledge version")
+        return [
+            dict(
+                item,
+                version=version,
+                evidence_through=row["evidence_through"],
+                legacy_through=row["legacy_through"],
+            )
+            if item["alias"] == alias
+            else item
+            for item in manifest
+        ]
+
     def _manifest(self, manifest):
         if not isinstance(manifest, list):
             raise ValueError("Expected a frozen knowledge manifest")
@@ -403,6 +633,8 @@ class KnowledgeBase:
             ):
                 raise ValueError("Invalid frozen knowledge boundary")
             result[library_id] = dict(item, root=self._roots[library_id])
+            if self._library(self._roots[library_id])["id"] != library_id:
+                raise PermissionError("Knowledge library identity changed")
             aliases.add(item.get("alias"))
         return result
 
@@ -418,7 +650,12 @@ class KnowledgeBase:
                     "Source dependency is outside the role disclosure scope"
                 )
             return {}, []
+        if ref["kind"] == "library":
+            if ref["revision"] > item["version"]:
+                raise PermissionError("Library grant exceeds the authorized version")
+            return {}, []
         with self._connection(item["root"], readonly=True) as conn:
+            self._check_library_identity(conn, ref["library_id"])
             if ref["kind"] == "index":
                 row = conn.execute(
                     "SELECT index_path AS path,dependencies_json FROM kb_snapshots WHERE version=? AND version<=?",
@@ -451,7 +688,11 @@ class KnowledgeBase:
                 return dict(row), []
             row = conn.execute(
                 "SELECT * FROM kb_revisions WHERE id=? AND revision=? AND version<=?",
-                (ref["id"], ref["revision"], item["version"]),
+                (
+                    "file:" + ref["id"] if ref["kind"] == "file" else ref["id"],
+                    ref["revision"],
+                    item["version"],
+                ),
             ).fetchone()
             if row is None:
                 raise PermissionError(
@@ -471,6 +712,7 @@ class KnowledgeBase:
 
     def _snapshot(self, item):
         with self._connection(item["root"], readonly=True) as conn:
+            self._check_library_identity(conn, item["library_id"])
             row = conn.execute(
                 "SELECT * FROM kb_snapshots WHERE version=?", (item["version"],)
             ).fetchone()
@@ -478,8 +720,96 @@ class KnowledgeBase:
                 raise PermissionError("Knowledge snapshot is unavailable")
             return dict(row)
 
+    def file_catalog(self, item, snapshot=None):
+        """Return the actual complete file tree of one immutable library version."""
+        snapshot = self._snapshot(item) if snapshot is None else snapshot
+        if snapshot.get("files_json") is not None:
+            return json.loads(snapshot["files_json"])["files"]
+        result = {}
+        with self._connection(item["root"], readonly=True) as conn:
+            self._check_library_identity(conn, item["library_id"])
+            for identity, revision in json.loads(snapshot["pages_json"]).items():
+                row = conn.execute(
+                    "SELECT archived FROM kb_revisions WHERE id=? AND revision=?",
+                    (identity, revision),
+                ).fetchone()
+                if row is not None and not row["archived"]:
+                    result[f"pages/{identity}.md"] = dict(
+                        library_id=item["library_id"],
+                        kind="knowledge",
+                        id=identity,
+                        revision=revision,
+                    )
+        if snapshot["index_path"]:
+            result["index.md"] = dict(
+                library_id=item["library_id"],
+                kind="index",
+                id="index.md",
+                revision=item["version"],
+            )
+        return result
+
+    def _validate_file_paths(self, paths):
+        """Protect SQL acceptance against observed target-filesystem name collisions.
+
+        Once per changed commit, create only zero-byte names on the actual
+        filesystem. This reads no file contents and is never a startup check.
+        """
+        with TemporaryDirectory(prefix=".file-paths-", dir=self.folder) as folder:
+            try:
+                for relative in sorted(paths):
+                    target = Path(folder) / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open("xb"):
+                        pass
+            except OSError as error:
+                raise ValueError(
+                    "Published file paths cannot coexist on the target filesystem"
+                ) from error
+
+    def disclosure(self, manifest, references):
+        """Expand fixed citations to source/library grants without reading bodies."""
+        scoped = self._manifest(manifest)
+        result, seen = {}, set()
+
+        def visit(reference):
+            reference = _reference(reference)
+            key = _json(reference)
+            if key in seen:
+                return
+            seen.add(key)
+            if reference["kind"] in {"library", "source"}:
+                item = scoped.get(reference["library_id"])
+                if item is None:
+                    raise PermissionError(
+                        "Disclosure library is outside the granted libraries"
+                    )
+                if (
+                    reference["kind"] == "library"
+                    and reference["revision"] == 0
+                    and item["alias"] != "study"
+                ):
+                    reference = dict(reference, revision=item["version"])
+                result[_json(reference)] = reference
+                return
+            _, dependencies = self._record(scoped, reference)
+            item = scoped[reference["library_id"]]
+            grant = dict(
+                library_id=reference["library_id"],
+                kind="library",
+                id="library",
+                revision=0 if item["alias"] == "study" else item["version"],
+            )
+            result[_json(grant)] = grant
+            for dependency in dependencies:
+                visit(dependency)
+
+        for reference in references:
+            visit(reference)
+        return list(result.values())
+
     @staticmethod
-    def _body(item, path):
+    def _bytes(item, path):
         relative = Path(path)
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("Invalid stored Markdown path")
@@ -492,7 +822,11 @@ class KnowledgeBase:
                 raise ValueError("Knowledge Markdown must not traverse symlinks")
         if not target.is_file() or target.stat().st_mode & 0o222:
             raise ValueError("Knowledge Markdown must remain an immutable regular file")
-        return target.read_text(encoding="utf-8")
+        return target.read_bytes()
+
+    @staticmethod
+    def _body(item, path):
+        return KnowledgeBase._bytes(item, path).decode("utf-8")
 
     def _visible_pages(self, scoped, item):
         snapshot = self._snapshot(item)
@@ -586,6 +920,8 @@ class KnowledgeBase:
                 raise PermissionError(
                     "Reference does not belong to the requested alias"
                 )
+        elif isinstance(path, str) and path in self.file_catalog(item):
+            ref = self.file_catalog(item)[path]
         elif path == "index.md":
             raise ValueError(
                 "Index uses a snapshot boundary, not an evidence reference"
@@ -614,11 +950,21 @@ class KnowledgeBase:
     def read_with_sources(self, manifest, alias, path):
         """Read one frozen record and its traversable citations after authorization."""
         if path == "index.md":
-            return self.index_with_sources(manifest, alias)
+            scoped_index = self._manifest(manifest)
+            item_index = next(
+                (item for item in scoped_index.values() if item["alias"] == alias), None
+            )
+            if item_index is None or "index.md" not in self.file_catalog(item_index):
+                if (
+                    item_index is not None
+                    and self._snapshot(item_index).get("files_json") is not None
+                ):
+                    raise PermissionError("Published file is absent from this version")
+                return self.index_with_sources(manifest, alias)
         scoped = self._manifest(manifest)
         ref = self.resolve_reference(manifest, alias, path)
         row, dependencies = self._record(scoped, ref)
-        if ref["kind"] == "source":
+        if ref["kind"] in {"source", "library"}:
             raise PermissionError("Source dependencies do not grant artifact reads")
         if ref["kind"] == "evidence":
             content = dict(
@@ -628,93 +974,15 @@ class KnowledgeBase:
                 source_refs=json.loads(row["refs_json"]),
                 metadata=json.loads(row["metadata_json"]),
             )
+        elif ref["kind"] == "file":
+            data = self._bytes(scoped[ref["library_id"]], row["path"])
+            try:
+                content = data.decode("utf-8")
+            except UnicodeDecodeError:
+                content = {"base64": base64.b64encode(data).decode("ascii")}
         else:
             content = self._body(scoped[ref["library_id"]], row["path"])
         return {"content": content, "fixed_ref": ref, "dependencies": dependencies}
-
-    def search(self, manifest, query, limit=10):
-        """Query the rebuildable FTS index, authorizing before returning snippets."""
-        if not isinstance(query, str) or not query.strip():
-            raise ValueError("Search query must be nonempty text")
-        if type(limit) is not int or not 1 <= limit <= 100:
-            raise ValueError("Search limit must be between 1 and 100")
-        scoped = self._manifest(manifest)
-        words = re.findall(r"\w+", query, flags=re.UNICODE)
-        if not words:
-            return []
-        expression = " AND ".join('"' + word.replace('"', '""') + '"' for word in words)
-        found = []
-        for item in scoped.values():
-            page_map = json.loads(self._snapshot(item)["pages_json"])
-            with self._connection(item["root"], readonly=True) as conn:
-                rows = conn.execute(
-                    "SELECT title,kind,id,revision,snippet(kb_search,1,'','',' … ',36) AS excerpt FROM kb_search WHERE kb_search MATCH ? ORDER BY bm25(kb_search)",
-                    (expression,),
-                )
-                for row in rows:
-                    ref = dict(
-                        library_id=item["library_id"],
-                        kind=row["kind"],
-                        id=row["id"],
-                        revision=int(row["revision"]),
-                    )
-                    if (
-                        ref["kind"] == "knowledge"
-                        and page_map.get(ref["id"]) != ref["revision"]
-                    ):
-                        continue
-                    try:
-                        self._authorized(scoped, ref)
-                    except PermissionError:
-                        continue
-                    record, _ = self._record(scoped, ref)
-                    if ref["kind"] == "knowledge" and record["archived"]:
-                        continue
-                    found.append(
-                        dict(
-                            alias=item["alias"],
-                            title=row["title"],
-                            snippet=row["excerpt"],
-                            reference=ref,
-                        )
-                    )
-                    if len(found) == limit:
-                        return found
-        return found
-
-    def rebuild_search_index(self):
-        """Explicitly rebuild derivative FTS data; never runs during startup/read."""
-        self._ensure()
-        item = dict(root=self.root)
-        with self._connection(self.root) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM kb_search")
-            for row in conn.execute("SELECT * FROM kb_revisions"):
-                conn.execute(
-                    "INSERT INTO kb_search(title,body,kind,id,revision) VALUES(?,?,'knowledge',?,?)",
-                    (
-                        row["title"],
-                        self._body(item, row["path"]),
-                        row["id"],
-                        row["revision"],
-                    ),
-                )
-            for row in conn.execute("SELECT * FROM kb_historical"):
-                conn.execute(
-                    "INSERT INTO kb_search(title,body,kind,id,revision) VALUES(?,?,'historical',?,?)",
-                    (
-                        row["id"],
-                        self._body(item, row["path"]),
-                        row["id"],
-                        row["revision"],
-                    ),
-                )
-            for row in conn.execute("SELECT * FROM kb_evidence"):
-                conn.execute(
-                    "INSERT INTO kb_search(title,body,kind,id,revision) VALUES(?,?,'evidence',?,1)",
-                    (row["id"], row["body_json"], row["id"]),
-                )
-            conn.commit()
 
     def _affected(self, manifest, conn=None):
         scoped = self._manifest(manifest)
@@ -749,6 +1017,8 @@ class KnowledgeBase:
             if row["archived"]:
                 continue
             for dep in deps:
+                if dep["kind"] != "knowledge":
+                    continue
                 latest = (
                     maps.get(dep["library_id"], {}).get(dep["id"], 0)
                     if dep["kind"] == "knowledge"
@@ -816,7 +1086,7 @@ class KnowledgeBase:
             needs_review=needs_review,
         )
 
-    def pending(self, *, manifest=None):
+    def pending(self, *, manifest=None, include_content=False):
         self._ensure()
         with self._connection(self.root, readonly=True) as conn:
             conn.execute("BEGIN")
@@ -870,6 +1140,11 @@ class KnowledgeBase:
                     reference=reference,
                     sequence=record["sequence"],
                     source_type=record["source_type"],
+                    **(
+                        {"content": self.read(frozen, "study", reference)}
+                        if include_content
+                        else {}
+                    ),
                 )
             )
         return dict(
@@ -893,6 +1168,9 @@ class KnowledgeBase:
         *,
         manifest=None,
         index_dependencies=None,
+        files=None,
+        remove_paths=(),
+        file_dependencies=None,
         conn=None,
     ):
         """CAS-publish page edits, index and processing progress, or advance progress only.
@@ -914,6 +1192,20 @@ class KnowledgeBase:
             raise ValueError("pages must be a list")
         if index_markdown is not None and not isinstance(index_markdown, str):
             raise ValueError("index_markdown must be text or null")
+        if files is not None and not isinstance(files, dict):
+            raise ValueError("files must map normal relative paths to file contents")
+        file_data = {
+            _file_path(path): _file_data(body) for path, body in (files or {}).items()
+        }
+        if not isinstance(remove_paths, (list, tuple)):
+            raise ValueError("remove_paths must be a list")
+        remove_paths = [_file_path(path) for path in remove_paths]
+        if (
+            len(set(remove_paths)) != len(remove_paths)
+            or set(remove_paths) & file_data.keys()
+        ):
+            raise ValueError("Conflicting or duplicate file edits")
+        file_dependencies = _references(file_dependencies or [])
         normalized = []
         seen = set()
         for page in pages:
@@ -953,6 +1245,12 @@ class KnowledgeBase:
                 index_markdown=index_markdown,
                 processed_through=processed_through,
                 index_dependencies=extra_dependencies,
+                files={
+                    path: {"base64": base64.b64encode(body).decode("ascii")}
+                    for path, body in file_data.items()
+                },
+                remove_paths=remove_paths,
+                file_dependencies=file_dependencies,
             )
         )
         with (
@@ -968,6 +1266,8 @@ class KnowledgeBase:
                     raise ConflictError(
                         "Knowledge commit retry differs from its original request"
                     )
+                if conn is None:
+                    self.refresh_live()
                 return json.loads(prior["receipt_json"])
         if manifest is None:
             manifest = self.freeze(
@@ -982,6 +1282,7 @@ class KnowledgeBase:
                 "Processing progress exceeds the frozen evidence boundary"
             )
         current_map = json.loads(self._snapshot(scoped[main_id])["pages_json"])
+        catalog = self.file_catalog(scoped[main_id])
         for page in normalized:
             if page["id"] in current_map:
                 self._authorized(
@@ -1001,6 +1302,40 @@ class KnowledgeBase:
         extra_dependencies = _references(index_dependencies or [])
         for ref in extra_dependencies:
             self._authorized(scoped, ref)
+        for ref in file_dependencies:
+            self._authorized(scoped, ref)
+        touched = (
+            set(file_data)
+            | set(remove_paths)
+            | {f"pages/{page['id']}.md" for page in normalized}
+        )
+        if index_markdown is not None:
+            touched.add("index.md")
+        for path in set(file_data) | set(remove_paths):
+            if path in catalog:
+                self._authorized(scoped, catalog[path])
+        from .handoff_scope import authorize_publication
+        from .role_access import shared_knowledge_readers
+
+        publication_config = self._config
+        with self._connection(self.root, readonly=True) as reader:
+            if reader.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='control'"
+            ).fetchone():
+                publication_config = json.loads(
+                    reader.execute(
+                        "SELECT config_json FROM control WHERE singleton=1"
+                    ).fetchone()[0]
+                )
+        permission_library = KnowledgeBase(self.root, config=publication_config)
+        readers = shared_knowledge_readers(publication_config)
+        outgoing = [ref for path, ref in catalog.items() if path not in touched]
+        outgoing += [ref for page in normalized for ref in page["dependencies"]]
+        outgoing += extra_dependencies + (
+            file_dependencies if file_data or remove_paths else []
+        )
+        publication_disclosure = self.disclosure(manifest, outgoing)
+        authorize_publication(permission_library, publication_disclosure, readers)
         external = conn is not None
         if external and self.path != self.root / DATABASE:
             raise ValueError(
@@ -1017,6 +1352,9 @@ class KnowledgeBase:
                     raise ConflictError(
                         "Knowledge commit retry differs from its original request"
                     )
+                if not external:
+                    conn.rollback()
+                    self.refresh_live()
                 return json.loads(prior["receipt_json"])
             current = dict(conn.execute("SELECT * FROM kb_library").fetchone())
             if current["version"] != base_version:
@@ -1029,6 +1367,19 @@ class KnowledgeBase:
                 ).fetchone()
             )
             page_map = json.loads(old["pages_json"])
+            file_map = dict(catalog)
+            file_edits = {}
+            for path, data in file_data.items():
+                previous_ref = file_map.get(path)
+                if previous_ref is not None:
+                    previous_row, deps = self._record(scoped, previous_ref)
+                    if (
+                        deps == file_dependencies
+                        and self._bytes(scoped[main_id], previous_row["path"]) == data
+                    ):
+                        continue
+                file_edits[path] = data
+            removed = [path for path in remove_paths if path in file_map]
             # Exact unchanged edits do not create redundant revisions.
             edits = []
             for page in normalized:
@@ -1053,12 +1404,26 @@ class KnowledgeBase:
             )
             changed = bool(
                 edits
+                or file_edits
+                or removed
                 or index_changed
                 or extra_dependencies != json.loads(old["dependencies_json"])
                 and index_dependencies is not None
             )
             version = base_version + int(changed)
             if changed:
+                physical_paths = set(file_map)
+                for page in edits:
+                    path = f"pages/{page['id']}.md"
+                    if page["archived"]:
+                        physical_paths.discard(path)
+                    else:
+                        physical_paths.add(path)
+                if index_markdown is not None:
+                    physical_paths.add("index.md")
+                physical_paths.update(file_edits)
+                physical_paths.difference_update(removed)
+                self._validate_file_paths(physical_paths)
                 prefix = f"versions/{version}-{uuid.uuid4().hex}"
                 for page in edits:
                     revision = page_map.get(page["id"], 0) + 1
@@ -1076,10 +1441,6 @@ class KnowledgeBase:
                             int(page["archived"]),
                         ),
                     )
-                    conn.execute(
-                        "INSERT INTO kb_search(title,body,kind,id,revision) VALUES(?,?,'knowledge',?,?)",
-                        (page["title"], page["markdown"], page["id"], revision),
-                    )
                     conn.executemany(
                         "INSERT INTO kb_dependencies VALUES(?,?,?,?,?,?)",
                         [
@@ -1095,10 +1456,57 @@ class KnowledgeBase:
                         ],
                     )
                     page_map[page["id"]] = revision
+                    physical = f"pages/{page['id']}.md"
+                    if page["archived"]:
+                        file_map.pop(physical, None)
+                    else:
+                        file_map[physical] = dict(
+                            library_id=main_id,
+                            kind="knowledge",
+                            id=page["id"],
+                            revision=revision,
+                        )
                 index_path = old["index_path"]
                 if index_markdown is not None:
                     index_path = f"{prefix}/index.md"
                     _markdown(self.folder / index_path, index_markdown)
+                    file_map["index.md"] = dict(
+                        library_id=main_id,
+                        kind="index",
+                        id="index.md",
+                        revision=version,
+                    )
+                for path, data in file_edits.items():
+                    identity_key = "file:" + path
+                    revision = conn.execute(
+                        "SELECT COALESCE(MAX(revision),0)+1 FROM kb_revisions WHERE id=?",
+                        (identity_key,),
+                    ).fetchone()[0]
+                    stored = f"{prefix}/files/{path}"
+                    _blob(self.folder / stored, data)
+                    conn.execute(
+                        "INSERT INTO kb_revisions VALUES(?,?,?,?,?,?,0)",
+                        (
+                            identity_key,
+                            revision,
+                            version,
+                            path,
+                            stored,
+                            _json(file_dependencies),
+                        ),
+                    )
+                    file_map[path] = dict(
+                        library_id=main_id, kind="file", id=path, revision=revision
+                    )
+                for path in removed:
+                    file_map.pop(path)
+                for path in file_map:
+                    if any(
+                        str(parent) in file_map
+                        for parent in Path(path).parents
+                        if str(parent) != "."
+                    ):
+                        raise ValueError("A published file cannot also be a directory")
                 # All pages contribute to the index's disclosure boundary, even
                 # when the Manager omitted an explicit index reference.
                 dependencies = list(extra_dependencies)
@@ -1112,7 +1520,7 @@ class KnowledgeBase:
                 ]
                 dependencies = list({_json(ref): ref for ref in dependencies}.values())
                 conn.execute(
-                    "INSERT INTO kb_snapshots VALUES(?,?,?,?,?,?)",
+                    "INSERT INTO kb_snapshots VALUES(?,?,?,?,?,?,?)",
                     (
                         version,
                         _json(page_map),
@@ -1120,6 +1528,7 @@ class KnowledgeBase:
                         _json(dependencies),
                         scoped[main_id]["evidence_through"],
                         scoped[main_id]["legacy_through"],
+                        _json(dict(files=file_map, disclosure=publication_disclosure)),
                     ),
                 )
             for affected in self._affected(manifest, conn):
@@ -1137,12 +1546,20 @@ class KnowledgeBase:
                 "UPDATE kb_library SET version=?,processed=?",
                 (version, processed_through),
             )
+            if (
+                changed
+                and conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='kb_live_state'"
+                ).fetchone()
+            ):
+                conn.execute("UPDATE kb_live_state SET dirty=1 WHERE singleton=1")
             conn.execute(
                 "INSERT INTO kb_commits VALUES(?,?,?)",
                 (request_id, identity, _json(receipt)),
             )
             if not external:
                 conn.commit()
+                self.refresh_live()
             return receipt
 
     def reverse_references(self, reference):
@@ -1238,10 +1655,6 @@ class KnowledgeBase:
                         path,
                         _json(metadata),
                     ),
-                )
-                conn.execute(
-                    "INSERT INTO kb_search(title,body,kind,id,revision) VALUES(?,?,'historical',?,?)",
-                    (row["id"], "\n".join(lines), row["id"], row["revision"]),
                 )
                 imported.append(
                     dict(

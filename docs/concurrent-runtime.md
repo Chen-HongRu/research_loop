@@ -1,6 +1,6 @@
 # Concurrent runtime
 
-For native Pi role grants, per-request budgets, Markdown maintenance and the
+For native Pi role grants, per-request budgets, Knowledge file maintenance and the
 read-only invocation preview, see [Study knowledge](study-knowledge.md).
 
 The concurrent coordinator runs on new, isolated SQLite schema 8 Studies through
@@ -110,6 +110,40 @@ publication as distinct facts. `events STUDY --consumer NAME` and `ack-event`
 provide durable outbox consumption and acknowledgement; no agent wakeup consumer
 or automatic follow-up is installed.
 
+For each actually dispatched Agent call, the optional SQLite
+`invocation_knowledge` record stores `start_version` immediately before dispatch
+and `end_version` at the first terminal observation. Both read the activated file publication.
+Result acceptance links the structured output and its explicit citations without changing
+the observation time. A Manager's own publication can therefore follow its end version.
+These bounds do not identify specific reads. The runtime does not save tool-read receipts.
+Existing schema-8 Studies need no conversion: missing historical records stay
+unknown and read-only inspection does not create or infer them.
+
+`status` returns each attempt's `knowledge_endpoints.start_version` and
+`end_version`, `task_id`, `iteration_id`, `dispatch.invocation_id`,
+`accepted_output_ref` and `explicit_citation_count`. The private `context` command returns
+the explicit `decision_refs`; `--expand` also reads the accepted structured output.
+Missing endpoints are `null` with an explicit unrecorded explanation; the dashboard
+shows `Not recorded`. The top-level `knowledge` object separates `sql_version`
+from `live_version` and reports `publication_pending`. A committed Manager result
+remains accepted if native directory publication needs recovery; the next live
+open retries publication. A pending SQL version is not reported as active live
+content. Raw model transcripts and private source bodies remain excluded.
+
+```sh
+research-loop runtime context /path/to/study ATTEMPT_ID
+research-loop runtime knowledge-read /path/to/study ATTEMPT_ID K1 --version 3
+research-loop runtime knowledge-read /path/to/study ATTEMPT_ID --reference '{"library_id":"example","kind":"knowledge","id":"K1","revision":2}' --with-sources
+```
+
+`context` reports the bound input and endpoint metadata; `--expand` reveals the
+private model-visible content and retained trace location. `knowledge-read`
+browses a requested published version or exact revision within that historical
+role's authorized library entries. It does not reconstruct what the invocation
+actually read. For Live Knowledge calls, pass `--version` with a file path or
+`--reference` with a fixed record. With `--alias`, the version belongs to the
+selected library.
+
 Run the synthetic CLI demonstration with:
 
 ```sh
@@ -171,8 +205,9 @@ retired, not redispatched; ambiguous submit outcomes do not trigger resubmission
 A new owner can reconcile the exact recorded completion of an earlier owner after
 its worker retires, subject to identity and revision checks. Failed Review is
 retried only by an explicit `DispatchLedger.retry_phase` request with its current
-revision, reason, proof reference and request ID; the frozen Review input is
-reused. This does not retry Execute or submit a new operation.
+revision, reason, proof reference and request ID; the protected Review control
+input is reused. Native knowledge directory entries remain live across the retry.
+This does not retry Execute or submit a new operation.
 If positive `not_started` proof establishes that the failed Review never bound a
 context, the retry selects its first context normally. A retry reserves a new
 call and preserves the original attempt and budget charges.

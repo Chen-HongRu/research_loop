@@ -8,7 +8,10 @@ context, while Python validators enforce evidence and execution constraints.
 This application uses the [shared Pi runtime](../native_runtime/README.md)
 for the six research roles and Knowledge Manager. Script Plan and Execute have
 their own [definitions](roles/). See [Study knowledge](../../docs/study-knowledge.md)
-for role configuration and call previews. It adds typed,
+for authorized live read directories, Manager drafts, fixed citations and decision version ranges.
+Ordinary Pi reads can observe a newer publication while Plan, Execute or Review is running.
+Execute still checks the approved scientific contract and operation identities. Host isolation
+and supported provider profiles are specified in the native application README. This application adds typed,
 bounded script operations to the SQLite runtime. It contains no scientific task,
 metric, dataset, model architecture or deployment defaults. Installing a Pi
 network extension does not enable it here: calls retain `--no-extensions`,

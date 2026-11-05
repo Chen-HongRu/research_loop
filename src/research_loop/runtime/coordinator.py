@@ -148,6 +148,7 @@ class ConcurrentCoordinator:
                 {key: run[key] for key in ("kind", "input_ref", "deadline")},
             )
         else:
+            self.ledger.record_start(run["token"])
             observation = self.invoker.launch(
                 run["token"], run["kind"], run["input_ref"], run["deadline"]
             )
@@ -452,23 +453,27 @@ class ConcurrentCoordinator:
             if self.prepare_agent is not None:
                 config = self.owner.snapshot()["config"]
                 record = self.owner._feedback_snapshot(call.to_dict())
-                if record["planning"]:
-                    planning = record["planning"]
-                    frozen_round = self.updater._read_record(
-                        planning["snapshot_ref"], planning["identity"]
-                    )
-                    payload["planning_libraries"] = frozen_round.get(
-                        "knowledge_libraries"
-                    )
                 prior = record.get("retry")
                 historical = None
                 if prior and prior["source_context_ref"]:
                     from .call_context import dispatched_input
+                    from .handoff_scope import attempt_dependencies
+                    from .knowledge import KnowledgeBase
 
+                    # A pre-assembly native call cannot be safely reconstructed
+                    # with today's grants or treated as an unrestricted input.
+                    attempt_dependencies(
+                        self.owner.store,
+                        prior["source_attempt_id"],
+                        KnowledgeBase(self.owner.store.root).library_id,
+                    )
                     historical = dispatched_input(
                         self.owner.store, prior["source_attempt_id"]
                     ).get("assembly")
                 if historical:
+                    from .handoff_scope import require_bound_assembly
+
+                    require_bound_assembly(historical)
                     # The scientific inputs, tools and read capabilities of a
                     # retried Review stay bound to the original call.
                     historical["context_ref"] = context_ref
@@ -477,10 +482,9 @@ class ConcurrentCoordinator:
                     payload["assembly"] = self.prepare_agent(
                         payload, study_config=config, study_root=self.owner.store.root
                     )
-                payload.pop("planning_libraries", None)
                 payload["knowledge_config"] = {
                     key: config[key]
-                    for key in ("knowledge_libraries", "role_access")
+                    for key in ("knowledge_libraries", "role_access", "context_sources")
                     if key in config
                 }
                 payload["request_budget"] = {

@@ -1,5 +1,6 @@
-"""Derived input disclosures stay within the originating grants, including peers."""
+"""Private inputs stay in SQL; whole-library publication never widens authority."""
 
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -9,7 +10,12 @@ from unittest.mock import patch
 from research_loop.runtime.knowledge import KnowledgeBase
 from research_loop.runtime.knowledge_manager import EvidenceIntake, commit_maintenance
 from research_loop.runtime.role_access import ROLES
-from research_loop.runtime.source_scope import freeze_source_scope, source_reference
+from research_loop.runtime.source_scope import (
+    derived_dependencies,
+    freeze_source_scope,
+    input_dependencies,
+    source_reference,
+)
 from research_loop.runtime.store import StateStore
 
 
@@ -25,6 +31,7 @@ def source(name, roles, identity):
 
 def assembly(source_entry, scope, libraries, **inputs):
     return dict(
+        version=2,
         role="knowledge_manager",
         inputs={"provided:private": {"text": "secretword"}, **inputs},
         input_sources=[
@@ -38,6 +45,9 @@ def assembly(source_entry, scope, libraries, **inputs):
         ],
         source_scope=scope,
         knowledge_libraries=libraries,
+        maintenance_libraries=libraries,
+        knowledge_dependencies=[],
+        inherited_dependencies=[],
     )
 
 
@@ -62,7 +72,7 @@ class SourceScopeTests(unittest.TestCase):
             self.store.root, config=self.config, source_scope=self.scope
         )
 
-    def test_scout_observation_inherits_uncited_direct_input(self):
+    def test_uncited_direct_input_stays_private_in_evidence(self):
         packet = {"assembly": assembly(self.private, self.scope, self.manifest)}
         observation = {"kind": "external", "statement": "secretword", "source_refs": []}
         intake = EvidenceIntake(SimpleNamespace(store=self.store))
@@ -71,34 +81,33 @@ class SourceScopeTests(unittest.TestCase):
             "dispatch": packet,
         }
         intake.reader = SimpleNamespace(_read_record=lambda ref, identity: records[ref])
-        with patch(
-            "research_loop.runtime.knowledge_manager.consulted_refs", return_value=[]
-        ):
-            intake._ingest(
-                dict(
-                    id=1,
-                    payload_ref="result",
-                    identity={},
-                    input_ref="dispatch",
-                    input_identity={},
-                    role="scout",
-                    attempt_id="scout-call",
-                )
+        intake._ingest(
+            dict(
+                id=1,
+                payload_ref="result",
+                identity={},
+                input_ref="dispatch",
+                input_identity={},
+                role="scout",
+                attempt_id="scout-call",
             )
+        )
         manifest = self.kb.freeze()
-        denied = KnowledgeBase(self.store.root)
-        self.assertEqual(denied.search(manifest, "secretword"), [])
         with self.assertRaises(PermissionError):
-            denied.read(manifest, "study", "observation-1-0")
-        self.assertTrue(denied.pending(manifest=manifest)["blocked_by_scope"])
+            KnowledgeBase(self.store.root).read(manifest, "study", "observation-1-0")
         record = self.writer().read(manifest, "study", "observation-1-0")
         self.assertIn(self.private_ref, record["source_refs"])
-        self.assertEqual(record["content"], observation)
-        with self.assertRaises(PermissionError):
-            self.writer().read(manifest, "study", self.private_ref)
+        current = Path(self.kb.live(["study"], role="plan")["entries"][0]["path"])
+        self.assertEqual(list((current / "files").iterdir()), [])
+        self.assertNotIn(
+            "secretword",
+            "\n".join(
+                path.read_text() for path in current.rglob("*") if path.is_file()
+            ),
+        )
 
-    def test_manager_direct_input_taints_pages_and_index_without_tool_reads(self):
-        self.kb.publish_evidence("trigger", "synthetic", "Public trigger")
+    def test_manager_uncited_private_input_rejects_shared_file_before_commit(self):
+        self.kb.publish_evidence("trigger", "synthetic", "trigger")
         manifest = self.kb.freeze()
         bound = assembly(
             self.private,
@@ -112,75 +121,48 @@ class SourceScopeTests(unittest.TestCase):
             ),
         )
         output = dict(
-            pages=[
-                dict(
-                    id="secret-page",
-                    title="secretword title",
-                    markdown="secretword body",
-                    dependencies=[],
-                )
-            ],
-            index_markdown="# secretword index",
+            files={"notes/rough.txt": "secretword"},
+            remove_paths=[],
             processed_through=1,
         )
         with self.store._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            with (
-                patch(
-                    "research_loop.runtime.knowledge_manager.dispatched_input",
-                    return_value={"assembly": bound, "knowledge_config": self.config},
-                ),
-                patch(
-                    "research_loop.runtime.knowledge_manager.consulted_refs",
-                    return_value=[],
-                ),
+            with patch(
+                "research_loop.runtime.knowledge_manager.dispatched_input",
+                return_value={"assembly": bound, "knowledge_config": self.config},
             ):
-                commit_maintenance(
-                    SimpleNamespace(store=self.store),
-                    conn,
-                    SimpleNamespace(attempt_id="manager-call"),
-                    output,
-                )
-            conn.commit()
-        frozen = self.kb.freeze()
-        denied = KnowledgeBase(self.store.root)
-        self.assertEqual(denied.search(frozen, "secretword"), [])
-        self.assertNotIn("secretword", denied.read_index(frozen))
-        self.assertNotIn("secret-page", denied.read_index(frozen))
-        with self.assertRaises(PermissionError):
-            denied.read(frozen, "study", "secret-page")
-        self.assertEqual(self.writer().read_index(frozen), "# secretword index")
-        self.assertEqual(
-            self.writer().read(frozen, "study", "secret-page"), "secretword body"
+                with self.assertRaises(PermissionError):
+                    commit_maintenance(
+                        SimpleNamespace(store=self.store),
+                        conn,
+                        SimpleNamespace(attempt_id="manager-call"),
+                        output,
+                    )
+            conn.rollback()
+        self.assertEqual(self.kb.head(), 0)
+        self.assertEqual(self.kb.status()["processed_through"], 0)
+        self.assertFalse(
+            self.store.root.joinpath(
+                "knowledge/published/current/files/notes/rough.txt"
+            ).exists()
         )
 
-    def test_peer_mount_permits_only_universally_authorized_sources(self):
+    def test_peer_grant_widening_does_not_expand_old_reference_authority(self):
         public_ref = source_reference(self.kb.library_id, self.public)
         private = self.kb.publish_evidence(
-            "restricted", "scout", "secretword", source_refs=[self.private_ref]
+            "private", "scout", "secretword", source_refs=[self.private_ref]
         )
-        public = self.kb.publish_evidence(
-            "shareable", "scout", "publicword", source_refs=[public_ref]
+        self.kb.publish_evidence(
+            "public", "scout", "publicword", source_refs=[public_ref]
         )
         self.writer().commit(
             0,
-            [
-                dict(
-                    id="restricted-page",
-                    title="secretword title",
-                    markdown="secretword",
-                    dependencies=[private],
-                ),
-                dict(
-                    id="public-page",
-                    title="publicword title",
-                    markdown="publicword",
-                    dependencies=[public],
-                ),
-            ],
-            "# secretword custom index",
+            [],
+            None,
             2,
-            "origin",
+            "public",
+            files={"public.txt": "publicword"},
+            file_dependencies=[public_ref],
         )
         config = {
             "knowledge_libraries": [
@@ -188,36 +170,81 @@ class SourceScopeTests(unittest.TestCase):
             ]
         }
         consumer = KnowledgeBase(self.root / "consumer", config=config)
-        frozen = consumer.freeze(aliases=["origin"])
-        scoped = freeze_source_scope(consumer, config, "plan", frozen)
-        self.assertEqual(scoped, [public_ref])
-        reader = KnowledgeBase(consumer.root, config=config, source_scope=scoped)
-        self.assertEqual(reader.search(frozen, "secretword"), [])
-        self.assertEqual(len(reader.search(frozen, "publicword")), 2)
-        self.assertNotIn("secretword", reader.read_index(frozen, "origin"))
-        self.assertEqual(reader.read(frozen, "origin", "public-page"), "publicword")
-        self.assertIn("public-page", reader.read_index(frozen, "origin"))
-        with self.assertRaises(PermissionError):
-            reader.read(frozen, "origin", "restricted-page")
-        # The sources intentionally do not exist: metadata grants never open them.
-        self.assertFalse((self.store.root / self.private["ref"]).exists())
-
-    def test_role_access_narrowing_and_omitted_inputs(self):
-        config = self.config | {
-            "role_access": {"knowledge_manager": {"context_sources": []}}
+        live = consumer.live(["origin"], role="plan")
+        old_scope = live["source_scope"]
+        self.assertEqual(old_scope, [public_ref])
+        widened = {
+            "context_sources": [dict(self.private, roles=sorted(ROLES)), self.public]
         }
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE control SET config_json=? WHERE singleton=1",
+                (json.dumps(widened),),
+            )
+        for scope in (old_scope, []):
+            old_call = KnowledgeBase(consumer.root, config=config, source_scope=scope)
+            with self.assertRaises(PermissionError):
+                old_call.authorize_reference(
+                    private, aliases=["origin"], role="plan", bindings=live["entries"]
+                )
+        fresh = KnowledgeBase(consumer.root, config=config)
         self.assertEqual(
-            freeze_source_scope(self.kb, config, "knowledge_manager", self.manifest), []
+            fresh.authorize_reference(
+                private, aliases=["origin"], role="plan", bindings=live["entries"]
+            ),
+            private,
         )
-        from research_loop.runtime.source_scope import input_dependencies
 
+    def test_private_peer_dependency_cannot_be_paraphrased_into_shared_root(self):
+        peer = KnowledgeBase(self.root / "peer")
+        peer.commit(
+            0, [], None, 0, "peer", files={"private.txt": "uncited private peer"}
+        )
+        config = {
+            "knowledge_libraries": [dict(alias="peer", path=str(peer.root), version=1)]
+        }
+        self.kb.configure(config)
+        manifest = self.kb.freeze(aliases=["study", "peer"])
+        reference = peer.file_catalog(peer._manifest(peer.freeze())[peer.library_id])[
+            "private.txt"
+        ]
+        disclosure = self.kb.disclosure(manifest, [reference])
+        self.assertEqual(
+            disclosure,
+            [
+                dict(
+                    library_id=peer.library_id, kind="library", id="library", revision=1
+                )
+            ],
+        )
+        with self.assertRaises(PermissionError):
+            self.kb.commit(
+                0,
+                [],
+                None,
+                0,
+                "paraphrase",
+                files={"summary.txt": "uncited private peer"},
+                file_dependencies=disclosure,
+                manifest=manifest,
+            )
+        self.assertEqual(self.kb.head(), 0)
+
+    def test_direct_input_and_whole_base_grants_are_retained_without_citations(self):
+        live = self.kb.live(["study"], role="scout")
+        same = self.kb.live(["study"], role="plan")
+        self.assertEqual(live["entries"][0]["path"], same["entries"][0]["path"])
         bound = assembly(self.private, self.scope, self.manifest)
-        bound["input_sources"][0]["disposition"] = "omitted"
-        self.assertEqual(input_dependencies(bound, self.kb.library_id), [])
-        bound["input_sources"][0]["disposition"] = "provided"
+        bound["knowledge_dependencies"] = live["references"]
+        deps = derived_dependencies(bound, self.kb.library_id)
+        self.assertIn(self.private_ref, deps)
+        self.assertIn(live["references"][0], deps)
+        bound["input_sources"][0]["allow_feedback"] = False
         self.assertEqual(
             input_dependencies(bound, self.kb.library_id), [self.private_ref]
         )
+        bound["input_sources"][0]["disposition"] = "omitted"
+        self.assertEqual(input_dependencies(bound, self.kb.library_id), [])
 
 
 if __name__ == "__main__":

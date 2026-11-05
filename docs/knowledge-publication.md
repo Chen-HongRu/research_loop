@@ -1,14 +1,20 @@
 # Knowledge publication
 
 For native role calls the coordinator publishes Scout and Review observations as
-Evidence. Knowledge Manager owns Markdown revisions and the Index. Existing
-publications have a read-only Markdown representation. See [Study knowledge](study-knowledge.md).
-The ledger described below continues to govern measurement identity and eligibility.
+Evidence. Knowledge Manager maintains the directory of published files, including any Index. Each role
+uses an authorized live directory, including during planning and after task
+claiming. Publishing a new library version changes subsequent reads without
+rebinding a role's protected control input. Existing publications have a read-only
+Markdown representation. See [Study knowledge](study-knowledge.md).
+The generic Publisher ledger described below continues to govern measurement
+identity, eligibility and its optional frozen research/Frontier projections. Its
+publication sequence is distinct from the Study library's `kb_library.version`.
 
 This is stage 3 of [#77](https://github.com/Chen-HongRu/research_loop/issues/77),
 available through Python APIs on new SQLite Studies. The serial CLI retains its
-existing document format. [Planning](task-planning.md) consumes its frozen knowledge
-and publication events. SQLite schema 8 also supports operation-bound evaluator
+existing document format. [Planning](task-planning.md) consumes its publication
+events and can select a frozen Publisher projection; native Study libraries
+remain live. SQLite schema 8 also supports operation-bound evaluator
 intake through the [backend lifecycle APIs](backend-lifecycle.md). A new SQLite
 CLI and dashboard are available; [explicit migration](runtime-migration.md) and
 versioned deployment require operator evidence.
@@ -118,7 +124,7 @@ Each knowledge entry has exactly:
 | `kind` | `external`, `local_measurement` or `interpretation`; revisions cannot change kind |
 | `statement` | Nonblank attributed claim or observation |
 | `conditions` | Nonempty list of explicit applicability conditions |
-| `source_refs` | Accepted local evidence references or HTTP(S) source URLs without credentials |
+| `source_refs` | Accepted local artifact/fixed `kb:` evidence references or HTTP(S) source URLs without credentials |
 | `measurement_ids` | Registered measurements; their receipts must be accepted evidence |
 | `interpretation` | Separate text; empty is permitted |
 | `limitations` | Nonempty list of explicit uncertainties or limitations |
@@ -142,15 +148,16 @@ Corrections only append eligibility decisions; they never alter metrics,
 artifact versions, evaluator identity or evaluation definitions. A separate
 qualitative investigation can review historical eligibility without retraining.
 
-The predecessor revision must have been visible at the call's frozen knowledge
-version and must still be current. Guessing a newer revision cannot overwrite a
+For these Publisher ledger entries, the predecessor revision must have been
+visible at the call's frozen Publisher projection version and must still be
+current. Guessing a newer revision cannot overwrite a
 decision the caller did not observe. Typed historical `measurement_ids` also need
 eligibility visible at that frozen version; the current Review's own measurements
 are the explicit exception. A receipt present in the evidence allowlist alone
 does not imply published historical eligibility.
 
-Target revision, kind or frozen-provenance conflicts become durable records while independent entries
-in the same publication may append. Conflict records identify the payload array
+Publisher target revision, kind or frozen-projection provenance conflicts become
+durable records while independent entries in the same publication may append. Conflict records identify the payload array
 (`knowledge`, `reviews`, `corrections`), index, expected/actual revision and reason.
 They preserve rejected requests for later resolution; they are not accepted
 knowledge. Publication sequence is independent of iteration identity. An exact
@@ -167,6 +174,9 @@ from research_loop.runtime.projections import ProjectionWriter
 
 pointer = ProjectionWriter(owner).rebuild()
 ```
+
+These are generic Publisher views, separate from the native live Study
+library and its publication pointer.
 
 `build_views(snapshot, global_evaluation)` and
 `render_research(snapshot, publication_payloads)` in `runtime.publication_views`

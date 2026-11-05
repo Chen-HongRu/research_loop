@@ -1,4 +1,4 @@
-"""Fenced per-provider-request reservations and immutable retrieval receipts.
+"""Fenced per-provider-request reservations and explicit decision references.
 
 The attempt's existing reservation pays for ordinal one. Every later provider
 request consumes another Study call before network admission, across processes.
@@ -9,8 +9,6 @@ from pathlib import Path
 import sqlite3
 import time
 
-from .files import publish_artifact
-from .invocations import _identity
 from .store import BudgetExceeded, ConflictError, DATABASE, OwnershipError
 
 
@@ -89,48 +87,6 @@ def reserve_request(capability, ordinal, *, now=None):
         )
 
 
-def record_retrieval(capability, name, arguments, result):
-    """Publish an authorized successful read and bind its identity to this attempt."""
-    with _connect(capability["study_root"]) as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        _fence(connection, capability, time.time())
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS model_retrievals (attempt_id TEXT NOT NULL, "
-            "artifact_ref TEXT PRIMARY KEY, identity_json TEXT NOT NULL)"
-        )
-        reference = publish_artifact(
-            Path(capability["study_root"]),
-            {
-                "attempt_id": capability["attempt_id"],
-                "tool": name,
-                "arguments": arguments,
-                "result": result,
-            },
-        )
-        identity = _identity(capability["study_root"], reference)
-        connection.execute(
-            "INSERT INTO model_retrievals VALUES(?,?,?)",
-            (capability["attempt_id"], reference, json.dumps(identity)),
-        )
-        return reference
-
-
-def retrieved_evidence(root, attempt_id):
-    """Return recorded immutable identities; readers still check current metadata."""
-    with _connect(root) as connection:
-        if not connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_retrievals'"
-        ).fetchone():
-            return {}
-        return {
-            row["artifact_ref"]: json.loads(row["identity_json"])
-            for row in connection.execute(
-                "SELECT artifact_ref,identity_json FROM model_retrievals WHERE attempt_id=?",
-                (attempt_id,),
-            )
-        }
-
-
 def check_active(capability):
     """Fence tool execution and terminal submission without charging another call."""
     with _connect(capability["study_root"]) as connection:
@@ -164,39 +120,33 @@ def call_trace(root, attempt_id):
         return row["directory"] if row else None
 
 
-def record_consulted(capability, references):
-    """Retain typed knowledge dependencies disclosed by a successful tool result."""
+def parse_decision_reference(value):
+    """Decode a worker's explicit fixed citation, never a tool-read receipt."""
     from .knowledge import _reference
 
-    if not isinstance(references, (list, tuple)):
-        raise ValueError("Consulted references must be typed knowledge references")
-    references = [
-        json.dumps(_reference(reference), sort_keys=True, allow_nan=False)
-        for reference in references
-    ]
-    with _connect(capability["study_root"]) as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        _fence(connection, capability, time.time())
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS model_consulted (attempt_id TEXT NOT NULL, reference TEXT NOT NULL, PRIMARY KEY(attempt_id,reference))"
+    if not isinstance(value, str) or not value.startswith("kb:"):
+        raise ValueError("Expected a fixed kb: decision reference")
+    try:
+        _, library_id, kind, tail = value.split(":", 3)
+        identity, revision = tail.rsplit("@", 1)
+        if kind not in {"evidence", "knowledge", "historical", "index", "file"}:
+            raise ValueError("Unsupported decision reference kind")
+        if not revision.isdecimal():
+            raise ValueError("Decision reference revision must be an integer")
+        return _reference(
+            dict(library_id=library_id, kind=kind, id=identity, revision=int(revision))
         )
-        connection.executemany(
-            "INSERT OR IGNORE INTO model_consulted VALUES(?,?)",
-            [(capability["attempt_id"], reference) for reference in references],
-        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("Expected kb:<library_id>:<kind>:<id>@<revision>") from error
 
 
-def consulted_refs(root, attempt_id):
-    """Return disclosed fixed references without rereading the private transcript."""
-    with _connect(root) as connection:
-        if not connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_consulted'"
-        ).fetchone():
-            return []
-        return [
-            json.loads(row["reference"])
-            for row in connection.execute(
-                "SELECT reference FROM model_consulted WHERE attempt_id=? ORDER BY reference",
-                (attempt_id,),
-            )
-        ]
+def format_decision_reference(reference):
+    """Encode a fixed citation for the existing evidence_refs output field."""
+    from .knowledge import _reference
+
+    ref = _reference(reference)
+    if ref["kind"] not in {"evidence", "knowledge", "historical", "index", "file"}:
+        raise ValueError("Unsupported decision reference kind")
+    if ":" in ref["library_id"]:
+        raise ValueError("Decision reference library ID cannot contain a colon")
+    return f"kb:{ref['library_id']}:{ref['kind']}:{ref['id']}@{ref['revision']}"

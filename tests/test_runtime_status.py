@@ -126,6 +126,35 @@ class StatusFixture:
 
 
 class RuntimeStatusTests(StatusFixture, unittest.TestCase):
+    def test_schema_eight_without_endpoint_records_remains_readonly_and_unknown(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from research_loop.runtime.cli import main
+
+        self.trial("historical")
+        with self.store._connection(readonly=True) as conn:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='invocation_knowledge'"
+                ).fetchone()
+            )
+        stream = StringIO()
+        with redirect_stdout(stream):
+            self.assertEqual(main(["status", str(self.root)]), 0)
+        snapshot = json.loads(stream.getvalue())
+        self.assertEqual(snapshot["schema_version"], 8)
+        for attempt in snapshot["attempts"]:
+            self.assertIsNone(attempt["knowledge_endpoints"]["start_version"])
+            self.assertIsNone(attempt["knowledge_endpoints"]["end_version"])
+            self.assertIn("not recorded", attempt["knowledge_endpoints"]["meaning"])
+        with self.store._connection(readonly=True) as conn:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='invocation_knowledge'"
+                ).fetchone()
+            )
+
     def test_no_owner_mutation_artifact_reads_or_private_fields(self):
         self.reviewed("published", publish=True)
         self.owner.create_task("queued", {"instruction": "PRIVATE_REQUIREMENT"})
@@ -150,7 +179,6 @@ class RuntimeStatusTests(StatusFixture, unittest.TestCase):
             "worker_token",
             "specification",
             "config",
-            "output_ref",
             "context_ref",
             "submission_token",
             "failure_reason",

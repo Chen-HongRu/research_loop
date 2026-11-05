@@ -109,18 +109,6 @@ class PlanningLedger:
             RoleAccess.resolve(config, role).published_history
             for role in ("advocate", "judge")
         )
-        if config.get("runtime", {}).get("worker_adapter", {}).get("id") in {
-            "native-runtime-v1",
-            "native-script-runtime-v1",
-        }:
-            from .knowledge import KnowledgeBase
-
-            aliases = ["study"] + [
-                entry["alias"] for entry in config.get("knowledge_libraries", [])
-            ]
-            snapshot["knowledge_libraries"] = KnowledgeBase(
-                self.owner.store.root, config=config
-            ).freeze(config, aliases)
         publications = {
             row["id"]: self.reader._read_record(row["payload_ref"], row["identity"])[
                 "normalized_output"

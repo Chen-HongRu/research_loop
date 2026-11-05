@@ -1,17 +1,18 @@
 """Role declarations, frozen inputs, grants and previews without model calls."""
 
-from copy import deepcopy
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from integrations.native_runtime import application, policy, role_tools
+from integrations.native_runtime import application, policy
+from research_loop.runtime.call_context import read_at_call
 from research_loop.runtime.context import ContextSnapshot, build_context
 from research_loop.runtime.knowledge import KnowledgeBase
 from research_loop.runtime.role_access import RoleAccess
 from research_loop.runtime.role_assembly import preview_assembly
+from research_loop.runtime.store import StateStore
 
 
 class RoleAssemblyTests(unittest.TestCase):
@@ -95,7 +96,7 @@ class RoleAssemblyTests(unittest.TestCase):
             )
             self.assertEqual(
                 assembly["response_schema"],
-                assembly["tools"]["submit_result"]["parameters"],
+                json.loads(assembly["prompt"].split("satisfy this JSON schema:\n")[-1]),
             )
             self.assertIn(assembly["instructions"], assembly["prompt"])
             self.assertEqual(assembly["knowledge_libraries"][0]["alias"], "study")
@@ -178,7 +179,7 @@ class RoleAssemblyTests(unittest.TestCase):
         config["role_definitions"] = {
             "plan": {
                 "knowledge_bases": ["study", "literature"],
-                "tools": ["read_index", "read", "submit_result"],
+                "tools": ["read", "submit_result"],
             }
         }
         new = self.prepare(config=config)
@@ -186,29 +187,21 @@ class RoleAssemblyTests(unittest.TestCase):
             [entry["alias"] for entry in new["knowledge_libraries"]],
             ["study", "literature"],
         )
-        self.assertNotIn("search", new["tools"])
+        self.assertNotIn("grep", new["tools"])
         self.assertEqual(
             [entry["alias"] for entry in old["knowledge_libraries"]], ["study"]
         )
-        invoke, _ = role_tools.handler(new, study_root=self.root, config=config)
-        with self.assertRaisesRegex(ValueError, "frozen role grant"):
-            invoke("search", {"query": "synthetic"})
         serialized = json.dumps(preview_assembly(old))
         self.assertNotIn("Public synthetic sources", serialized)
-        self.assertNotIn(str(self.root), json.dumps(new))
+        self.assertNotIn(str(self.root), json.dumps(preview_assembly(new, expand=True)))
 
-    def test_frozen_planning_libraries_scoped_before_prompt(self):
-        library = KnowledgeBase(self.root)
-        manifests = library.freeze()
-        hidden = deepcopy(manifests[0])
-        hidden.update(alias="hidden", description="Hidden private description")
-        payload = self.payload()
-        payload["planning_libraries"] = [*manifests, hidden]
-        assembly = self.prepare(payload)
-        self.assertNotIn("Hidden private description", assembly["prompt"])
-        self.assertNotIn(
-            "Hidden private description", json.dumps(preview_assembly(assembly))
-        )
+    def test_ordinary_grant_names_live_library_without_pinning_a_revision(self):
+        assembly = self.prepare()
+        self.assertEqual(assembly["knowledge_libraries"][0]["path"], "knowledge/study")
+        self.assertNotIn("version", assembly["knowledge_libraries"][0])
+        self.assertNotIn("maintenance_libraries", assembly)
+        self.assertNotIn("history", assembly)
+        self.assertNotIn("filesystem", preview_assembly(assembly, expand=True))
 
     def test_preview_and_real_transport_share_frozen_prompt_schema_and_tools(self):
         payload = self.payload()
@@ -247,53 +240,33 @@ class RoleAssemblyTests(unittest.TestCase):
         config["role_access"] = {"plan": {"published_history": False}}
         self.assertFalse(RoleAccess.resolve(config, "plan").published_history)
 
-    def test_retrieved_receipt_is_accepted_only_from_successful_read_history(self):
+    def test_explicit_citation_resolves_fixed_record_without_a_read_receipt(self):
+        kb = KnowledgeBase(self.root)
+        kb.publish_evidence("E1", "external", {"value": 3})
         payload = self.payload()
-        assembly = self.prepare(payload)
         payload.update(
-            assembly=assembly,
+            assembly=self.prepare(payload),
             request_budget={"study_root": str(self.root)},
             knowledge_config={},
         )
-        reference = "artifacts/retrieved.json"
+        ref = f"kb:{kb.library_id}:evidence:E1@1"
         response = {
             "output": {
                 "timeout_seconds": 10,
                 "local_evaluation": None,
-                "experiment_definition": "Synthetic retrieval",
+                "experiment_definition": "Synthetic reference.",
             },
-            "evidence_refs": [reference],
+            "evidence_refs": [ref],
         }
-
-        def run(*args, **kwargs):
-            kwargs["history"].append(
-                {
-                    "event": "success",
-                    "request": {"name": "read", "args": {}},
-                    "result": {"evidence_ref": reference},
-                }
-            )
-            return response
-
-        with patch("integrations.native_runtime.transport.run", side_effect=run):
+        with patch("integrations.native_runtime.transport.run", return_value=response):
             self.assertEqual(
                 application.invoke("agent", payload, self.config)["evidence_refs"],
-                [reference],
+                [ref],
             )
-
-        def rejected(*args, **kwargs):
-            kwargs["history"].append(
-                {
-                    "event": "failure",
-                    "request": {"name": "read"},
-                    "result": {"evidence_ref": reference},
-                }
-            )
-            return response
-
+        response["evidence_refs"] = [f"kb:{kb.library_id}:evidence:missing@1"]
         with (
-            patch("integrations.native_runtime.transport.run", side_effect=rejected),
-            self.assertRaisesRegex(ValueError, "outside the bound manifest"),
+            patch("integrations.native_runtime.transport.run", return_value=response),
+            self.assertRaises((ValueError, PermissionError)),
         ):
             application.invoke("agent", payload, self.config)
 
@@ -329,41 +302,81 @@ class RoleAssemblyTests(unittest.TestCase):
         ):
             application.invoke("agent", payload, self.config)
 
-    def test_retrieved_page_receipt_contains_canonical_fixed_revision(self):
-        library = KnowledgeBase(self.root)
-        manifests = library.freeze()
-        evidence = library.publish_evidence(
-            "e1", "external", {"observation": "Synthetic"}
-        )
-        manifest = library.freeze()
-        library.commit(
-            base_version=0,
-            pages=[
-                {
-                    "id": "k1",
-                    "title": "Synthetic page",
-                    "markdown": "Synthetic knowledge",
-                    "dependencies": [evidence],
-                }
+    def test_page_bytes_and_its_fixed_citation_are_independent(self):
+        kb = KnowledgeBase(self.root)
+        kb.commit(
+            0,
+            [
+                dict(
+                    id="k1",
+                    title="Synthetic",
+                    markdown="Synthetic knowledge",
+                    dependencies=[],
+                )
             ],
-            index_markdown="# Synthetic Index\n",
-            processed_through=1,
-            request_id="synthetic",
-            manifest=manifest,
+            "# Index",
+            0,
+            "citation",
         )
-        assembly = self.prepare()
-        invoke, _ = role_tools.handler(assembly, study_root=self.root, config={})
-        result = invoke("read", {"alias": "study", "path": "k1"})
+        directory = Path(self.prepare()["filesystem"]["mounts"]["study"])
         self.assertEqual(
-            result["fixed_ref"],
-            {
-                "library_id": manifests[0]["library_id"],
-                "kind": "knowledge",
-                "id": "k1",
-                "revision": 1,
-            },
+            (directory / "files/pages/k1.md").read_text(), "Synthetic knowledge"
         )
-        self.assertEqual(result["content"], "Synthetic knowledge")
+        self.assertIn(
+            f"kb:{kb.library_id}:knowledge:k1@1",
+            (directory / "revisions.json").read_text(),
+        )
+
+    def test_peer_history_uses_the_requested_peer_version_within_its_grant(self):
+        store = StateStore.create(self.root, config={})
+        peer = KnowledgeBase(self.root / "peer")
+        for number in range(1, 4):
+            peer.commit(
+                number - 1,
+                [],
+                None,
+                0,
+                f"seed-{number}",
+                files={"notes.txt": f"peer-{number}"},
+            )
+        config = {
+            "knowledge_libraries": [
+                {"alias": "peer", "path": str(peer.root), "version": 2}
+            ],
+            "role_definitions": {"plan": {"knowledge_bases": ["study", "peer"]}},
+        }
+        packet = {"assembly": self.prepare(config=config), "knowledge_config": config}
+        with patch(
+            "research_loop.runtime.call_context.dispatched_input", return_value=packet
+        ):
+            self.assertEqual(
+                read_at_call(store, "invocation", "peer", "notes.txt", version=1),
+                "peer-1",
+            )
+            with self.assertRaises((ValueError, PermissionError)):
+                read_at_call(store, "invocation", "peer", "notes.txt", version=3)
+
+    def test_historical_call_respects_its_recorded_version_and_read_tools(self):
+        store = StateStore.create(self.root, config={})
+        library = KnowledgeBase(self.root)
+        library.commit(0, [], "# first", 0, "first")
+        packet = {
+            "assembly": {
+                "version": 1,
+                "knowledge_libraries": library.freeze(),
+                "tools": {"read_index": {}},
+            },
+            "knowledge_config": {},
+        }
+        library.commit(1, [], "# later", 0, "later")
+        with patch(
+            "research_loop.runtime.call_context.dispatched_input", return_value=packet
+        ):
+            self.assertEqual(read_at_call(store, "old", "study", "index.md"), "# first")
+            with self.assertRaisesRegex(ValueError, "different library version"):
+                read_at_call(store, "old", "study", "index.md", version=2)
+            with self.assertRaises(PermissionError):
+                read_at_call(store, "old", "study", "some-file")
 
     def test_legacy_history_denial_requires_explicit_retrieval_authorization(self):
         config = {"role_access": {"plan": {"published_history": False}}}
@@ -411,135 +424,49 @@ class RoleAssemblyTests(unittest.TestCase):
         )
         self.assertEqual(actual, source)
 
-    def test_index_tools_return_body_and_fixed_authorized_dependencies(self):
-        library = KnowledgeBase(self.root)
-        manifest = library.freeze()
-        library.commit(
-            base_version=0,
-            pages=[
-                {
-                    "id": "k1",
-                    "title": "Synthetic",
-                    "markdown": "Synthetic page",
-                    "dependencies": [],
-                }
+    def test_empty_draft_index_still_requires_publish_permission(self):
+        path = self.root / "draft"
+        path.mkdir()
+        (path / "index.md").write_text("")
+        submitted = {"processed_through": 1}
+        with self.assertRaisesRegex(ValueError, "permission for index_markdown"):
+            application._collect_draft(path, submitted, {"pages"}, True)
+        self.assertEqual(
+            application._collect_draft(path, submitted, {"index_markdown"}, True)[
+                "files"
             ],
-            index_markdown="# Synthetic Index\n",
-            processed_through=0,
-            request_id="index-test",
-            manifest=manifest,
+            {"index.md": ""},
         )
-        assembly = self.prepare()
-        invoke, _ = role_tools.handler(assembly, study_root=self.root, config={})
-        expected = library.index_with_sources(assembly["knowledge_libraries"], "study")
-        direct = invoke("read_index", {"alias": "study"})
-        opened = invoke("read", {"alias": "study", "path": "index.md"})
-        self.assertEqual(direct, opened)
-        self.assertEqual(direct["content"], expected["content"])
-        self.assertEqual(direct["dependencies"], expected["dependencies"])
-        self.assertTrue(
-            all(
-                isinstance(ref, dict)
-                and {"library_id", "kind", "id", "revision"} == set(ref)
-                for ref in direct["dependencies"]
-            )
-        )
-        with self.assertRaises(PermissionError):
-            invoke("read_index", {"alias": "hidden"})
 
-    def test_manager_empty_index_is_a_write_and_final_proposal_needs_capability(self):
+    def test_manager_collects_nested_text_and_binary_without_an_index(self):
+        path = self.root / "draft"
+        (path / "notes").mkdir(parents=True)
+        file = path / "notes/result.txt"
+        file.write_bytes(b"unlisted\r\n")
+        (path / "samples.bin").write_bytes(b"\xff\x00")
+        output = {"processed_through": 1, "remove_paths": ["obsolete"]}
+        result = application._collect_draft(path, output, {"pages"}, True)
+        self.assertEqual(
+            result,
+            output
+            | {
+                "files": {
+                    "notes/result.txt": "unlisted\r\n",
+                    "samples.bin": {"base64": "/wA="},
+                }
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "permission for pages"):
+            application._collect_draft(path, output, set(), True)
+        with self.assertRaisesRegex(ValueError, "writable Manager draft"):
+            application._collect_draft(path, output, {"pages"}, False)
+        file.unlink()
+        file.symlink_to(Path(__file__).resolve())
+        with self.assertRaisesRegex(ValueError, "Only regular files"):
+            application._collect_draft(path, output, {"pages"}, True)
         access = RoleAccess.resolve(
-            {"role_access": {"knowledge_manager": {"actions": []}}}, "knowledge_manager"
-        )
-        with self.assertRaisesRegex(ValueError, "lacks permission for index_markdown"):
-            access.check_output(
-                {"pages": [], "index_markdown": "", "processed_through": 0}
-            )
-        payload = self.payload("knowledge_manager")
-        config = {
-            "role_definitions": {
-                "knowledge_manager": {"tools": ["read_index", "read", "submit_result"]}
-            }
-        }
-        assembly = self.prepare(payload, config)
-        payload.update(
-            assembly=assembly,
-            request_budget={"study_root": str(self.root)},
-            knowledge_config={},
-        )
-        response = {
-            "output": {"pages": [], "index_markdown": "", "processed_through": 0},
-            "evidence_refs": [],
-        }
-        with (
-            patch("integrations.native_runtime.transport.run", return_value=response),
-            self.assertRaisesRegex(
-                ValueError, "lacks write capability for index_markdown"
-            ),
-        ):
-            application.invoke("agent", payload, self.config)
-        config["role_access"] = {"knowledge_manager": {"actions": ["index_markdown"]}}
-        payload["assembly"] = self.prepare(self.payload("knowledge_manager"), config)
-        with patch("integrations.native_runtime.transport.run", return_value=response):
-            self.assertEqual(
-                application.invoke("agent", payload, self.config)["output"][
-                    "index_markdown"
-                ],
-                "",
-            )
-
-    def test_manager_combined_draft_respects_frozen_final_action_grant(self):
-        payload = self.payload(
+            {"role_access": {"knowledge_manager": {"actions": ["pages"]}}},
             "knowledge_manager",
-            extra={"allowed_actions": []},
-            protected=["allowed_actions"],
         )
-        assembly = self.prepare(
-            payload, {"role_access": {"knowledge_manager": {"actions": []}}}
-        )
-        payload.update(
-            assembly=assembly,
-            request_budget={"study_root": str(self.root)},
-            knowledge_config={},
-        )
-
-        def run(*args, **kwargs):
-            kwargs["tool_handler"]("edit_index", {"markdown": ""})
-            return {
-                "output": {"pages": [], "index_markdown": None, "processed_through": 0},
-                "evidence_refs": [],
-            }
-
-        with (
-            patch("integrations.native_runtime.transport.run", side_effect=run),
-            self.assertRaisesRegex(ValueError, "lacks permission for index_markdown"),
-        ):
-            application.invoke("agent", payload, self.config)
-
-    def test_read_cannot_bypass_revoked_index_tool_by_path_or_typed_reference(self):
-        library = KnowledgeBase(self.root)
-        manifest = library.freeze()
-        library.commit(
-            base_version=0,
-            pages=[],
-            index_markdown="# Synthetic Index\n",
-            processed_through=0,
-            request_id="index-alias-test",
-            manifest=manifest,
-        )
-        assembly = self.prepare(
-            config={"role_definitions": {"plan": {"tools": ["read", "submit_result"]}}}
-        )
-        invoke, _ = role_tools.handler(assembly, study_root=self.root, config={})
-        fixed = {
-            "library_id": assembly["knowledge_libraries"][0]["library_id"],
-            "kind": "index",
-            "id": "index.md",
-            "revision": 1,
-        }
-        for path in ("index.md", fixed):
-            with (
-                self.subTest(path=path),
-                self.assertRaisesRegex(ValueError, "read_index grant"),
-            ):
-                invoke("read", {"alias": "study", "path": path})
+        with self.assertRaisesRegex(ValueError, "permission for index_markdown"):
+            access.check_output({"files": {}, "remove_paths": ["index.md"]})

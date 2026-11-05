@@ -1,26 +1,29 @@
-"""Optional end-to-end knowledge Study using a real Pi CLI and loopback provider."""
+"""Real Pi, SQLite and loopback provider: publish while the same Plan is reading."""
 
-from contextlib import redirect_stdout
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from io import StringIO
 import json
+from contextlib import redirect_stdout
+from io import StringIO
 import os
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from threading import Thread
+import re
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Event, Thread
 from unittest.mock import patch
+from uuid import uuid4
 
 from examples.concurrent_runtime import configuration
 from integrations.native_runtime import application
 from research_loop.runtime.application import load_application, prepare_application
-from research_loop.runtime.call_context import preview
+from research_loop.runtime.call_context import preview, read_at_call
 from research_loop.runtime.cli import main as runtime_cli
-from research_loop.runtime.controls import ControlInbox, submit_command
 from research_loop.runtime.coordinator import ConcurrentCoordinator
+from research_loop.runtime.controls import ControlInbox, submit_command
 from research_loop.runtime.knowledge import KnowledgeBase
-from research_loop.runtime.model_requests import retrieved_evidence
+from research_loop.runtime.model_requests import format_decision_reference
+from research_loop.runtime.status import status_snapshot
 from research_loop.runtime.store import StateStore
 
 
@@ -28,36 +31,45 @@ from research_loop.runtime.store import StateStore
     os.environ.get("NATIVE_PI_CLI"), "Requires installed Pi and loopback"
 )
 class KnowledgeLoopTests(unittest.TestCase):
-    def test_manager_revisions_role_config_and_frozen_pi_calls(self):
-        """Exercise dispatch, read tools, model admission, acceptance and historical preview."""
+    def test_publish_during_plan_and_complete_approved_experiment(self):
+        self.first_read = Event()
+        self.published = Event()
+        self.errors = []
+        self.requests = []
+        self.plan_reads = []
+        self.evidence = None
+        self.retry_manager = False
+        self.plan_refs = []
+        self.task = dict(
+            id="replicate",
+            priority=1,
+            specification={"instruction": "Replicate the observation."},
+            dependencies=[],
+        )
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self.requests = []
-            self.fail_edit = False
-            self.evidence = {}
-            self.replies = []
-            self.errors = []
+            case = self
 
             class Endpoint(BaseHTTPRequestHandler):
                 def log_message(self, *args):
                     pass
 
-                def do_POST(endpoint):
-                    packet = json.loads(
-                        endpoint.rfile.read(int(endpoint.headers["Content-Length"]))
-                    )
+                def do_POST(self):
                     try:
-                        name, args = self.next_tool(packet)
+                        packet = json.loads(
+                            self.rfile.read(int(self.headers["Content-Length"]))
+                        )
+                        name, args = case.reply(packet)
                     except Exception as exc:
-                        self.errors.append(repr(exc))
-                        endpoint.send_error(400)
+                        case.errors.append(repr(exc))
+                        self.send_error(400)
                         return
-                    endpoint.send_response(200)
-                    endpoint.send_header("Content-Type", "text/event-stream")
-                    endpoint.end_headers()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
                     call = {
                         "index": 0,
-                        "id": f"tool_{len(self.requests)}",
+                        "id": "call_" + uuid4().hex,
                         "type": "function",
                         "function": {"name": name, "arguments": json.dumps(args)},
                     }
@@ -74,11 +86,13 @@ class KnowledgeLoopTests(unittest.TestCase):
                                 {"index": 0, "delta": delta, "finish_reason": finish}
                             ],
                         }
-                        endpoint.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-                    endpoint.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                    self.wfile.write(b"data: [DONE]\n\n")
 
             with ThreadingHTTPServer(("127.0.0.1", 0), Endpoint) as server:
-                (root / "models.json").write_text(
+                agent_dir = root / "pi-profile"
+                agent_dir.mkdir()
+                (agent_dir / "models.json").write_text(
                     json.dumps(
                         {
                             "providers": {
@@ -94,7 +108,7 @@ class KnowledgeLoopTests(unittest.TestCase):
                         }
                     )
                 )
-                (root / "settings.json").write_text(
+                (agent_dir / "settings.json").write_text(
                     json.dumps(
                         {
                             "retry": {"enabled": False, "provider": {"maxRetries": 0}},
@@ -105,14 +119,16 @@ class KnowledgeLoopTests(unittest.TestCase):
                 serving = Thread(target=server.serve_forever, daemon=True)
                 serving.start()
                 try:
-                    with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(root)}):
-                        self.exercise_study(root)
+                    with patch.dict(
+                        os.environ, {"PI_CODING_AGENT_DIR": str(agent_dir)}
+                    ):
+                        self.exercise(root)
                 finally:
+                    self.published.set()
                     server.shutdown()
                     serving.join()
 
-    def next_tool(self, packet):
-        tools = [t["function"]["name"] for t in packet["tools"]]
+    def reply(self, packet):
         messages = packet["messages"]
         user = next(m["content"] for m in messages if m["role"] == "user")
         prompt = user if isinstance(user, str) else user[0]["text"]
@@ -120,140 +136,93 @@ class KnowledgeLoopTests(unittest.TestCase):
             prompt.split("ContextPackage:\n", 1)[1].split("\nResponse contract:", 1)[0]
         )
         role = package["manifest"]["role"]
-        self.requests.append(
-            (
-                role,
-                {
-                    t["function"]["name"]: t["function"]["parameters"]
-                    for t in packet["tools"]
-                },
-                prompt,
-            )
-        )
-        turn = sum(m["role"] == "tool" for m in messages)
+        tools = {item["function"]["name"] for item in packet["tools"]}
+        expected = {"ls", "find", "grep", "read", "submit_result"}
         if role == "knowledge_manager":
-            seq = package["context"]["maintenance"]["evidence_through"]
-            if seq == 3:
-                if turn == 0:
-                    return "read_index", {"alias": "literature"}
-                # The submitted prose omits its dependency. The controller must
-                # retain the disclosure boundary of the returned Index.
-                return "submit_result", {
-                    "output": {
-                        "pages": [
-                            {
-                                "id": "copied",
-                                "title": "Indigo",
-                                "markdown": "Indigo copied from a restricted index.",
-                                "dependencies": [],
-                            }
-                        ],
-                        "index_markdown": "# Indigo",
-                        "processed_through": seq,
-                    },
-                    "evidence_refs": [],
-                }
-            evidence = self.evidence[seq]
-            if turn == 0:
-                return "read", {"alias": "study", "path": evidence}
-            if turn == 1:
-                return "edit_page", {
-                    "page": {
-                        "id": "K1",
-                        "title": "Finding",
-                        "markdown": f"# Finding\n\nResult {seq}.",
-                        "dependencies": [evidence],
-                    }
-                }
-            if turn == 2:
-                return "edit_index", {
-                    "markdown": f"# Index\n\n[K1](K1) — result {seq}."
-                }
-            output = {
-                "pages": [],
-                "index_markdown": None,
-                "processed_through": seq + int(self.fail_edit),
-            }
+            expected |= {"edit", "write"}
+        self.assertEqual(tools, expected)
+        self.requests.append(role)
+        results = [m["content"] for m in messages if m["role"] == "tool"]
+        turn = len(results)
+        refs = []
+        if role == "advocate":
+            output = {"proposals": [self.task | {"reason": "Synthetic observation"}]}
+        elif role == "judge":
+            existing = package["context"]["planning"]["pool"]["tasks"]
+            output = {"changes": [] if existing else [self.task | {"action": "create"}]}
         elif role == "plan":
+            base = "knowledge/study"
             if turn == 0:
-                return "read_index", {"alias": "study"}
-            if turn == 1 and "search" in tools:
-                return "search", {"query": "Finding"}
-            if messages[-1].get("role") == "tool":
-                last = messages[-1]["content"]
-                result = json.loads(last if isinstance(last, str) else last[0]["text"])
-                if not isinstance(result, dict) or "evidence_ref" not in result:
-                    return "read", {"alias": "study", "path": "K1"}
-                if isinstance(result["content"], str):
-                    self.replies.append(result)
-                    source = next(
-                        r for r in result["dependencies"] if r["kind"] == "evidence"
+                return "read", {"path": f"{base}/files/pages/finding.md"}
+            text = (
+                results[-1] if isinstance(results[-1], str) else results[-1][0]["text"]
+            )
+            self.plan_reads.append(text)
+            if turn == 1:
+                self.assertIn("observation-seven", text)
+                return "read", {"path": f"{base}/revisions.json"}
+            if turn == 2:
+                citation = re.search(r"kb:[A-Za-z0-9_-]+:knowledge:finding@7", text)
+                self.assertIsNotNone(citation)
+                self.plan_refs.append(citation.group())
+                self.first_read.set()
+                if not self.published.wait(45):
+                    raise TimeoutError(
+                        "Manager did not publish while Plan remained active"
                     )
-                    return "read", {"alias": "study", "path": source}
-                self.assertEqual(result["content"]["reference"], result["fixed_ref"])
+                return "grep", {
+                    "pattern": "observation-eight",
+                    "path": f"{base}/files",
+                }
+            if turn == 3:
+                self.assertIn("observation-eight", text)
+                return "read", {"path": f"{base}/files/notes/rough/observation.txt"}
+            if turn == 4:
+                self.assertIn("observation-eight", text)
+                return "read", {"path": f"{base}/revisions.json"}
+            citation = re.search(
+                r"kb:[A-Za-z0-9_-]+:file:notes/rough/observation\.txt@1", text
+            )
+            self.assertIsNotNone(citation)
+            refs = [*self.plan_refs, citation.group()]
             output = {
-                "timeout_seconds": 1,
+                "timeout_seconds": 10,
                 "local_evaluation": None,
-                "experiment_definition": "Inspect evidence.",
+                "experiment_definition": "Inspect the two observed revisions.",
             }
-            return "submit_result", {
-                "output": output,
-                "evidence_refs": [
-                    self.replies[-1]["evidence_ref"],
-                    result["evidence_ref"],
-                ],
-            }
-        elif role == "scout":
+        elif role == "knowledge_manager":
+            batch = package["context"]["maintenance"]
+            evidence = batch["evidence"][0]
+            observation = evidence["content"]["content"]["observation"]
             if turn == 0:
-                return "search", {"query": "Indigo"}
+                return "write", {
+                    "path": "draft/notes/rough/observation.txt",
+                    "content": f"observation-{observation}\n",
+                }
+            refs = [format_decision_reference(evidence["reference"])]
             output = {
-                "knowledge": [
-                    {
-                        "id": "observation",
-                        "kind": "interpretation",
-                        "expected_revision": 0,
-                        "statement": "Indigo copied from a restricted snippet.",
-                        "conditions": ["Synthetic fixture"],
-                        "source_refs": [],
-                        "measurement_ids": [],
-                        "interpretation": "Indigo",
-                        "limitations": ["One observation"],
-                    }
-                ],
-                "reviews": [],
-                "corrections": [],
+                "remove_paths": ["index.md"],
+                "processed_through": batch["evidence_through"]
+                + int(not self.retry_manager),
             }
         elif role == "execute":
+            self.assertIn("plan", package["context"])
             output = {"operations": [], "artifacts": []}
-        elif role == "review":
+        elif role in {"scout", "review"}:
+            if role == "review":
+                self.assertIn("execute", package["context"])
             output = {"knowledge": [], "reviews": [], "corrections": []}
         else:
             raise AssertionError(role)
-        return "submit_result", {"output": output, "evidence_refs": []}
+        return "submit_result", {"output": output, "evidence_refs": refs}
 
-    def exercise_study(self, root):
-        study = root / "study"
-        peer = KnowledgeBase(root / "peer")
-        peer.commit(
-            0,
-            [
-                {
-                    "id": "peer",
-                    "title": "Indigo",
-                    "markdown": "Indigo reference.",
-                    "dependencies": [],
-                }
-            ],
-            "# Indigo literature",
-            0,
-            "peer-initial",
-        )
+    def exercise(self, root):
         cfg = configuration(
-            worker_adapter=application.APPLICATION_IDENTITY, call_timeout_seconds=40
+            worker_adapter=application.APPLICATION_IDENTITY,
+            planning=True,
+            worker_slots=3,
+            call_timeout_seconds=80,
         )
-        cfg["knowledge_libraries"] = [
-            {"alias": "literature", "path": str(peer.root), "version": 1}
-        ]
         cfg["runtime"]["application"] = prepare_application(
             application.__file__,
             {
@@ -264,165 +233,138 @@ class KnowledgeLoopTests(unittest.TestCase):
                     "provider": "fixture",
                     "model": "fixture-model",
                     "reasoning": "off",
-                    "timeout_seconds": 30,
-                    "private_calls_dir": str(root / "calls"),
+                    "timeout_seconds": 75,
                 },
             },
             application.APPLICATION_IDENTITY,
         )
+        study = root / "study"
         store = StateStore.create(
-            study, config=cfg, max_calls=40, max_iterations=2, max_seconds=180
+            study, config=cfg, max_calls=40, max_iterations=1, max_seconds=180
         )
         kb = KnowledgeBase(study, config=cfg)
+        for n in range(1, 8):
+            body = "observation-seven" if n == 7 else f"seed-{n}"
+            kb.commit(
+                n - 1,
+                [dict(id="finding", title="Finding", markdown=body, dependencies=[])],
+                "# Index\n",
+                0,
+                f"seed-{n}",
+            )
         with store.coordinator() as owner:
             app = load_application(owner)
             runner = ConcurrentCoordinator(owner, app.invoker, app.validators)
-
-            def drain():
-                deadline = time.monotonic() + 75
-                while time.monotonic() < deadline:
-                    state = runner.tick()
-                    if not state["waiting"] and not state["progress"]:
-                        self.assertFalse(self.errors, self.errors)
-                        return
-                    time.sleep(0.03)
-                self.fail(str(state))
-
-            def attempts(role):
-                return [a for a in owner.snapshot()["attempts"] if a["role"] == role]
-
-            self.evidence[1] = kb.publish_evidence(
-                "E1", "experiment_receipt", {"observed": 1}
-            )
-            drain()
-            self.assertEqual(kb.status()["version"], 1, attempts("knowledge_manager"))
-            owner.create_task("first", {"instruction": "read the finding"})
-            drain()
-            plan = attempts("plan")[0]
-            self.assertEqual(plan["status"], "accepted", plan["failure_reason"])
-            frozen = preview(store, plan["id"], expand=True)
-            self.assertEqual(frozen["knowledge_libraries"][0]["version"], 1)
+            runner.planning.trigger("start", "manual", {"reason": "synthetic study"})
+            runner.request_scout("observe")
+            deadline = time.monotonic() + 130
+            while time.monotonic() < deadline:
+                state = runner.tick()
+                self.assertFalse(self.errors, self.errors)
+                failed = [
+                    (a["role"], a["failure_reason"])
+                    for a in owner.snapshot()["attempts"]
+                    if a["status"] == "failed"
+                ]
+                if failed:
+                    self.assertEqual(
+                        [role for role, _ in failed], ["knowledge_manager"], failed
+                    )
+                    if not self.retry_manager:
+                        self.assertIn("advance", failed[0][1])
+                        self.assertEqual(kb.published_version(), 7)
+                        self.assertEqual(kb.status()["processed_through"], 0)
+                        entry = kb.live(["study"], role="plan")["entries"][0]
+                        files = Path(entry["path"]) / "files"
+                        self.assertEqual(
+                            (files / "pages/finding.md").read_text(),
+                            "observation-seven",
+                        )
+                        self.assertTrue((files / "index.md").is_file())
+                        self.assertFalse(
+                            (files / "notes/rough/observation.txt").exists()
+                        )
+                        self.retry_manager = True
+                        submit_command(
+                            study, "maintain", {}, "retry-after-rejected-draft"
+                        )
+                        ControlInbox(owner).drain(admit_calls=True)
+                if self.first_read.is_set() and self.evidence is None:
+                    self.evidence = kb.publish_evidence(
+                        "E8", "experiment_receipt", {"observation": "eight"}
+                    )
+                if (
+                    self.evidence
+                    and not self.published.is_set()
+                    and kb.published_version() == 8
+                ):
+                    self.published.set()
+                if not state["waiting"] and not state["progress"]:
+                    break
+                time.sleep(0.03)
+            else:
+                self.fail(f"Timed out: {state}")
+            final = owner.snapshot()
+            self.assertTrue(self.retry_manager)
             self.assertEqual(
-                self.replies[-1]["content"],
-                kb.read(frozen["knowledge_libraries"], "study", "K1"),
+                [row["status"] for row in final["iterations"]], ["published"]
             )
-            self.assertIn(
-                self.replies[-1]["evidence_ref"], retrieved_evidence(study, plan["id"])
+            self.assertEqual(set(self.requests), set(application.policy.MODELS))
+            self.assertEqual(final["counters"]["calls"], len(self.requests))
+            plans = [a for a in final["attempts"] if a["role"] == "plan"]
+            self.assertEqual(len(plans), 1)
+            info = preview(store, plans[0]["id"])
+            manager = next(
+                a
+                for a in final["attempts"]
+                if a["role"] == "knowledge_manager" and a["status"] == "accepted"
             )
-            self.evidence[2] = kb.publish_evidence(
-                "E2", "run_report", {"counterexample": 2}
+            self.assertEqual(
+                preview(store, manager["id"])["decision_refs"],
+                [f"kb:{kb.library_id}:evidence:E8@1"],
             )
-            self.fail_edit = True
-            drain()
-            self.assertEqual(attempts("knowledge_manager")[-1]["status"], "failed")
-            self.assertEqual(kb.status()["version"], 1)
-            self.assertEqual(kb.status()["processed_through"], 1)
-            self.fail_edit = False
-            submit_command(study, "maintain", {}, "explicit-retry")
-            ControlInbox(owner).drain(admit_calls=True)
-            drain()
-            self.assertEqual(kb.status()["version"], 2)
-            submit_command(
-                study,
-                "role_config",
+            self.assertEqual(info["knowledge_endpoints"]["start_version"], 7)
+            self.assertEqual(info["knowledge_endpoints"]["end_version"], 8)
+            self.assertEqual(
+                set(info["decision_refs"]),
                 {
-                    "role": "plan",
-                    "definition": {
-                        "knowledge_bases": ["study", "literature"],
-                        "tools": ["read_index", "read", "submit_result"],
-                    },
+                    f"kb:{kb.library_id}:knowledge:finding@7",
+                    f"kb:{kb.library_id}:file:notes/rough/observation.txt@1",
                 },
-                "adjust-plan",
             )
-            result = ControlInbox(owner).drain()
-            self.assertEqual(result[-1]["status"], "applied", result)
-            owner.create_task("second", {"instruction": "read the revised finding"})
-            drain()
-            second = attempts("plan")[-1]
-            self.assertEqual(second["status"], "accepted", second["failure_reason"])
-            revised = preview(store, second["id"], expand=True)
-            self.assertEqual(
-                [e["alias"] for e in revised["knowledge_libraries"]],
-                ["study", "literature"],
-            )
-            self.assertEqual(revised["knowledge_libraries"][0]["version"], 2)
-            self.assertEqual(
-                kb.read(frozen["knowledge_libraries"], "study", "K1"),
-                "# Finding\n\nResult 1.",
-            )
-            self.assertEqual(self.replies[-1]["content"], "# Finding\n\nResult 2.")
-            self.assertEqual(preview(store, plan["id"], expand=True), frozen)
-            audit = StringIO()
-            with redirect_stdout(audit):
+            capture = StringIO()
+            with redirect_stdout(capture):
                 self.assertEqual(
-                    runtime_cli(["context", str(study), plan["id"], "--expand"]), 0
+                    runtime_cli(["context", str(study), plans[0]["id"], "--expand"]), 0
                 )
-            self.assertEqual(json.loads(audit.getvalue()), frozen)
-            human = StringIO()
-            with redirect_stdout(human):
+            decision = json.loads(capture.getvalue())
+            self.assertEqual(
+                decision["accepted_output"]["experiment_definition"],
+                "Inspect the two observed revisions.",
+            )
+            self.assertEqual(decision["task_id"], self.task["id"])
+            self.assertTrue(
+                decision["accepted_output_ref"] and decision["invocation_id"]
+            )
+            self.assertEqual(
+                read_at_call(store, plans[0]["id"], "study", "finding", version=7),
+                "observation-seven",
+            )
+            capture = StringIO()
+            with redirect_stdout(capture):
                 self.assertEqual(
                     runtime_cli(
                         [
                             "knowledge-read",
                             str(study),
-                            plan["id"],
-                            "K1",
-                            "--with-sources",
+                            plans[0]["id"],
+                            "notes/rough/observation.txt",
+                            "--version",
+                            "8",
                         ]
                     ),
                     0,
                 )
-            human_page = json.loads(human.getvalue())
-            self.assertEqual(human_page["content"], self.replies[0]["content"])
-            self.assertIn(self.evidence[1], human_page["dependencies"])
-            for assembly in (frozen, revised):
-                actual = [
-                    tools
-                    for role, tools, prompt in self.requests
-                    if role == "plan" and prompt == assembly["prompt"]
-                ]
-                self.assertTrue(actual)
-                expected = {
-                    name: spec["parameters"] for name, spec in assembly["tools"].items()
-                }
-                for schemas in actual:
-                    self.assertEqual(schemas, expected)
-            self.assertNotIn("search", revised["tools"])
-            for role in ("scout", "knowledge_manager"):
-                submit_command(
-                    study,
-                    "role_config",
-                    {
-                        "role": role,
-                        "definition": {"knowledge_bases": ["study", "literature"]},
-                    },
-                    "grant-" + role,
-                )
-            ControlInbox(owner).drain()
-            runner.request_scout("considers-literature")
-            drain()
-            self.assertEqual(
-                attempts("scout")[-1]["status"],
-                "accepted",
-                attempts("scout")[-1]["failure_reason"],
-            )
-            self.assertEqual(
-                kb.status()["processed_through"],
-                3,
-                attempts("knowledge_manager")[-1]["failure_reason"],
-            )
-            main = kb.freeze(cfg, ["study"])
-            full = kb.freeze(cfg, ["study", "literature"])
-            self.assertIn("Indigo", kb.read(full, "study", "copied"))
-            self.assertIn("Indigo", kb.read_index(full))
-            self.assertTrue(
-                any(
-                    h["reference"]["kind"] == "evidence"
-                    for h in kb.search(full, "Indigo")
-                )
-            )
-            self.assertEqual(kb.search(main, "Indigo"), [])
-            self.assertNotIn("Indigo", kb.read_index(main))
-            with self.assertRaises(PermissionError):
-                kb.read(main, "study", "copied")
-            self.assertEqual(owner.snapshot()["counters"]["calls"], len(self.requests))
+            self.assertEqual(capture.getvalue(), "observation-eight\n")
+            self.assertFalse((files / "index.md").exists())
+            self.assertEqual(status_snapshot(study)["knowledge"]["live_version"], 8)

@@ -16,6 +16,38 @@ ROLE_ACTIONS = {
 ROLES = frozenset(ROLE_ACTIONS)
 
 
+def directory_grants(config):
+    """Immutable Study ceilings for every reader, including existing calls."""
+    rules = config.get("role_access", {})
+    result = {}
+    for role in sorted(ROLES):
+        rule = rules.get(role, {})
+        result[role] = list(
+            rule.get(
+                "knowledge_bases",
+                [] if rule.get("published_history") is False else ["study"],
+            )
+        )
+    return result
+
+
+def shared_knowledge_readers(config):
+    """All roles that can retain a live handle to this Study's shared library."""
+    return {
+        role: aliases
+        for role, aliases in directory_grants(config).items()
+        if "study" in aliases
+    }
+
+
+def check_draft_actions(paths, actions):
+    paths = set(paths)
+    if "index.md" in paths and "index_markdown" not in actions:
+        raise ValueError("Role knowledge_manager lacks permission for index_markdown")
+    if paths - {"index.md"} and "pages" not in actions:
+        raise ValueError("Role knowledge_manager lacks permission for pages")
+
+
 def validate_role_access(config):
     rules = config.get("role_access", {})
     if not isinstance(rules, dict) or not rules.keys() <= ROLES:
@@ -123,6 +155,11 @@ class RoleAccess:
     def check_output(self, output):
         if not self.configured:
             return
+        if self.role == "knowledge_manager":
+            check_draft_actions(
+                set(output.get("files", {})).union(output.get("remove_paths", [])),
+                self.actions,
+            )
         for action in ROLE_ACTIONS[self.role] - self.actions:
             effect = (
                 output.get(action) is not None
