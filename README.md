@@ -152,10 +152,7 @@ study/
 
 ## 开发
 
-Runtime 重构按 [#94 的三阶段计划](https://github.com/Chen-HongRu/research_loop/issues/94)
-推进。[阶段 A 的持久化 Coding Spike](spikes/persistent-coding/README.md)比较实际框架部署和恢复，
-[选型记录](docs/runtime-framework-decision.md)区分合成 provider 与真实执行证据。
-阶段 B 的真实研究验收和阶段 C 的旧系统退出完成前，现有生产入口继续使用当前 Runtime。
+Runtime 重构按 [#94 的三阶段计划](https://github.com/Chen-HongRu/research_loop/issues/94)推进。阶段 A 的[选型记录](docs/runtime-framework-decision.md)选择 Pi Durable 1.5；阶段 B 的[持久化研究运行时](runtime/README.md)使用官方 pi-env 1.5 提供有界研究流程。阶段 C 的生产切换和旧系统退出尚未完成，现有生产入口继续使用当前 Runtime。
 
 ```bash
 uvx ruff check src tests benchmarks/cactus integrations examples
