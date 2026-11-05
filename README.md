@@ -152,6 +152,11 @@ study/
 
 ## 开发
 
+Runtime 重构按 [#94 的三阶段计划](https://github.com/Chen-HongRu/research_loop/issues/94)
+推进。[阶段 A 的持久化 Coding Spike](spikes/persistent-coding/README.md)比较实际框架部署和恢复，
+[选型记录](docs/runtime-framework-decision.md)区分合成 provider 与真实执行证据。
+阶段 B 的真实研究验收和阶段 C 的旧系统退出完成前，现有生产入口继续使用当前 Runtime。
+
 ```bash
 uvx ruff check src tests benchmarks/cactus integrations examples
 uv run python -m unittest discover -s tests -v
