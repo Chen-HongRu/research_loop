@@ -142,6 +142,12 @@ def validate_output(role, output, context, config):
     if [_planned(item) for item in value["operations"]] != plan["operations"]:
         raise ValueError("Execute must match accepted Plan except source_files")
     for item in value["operations"]:
+        if (
+            "allowed_actions" in context
+            and "source_edits" not in context["allowed_actions"]
+            and item["parameters"]["source_files"]
+        ):
+            raise ValueError("Execute lacks permission for source_edits")
         backend.validate_request(
             item, config["backend_handlers"][item["backend"]]["config"]
         )

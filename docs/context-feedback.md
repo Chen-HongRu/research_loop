@@ -55,6 +55,48 @@ source descriptions. Untrusted Agent decisions are data proposals, never live
 coordinator handles. Backend/tool boundaries remain responsible for preventing
 access to final-only data outside the provided context.
 
+## Role access in a SQLite Study
+
+Set `role_access` in the Study configuration at creation. Each named role has
+one rule shared by context construction, binding and validated output admission.
+Omitted roles keep their existing behavior. This example gives Review its own
+accepted Plan, Execute, collected reports and eligible measurements for the
+iteration. Advocate receives the frozen planning round and published research.
+
+```json
+{
+  "role_access": {
+    "review": {
+      "published_history": false,
+      "context_sources": [],
+      "permissions": [],
+      "actions": ["knowledge", "reviews"]
+    },
+    "advocate": {"published_history": true, "actions": ["proposals"]}
+  }
+}
+```
+
+The four rule fields are optional. `published_history` defaults to true and
+governs published research, Frontiers, historical measurements and imported
+history. The task, role-specific control inputs, and the planning pool for
+Advocate/Judge remain authoritative inputs. `context_sources` narrows the
+operator's named sources by intersecting with their existing role and
+feedback grants. `permissions` selects keys from the Study permission map
+and preserves their values. An empty list selects none. A configured role
+may cite only references represented by visible source fields.
+
+`actions` restricts nonempty sections of accepted output. Plan can propose
+`operations`; Execute can request `operations` and supply `source_edits`;
+Review can publish `knowledge`, `reviews` and `corrections`; Scout can publish
+`knowledge`; Advocate can make `proposals`; Judge can submit `changes`.
+A role receives its effective `allowed_actions` in protected context. The
+controller checks normalized output before admitting operations or applying
+updates. The script application checks source edits against this same action list when validating proposed files. Custom applications implement their own backend-specific edit checks. Study grants, protected sources and backend limits still apply.
+These rules govern frozen inputs and controller actions. Interactive Pi search,
+filesystem access and operating-system isolation have separate enforcement
+boundaries.
+
 ## Validated output
 
 ```text

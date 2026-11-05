@@ -10,9 +10,9 @@ import json
 import re
 
 from .operation_contract import fields, json_value
+from .role_access import ROLES, RoleAccess
 from .store import ConflictError
 
-_ROLES = {"plan", "execute", "review", "scout", "advocate", "judge"}
 _FIELDS = {"name", "ref", "identity", "revision", "roles", "allow_feedback", "required"}
 _METADATA = {"id", "key", "ref", "revision", "reason", "allow_feedback"}
 
@@ -22,6 +22,7 @@ def descriptors(config, role):
     entries = json_value(config.get("context_sources", []))
     if not isinstance(entries, list):
         raise ValueError("context_sources must be an explicit list")
+    access = RoleAccess.resolve(config, role)
     result, names = [], set()
     for entry in entries:
         fields(entry, _FIELDS, "operator context source")
@@ -52,7 +53,7 @@ def descriptors(config, role):
         if (
             not isinstance(roles, list)
             or not roles
-            or any(not isinstance(item, str) or item not in _ROLES for item in roles)
+            or any(not isinstance(item, str) or item not in ROLES for item in roles)
             or len(set(roles)) != len(roles)
         ):
             raise ValueError("Context source roles must be a unique native-role subset")
@@ -61,7 +62,7 @@ def descriptors(config, role):
             or type(entry["allow_feedback"]) is not bool
         ):
             raise ValueError("Context source feedback/required flags must be boolean")
-        eligible = entry["allow_feedback"] and role in roles
+        eligible = access.source_allowed(entry)
         reason = (
             "Frozen operator control source"
             if eligible
@@ -89,6 +90,8 @@ def descriptors(config, role):
 def extend(config, role, read_record, inputs, sources, protected, allowed):
     """Append selected objects and denied placeholders to one local snapshot."""
     for entry, source in descriptors(config, role):
+        if role in config.get("role_access", {}) and not source["allow_feedback"]:
+            continue
         key = source["key"]
         if key in inputs:
             raise ValueError("Operator source collides with an existing context key")
@@ -115,14 +118,22 @@ def validate_package(config, role, package, read_record):
         for source in manifest["sources"]
         if source["key"].startswith("provided:")
     }
+    refs = {entry["ref"] for entry, _ in entries}
+    if role in config.get("role_access", {}):
+        entries = [
+            (entry, source) for entry, source in entries if source["allow_feedback"]
+        ]
     expected = {source["key"] for _, source in entries}
     if (
         set(provided) != expected
         or {key for key in context if key.startswith("provided:")} - expected
     ):
         raise ConflictError("Unknown or missing configured operator context source")
-    refs = {entry["ref"] for entry, _ in entries}
     allowed = {entry["ref"] for entry, source in entries if source["allow_feedback"]}
+    if role in config.get("role_access", {}):
+        allowed &= {
+            s["ref"] for s in manifest["sources"] if s["disposition"] != "omitted"
+        }
     if set(manifest["allowed_evidence"]) & refs != allowed:
         raise ConflictError("Operator source evidence permissions differ from config")
     for entry, source in entries:

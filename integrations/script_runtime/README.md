@@ -46,6 +46,13 @@ editable/protected scope and canonical input aliases needed to plan the task.
 The application never reads private source files into prompts or adds bodies
 outside the selected ContextPackage. Backend configuration is not prompt context.
 
+A Study can further narrow each role through
+[`config.role_access`](../../docs/context-feedback.md#role-access-in-a-sqlite-study).
+Include the contract source in the Plan and Execute scopes. An Execute that
+submits proposed files requires both `operations` and `source_edits` in its
+effective actions. The application validates the file edit permission before
+the controller admits an operation.
+
 Plan returns `timeout_seconds`, `local_evaluation`, `experiment_definition`,
 `baseline_ref`, `backend`, `scientific_contract`, and an `operations` list.
 An empty list explicitly selects qualitative investigation with no external

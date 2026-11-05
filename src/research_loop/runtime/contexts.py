@@ -9,10 +9,34 @@ from .context_sources import extend as extend_sources
 from .files import publish_artifact
 from .operations import Operations
 from .planning_state import PlanningLedger
+from .role_access import RoleAccess
 from .publication import Publisher
 from .publication_views import build_views, render_research
 from .store import ConflictError, _decode
 from .updates import Updater
+
+
+def own_operations(owner, iteration_id):
+    return [
+        {
+            key: operation[key]
+            for key in (
+                "id",
+                "revision",
+                "backend",
+                "backend_version",
+                "environment",
+                "state",
+                "terminal_outcome",
+                "collection_state",
+                "collection_ref",
+                "inconsistency",
+                "job_id",
+                "unexpected_job_ids",
+            )
+        }
+        for operation in Operations(owner).list(iteration_id=iteration_id)
+    ]
 
 
 class RuntimeContexts:
@@ -36,7 +60,11 @@ class RuntimeContexts:
         if record["planning"] is not None:
             return PlanningLedger(self.owner).context(call, policy=self.policy)
         config = record["control"]["config"]
-        knowledge = Publisher(self.owner).snapshot()
+        access = RoleAccess.resolve(config, call.role)
+        knowledge = Publisher(self.owner).snapshot(
+            history=access.published_history,
+            iteration_id=call.iteration_id if access.own_execution else None,
+        )
         publications = {
             row["id"]: self.reader._read_record(row["payload_ref"], row["identity"])[
                 "normalized_output"
@@ -47,7 +75,7 @@ class RuntimeContexts:
             key: config[key] for key in ("goal", "global_evaluation") if key in config
         }
         inputs.update(
-            permissions=config.get("permissions", {}),
+            **access.controls(config),
             task=record["task"],
             budget={
                 key: record["control"][key]
@@ -59,7 +87,7 @@ class RuntimeContexts:
                 )
             },
         )
-        if call.role in {"plan", "execute"}:
+        if access.resource_context:
             inputs.update(
                 (key, config[key])
                 for key in (
@@ -89,7 +117,10 @@ class RuntimeContexts:
         # It remains archived unless the trusted migration configuration permits
         # this reviewed source. Never expose old numeric Frontiers as new facts.
         for imported in (
-            imported_history if config.get("legacy_history_feedback") is True else []
+            imported_history
+            if access.published_history
+            and config.get("legacy_history_feedback") is True
+            else []
         ):
             history = self.reader._read_record(
                 imported["context_ref"], imported["context_identity"]
@@ -101,7 +132,7 @@ class RuntimeContexts:
                 imported["id"],
             )
 
-        if call.role in {"execute", "review"}:
+        if access.accepted_plan:
             plan = record["plan"]
             source(
                 "plan",
@@ -110,7 +141,7 @@ class RuntimeContexts:
                 plan["id"],
                 required=True,
             )
-        if call.role == "review":
+        if access.own_execution:
             with self.owner.store._connection(readonly=True) as conn:
                 execute = _decode(
                     conn.execute(
@@ -128,28 +159,7 @@ class RuntimeContexts:
                 execute["id"],
                 required=True,
             )
-            operations = [
-                {
-                    key: operation[key]
-                    for key in (
-                        "id",
-                        "revision",
-                        "backend",
-                        "backend_version",
-                        "environment",
-                        "state",
-                        "terminal_outcome",
-                        "collection_state",
-                        "collection_ref",
-                        "inconsistency",
-                        "job_id",
-                        "unexpected_job_ids",
-                    )
-                }
-                for operation in Operations(self.owner).list(
-                    iteration_id=call.iteration_id
-                )
-            ]
+            operations = own_operations(self.owner, call.iteration_id)
             if operations:
                 reference = publish_artifact(
                     self.owner.store.root, {"operations": operations}
@@ -170,7 +180,9 @@ class RuntimeContexts:
                 call.role == "review"
                 and measurement["iteration_id"] == call.iteration_id
             )
-            if measurement["id"] in visible or own_review:
+            if (
+                access.published_history and measurement["id"] in visible
+            ) or own_review:
                 source(
                     f"measurement:{measurement['id']}",
                     measurement,
@@ -178,16 +190,17 @@ class RuntimeContexts:
                     measurement["id"],
                     required=own_review,
                 )
-        research = {
-            "version": knowledge["version"],
-            "research": render_research(knowledge, publications),
-            "frontiers": build_views(knowledge, config["global_evaluation"])
-            if isinstance(config.get("global_evaluation"), dict)
-            else None,
-        }
-        reference = publish_artifact(self.owner.store.root, research)
-        source("research", research["research"], reference, knowledge["version"])
-        source("frontiers", research["frontiers"], reference, knowledge["version"])
+        if access.published_history:
+            research = {
+                "version": knowledge["version"],
+                "research": render_research(knowledge, publications),
+                "frontiers": build_views(knowledge, config["global_evaluation"])
+                if isinstance(config.get("global_evaluation"), dict)
+                else None,
+            }
+            reference = publish_artifact(self.owner.store.root, research)
+            source("research", research["research"], reference, knowledge["version"])
+            source("frontiers", research["frontiers"], reference, knowledge["version"])
         sources = [
             {
                 "id": key,
@@ -200,7 +213,7 @@ class RuntimeContexts:
             for key in inputs
         ]
         allowed = list(dict.fromkeys(references.values()))
-        if call.role == "review":
+        if access.own_execution:
             reports, _ = Operations(self.owner).research_evidence(call.iteration_id)
             for entry in reports:
                 metadata = entry["source"]
@@ -244,6 +257,7 @@ class RuntimeContexts:
             self.policy_ref,
             config.get("context_budget", {}),
             policy=self.policy,
+            visible_evidence_only=access.configured,
         )
 
     def retry_review(self, call, original_context_ref, original_identity):

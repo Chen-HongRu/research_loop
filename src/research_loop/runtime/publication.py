@@ -559,7 +559,7 @@ class Publisher:
             )
             return receipt
 
-    def snapshot(self):
+    def snapshot(self, *, history=True, iteration_id=None):
         """Return consistent detached metadata; no payload reads or writes."""
         self.coordinator._live()
         with self.coordinator.store._connection(readonly=True) as conn:
@@ -576,6 +576,19 @@ class Publisher:
                 ("conflicts", "publication_conflicts"),
                 ("measurements", "measurements"),
             ):
+                if not history:
+                    result[key] = (
+                        [
+                            _decode(row)
+                            for row in conn.execute(
+                                "SELECT * FROM measurements WHERE iteration_id=? ORDER BY rowid",
+                                (iteration_id,),
+                            )
+                        ]
+                        if key == "measurements" and iteration_id is not None
+                        else []
+                    )
+                    continue
                 result[key] = [
                     _decode(row)
                     for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")

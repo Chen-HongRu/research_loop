@@ -18,10 +18,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .operation_contract import OPERATION_SCHEMA
+from .role_access import ROLES, validate_role_access
 
 SCHEMA_VERSION = 8
 DATABASE = "runtime.sqlite3"
-ROLES = {"scout", "advocate", "judge", "plan", "execute", "review"}
 PHASES = {"plan": "execute", "execute": "review", "review": "publication"}
 _CONTROL_METADATA = (
     "study_id,max_iterations,max_calls,max_seconds,admission_deadline,calls,iterations,"
@@ -259,6 +259,7 @@ class StateStore:
     ):
         if not isinstance(config, dict):
             raise ValueError("config must be a dictionary")
+        validate_role_access(config)
         config_json = _json(config)
         _number(max_iterations, "max_iterations", nullable=True, integer=True)
         _number(max_calls, "max_calls", nullable=True, integer=True)

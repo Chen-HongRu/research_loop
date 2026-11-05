@@ -95,6 +95,13 @@ class NativeScriptApplicationTests(unittest.TestCase):
         context = self.context if context is None else context
         return application.validate(role, output, context, self.config)
 
+    def test_source_edits_require_separate_configured_action(self):
+        context = self.context | {"plan": self.plan, "allowed_actions": ["operations"]}
+        with self.assertRaisesRegex(ValueError, "source_edits"):
+            self.validate("execute", self.execute, context)
+        context["allowed_actions"].append("source_edits")
+        self.assertEqual(self.validate("execute", self.execute, context), self.execute)
+
     def package(self, role):
         context = deepcopy(self.context)
         if role == "execute":

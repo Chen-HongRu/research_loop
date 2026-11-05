@@ -9,12 +9,13 @@ import json
 from typing import Callable, Mapping
 
 from .context import ContextPackage
+from .role_access import RoleAccess
 from .context_sources import (
     check_metadata as check_source_metadata,
     validate_package as validate_source_package,
 )
 from .files import publish_artifact, validate_artifact_ref
-from .store import ConflictError, InvalidTransition, _json
+from .store import ConflictError, InvalidTransition, _decode, _json
 
 
 @dataclass(frozen=True)
@@ -177,7 +178,9 @@ class Updater:
         return value
 
     def _plan_output(self, record):
-        if record["attempt"]["role"] not in {"execute", "review"}:
+        if not RoleAccess.resolve(
+            record["control"]["config"], record["attempt"]["role"]
+        ).accepted_plan:
             return None
         plan = record["plan"]
         if plan is None:
@@ -247,6 +250,7 @@ class Updater:
         if not _same(manifest["task"], record["task"]):
             raise ConflictError("Context task envelope differs from immutable task")
         config = control["config"]
+        access = RoleAccess.resolve(config, attempt["role"])
         validate_source_package(config, attempt["role"], package, self._read_record)
         self._check_research_package(record, package)
         if not _same(manifest["budget"], config.get("context_budget", {})):
@@ -261,14 +265,14 @@ class Updater:
             )
         }
         required = dict(
-            permissions=config.get("permissions", {}),
+            **access.controls(config),
             task=record["task"],
             budget=limits,
         )
         for key in ("goal", "global_evaluation"):
             if key in config:
                 required[key] = config[key]
-        if attempt["role"] in {"plan", "execute"}:
+        if access.resource_context:
             for key in (
                 "execution_backends",
                 "resource_pools",
@@ -277,7 +281,7 @@ class Updater:
                 if key in config:
                     required[key] = config[key]
         required.update(self._planning_inputs(record))
-        if attempt["role"] in {"execute", "review"}:
+        if access.accepted_plan:
             if record["plan"] is None:
                 raise InvalidTransition(
                     "Execute/Review requires an accepted validated Plan"
@@ -288,6 +292,18 @@ class Updater:
         for key, value in required.items():
             if key not in context or not _same(context[key], value):
                 raise ConflictError(f"Context {key} differs from authoritative input")
+        if access.configured:
+            visible_refs = {
+                s["ref"] for s in manifest["sources"] if s["disposition"] != "omitted"
+            }
+            if set(manifest["allowed_evidence"]) - visible_refs:
+                raise ConflictError("Role cannot cite omitted context")
+            if (
+                not access.published_history
+                and record["binding"] is None
+                and not (record.get("retry") or {}).get("source_context_ref")
+            ):
+                self._check_iteration_scope(record, package, required, access)
         retry = record.get("retry")
         if retry is not None and retry["source_context_ref"] is not None:
             original = self._read_record(
@@ -308,6 +324,79 @@ class Updater:
             self.coordinator._iteration_for_feedback(record)
         elif attempt["status"] != "accepted":
             raise InvalidTransition("Attempt no longer accepts feedback")
+
+    def _check_iteration_scope(self, record, package, required, access):
+        """Pin evidence to authoritative inputs when Study history is out of scope."""
+        from .contexts import own_operations
+
+        ctx, manifest = package.context, package.manifest
+        sources = {s["key"]: s for s in manifest["sources"]}
+        expected = {key: f"control:{key}" for key in required}
+        protected = set(required)
+        iteration = record["attempt"]["iteration_id"]
+        if access.accepted_plan:
+            expected["plan"] = record["plan"]["output_ref"]
+        if access.own_execution:
+            with self.coordinator.store._connection(readonly=True) as conn:
+                execute = _decode(
+                    conn.execute(
+                        "SELECT * FROM attempts WHERE iteration_id=? AND role='execute' AND status='accepted'",
+                        (iteration,),
+                    ).fetchone()
+                )
+                rows = [
+                    _decode(r)
+                    for r in conn.execute(
+                        "SELECT * FROM measurements WHERE iteration_id=?", (iteration,)
+                    )
+                ]
+            if not execute or not _same(
+                ctx.get("execute"), self._phase_output(execute, "execute")
+            ):
+                raise ConflictError("Review requires its own Execute output")
+            expected["execute"] = execute["output_ref"]
+            protected.add("execute")
+            for row in rows:
+                key = "measurement:" + row["id"]
+                if not _same(ctx.get(key), row):
+                    raise ConflictError("Review requires its own measurement")
+                expected[key] = row["receipt_ref"]
+                protected.add(key)
+            operations = own_operations(self.coordinator, iteration)
+            if operations:
+                ref = sources.get("operations", {}).get("ref")
+                if (
+                    not _same(ctx.get("operations"), operations)
+                    or not ref
+                    or not _same(
+                        self._read_record(ref, _identity(self._root, ref)),
+                        {"operations": operations},
+                    )
+                ):
+                    raise ConflictError("Review operations differ from own iteration")
+                expected["operations"] = ref
+                protected.add("operations")
+        planning = record.get("planning")
+        if planning:
+            expected["planning"] = planning["snapshot_ref"]
+            for slot in planning.get("advocates", []):
+                expected[slot["slot"]] = (
+                    slot["output_ref"]
+                    if slot["status"] == "accepted"
+                    else "control:attempt:" + slot["id"]
+                )
+        # Both namespaces have already undergone independent identity and body checks.
+        for key, source in sources.items():
+            if key.startswith(("provided:", "evidence:")):
+                expected[key] = source["ref"]
+        if (
+            {key: s["ref"] for key, s in sources.items()} != expected
+            or not protected <= set(manifest["protected_keys"])
+            or any(
+                not ref.startswith("artifacts/") for ref in manifest["allowed_evidence"]
+            )
+        ):
+            raise ConflictError("Context exceeds the role's iteration scope")
 
     def _check_research_package(self, record, package):
         from .operations import Operations
@@ -338,6 +427,10 @@ class Updater:
             for entry in reports
             if entry["source"]["allow_feedback"]
         }
+        if attempt["role"] in record["control"]["config"].get("role_access", {}):
+            allowed &= {
+                s["ref"] for s in manifest["sources"] if s["disposition"] != "omitted"
+            }
         if set(manifest["allowed_evidence"]) & refs != allowed:
             raise ConflictError(
                 "Research evidence permissions differ from accepted collection"
@@ -571,6 +664,9 @@ class Updater:
         if not isinstance(normalized, dict):
             raise ValueError("Validator must return a normalized object")
         normalized = json.loads(_json(normalized))
+        RoleAccess.resolve(
+            captured["control"]["config"], call_identity.role
+        ).check_output(normalized)
         if _FORBIDDEN & normalized.keys():
             raise ValueError("Normalized output cannot update control or authorization")
         reports = {

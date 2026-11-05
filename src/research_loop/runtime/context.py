@@ -249,6 +249,7 @@ def build_context(
     budget: dict,
     *,
     policy: Callable | None = None,
+    visible_evidence_only: bool = False,
 ):
     """Select whole fields or string prefixes; estimate serialized JSON tokens."""
     captured = snapshot.to_dict()
@@ -320,6 +321,10 @@ def build_context(
         recorded.append(item)
     # Source order is metadata order; preserve the original input order for prompts.
     context = {key: context[key] for key in inputs if key in context}
+    allowed = captured["allowed_evidence"]
+    if visible_evidence_only:
+        visible = {s["ref"] for s in recorded if s["disposition"] != "omitted"}
+        allowed = [ref for ref in allowed if ref in visible]
     manifest = dict(
         version=1,
         study_id=captured["study_id"],
@@ -329,7 +334,7 @@ def build_context(
         policy_ref=policy_ref,
         budget=budget,
         protected_keys=protected,
-        allowed_evidence=captured["allowed_evidence"],
+        allowed_evidence=allowed,
         sources=recorded,
         tokens={
             "estimated_input_tokens": math.ceil(len(_json(context)) / 4),
