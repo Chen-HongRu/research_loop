@@ -364,6 +364,7 @@ study/
         attempt-001/
           prompt.md
           context.json              本次调用的快照与引用清单
+          context-manifest.json     新调用的来源、策略版本、提供/省略/截断记录
           schema.json
           stdout.jsonl
           stderr.txt

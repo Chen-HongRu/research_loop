@@ -2,7 +2,9 @@
 
 This guide describes the serial document controller. The new
 [SQLite runtime foundation](transactional-runtime.md) preserves unresolved
-attempts across owner epochs and does not yet expose recovery or migration in
+attempts across owner epochs. Its [Updater](context-feedback.md) can replay exact
+committed receipts without invoking a validator or Agent again; it does not yet
+expose unresolved-attempt recovery or migration in
 the CLI. Legacy entry points refuse its marker or database instead of replaying
 `state.json` over authoritative SQLite state.
 

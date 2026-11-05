@@ -3,8 +3,10 @@
 This is the SQLite state foundation for [#77](https://github.com/Chen-HongRu/research_loop/issues/77).
 It is available through the Python API for new, isolated test Studies. The current
 `research-loop init/run` commands still use the serial document controller. The
-concurrent runner, Context updater, knowledge publication, backend lifecycle and
+concurrent runner, knowledge publication, backend lifecycle and
 explicit migration are subsequent deliverables tracked in #77.
+The [Context / Feedback interface](context-feedback.md) binds immutable inputs
+and validates output before accepting context-bound attempts.
 
 ## Authority and identities
 
@@ -134,7 +136,8 @@ with store.coordinator() as owner:
     )
 ```
 
-The later Context updater will validate role output, evidence access and scientific
-contracts before this acceptance transition. The state foundation's acceptance
-proves identity and control ordering, not the validity of a Plan or scientific
-claim. The existing document controller retains its current scientific validators.
+This low-level example uses an unbound attempt. Real role calls use the
+[Updater](context-feedback.md), which requires a bound context and an explicit
+role validator. Raw acceptance cannot bypass an existing binding. Neither state
+acceptance nor structural output validation proves a scientific claim. The
+existing document controller retains its current scientific validators.
