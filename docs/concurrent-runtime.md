@@ -17,25 +17,27 @@ in synthetic examples do not establish scientific validity.
 
 Use `research-loop runtime --help` and each subcommand's `--help` for arguments.
 The bundled skill launcher accepts the same `runtime` arguments. Initialize a new
-empty Study directory with an explicit JSON configuration and trusted application:
+empty Study directory with an explicit YAML configuration and trusted application:
 
 ```sh
-research-loop runtime init /path/to/study --config /path/to/config.json \
+research-loop runtime init /path/to/study --config /path/to/config.yaml \
   --application /path/to/versioned/application.py \
-  --application-config /path/to/private-application-config.json
+  --application-config /path/to/private-application-config.yaml
 research-loop runtime run /path/to/study
 research-loop runtime status /path/to/study
 ```
 
 Place controller budgets and pool capacity alongside `runtime`, `resource_pools`
-and `operation_authorizations` in the Study JSON. These are fields of the full
+and `operation_authorizations` in the Study YAML. These are fields of the full
 configuration, for example:
 
-```json
-{
-  "budget": {"max_calls": null, "max_iterations": null, "window_seconds": 36000},
-  "task_pool": {"max_pending": null}
-}
+```yaml
+budget:
+  window_seconds: 36000  # 10 hours
+  max_calls: null
+  max_iterations: null
+task_pool:
+  max_pending: null
 ```
 
 `null` means unlimited for counts. `window_seconds` fixes both the elapsed
@@ -49,7 +51,12 @@ For existing commands without a `budget` block, supply all three CLI flags
 `--max-iterations`, `--max-calls` and `--max-seconds`; the optional
 `--admission-deadline` remains available. Combining budget sources is rejected.
 The Python API accepts the same config block or explicit limits. The
-[local CLI example](../examples/runtime_cli.py) exercises file-based budgets.
+[local CLI example](../examples/runtime_cli.py) uses the complete synthetic
+[Study configuration](../examples/runtime_config.yaml) and exercises file-based budgets.
+
+Both configuration files must have a `.yaml` or `.yml` extension and use safe
+YAML 1.2. Duplicate keys and YAML 1.1 merge keys (`<<`) are rejected. Other CLI
+documents, including task specifications and migration inventory, remain JSON.
 
 `--application-config` is optional. Configuration requires a nonblank `goal`,
 explicit object `permissions`, and the runtime fields below. Initialization imports

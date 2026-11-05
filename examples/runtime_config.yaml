@@ -1,0 +1,39 @@
+goal: Synthetic concurrent runtime
+permissions: {}
+global_evaluation:
+  id: synthetic-score
+  comparison_scope: fixed-fixture-v1
+  protocol: Deterministic example values, not a scientific evaluation
+  data_role: development
+  allow_feedback: true
+  objectives:
+    - name: score
+      direction: maximize
+      unit: points
+  constraints: []
+runtime:
+  worker_slots: 2
+  worker_adapter: {id: concurrent-fixture, version: '1'}
+  call_timeout_seconds: 8
+  action_timeout_seconds: 8
+  inspection_interval_seconds: 0.01
+  action_retries: 1
+  planning: false
+execution_backends:
+  synthetic:
+    version: '1'
+    environment: {id: local, version: '1'}
+resource_pools: {cpu: 2}
+operation_authorizations:
+  fixture:
+    backends: [synthetic]
+    max_operations: 10
+    resource_limits: {cpu: 2}
+    cost_limits: {ticks: 10}
+    deadline: null
+budget:
+  max_iterations: 3
+  max_calls: 12
+  window_seconds: 60
+task_pool:
+  max_pending: 3

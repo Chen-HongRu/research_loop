@@ -10,6 +10,8 @@ import tempfile
 import time
 import unittest
 
+from ruamel.yaml import YAML
+
 from examples import coordinator_fixture
 from examples.concurrent_runtime import configuration
 from research_loop.cli import main
@@ -25,9 +27,9 @@ class RuntimeCLITests(unittest.TestCase):
         self.root = self.base / "study"
         self.module = self.base / "application.py"
         self.module.write_text(Path(coordinator_fixture.__file__).read_text())
-        self.configuration = self.base / "config.json"
-        self.configuration.write_text(json.dumps(configuration()))
-        self.application = self.base / "application.json"
+        self.configuration = self.base / "config.yaml"
+        YAML(typ="safe", pure=True).dump(configuration(), self.configuration)
+        self.application = self.base / "application.yaml"
         self.spec = self.base / "task.json"
         self.spec.write_text(json.dumps({"instruction": "Synthetic command path"}))
 
@@ -39,7 +41,9 @@ class RuntimeCLITests(unittest.TestCase):
         return json.loads(stdout.getvalue()) if stdout.getvalue() else stderr.getvalue()
 
     def initialize(self, **fixture):
-        self.application.write_text(json.dumps({"root": str(self.root), **fixture}))
+        YAML(typ="safe", pure=True).dump(
+            {"root": str(self.root), **fixture}, self.application
+        )
         return self.cli(
             "init",
             self.root,
@@ -69,6 +73,10 @@ class RuntimeCLITests(unittest.TestCase):
             "task-" + identity,
             *extra,
         )
+
+    def test_init_accepts_yml_configuration(self):
+        self.configuration = self.configuration.rename(self.base / "config.yml")
+        self.assertEqual(self.initialize()["state"], "initialized")
 
     def test_initialize_task_run_publication_and_readonly_status(self):
         initialized = self.initialize(
@@ -102,8 +110,8 @@ class RuntimeCLITests(unittest.TestCase):
             },
             "task_pool": {"max_pending": 1},
         }
-        self.configuration.write_text(json.dumps(config))
-        self.application.write_text(json.dumps({"root": str(self.root)}))
+        YAML(typ="safe", pure=True).dump(config, self.configuration)
+        YAML(typ="safe", pure=True).dump({"root": str(self.root)}, self.application)
         args = (
             "init",
             self.root,
@@ -323,7 +331,7 @@ class RuntimeCLITests(unittest.TestCase):
 
     def test_invalid_settings_fail_before_creating_study(self):
         config = configuration(worker_slots=0)
-        self.configuration.write_text(json.dumps(config))
+        YAML(typ="safe", pure=True).dump(config, self.configuration)
         self.application.write_text("{}")
         self.cli(
             "init",
