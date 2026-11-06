@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ResearchRecord, StudyConfig } from "./contract.ts";
+import { validateContextConfig } from "./context.ts";
 
 export function writeJson(path: string, value: unknown) {
   mkdirSync(dirname(path), { recursive: true });
@@ -38,6 +39,7 @@ export function readConfig(root: string): StudyConfig {
 }
 
 export function validateConfig(config: StudyConfig) {
+  validateContextConfig(config.context);
   if (
     config.version !== 1 ||
     !config.id ||
@@ -171,6 +173,9 @@ export function initialize(root: string, config: StudyConfig) {
   // Resolve supplied paths once; recovery never refreshes resources or relocates them.
   for (const path of [config.source.root, config.inputs.root, config.python])
     realpathSync(path);
+  for (const [name, path] of Object.entries(config.context?.mounts ?? {}))
+    config.context!.mounts![name] = realpathSync(path);
+  validateContextConfig(config.context);
   mkdirSync(root, { recursive: false, mode: 0o700 });
   for (const folder of [
     "workspaces",

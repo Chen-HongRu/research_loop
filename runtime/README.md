@@ -33,6 +33,8 @@ For a new Study, `study.json` may set independent limits (both positive integers
 
 Omitting either limit defaults it to 1. Independent human investigations can overlap Plan, Execute and Review up to the investigation limit; the experiment limit separately bounds outstanding backend operations. These settings do not add authorized slots or extend the deadline. See the [concurrency contract](../docs/durable-research.md#concurrency) before choosing limits. Initialized but unstarted configurations can run under this runtime; existing serial execution state is not automatically migrated.
 
+Configure optional role instructions, tools and path grants before starting; inspect effective definitions or a frozen conversation with the [role context guide](../docs/role-context.md). Configuration changes are rejected after the Study starts.
+
 Use one writable host per Study. Do not run `run`, `resume` or `maintain`
 concurrently for the same root. Read-only status and original-job inspection do
 not start a second workflow executor.

@@ -12,6 +12,7 @@
   },
   "exports": {
     "./contract": "./dist/contract.js",
+    "./context": "./dist/context.js",
     "./engine": "./dist/engine.js",
     "./environment": "./dist/environment.js",
     "./files": "./dist/files.js"

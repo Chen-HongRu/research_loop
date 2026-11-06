@@ -20,7 +20,19 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { getOrThrow } from "@earendil-works/pi-durable/env";
-import { arr, bool, obj, oneOf, str } from "@earendil-works/pi-schema";
+import { obj } from "@earendil-works/pi-schema";
+import {
+  assembleContext,
+  contextAccess,
+  executeSchema,
+  notesSchema,
+  planSchema,
+  previewContext,
+  previewDefinitions,
+  reviewSchema,
+  type RoleContext,
+  type RoleRequest,
+} from "./context.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type {
@@ -46,14 +58,12 @@ import { createEnvironment, requireNativePlatform } from "./environment.ts";
 import { readReceipts, runExperiment } from "./experiments.ts";
 
 const context = BACKGROUND_CONTEXT;
-type Role = "plan" | "execute" | "review" | "manager";
 const Binding = defineDoc<{
   role: string;
   workspace: string;
-  writable: boolean;
+  assembled: RoleContext | null;
   records: string[];
   slot: string;
-  readOnly: string[];
 }>({
   kind: "research.role",
   version: 1,
@@ -63,10 +73,9 @@ const Binding = defineDoc<{
   initial: () => ({
     role: "",
     workspace: "",
-    writable: false,
+    assembled: null,
     records: [],
     slot: "",
-    readOnly: [],
   }),
   checkpointWhen: () => false,
 });
@@ -118,20 +127,6 @@ const State = defineDoc<{
   checkpointWhen: () => false,
 });
 
-const planSchema = obj({
-  question: str(),
-  change: str(),
-  rationale: str(),
-  basedOn: arr(str()),
-});
-const reviewSchema = obj({
-  interpretation: str(),
-  limitations: arr(str()),
-  knowledgeChanged: bool(),
-  goal: oneOf(["achieved", "not-achieved", "unknown"]),
-  continue: bool(),
-  nextQuestion: str(),
-});
 type Input = { root: string; config: StudyConfig; recovery?: number[] };
 type InvestigationInput = Input & {
   round: number;
@@ -196,16 +191,7 @@ function recordId(round: number) {
   return "r" + String(round + 1).padStart(4, "0");
 }
 function previous(root: string, ids: string[]) {
-  const records = ids.map((id) => readRecord(root, id));
-  if (
-    records.some((record) =>
-      record.receipts.some((receipt) => receipt.feedback !== "development"),
-    )
-  )
-    throw new Error(
-      "Restricted/final-only feedback cannot enter learning or knowledge",
-    );
-  return records;
+  return ids.map((id) => readRecord(root, id));
 }
 
 async function ask<I, S, R>(
@@ -213,13 +199,16 @@ async function ask<I, S, R>(
   runtime: TaskRuntime<I, S, R, object>,
   id: ConversationId,
   requestId: string,
-  prompt: string,
 ) {
   const binding = await runtime.snapshot(Binding, id, context);
+  if (!binding?.assembled)
+    throw new Error(
+      "Role has no frozen context; inspect and reconcile using its original runtime",
+    );
   event(root, "role.active", { role: binding?.role, conversation: id });
   const conversation = (await runtime.conversation(id, context))!;
   const submission = await conversation.submit(
-    { type: "input", requestId, content: prompt },
+    { type: "input", requestId, content: binding.assembled.prompt },
     context,
   );
   const settled = await submission.wait(context);
@@ -371,7 +360,7 @@ export async function openStudy(
     name: "finish_execute",
     description:
       "Finish coding with a public summary of actual changes and limitations. Measurements come only from run_experiment receipts.",
-    parameters: obj({ summary: str() }),
+    parameters: executeSchema,
     replay: "safe",
     async execute(args, api, ctx) {
       if (
@@ -495,7 +484,7 @@ export async function openStudy(
     name: "publish_notes",
     description:
       "Finish editing your research.md draft for atomic publication when this Manager conversation succeeds. Reviewed records remain authoritative; do not invent measurements.",
-    parameters: obj({}),
+    parameters: notesSchema,
     replay: "safe",
     async execute(_args, api, ctx) {
       const role = await api.snapshot(Binding, api.conversationId, ctx);
@@ -542,19 +531,6 @@ export async function openStudy(
     },
   });
 
-  const toolNames: Record<Role, string[]> = {
-    plan: ["read", "submit_plan"],
-    execute: [
-      "read",
-      "write",
-      "edit",
-      "bash",
-      "run_experiment",
-      "finish_execute",
-    ],
-    review: ["read", "submit_review"],
-    manager: ["read", "write", "edit", "bash", "publish_notes"],
-  };
   const allTools = [
     ...CodingTools.tools!,
     finishPlan,
@@ -563,45 +539,34 @@ export async function openStudy(
     experiment,
     notes,
   ];
-  function reviewPaths(receipts: Receipt[], ids: string[]) {
-    return [
-      config.inputs.root,
-      join(root, "knowledge"),
-      ...ids.map((id) => join(root, "records", id + ".json")),
-      ...[
-        ...receipts,
-        ...previous(root, ids).flatMap((record) => record.receipts),
-      ].flatMap((receipt) => [receipt.candidatePath, receipt.rawResult]),
-    ];
-  }
   async function roleInCommit(
     tx: Parameters<Parameters<Harness["commit"]>[0]>[0],
     owner: TaskId,
-    role: Role,
-    workspace: string,
-    records: string[],
-    slot: string,
-    readOnlyPaths: string[],
+    request: RoleRequest,
+    slot = "",
   ) {
+    const assembled = assembleContext(root, config, request);
+    const modelTools = assembled.tools.map((name) => {
+      const tool = allTools.find((tool) => tool.name === name);
+      if (!tool) throw new Error(`Unregistered context tool: ${name}`);
+      return tool;
+    });
     const conversation = await tx.createConversation({
       ownership: { kind: "task", taskId: owner },
     });
     Object.assign(await tx.doc(Binding, conversation.id), {
-      role,
-      workspace,
-      records,
+      role: assembled.role,
+      workspace: assembled.workspace,
+      records: request.records.map((record) => record.id),
       slot,
-      readOnly: readOnlyPaths,
-      writable: role === "execute" || role === "manager",
+      assembled,
     });
     await configure(tx, conversation.id, {
-      cwd: workspace,
+      cwd: assembled.workspace,
       model: { provider: config.model.provider, modelId: config.model.id },
       thinkingLevel: config.model.thinking,
-      modelTools: allTools.filter((tool) =>
-        toolNames[role].includes(tool.name),
-      ),
-      instructions: `You are the ${role} of an evidence-driven research study. Follow the human goal and constraints. Use the role's finish tool rather than merely writing a final chat response. Never treat self-reported numbers as measurements. Published knowledge is at ${join(root, "knowledge", "research.md")}; a fresh read can see updates during this conversation.`,
+      modelTools,
+      instructions: assembled.instructions,
     });
     return conversation.id;
   }
@@ -625,20 +590,11 @@ export async function openStudy(
               status: "running",
               checkpoint: {
                 phase: "edit",
-                conversation: await roleInCommit(
-                  tx,
-                  task.id,
-                  "manager",
+                conversation: await roleInCommit(tx, task.id, {
+                  role: "manager",
                   workspace,
-                  task.input.records,
-                  "",
-                  [
-                    join(root, "knowledge"),
-                    ...task.input.records.map((id) =>
-                      join(root, "records", id + ".json"),
-                    ),
-                  ],
-                ),
+                  records: previous(root, task.input.records),
+                }),
               },
             }),
             ctx,
@@ -650,8 +606,6 @@ export async function openStudy(
             runtime,
             task.state.checkpoint.conversation,
             "manager",
-            `Read the latest published knowledge and the reviewed records below. Read and edit research.md in your private workspace, then call publish_notes. Keep negative results and limitations. Do not rewrite accepted Plans or raw measurements.
-${JSON.stringify(previous(root, task.input.records))}`,
           )) as { content: string; preparedAt: string };
           const id = String(task.id);
           const replaced = publishKnowledge(root, id, publication.content);
@@ -731,15 +685,19 @@ ${JSON.stringify(previous(root, task.input.records))}`,
                   ? answer.value
                   : "Interrupted Execute; original job reconciled by operator, no coding or job replay",
               receipts,
-              reviewer: await roleInCommit(
-                tx,
-                task.id,
-                "review",
-                cp.workspace,
-                [],
-                "",
-                reviewPaths(receipts, cp.plan.basedOn),
-              ),
+              reviewer: await roleInCommit(tx, task.id, {
+                role: "review",
+                workspace: cp.workspace,
+                records: previous(root, cp.plan.basedOn),
+                round: cp.round,
+                task: cp.task,
+                plan: cp.plan,
+                execute:
+                  typeof answer?.value === "string"
+                    ? answer.value
+                    : "Interrupted Execute; original job reconciled by operator, no coding or job replay",
+                receipts,
+              }),
             },
           }),
           ctx,
@@ -764,15 +722,12 @@ ${JSON.stringify(previous(root, task.input.records))}`,
           writeFileSync(join(workspace, file), readRegular(join(source, file)));
         }
         await runtime.commit(async (tx) => {
-          const conversation = await roleInCommit(
-            tx,
-            task.id,
-            "plan",
+          const conversation = await roleInCommit(tx, task.id, {
+            role: "plan",
             workspace,
-            [...task.input.evidence],
-            "",
-            [workspace, config.inputs.root, join(root, "knowledge")],
-          );
+            records: previous(root, task.input.evidence),
+            task: selected,
+          });
           const state = await tx.doc(State);
           state.investigations.find((row) => row.task === task.id)!.planner =
             conversation;
@@ -794,14 +749,6 @@ ${JSON.stringify(previous(root, task.input.records))}`,
           runtime,
           cp.conversation,
           "plan",
-          `Goal: ${config.goal}
-Human constraints: ${JSON.stringify(config.constraints)}
-Task: ${JSON.stringify(cp.task)}
-Candidate files: ${JSON.stringify(config.source.files)}
-Public inputs: ${config.inputs.root}
-Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, input ${config.inputs.version}. ${config.evaluation.description ?? ""} Keep it fixed.
-Prior independently reviewed evidence: ${JSON.stringify(previous(root, task.input.evidence))}
-Read candidate/inputs and knowledge. Choose a concrete investigation; if prior records exist, explain specifically how their evidence/limits change your next code edit and cite record IDs in basedOn. Freeze it with submit_plan.`,
         )) as unknown as Plan;
         const selected =
           cp.task.source === "human"
@@ -828,11 +775,14 @@ Read candidate/inputs and knowledge. Choose a concrete investigation; if prior r
           const executor = await roleInCommit(
             tx,
             task.id,
-            "execute",
-            workspace,
-            [...task.input.evidence],
+            {
+              role: "execute",
+              workspace,
+              records: previous(root, task.input.evidence),
+              task: cp.task,
+              plan: cp.plan,
+            },
             config.authorization.slots[cp.round],
-            [config.inputs.root, join(root, "knowledge")],
           );
           const state = await tx.doc(State);
           state.investigations.find((row) => row.task === task.id)!.executor =
@@ -872,17 +822,7 @@ Read candidate/inputs and knowledge. Choose a concrete investigation; if prior r
           )
             throw new Error("Accepted experiment identity changed");
         } else writeJson(path, accepted);
-        const summary = await ask(
-          root,
-          runtime,
-          cp.executor,
-          "execute",
-          `Goal: ${config.goal}
-Immutable human constraints: ${JSON.stringify(config.constraints)}
-Accepted task: ${JSON.stringify(cp.task)}
-Frozen Plan: ${JSON.stringify(cp.plan)}
-Read and edit the candidate files ${JSON.stringify(config.source.files)}, run bash CPU checks and correct mistakes. Public input files are at ${config.inputs.root}; canonical inputs, hidden evaluation and model credentials are protected by the OS. Python executable: ${config.python}. Actually implement the Plan, then call run_experiment exactly for this authorized round to obtain trusted evaluation. Do not fake a metric or change evaluator/data. Your operation slot is fixed; rerunning cannot create more jobs. After inspecting the receipt call finish_execute with an honest public summary.`,
-        );
+        const summary = await ask(root, runtime, cp.executor, "execute");
         const receipts = experiments
           .readReceipts(root, config)
           .filter(
@@ -892,7 +832,6 @@ Read and edit the candidate files ${JSON.stringify(config.source.files)}, run ba
           throw new Error(
             "Execute produced no trusted experiment receipt; self-reports are not measurements",
           );
-        const readOnlyPaths = reviewPaths(receipts, cp.plan.basedOn);
         await runtime.commit(
           async (tx) => ({
             status: "running",
@@ -905,15 +844,16 @@ Read and edit the candidate files ${JSON.stringify(config.source.files)}, run ba
               executor: cp.executor,
               execute: String(summary),
               receipts,
-              reviewer: await roleInCommit(
-                tx,
-                task.id,
-                "review",
-                cp.workspace,
-                [],
-                "",
-                readOnlyPaths,
-              ),
+              reviewer: await roleInCommit(tx, task.id, {
+                role: "review",
+                workspace: cp.workspace,
+                records: previous(root, cp.plan.basedOn),
+                round: cp.round,
+                task: cp.task,
+                plan: cp.plan,
+                execute: String(summary),
+                receipts,
+              }),
             },
           }),
           ctx,
@@ -926,17 +866,6 @@ Read and edit the candidate files ${JSON.stringify(config.source.files)}, run ba
           runtime,
           cp.reviewer,
           "review",
-          `You are an independent fresh Review session, with no hidden Execute chat.
-Goal: ${config.goal}
-Current measured round: ${cp.round + 1}; authorized limit: ${config.maxRounds}; human-required minimum: ${config.minimumRounds ?? 1}.
-Human constraints: ${JSON.stringify(config.constraints)}
-Public input directory: ${config.inputs.root}
-Actual task: ${JSON.stringify(cp.task)}
-Accepted Plan: ${JSON.stringify(cp.plan)}
-Public Execute summary (not measurement authority): ${cp.execute}
-Prior independently reviewed records: ${JSON.stringify(previous(root, cp.plan.basedOn))}
-Trusted receipts: ${JSON.stringify(cp.receipts)}
-Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, inputs ${config.inputs.version}. ${config.evaluation.description ?? ""} Read the actual candidate snapshots and raw results. Separate execution completion, validity, knowledge change, goal achievement/unknown and continuation. Budget or round exhaustion is not goal achievement. Record specific limitations and a next research question using submit_review.`,
         )) as unknown as Review;
         if (
           !cp.receipts.some((receipt) => receipt.valid) &&
@@ -1212,8 +1141,17 @@ Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, inputs $
       tasks: [Loop, Investigation, Manager],
       hooks: [
         hook(ToolTask, {
-          beforeTool(call) {
+          async beforeTool(call, api, ctx) {
             admission(root, config);
+            const binding = await api.snapshot(
+              Binding,
+              api.conversationId,
+              ctx,
+            );
+            if (!binding?.assembled?.tools.includes(call.name))
+              throw new Error(
+                `Tool ${call.name} is not granted by this conversation's frozen context`,
+              );
             event(root, "tool.start", { name: call.name });
             return undefined;
           },
@@ -1245,15 +1183,17 @@ Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, inputs $
           target.conversationId,
           ctx,
         );
-        if (!binding?.role) throw new Error("No role workspace binding");
+        if (!binding?.assembled)
+          throw new Error(
+            "Role has no frozen context; inspect and reconcile using its original runtime",
+          );
         if (!environments.has(target.conversationId))
           environments.set(
             target.conversationId,
             await createEnvironment({
               id: String(target.conversationId),
-              workspace: binding.workspace,
-              readOnly: binding.readOnly,
-              writable: binding.writable ? [binding.workspace] : [],
+              workspace: binding.assembled.workspace,
+              ...contextAccess(binding.assembled),
               python: config.python,
             }),
           );
@@ -1487,6 +1427,35 @@ export async function studyStatus(root: string) {
       live: await opened.harness.inspect(context),
       usage: await opened.harness.usage(context),
     };
+  } finally {
+    await opened.close();
+  }
+}
+
+/** Read-only configuration or a previously frozen call; never admits model or experiment work. */
+export async function studyContext(
+  root: string,
+  conversation?: number,
+  expand = false,
+) {
+  const config = readConfig(root);
+  if (conversation === undefined)
+    return {
+      roles: previewDefinitions(config, expand),
+      mounts: config.context?.mounts ?? {},
+    };
+  if (!Number.isSafeInteger(conversation) || conversation < 1)
+    throw new Error("context requires a positive conversation ID");
+  const opened = await openStudy(root, { readOnly: true });
+  try {
+    const binding = await opened.harness.snapshot(
+      Binding,
+      conversation as ConversationId,
+      context,
+    );
+    if (!binding?.assembled)
+      throw new Error("No frozen role context for this conversation");
+    return previewContext(binding.assembled, expand);
   } finally {
     await opened.close();
   }
