@@ -57,7 +57,7 @@ that silence proves correctness or that a model review certifies public release.
 
 ### The research controller is algorithm-neutral
 
-- Keep `src/research_loop/` and its public interfaces independent of ProTok or any
+- Keep `runtime/src/` and its public interfaces independent of ProTok or any
   other specific algorithm, dataset, metric, candidate layout or deployment.
   Flag task imports, hardcoded task paths/metrics/scientific prompts, special-case
   algorithm branches, or mandatory task dependencies in the reusable package,

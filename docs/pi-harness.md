@@ -1,3 +1,5 @@
+> Historical record: commands and results describe the former runtime and do not validate the current system. See [current entry](../README.md) and [retirement](runtime-retirement.md).
+
 # Pi Harness
 
 验证日期：2026-11-02。兼容接线版本为 `@earendil-works/pi-coding-agent` 1.4.0，Node.js 要求以该包的 `engines` 为准。使用 Pi 自己的 `openai-codex` 登录；控制器不读取或复制 Codex 凭据。
@@ -16,7 +18,7 @@ Pi 的 `thinkingLevel` 表示客户端按模型能力调整后的配置；`provi
 
 ## 自定义模型配置
 
-SQLite [原生应用](../integrations/native_runtime/README.md)的 Pi 接线独立于上述普通 Study Harness。对于 Pi 1.5 的 `openai-completions` 自定义模型，若服务采用 DeepSeek thinking 协议，模型需要声明 `reasoning: true` 和 `compat.thinkingFormat: "deepseek"`，才能让 `--thinking off` 发送 `thinking: {type: "disabled"}`。仅配置 ID 和名称时，`reasoning` 默认为 `false`，不会发送该关闭字段。配置示例及输出上限见原生应用指南。
+SQLite [原生应用](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/integrations/native_runtime/README.md)的 Pi 接线独立于上述普通 Study Harness。对于 Pi 1.5 的 `openai-completions` 自定义模型，若服务采用 DeepSeek thinking 协议，模型需要声明 `reasoning: true` 和 `compat.thinkingFormat: "deepseek"`，才能让 `--thinking off` 发送 `thinking: {type: "disabled"}`。仅配置 ID 和名称时，`reasoning` 默认为 `false`，不会发送该关闭字段。配置示例及输出上限见原生应用指南。
 
 服务端仍可能忽略该字段；客户端模式元数据不能证明推理已关闭。可检查已报告的 reasoning-token 用量，无需读取思维文本。协议参见 [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/)。
 

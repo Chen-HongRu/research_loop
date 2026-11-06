@@ -1,8 +1,6 @@
-# Cactus smoke
+# Cactus task fixture
 
-The local controller uses the root project's Pydantic v2 dependency (`uv sync
---locked` at the repository root). Its report-only model supplies both the CLI
-schema and local validation; remote trainer dependencies and scoring are unchanged.
+This is an independent task fixture. Its former controller bridge and smoke/meta-loop runners have been retired. The new [remote training adapter](../../integrations/cactus_remote/README.md) has separate [two-round evidence](../../docs/autodl-cactus-evidence.md); historical results do not validate it. The standalone commands below describe the fixture, not that remote run.
 
 Controller preparation uses the prepared dataset in the [TIGER-Lab mirror](https://huggingface.co/datasets/TIGER-Lab/mle-bench/commit/01a3db85f9245ba64d87ed2a1170d486ee147e1f), pinned to `01a3db85f9245ba64d87ed2a1170d486ee147e1f`. The ~19 MB archive pair contains actual Kaggle Cactus images. No Kaggle credential was available. Mirror image bytes are not independently verified against Kaggle. The official preparation and grading sources are pinned to [MLE-bench commit 507f92e](https://github.com/openai/mle-bench/tree/507f92e1138bb6e40dac5c6ee7a6758e6424bf97).
 
@@ -17,7 +15,7 @@ Preparation, once, by the trusted controller:
 .venv/bin/python check_contract.py --root /absolute/task/prepared
 ```
 
-`prepared/data` contains fitting labels, unlabeled dev/test IDs, separate image directories, and configuration metadata. `prepared/controller` contains all source labels and the authoritative upstream grader and is mode 0700. This permission alone does not isolate an agent sharing the controller's root identity. The smoke uses a local agent without remote SSH or network access; a trusted bridge invokes fixed remote commands, gives the agent only permitted data/configuration and dev feedback, and keeps controller labels remote.
+`prepared/data` contains fitting labels, unlabeled dev/test IDs, separate image directories, and configuration metadata. `prepared/controller` contains all source labels and the authoritative upstream grader and is mode 0700. This permission alone does not isolate an agent sharing the controller's root identity. Any agent integration must independently enforce this boundary; these standalone scripts do not provide an agent isolation boundary.
 
 Fixed training invocation (output directory must not already exist):
 
@@ -37,4 +35,4 @@ Controller dev evaluation:
   --submission /absolute/task/runs/candidate-001/dev-predictions.csv --split dev
 ```
 
-Output is one JSON object: `{"split":"dev","metric":"roc_auc","score":0.0}` (score shown only as a schema example). Evaluation executes the unmodified official `prepare_for_auroc_metric` function and competition `grade` function AST nodes; pandas, sklearn ROC-AUC, and the invalid-submission exception are bound locally. The official helper validates row count, ID matching, numeric/range constraints, and sorts by ID. Only the controller may invoke `--split test`, after the loop freezes its final candidate. No private score is returned during research.
+Output is one JSON object: `{"split":"dev","metric":"roc_auc","score":0.0}` (score shown only as a schema example). Evaluation executes the unmodified official `prepare_for_auroc_metric` function and competition `grade` function AST nodes; pandas, sklearn ROC-AUC, and the invalid-submission exception are bound locally. The official helper validates row count, ID matching, numeric/range constraints, and sorts by ID. The standalone evaluator also supports a protected test split. The new remote acceptance path uses development scoring only and does not score final-test data.

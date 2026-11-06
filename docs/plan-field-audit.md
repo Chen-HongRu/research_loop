@@ -1,3 +1,5 @@
+> Historical record: this describes the former runtime. See [current entry](../README.md) and [retirement](runtime-retirement.md).
+
 # Plan field consumers
 
 The version-3 Plan keeps scientific intent in the existing frozen `markdown`.

@@ -62,6 +62,10 @@ export type PendingReceipt = {
 };
 
 function development(config: StudyConfig): void {
+  if (config.execution)
+    throw new Error(
+      "Use the exact configured experiment adapter for this Study",
+    );
   if (
     config.inputs.feedback !== "development" ||
     config.evaluation.feedback !== "development"
@@ -542,8 +546,15 @@ export async function runExperiment(
       const child = spawn(
         process.execPath,
         [
-          "--experimental-strip-types",
-          fileURLToPath(new URL("./cpu-job.ts", import.meta.url)),
+          ...(import.meta.url.endsWith(".ts")
+            ? ["--experimental-strip-types"]
+            : []),
+          fileURLToPath(
+            new URL(
+              import.meta.url.endsWith(".ts") ? "./cpu-job.ts" : "./cpu-job.js",
+              import.meta.url,
+            ),
+          ),
           intentPath,
         ],
         {

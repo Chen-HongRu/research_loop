@@ -1,3 +1,5 @@
+> Historical record: commands and results describe the former runtime and do not validate the current system. See [current entry](../README.md) and [retirement](runtime-retirement.md).
+
 # Codex skill verification
 
 Verified on 2026-11-03, macOS/arm64, Codex CLI 0.156.0, uv 0.11.19,

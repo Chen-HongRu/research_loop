@@ -1,3 +1,5 @@
+> Historical record: commands and results describe the former runtime and do not validate the current system. See [current entry](../README.md) and [retirement](runtime-retirement.md).
+
 # Runtime framework decision — Stage A (#94 / #95)
 
 Default candidate: **Pi Durable 1.5.0**, with its published native coding tools,
@@ -14,7 +16,7 @@ platform or production switch has been exercised by this evidence.
 ## Reproduce
 
 The two implementations, exact installation/start/restart/status/cancel commands
-and fault matrix are in [the spike guide](../spikes/persistent-coding/README.md).
+and fault matrix are in [the spike guide](https://github.com/Chen-HongRu/research_loop/blob/455d059aa7e4d48e29cac7eb0b1aaf61c16dc47f/spikes/persistent-coding/README.md).
 Versions come from published npm packages, pinned by `package-lock.json`:
 
 | Component                           | Fixed version                    | Observed local environment                       |
@@ -58,7 +60,7 @@ Raw transcripts and temporary workspaces are outside Git. The checked-in
 `observations.json` contains only synthetic fixture counters and elapsed times;
 elapsed times include process startup, deliberate sleeps and fault handling.
 They are not a throughput comparison. See
-[observations](../spikes/persistent-coding/observations.json).
+[observations](https://github.com/Chen-HongRu/research_loop/blob/455d059aa7e4d48e29cac7eb0b1aaf61c16dc47f/spikes/persistent-coding/observations.json).
 
 The authorized real runs use the locally configured `deepseek-flash` model on the
 same private provider, with requested thinking `off` (the registry marks it

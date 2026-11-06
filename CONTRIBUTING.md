@@ -5,11 +5,7 @@ its input/output contract, and the smallest check that demonstrates success.
 For research changes, fix the model/loss, data roles, shapes, masks, time alignment,
 evaluation and budget before changing behavior.
 
-Use Python 3.11+ and `uv sync --locked`. Run `uvx ruff format` and
-`uvx ruff check` on changed Python files, relevant unittest suites, and the
-smallest real smoke that exercises the change. The commands are in
-[README](README.md#开发). Agent/GPU/remote runs require the appropriate account
-and resource authorization; ordinary unit tests and the offline demo need none.
+Use the root Node package: `npm ci`, `npm run build`, `npm run check` and relevant tests. Native tests require `RESEARCH_NATIVE_SANDBOX_TEST=1` on macOS; see [README](README.md#development). Use uv for Python environments and run `uvx ruff format` and `uvx ruff check` on changed Python files, relevant tests and the smallest real smoke. Agent, GPU and remote runs require the appropriate account and resource authorization.
 
 Keep private goals, raw Agent transcripts, deployment/SSH details, credentials,
 data and checkpoints outside commits. Use synthetic fixtures in tests and demos.

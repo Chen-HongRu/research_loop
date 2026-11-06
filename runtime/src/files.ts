@@ -19,6 +19,15 @@ export function writeJson(path: string, value: unknown) {
 }
 
 export function readConfig(root: string): StudyConfig {
+  if (
+    !existsSync(join(root, "IDENTITY")) ||
+    ["runtime.sqlite3", "runtime.json", "state.json"].some((file) =>
+      existsSync(join(root, file)),
+    )
+  )
+    throw new Error(
+      "Legacy or unsupported Study; execution is refused. Use history on a consistent read-only snapshot and reconcile original effects before creating a new Study.",
+    );
   const config = JSON.parse(
     readFileSync(join(root, "study.json"), "utf8"),
   ) as StudyConfig;
@@ -37,6 +46,13 @@ export function validateConfig(config: StudyConfig) {
     !Number.isFinite(config.authorization.expiresAt)
   )
     throw new Error("Invalid durable Study configuration");
+  if (
+    config.execution &&
+    (!config.execution.id ||
+      !config.execution.version ||
+      !config.execution.identity)
+  )
+    throw new Error("Freeze the exact execution backend version and identity");
   if (
     config.inputs.feedback !== "development" ||
     config.evaluation.feedback !== "development"
@@ -89,8 +105,9 @@ export function validateConfig(config: StudyConfig) {
     )
       throw new Error("Candidate paths must stay within the source root");
   if (
-    config.evaluation.predictCommand.length === 0 ||
-    config.evaluation.command.length === 0 ||
+    (!config.execution &&
+      (config.evaluation.predictCommand.length === 0 ||
+        config.evaluation.command.length === 0)) ||
     !config.inputs.version ||
     !config.evaluation.id ||
     !config.evaluation.version
@@ -110,6 +127,10 @@ export function admission(root: string, config: StudyConfig) {
 }
 
 export function initialize(root: string, config: StudyConfig) {
+  if (existsSync(root))
+    throw new Error(
+      "Study root already exists; use status for this runtime or history on a consistent read-only legacy snapshot. Initialization never overwrites or migrates an existing root.",
+    );
   validateConfig(config);
   root = resolve(root);
   // Resolve supplied paths once; recovery never refreshes resources or relocates them.

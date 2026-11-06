@@ -14,6 +14,7 @@ import {
   hook,
   type ConversationId,
   type TaskId,
+  type Task,
   type TaskRuntime,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -24,6 +25,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type {
   Plan,
+  ExperimentBackend,
   Receipt,
   ResearchRecord,
   ResearchTask,
@@ -40,7 +42,7 @@ import {
   readRegular,
   writeJson,
 } from "./files.ts";
-import { createEnvironment } from "./environment.ts";
+import { createEnvironment, requireNativePlatform } from "./environment.ts";
 import { readReceipts, runExperiment } from "./experiments.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -205,11 +207,40 @@ async function ask<I, S, R>(
 
 export async function openStudy(
   root: string,
-  options: { readOnly?: boolean; models?: Models } = {},
-) {
+  options: {
+    readOnly?: boolean;
+    models?: Models;
+    experiments?: ExperimentBackend;
+  } = {},
+): Promise<{
+  harness: Harness;
+  config: StudyConfig;
+  Loop: Task<Input, RoundState, LoopResult, object>;
+  Manager: Task<Input & { records: string[] }, ManagerState, null, object>;
+  State: typeof State;
+  experiments: Pick<ExperimentBackend, "run" | "readReceipts">;
+  close(): Promise<void>;
+}> {
   root = resolve(root);
   const config = readConfig(root);
   const readOnly = options.readOnly ?? false;
+  if (config.execution && !options.experiments && !readOnly)
+    throw new Error(
+      "This Study requires its exact configured experiment adapter",
+    );
+  if (
+    options.experiments &&
+    JSON.stringify(config.execution) !==
+      JSON.stringify(options.experiments.execution)
+  )
+    throw new Error(
+      "Execution adapter does not match the frozen Study contract",
+    );
+  const experiments = options.experiments ?? {
+    run: runExperiment,
+    readReceipts,
+  };
+  if (!readOnly) requireNativePlatform();
   if (readOnly && !existsSync(join(root, "runtime.sqlite")))
     throw new Error("Study has not started");
   const environments = new Map<
@@ -323,14 +354,14 @@ export async function openStudy(
   const experiment = defineTool({
     name: "run_experiment",
     description:
-      "Run this round's single pre-authorized CPU operation. Freezes the current candidate and runs protected prediction/scoring. Repeating cannot create another job. Unknown submission requires operator reconciliation.",
+      "Run this round's single pre-authorized experiment through its frozen backend. Freezes the current candidate and returns a trusted receipt. Repeating cannot create another job. Unknown submission requires operator reconciliation.",
     parameters: obj({}),
     async execute(_args, api, ctx) {
       const role = await api.snapshot(Binding, api.conversationId, ctx);
       if (role?.role !== "execute")
         throw new Error("Only Execute may submit experiments");
       admission(root, config);
-      const receipt = await runExperiment(
+      const receipt = await experiments.run(
         root,
         config,
         role.workspace,
@@ -554,9 +585,11 @@ ${JSON.stringify(previous(root, task.input.records))}`,
       reconciled: async (task, runtime, ctx) => {
         admission(root, config);
         const cp = task.state.checkpoint.experiment;
-        const receipts = readReceipts(root, config).filter(
-          (receipt) => receipt.slot === config.authorization.slots[cp.round],
-        );
+        const receipts = experiments
+          .readReceipts(root, config)
+          .filter(
+            (receipt) => receipt.slot === config.authorization.slots[cp.round],
+          );
         if (!receipts.length)
           throw new Error(
             "Bind and collect the original job before continuing; no new submission is permitted",
@@ -728,9 +761,11 @@ Accepted task: ${JSON.stringify(cp.task)}
 Frozen Plan: ${JSON.stringify(cp.plan)}
 Read and edit the candidate files ${JSON.stringify(config.source.files)}, run bash CPU checks and correct mistakes. Public input files are at ${config.inputs.root}; canonical inputs, hidden evaluation and model credentials are protected by the OS. Python executable: ${config.python}. Actually implement the Plan, then call run_experiment exactly for this authorized round to obtain trusted evaluation. Do not fake a metric or change evaluator/data. Your operation slot is fixed; rerunning cannot create more jobs. After inspecting the receipt call finish_execute with an honest public summary.`,
         );
-        const receipts = readReceipts(root, config).filter(
-          (receipt) => receipt.slot === config.authorization.slots[cp.round],
-        );
+        const receipts = experiments
+          .readReceipts(root, config)
+          .filter(
+            (receipt) => receipt.slot === config.authorization.slots[cp.round],
+          );
         if (receipts.length === 0)
           throw new Error(
             "Execute produced no trusted experiment receipt; self-reports are not measurements",
@@ -888,7 +923,7 @@ Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, inputs $
       ],
     }),
   );
-  const harness = await Harness.open(
+  const harness: Harness = await Harness.open(
     await openNodeSqliteStorage(join(root, "runtime.sqlite")),
     {
       readOnly,
@@ -948,6 +983,7 @@ Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, inputs $
     Loop,
     Manager,
     State,
+    experiments,
     async close() {
       await harness.close(context);
       await Promise.all(
@@ -1002,7 +1038,12 @@ function watchAuthorization(
 
 export async function runStudy(
   root: string,
-  options: { models?: Models; drainManager?: boolean; resume?: boolean } = {},
+  options: {
+    models?: Models;
+    drainManager?: boolean;
+    resume?: boolean;
+    experiments?: ExperimentBackend;
+  } = {},
 ) {
   root = resolve(root);
   const opened = await openStudy(root, options);
@@ -1020,9 +1061,11 @@ export async function runStudy(
       if (original && original.state.status !== "terminal") {
         const round = state!.records.length;
         if (
-          !readReceipts(root, config).some(
-            (receipt) => receipt.slot === config.authorization.slots[round],
-          )
+          !opened.experiments
+            .readReceipts(root, config)
+            .some(
+              (receipt) => receipt.slot === config.authorization.slots[round],
+            )
         )
           throw new Error(
             "Collect the bound original job before resume; no Execute replay is permitted",
@@ -1106,7 +1149,7 @@ export async function runStudy(
 
 export async function maintainKnowledge(
   root: string,
-  options: { models?: Models } = {},
+  options: { models?: Models; experiments?: ExperimentBackend } = {},
 ) {
   root = resolve(root);
   const opened = await openStudy(root, options);

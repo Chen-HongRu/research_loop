@@ -1,3 +1,5 @@
+> Historical record: commands and results describe the former runtime and do not validate the current system. See [current entry](../README.md) and [retirement](runtime-retirement.md).
+
 # v2 实现与 Cactus 真实验证
 
 > 历史验证摘要：以下数值来自开发时保留的记录，本次公开整理未重跑训练。原始运行产物未随源码分发，读者无法仅凭此摘要独立复核这些数值。
@@ -16,7 +18,7 @@
 | 恢复 | 成功执行后的后处理错误复用收据，未知执行需核对后显式重试；发布中断按同一清单补齐，冲突保留人工内容 |
 | 权限与预算 | 仅授权的 Execute 可写，调用和时间边界受控，最终评分不回到研究上下文 |
 
-核心模块为 [core.py](../src/research_loop/core.py)、[protocol.py](../src/research_loop/protocol.py)、[evaluation.py](../src/research_loop/evaluation.py) 和 [harness.py](../src/research_loop/harness.py)。新 Study 格式为 version 2，旧 v1 目录保持原样，不自动迁移。
+核心模块为 [core.py](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/src/research_loop/core.py)、[protocol.py](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/src/research_loop/protocol.py)、[evaluation.py](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/src/research_loop/evaluation.py) 和 [harness.py](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/src/research_loop/harness.py)。新 Study 格式为 version 2，旧 v1 目录保持原样，不自动迁移。
 
 ## 本地检查
 
@@ -85,4 +87,4 @@ Review 将候选标为 `valid=true / verified=true`，控制器发布唯一 Glob
 
 首轮 `studies/cactus-real-20261101/` 在实际训练开始前失败：`reset_peak_memory_stats` 先于 CUDA 初始化，触发 `Invalid device argument`。已复现并修正为先初始化 CUDA；模型、损失、数据划分和评价协议未改变。原轮返回 incomplete、未产生候选，也没有进行 private 评分；失败摘要（私有运行产物，未随源码分发）保持原样。成功轮在新 Study 中执行唯一一次实际训练。
 
-本次固定 tiny-cnn，只验证一个配置的真实通路，没有架构搜索、跨路线真实实验对比或多目标真实优化。Pi 仍未做真实调用；多路线恢复、Local Frontier 和 Pareto 行为的证据来自确定性合同测试。服务器与继承的 PyTorch 环境并非独占、完整锁定的镜像；实际包版本已记录。关于研究收益的结论须等待[同预算对照](benchmark-plan.md)，不能由这次单次 AUC 推出。
+本次固定 tiny-cnn，只验证一个配置的真实通路，没有架构搜索、跨路线真实实验对比或多目标真实优化。Pi 仍未做真实调用；多路线恢复、Local Frontier 和 Pareto 行为的证据来自确定性合同测试。服务器与继承的 PyTorch 环境并非独占、完整锁定的镜像；实际包版本已记录。关于研究收益的结论须等待[同预算对照](https://github.com/Chen-HongRu/research_loop/blob/0d81cbc44025e0e8742a9818fc18326484023790/docs/benchmark-plan.md)，不能由这次单次 AUC 推出。
