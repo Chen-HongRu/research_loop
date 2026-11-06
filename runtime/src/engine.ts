@@ -84,6 +84,21 @@ const State = defineDoc<{
   records: string[];
   pending: string[];
   manager: number | null;
+  investigations: {
+    round: number;
+    task: number;
+    planner?: number;
+    executor?: number;
+    plan?: {
+      question: string;
+      change: string;
+      rationale: string;
+      basedOn: string[];
+    };
+  }[];
+  permits: string[];
+  autonomousEvidence: string[];
+  stopped: { goal: string; reason: string } | null;
   publications: { id: string; records: string[]; at: string }[];
 }>({
   kind: "research.study",
@@ -94,6 +109,10 @@ const State = defineDoc<{
     records: [],
     pending: [],
     manager: null,
+    investigations: [],
+    permits: [],
+    autonomousEvidence: [],
+    stopped: null,
     publications: [],
   }),
   checkpointWhen: () => false,
@@ -113,7 +132,16 @@ const reviewSchema = obj({
   continue: bool(),
   nextQuestion: str(),
 });
-type Input = { root: string; config: StudyConfig; resume?: RoundState };
+type Input = { root: string; config: StudyConfig; recovery?: number[] };
+type InvestigationInput = Input & {
+  round: number;
+  task: ResearchTask;
+  evidence: string[];
+  resume?: RoundState;
+};
+type StudyState =
+  | { phase: "admit"; next: number; active: number[] }
+  | { phase: "join"; next: number; active: number[] };
 type SavedExperiment = {
   round: number;
   plan: Plan;
@@ -215,7 +243,7 @@ export async function openStudy(
 ): Promise<{
   harness: Harness;
   config: StudyConfig;
-  Loop: Task<Input, RoundState, LoopResult, object>;
+  Loop: Task<Input, StudyState, LoopResult, object>;
   Manager: Task<Input & { records: string[] }, ManagerState, null, object>;
   State: typeof State;
   experiments: Pick<ExperimentBackend, "run" | "readReceipts">;
@@ -224,6 +252,35 @@ export async function openStudy(
   root = resolve(root);
   const config = readConfig(root);
   const readOnly = options.readOnly ?? false;
+  if (!readOnly && existsSync(join(root, "runtime.sqlite"))) {
+    // Inspect the persisted contract before a writable Harness can recover task state.
+    const inspection = await openStudy(root, { readOnly: true });
+    try {
+      const state = await inspection.harness.snapshot(State, context);
+      if (
+        state?.task &&
+        (!Array.isArray(state.investigations) ||
+          !Array.isArray(state.permits) ||
+          !Array.isArray(state.autonomousEvidence))
+      )
+        throw new Error(
+          "Unsupported serial Study execution state; inspect it read-only and reconcile original effects before creating a new Study",
+        );
+      const original = state?.task
+        ? await inspection.harness.getTask(state.task as TaskId, context)
+        : null;
+      if (
+        original &&
+        JSON.stringify((original.input as unknown as Input).config) !==
+          JSON.stringify(config)
+      )
+        throw new Error(
+          "Original Study contract changed; authorization cannot be refreshed by editing configuration",
+        );
+    } finally {
+      await inspection.close();
+    }
+  }
   if (config.execution && !options.experiments && !readOnly)
     throw new Error(
       "This Study requires its exact configured experiment adapter",
@@ -291,8 +348,19 @@ export async function openStudy(
         throw new Error("Unknown reviewed record reference");
       await api.commit(async (tx) => {
         const answer = await tx.doc(Answer, api.conversationId);
-        if (answer.value === null) answer.value = args;
+        if (answer.value === null) {
+          answer.value = args;
+          const state = await tx.doc(State);
+          const investigation = state.investigations.find(
+            (row) => row.planner === api.conversationId,
+          );
+          if (!investigation)
+            throw new Error("Planner has no assigned investigation");
+          investigation.plan = args;
+        }
       }, ctx);
+      if (process.env.RESEARCH_FAULT === "plan-ack")
+        process.kill(process.pid, "SIGKILL");
       return {
         output: [{ type: "text", text: "Plan frozen" }],
         control: { terminate: true },
@@ -361,12 +429,65 @@ export async function openStudy(
       if (role?.role !== "execute")
         throw new Error("Only Execute may submit experiments");
       admission(root, config);
-      const receipt = await experiments.run(
-        root,
-        config,
-        role.workspace,
-        role.slot,
-      );
+      // Capacity is reserved durably before entering a backend with external effects.
+      // Only a canonical collected receipt can free it, including terminal failures.
+      while (true) {
+        const watch = (await api.watchDoc(State, ctx))!;
+        try {
+          const acquired = await api.commit(async (tx) => {
+            admission(root, config);
+            const state = await tx.doc(State);
+            const receipts = experiments.readReceipts(root, config);
+            state.permits = state.permits.filter(
+              (slot) => !receipts.some((r) => r.slot === slot),
+            );
+            const existing = receipts.find((r) => r.slot === role.slot);
+            if (existing) return "collected";
+            if (state.permits.includes(role.slot)) return "unknown";
+            if (state.permits.length >= (config.concurrency?.experiments ?? 1))
+              return "wait";
+            state.permits.push(role.slot);
+            return "acquired";
+          }, ctx);
+          if (acquired === "unknown")
+            throw new Error(
+              "Original experiment effect is pending or unknown; query/bind/collect it before resume, never resubmit",
+            );
+          if (acquired !== "wait") break;
+          await new Promise<void>((resolve, reject) => {
+            watch.start(async (call) => {
+              if (call.kind === "failed") reject(call.error);
+              else if (
+                call.value.permits.length <
+                (config.concurrency?.experiments ?? 1)
+              )
+                resolve();
+            });
+            void watch.closed.then(() =>
+              reject(new Error("Experiment capacity wait ended")),
+            );
+          });
+        } finally {
+          await watch.stop();
+        }
+      }
+      admission(root, config);
+      let receipt: Receipt;
+      try {
+        receipt =
+          experiments
+            .readReceipts(root, config)
+            .find((r) => r.slot === role.slot) ??
+          (await experiments.run(root, config, role.workspace, role.slot));
+      } finally {
+        // Do not release on tool error, controller death, or unknown physical state.
+        const receipts = experiments.readReceipts(root, config);
+        if (receipts.some((r) => r.slot === role.slot))
+          await api.commit(async (tx) => {
+            const state = await tx.doc(State);
+            state.permits = state.permits.filter((slot) => slot !== role.slot);
+          }, ctx);
+      }
       return { output: [{ type: "text", text: JSON.stringify(receipt) }] };
     },
   });
@@ -577,10 +698,14 @@ ${JSON.stringify(previous(root, task.input.records))}`,
     },
   );
 
-  const Loop = defineTask<Input, RoundState, LoopResult>({
-    name: "research.loop",
+  const Investigation = defineTask<
+    InvestigationInput,
+    RoundState,
+    ResearchRecord
+  >({
+    name: "research.investigation",
     version: 1,
-    initial: (input) => input.resume ?? { phase: "plan", round: 0 },
+    initial: (input) => input.resume ?? { phase: "plan", round: input.round },
     phases: {
       reconciled: async (task, runtime, ctx) => {
         admission(root, config);
@@ -622,25 +747,15 @@ ${JSON.stringify(previous(root, task.input.records))}`,
       },
       plan: async (task, runtime, ctx) => {
         admission(root, config);
-        const state = (await runtime.snapshot(State, ctx))!;
-        const human = config.tasks[task.state.checkpoint.round];
-        const selected: ResearchTask = human ?? {
-          id: recordId(task.state.checkpoint.round),
-          source: "autonomous",
-          question:
-            "Select a follow-up investigation from the reviewed evidence",
-          constraints: [],
-          basedOn: [...state.records],
-        };
+        const selected = task.input.task;
         const workspace = join(
           root,
           "workspaces",
           recordId(task.state.checkpoint.round),
         );
         mkdirSync(workspace, { recursive: true });
-        const preceding = state.records.length
-          ? readRecord(root, state.records.at(-1)!)
-          : null;
+        const base = selected.basedOn.at(-1);
+        const preceding = base ? readRecord(root, base) : null;
         const source =
           preceding?.receipts.find((receipt) => receipt.valid)?.candidatePath ??
           config.source.root;
@@ -648,30 +763,32 @@ ${JSON.stringify(previous(root, task.input.records))}`,
           mkdirSync(dirname(join(workspace, file)), { recursive: true });
           writeFileSync(join(workspace, file), readRegular(join(source, file)));
         }
-        await runtime.commit(
-          async (tx) => ({
+        await runtime.commit(async (tx) => {
+          const conversation = await roleInCommit(
+            tx,
+            task.id,
+            "plan",
+            workspace,
+            [...task.input.evidence],
+            "",
+            [workspace, config.inputs.root, join(root, "knowledge")],
+          );
+          const state = await tx.doc(State);
+          state.investigations.find((row) => row.task === task.id)!.planner =
+            conversation;
+          return {
             status: "running",
             checkpoint: {
               phase: "awaitPlan",
               round: task.state.checkpoint.round,
               task: selected,
-              conversation: await roleInCommit(
-                tx,
-                task.id,
-                "plan",
-                workspace,
-                [...state.records],
-                "",
-                [workspace, config.inputs.root, join(root, "knowledge")],
-              ),
+              conversation,
             },
-          }),
-          ctx,
-        );
+          };
+        }, ctx);
       },
       awaitPlan: async (task, runtime, ctx) => {
         const cp = task.state.checkpoint;
-        const state = (await runtime.snapshot(State, ctx))!;
         const plan = (await ask(
           root,
           runtime,
@@ -683,7 +800,7 @@ Task: ${JSON.stringify(cp.task)}
 Candidate files: ${JSON.stringify(config.source.files)}
 Public inputs: ${config.inputs.root}
 Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, input ${config.inputs.version}. ${config.evaluation.description ?? ""} Keep it fixed.
-Prior independently reviewed evidence: ${JSON.stringify(previous(root, state.records))}
+Prior independently reviewed evidence: ${JSON.stringify(previous(root, task.input.evidence))}
 Read candidate/inputs and knowledge. Choose a concrete investigation; if prior records exist, explain specifically how their evidence/limits change your next code edit and cite record IDs in basedOn. Freeze it with submit_plan.`,
         )) as unknown as Plan;
         const selected =
@@ -707,9 +824,20 @@ Read candidate/inputs and knowledge. Choose a concrete investigation; if prior r
       execute: async (task, runtime, ctx) => {
         const cp = task.state.checkpoint;
         const workspace = join(root, "workspaces", recordId(cp.round));
-        const state = (await runtime.snapshot(State, ctx))!;
-        await runtime.commit(
-          async (tx) => ({
+        await runtime.commit(async (tx) => {
+          const executor = await roleInCommit(
+            tx,
+            task.id,
+            "execute",
+            workspace,
+            [...task.input.evidence],
+            config.authorization.slots[cp.round],
+            [config.inputs.root, join(root, "knowledge")],
+          );
+          const state = await tx.doc(State);
+          state.investigations.find((row) => row.task === task.id)!.executor =
+            executor;
+          return {
             status: "running",
             checkpoint: {
               phase: "awaitExecute",
@@ -718,19 +846,10 @@ Read candidate/inputs and knowledge. Choose a concrete investigation; if prior r
               task: cp.task,
               planner: cp.planner,
               workspace,
-              executor: await roleInCommit(
-                tx,
-                task.id,
-                "execute",
-                workspace,
-                [...state.records],
-                config.authorization.slots[cp.round],
-                [config.inputs.root, join(root, "knowledge")],
-              ),
+              executor,
             },
-          }),
-          ctx,
-        );
+          };
+        }, ctx);
       },
       awaitExecute: async (task, runtime, ctx) => {
         const cp = task.state.checkpoint;
@@ -744,8 +863,11 @@ Read candidate/inputs and knowledge. Choose a concrete investigation; if prior r
         };
         const path = join(root, "rounds", recordId(cp.round) + ".json");
         if (existsSync(path)) {
+          const saved = JSON.parse(
+            readFileSync(path, "utf8"),
+          ) as SavedExperiment;
           if (
-            JSON.stringify(JSON.parse(readFileSync(path, "utf8"))) !==
+            JSON.stringify({ ...saved, executor: accepted.executor }) !==
             JSON.stringify(accepted)
           )
             throw new Error("Accepted experiment identity changed");
@@ -863,32 +985,215 @@ Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, inputs $
               { ownership: { kind: "conversation" }, background: true },
             );
           if (
-            cp.record.review.goal === "achieved" ||
-            !cp.record.review.continue ||
-            cp.round + 1 >= config.maxRounds
+            !state.stopped &&
+            (cp.record.review.goal === "achieved" || !cp.record.review.continue)
           )
+            state.stopped = {
+              goal: cp.record.review.goal,
+              reason:
+                cp.record.review.goal === "achieved"
+                  ? "reviewed goal achieved"
+                  : "reviewed stop",
+            };
+          return {
+            status: "terminal",
+            outcome: { status: "completed", result: cp.record },
+          };
+        }, ctx);
+        event(root, "record.published", { id: cp.record.id });
+      },
+    },
+    abort: (_task, runtime, ctx) =>
+      runtime.commit(
+        () => ({ status: "terminal", outcome: { status: "aborted" } }),
+        ctx,
+      ),
+  });
+
+  const Loop = defineTask<Input, StudyState, LoopResult>({
+    name: "research.study.coordinator",
+    version: 1,
+    initial: () => ({ phase: "admit", next: 0, active: [] }),
+    phases: {
+      admit: async (task, runtime, ctx) => {
+        admission(root, config);
+        await runtime.commit(async (tx) => {
+          const state = await tx.doc(State);
+          const receipts = experiments.readReceipts(root, config);
+          state.permits = state.permits.filter(
+            (slot) => !receipts.some((receipt) => receipt.slot === slot),
+          );
+          // SDK transactions require table reads before the first task creation.
+          const existingTasks = new Map<
+            number,
+            Awaited<ReturnType<typeof tx.task>>
+          >();
+          for (const row of state.investigations)
+            existingTasks.set(row.task, await tx.task(row.task as TaskId));
+          // Recover by assigned round, never by completion count or order.
+          const active: number[] = [];
+          for (const row of state.investigations) {
+            const existing = existingTasks.get(row.task)!;
+            if (state.records.includes(recordId(row.round))) continue;
+            if (existing?.state.status !== "terminal") {
+              active.push(row.task);
+              continue;
+            }
+            if (!task.input.recovery?.includes(row.task))
+              throw new Error(
+                `Investigation failed; reconcile original effects and resume explicitly: ${JSON.stringify(existing.state.outcome)}`,
+              );
+            const saved = join(root, "rounds", recordId(row.round) + ".json");
+            const input = existing.input as unknown as InvestigationInput;
+            const resume: RoundState = existsSync(
+              join(root, "records", recordId(row.round) + ".json"),
+            )
+              ? {
+                  phase: "record",
+                  round: row.round,
+                  record: readRecord(root, recordId(row.round)),
+                }
+              : existsSync(saved)
+                ? (() => {
+                    const accepted = JSON.parse(
+                      readFileSync(saved, "utf8"),
+                    ) as SavedExperiment;
+                    if (row.executor)
+                      accepted.executor = row.executor as ConversationId;
+                    if (
+                      experiments
+                        .readReceipts(root, config)
+                        .some(
+                          (r) =>
+                            r.slot === config.authorization.slots[row.round],
+                        )
+                    )
+                      return {
+                        phase: "reconciled",
+                        experiment: accepted,
+                      } as RoundState;
+                    if (
+                      state.permits.includes(
+                        config.authorization.slots[row.round],
+                      )
+                    )
+                      throw new Error(
+                        "Collect the bound original job before resume; no Execute replay is permitted",
+                      );
+                    // No durable permit means this accepted Execute never entered the backend.
+                    return {
+                      phase: "execute",
+                      round: row.round,
+                      plan: accepted.plan,
+                      task: accepted.task,
+                      planner: accepted.planner,
+                    } as RoundState;
+                  })()
+                : row.plan && row.planner
+                  ? {
+                      phase: "execute",
+                      round: row.round,
+                      plan: row.plan,
+                      task:
+                        input.task.source === "human"
+                          ? input.task
+                          : {
+                              ...input.task,
+                              question: row.plan.question,
+                              basedOn: row.plan.basedOn,
+                            },
+                      planner: row.planner as ConversationId,
+                    }
+                  : { phase: "plan", round: row.round };
+            row.task = await tx.createTask(
+              Investigation,
+              { ...input, resume },
+              { ownership: { kind: "task", taskId: task.id } },
+            );
+            active.push(row.task);
+          }
+          let next = state.investigations.length;
+          const limit = config.concurrency?.investigations ?? 1;
+          while (
+            !state.stopped &&
+            next < config.maxRounds &&
+            active.length < limit
+          ) {
+            admission(root, config);
+            const human = config.tasks[next];
+            // Admit a dependent follow-up only from new, completed Reviews.
+            if (
+              !human &&
+              next > 0 &&
+              !state.records.some(
+                (id) => !state.autonomousEvidence.includes(id),
+              )
+            )
+              break;
+            const selected: ResearchTask = human ?? {
+              id: recordId(next),
+              source: "autonomous",
+              question:
+                "Select a follow-up investigation from the reviewed evidence",
+              constraints: [],
+              basedOn: [...state.records],
+            };
+            if (selected.basedOn.some((id) => !state.records.includes(id)))
+              break;
+            // Human investigations see only explicitly selected evidence; autonomous work sees all reviewed evidence.
+            const evidence = [...selected.basedOn];
+            const id = await tx.createTask(
+              Investigation,
+              { root, config, round: next, task: selected, evidence },
+              { ownership: { kind: "task", taskId: task.id } },
+            );
+            if (!human) state.autonomousEvidence = [...evidence];
+            state.investigations.push({ round: next, task: id });
+            active.push(id);
+            next++;
+            if (!human) break;
+          }
+          if (!active.length)
             return {
               status: "terminal",
               outcome: {
                 status: "completed",
                 result: {
                   records: [...state.records],
-                  goal: cp.record.review.goal,
-                  stopped:
-                    cp.record.review.goal === "achieved"
-                      ? "reviewed goal achieved"
-                      : !cp.record.review.continue
-                        ? "reviewed stop"
-                        : "authorized round limit",
+                  goal:
+                    state.stopped?.goal ??
+                    (state.records.length
+                      ? readRecord(root, state.records.at(-1)!).review.goal
+                      : "unknown"),
+                  stopped: state.stopped?.reason ?? "authorized round limit",
                 },
               },
             };
           return {
             status: "running",
-            checkpoint: { phase: "plan", round: cp.round + 1 },
+            checkpoint: { phase: "join", next, active },
           };
         }, ctx);
-        event(root, "record.published", { id: cp.record.id });
+      },
+      join: async (task, runtime, ctx) => {
+        // SDK owns persistence, task lifetime and restart. Wait for one completion so an
+        // independent configured investigation can fill the freed investigation slot.
+        await Promise.race(
+          task.state.checkpoint.active.map((id) =>
+            runtime.waitForTask(id as TaskId, ctx),
+          ),
+        );
+        await runtime.commit(
+          () => ({
+            status: "running",
+            checkpoint: {
+              phase: "admit",
+              next: task.state.checkpoint.next,
+              active: [],
+            },
+          }),
+          ctx,
+        );
       },
     },
     abort: (_task, runtime, ctx) =>
@@ -904,7 +1209,7 @@ Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, inputs $
     defineExtension({
       name: "research",
       tools: [finishPlan, finishExecute, finishReview, experiment, notes],
-      tasks: [Loop, Manager],
+      tasks: [Loop, Investigation, Manager],
       hooks: [
         hook(ToolTask, {
           beforeTool(call) {
@@ -962,21 +1267,6 @@ Fixed evaluation: ${config.evaluation.id}/${config.evaluation.version}, inputs $
     },
     context,
   );
-  if (!readOnly) {
-    const state = await harness.snapshot(State, context);
-    if (state?.task) {
-      const original = await harness.getTask(state.task as TaskId, context);
-      if (
-        JSON.stringify((original?.input as unknown as Input)?.config) !==
-        JSON.stringify(config)
-      ) {
-        await harness.close(context);
-        throw new Error(
-          "Original Study contract changed; authorization cannot be refreshed by editing configuration",
-        );
-      }
-    }
-  }
   return {
     harness,
     config,
@@ -1055,21 +1345,23 @@ export async function runStudy(
     if (options.resume) {
       admission(root, config);
       const state = await harness.snapshot(State, context);
-      const original = state?.task
-        ? await harness.getTask(state.task as TaskId, context)
-        : null;
-      if (original && original.state.status !== "terminal") {
-        const round = state!.records.length;
+      const receipts = opened.experiments.readReceipts(root, config);
+      for (const row of state?.investigations ?? []) {
+        if (state!.records.includes(recordId(row.round))) continue;
         if (
-          !opened.experiments
-            .readReceipts(root, config)
-            .some(
-              (receipt) => receipt.slot === config.authorization.slots[round],
-            )
+          state!.permits.includes(config.authorization.slots[row.round]) &&
+          !receipts.some(
+            (receipt) => receipt.slot === config.authorization.slots[row.round],
+          )
         )
           throw new Error(
             "Collect the bound original job before resume; no Execute replay is permitted",
           );
+      }
+      const original = state?.task
+        ? await harness.getTask(state.task as TaskId, context)
+        : null;
+      if (original && original.state.status !== "terminal") {
         await harness.abortTask(original.id, context);
         await harness.waitForTask(original.id, context);
       }
@@ -1098,21 +1390,13 @@ export async function runStudy(
           task.state.outcome.status !== "completed"
         ) {
           admission(root, config);
-          const round = state.records.length;
-          const id = recordId(round);
-          const resume: RoundState = existsSync(
-            join(root, "records", id + ".json"),
-          )
-            ? { phase: "record", round, record: readRecord(root, id) }
-            : {
-                phase: "reconciled",
-                experiment: JSON.parse(
-                  readFileSync(join(root, "rounds", id + ".json"), "utf8"),
-                ) as SavedExperiment,
-              };
           state.task = await tx.createTask(
             Loop,
-            { root, config, resume },
+            {
+              root,
+              config,
+              recovery: state.investigations.map((row) => row.task),
+            },
             { ownership: { kind: "conversation" } },
           );
           event(root, "recovery.continued", {

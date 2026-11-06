@@ -11,6 +11,7 @@ export interface StudyConfig {
     jobSeconds: number;
   };
   maxRounds: number;
+  concurrency?: { investigations?: number; experiments?: number };
   minimumRounds?: number;
   execution?: { id: string; version: string; identity: string };
   source: { root: string; files: string[] };
@@ -74,6 +75,9 @@ export interface Receipt {
 
 export interface ExperimentBackend {
   execution: { id: string; version: string; identity: string };
+  // Both methods expose only canonical, physically settled terminal receipts.
+  // executionComplete=false may describe a terminal failed/timed-out experiment.
+  // Pending or unknown effects must never appear as receipts.
   run(
     root: string,
     config: StudyConfig,

@@ -105,7 +105,7 @@ async function until(predicate: () => boolean) {
 }
 function controller(
   root: string,
-  fault: "cpu-ack" | "manager-ack",
+  fault: "cpu-ack" | "manager-ack" | "plan-ack",
   failManager = false,
 ) {
   const code = `import {runStudy} from ${JSON.stringify(new URL("../src/engine.ts", import.meta.url).href)}; import {scripted} from ${JSON.stringify(new URL("./scripted.ts", import.meta.url).href)}; const root=process.argv[1]; console.log(JSON.stringify(await runStudy(root,{models:scripted(root,${failManager}).models})));`;
@@ -116,7 +116,7 @@ function controller(
       env: {
         ...process.env,
         RL_CPU_FAULT: fault === "cpu-ack" ? "ack" : "",
-        RESEARCH_FAULT: fault === "manager-ack" ? "manager-ack" : "",
+        RESEARCH_FAULT: fault === "cpu-ack" ? "" : fault,
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -488,6 +488,39 @@ test(
         "r0001",
         "r0002",
       ]);
+    } finally {
+      f.cleanup();
+    }
+  },
+);
+
+test(
+  "accepted Plan survives process death before Execute without another Planner",
+  native,
+  async () => {
+    const f = fixture(1);
+    try {
+      const crashed = await controller(f.root, "plan-ack", true).done;
+      assert.equal(crashed.signal, "SIGKILL", crashed.output);
+      const before = await studyStatus(f.root);
+      const accepted = before.state!.investigations[0];
+      assert.ok(accepted.plan);
+      assert.ok(accepted.planner);
+      assert.equal(existsSync(join(f.root, "rounds", "r0001.json")), false);
+      const resumed = await runStudy(f.root, {
+        resume: true,
+        models: scripted(f.root, true).models,
+      });
+      assert.equal(resumed.status, "completed", JSON.stringify(resumed));
+      const record = readRecord(f.root, "r0001");
+      assert.deepEqual(record.plan, accepted.plan);
+      assert.equal(record.conversations.plan, accepted.planner);
+      assert.equal(
+        events(f.root).filter(
+          (event) => event.event === "role.active" && event.role === "plan",
+        ).length,
+        1,
+      );
     } finally {
       f.cleanup();
     }

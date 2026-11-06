@@ -71,6 +71,41 @@ export function validateConfig(config: StudyConfig) {
       "Each bounded round needs a distinct pre-authorized operation slot",
     );
   if (
+    config.concurrency !== undefined &&
+    (config.concurrency === null ||
+      typeof config.concurrency !== "object" ||
+      Array.isArray(config.concurrency))
+  )
+    throw new Error("Concurrency must be an object of positive integer limits");
+  if (
+    config.concurrency &&
+    (!Number.isSafeInteger(config.concurrency.investigations ?? 1) ||
+      (config.concurrency.investigations ?? 1) < 1 ||
+      !Number.isSafeInteger(config.concurrency.experiments ?? 1) ||
+      (config.concurrency.experiments ?? 1) < 1)
+  )
+    throw new Error("Concurrency limits must be positive safe integers");
+  if (
+    config.tasks.length > config.maxRounds ||
+    new Set(config.tasks.map((task) => task.id)).size !== config.tasks.length
+  )
+    throw new Error(
+      "Configured investigations require unique IDs and authorized rounds",
+    );
+  for (const [index, task] of config.tasks.entries())
+    if (
+      task.basedOn.some(
+        (id) =>
+          !/^r[0-9]{4,}$/.test(id) ||
+          Number(id.slice(1)) < 1 ||
+          Number(id.slice(1)) > index ||
+          id !== "r" + String(Number(id.slice(1))).padStart(4, "0"),
+      )
+    )
+      throw new Error(
+        "Investigation basedOn must cite a distinct earlier round record ID",
+      );
+  if (
     !Number.isInteger(config.minimumRounds ?? 1) ||
     (config.minimumRounds ?? 1) < 1 ||
     (config.minimumRounds ?? 1) > config.maxRounds

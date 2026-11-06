@@ -25,6 +25,14 @@ node dist/cli.js status /path/to/run
 
 `init` validates the supplied contract and creates the run root; it makes no model call. `run` admits the configured workflow and may call the model and launch the authorized CPU jobs. The fixture allows two 30-second CPU slots and requires two reviewed rounds before the goal can be declared achieved; a Review may stop earlier. Two rounds do not promise improvement. Keep the fixture and run root available at their original paths for recovery. See the [fixture](../benchmarks/cpu_regression/README.md) and [operating contract](../docs/durable-research.md) for evaluation and authorization details.
 
+For a new Study, `study.json` may set independent limits (both positive integers):
+
+```json
+"concurrency": { "investigations": 2, "experiments": 1 }
+```
+
+Omitting either limit defaults it to 1. Independent human investigations can overlap Plan, Execute and Review up to the investigation limit; the experiment limit separately bounds outstanding backend operations. These settings do not add authorized slots or extend the deadline. See the [concurrency contract](../docs/durable-research.md#concurrency) before choosing limits. Initialized but unstarted configurations can run under this runtime; existing serial execution state is not automatically migrated.
+
 Use one writable host per Study. Do not run `run`, `resume` or `maintain`
 concurrently for the same root. Read-only status and original-job inspection do
 not start a second workflow executor.
