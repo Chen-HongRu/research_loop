@@ -1,3 +1,5 @@
+import type { ContextConfig } from "./context.ts";
+
 export interface StudyConfig {
   version: 1;
   id: string;
@@ -12,6 +14,7 @@ export interface StudyConfig {
   };
   maxRounds: number;
   concurrency?: { investigations?: number; experiments?: number };
+  context?: ContextConfig;
   minimumRounds?: number;
   execution?: { id: string; version: string; identity: string };
   source: { root: string; files: string[] };

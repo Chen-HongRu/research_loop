@@ -2,7 +2,12 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { initialize, readConfig } from "./files.ts";
-import { maintainKnowledge, runStudy, studyStatus } from "./engine.ts";
+import {
+  maintainKnowledge,
+  runStudy,
+  studyContext,
+  studyStatus,
+} from "./engine.ts";
 import {
   bindSubmission,
   collectSubmission,
@@ -19,7 +24,7 @@ try {
   } else {
     if (!suppliedRoot)
       throw new Error(
-        "Usage: research-loop doctor | history ROOT [--file RELATIVE] | init ROOT CONFIG.json | run ROOT | resume ROOT | maintain ROOT | status ROOT | stop ROOT | submission ROOT SLOT [bind JOB_ID | collect]",
+        "Usage: research-loop doctor | history ROOT [--file RELATIVE] | init ROOT CONFIG.json | run ROOT | resume ROOT | maintain ROOT | status ROOT | context ROOT [CONVERSATION_ID] [--expand] | stop ROOT | submission ROOT SLOT [bind JOB_ID | collect]",
       );
     const root = resolve(suppliedRoot);
     let result: unknown;
@@ -50,6 +55,20 @@ try {
         const outcome = await runStudy(root, { resume: command === "resume" });
         result = outcome;
         if (outcome.status !== "completed") process.exitCode = 1;
+        break;
+      }
+      case "context": {
+        const positional = args.filter((arg) => arg !== "--expand");
+        if (
+          positional.length > 1 ||
+          args.filter((arg) => arg === "--expand").length > 1
+        )
+          throw new Error("context accepts [CONVERSATION_ID] [--expand]");
+        result = await studyContext(
+          root,
+          positional[0] === undefined ? undefined : Number(positional[0]),
+          args.includes("--expand"),
+        );
         break;
       }
       case "status":

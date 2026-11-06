@@ -10,7 +10,7 @@ npm run build
 node dist/cli.js doctor
 ```
 
-`doctor` makes no model call. It checks local prerequisites, compiled entry and locked dependency metadata; successful native isolation requires the native tests or an authorized smoke. For a bounded synthetic study and optional independent concurrency limits, see the [runtime instructions](runtime/README.md). For existing Studies, read [recovery and authorization](docs/durable-research.md#recovery-and-authorization); for retired Studies, use the [retirement and history guide](docs/runtime-retirement.md).
+`doctor` makes no model call. It checks local prerequisites, compiled entry and locked dependency metadata; successful native isolation requires the native tests or an authorized smoke. For a bounded synthetic study and optional independent concurrency limits, see the [runtime instructions](runtime/README.md). For role instructions, tool and path grants, and context inspection, see [role context](docs/role-context.md). For existing Studies, read [recovery and authorization](docs/durable-research.md#recovery-and-authorization); for retired Studies, use the [retirement and history guide](docs/runtime-retirement.md).
 
 ## Evidence and boundaries
 
