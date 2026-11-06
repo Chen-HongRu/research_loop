@@ -73,6 +73,10 @@ try {
             "submission requires an original authorized operation slot",
           );
         const config = readConfig(root);
+        if (config.execution)
+          throw new Error(
+            "Use the configured experiment adapter to query, bind or collect this Study's original jobs",
+          );
         result =
           action === "bind"
             ? await bindSubmission(root, config, slot, jobId)

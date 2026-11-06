@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -60,6 +61,37 @@ function fixture(rounds = 2, seconds = 900) {
   };
 }
 import { events, scripted } from "./scripted.ts";
+
+test("a configured external experiment adapter cannot fall back or change identity before any model/database admission", async () => {
+  const f = fixture();
+  try {
+    f.config.execution = {
+      id: "external-test",
+      version: "1",
+      identity: "frozen",
+    };
+    writeFileSync(join(f.root, "study.json"), JSON.stringify(f.config));
+    await assert.rejects(runStudy(f.root), /requires its exact configured/);
+    await assert.rejects(
+      runStudy(f.root, {
+        experiments: {
+          execution: { ...f.config.execution, identity: "changed" },
+          run: async () => {
+            throw new Error("must not submit");
+          },
+          readReceipts: () => {
+            throw new Error("must not collect");
+          },
+        },
+      }),
+      /does not match the frozen/,
+    );
+    assert.equal(existsSync(join(f.root, "runtime.sqlite")), false);
+    assert.equal(existsSync(join(f.root, "experiments")), false);
+  } finally {
+    f.cleanup();
+  }
+});
 
 async function until(predicate: () => boolean) {
   const end = Date.now() + 10_000;

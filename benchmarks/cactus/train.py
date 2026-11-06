@@ -116,7 +116,7 @@ def main(args):
     )
     model.eval()
     with torch.no_grad():
-        for split in ["dev", "test"]:
+        for split in args.prediction_splits:
             inputs = Images(args.data, split)
             prediction_loader = DataLoader(
                 inputs, batch_size=args.batch_size, num_workers=0
@@ -192,6 +192,12 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument(
+        "--prediction-splits",
+        nargs="+",
+        choices=["dev", "test"],
+        default=["dev", "test"],
+    )
     args = parser.parse_args()
     if args.epochs < 1 or args.batch_size < 1:
         parser.error("epochs and batch-size must be positive")

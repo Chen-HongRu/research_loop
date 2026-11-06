@@ -62,6 +62,10 @@ export type PendingReceipt = {
 };
 
 function development(config: StudyConfig): void {
+  if (config.execution)
+    throw new Error(
+      "Use the exact configured experiment adapter for this Study",
+    );
   if (
     config.inputs.feedback !== "development" ||
     config.evaluation.feedback !== "development"

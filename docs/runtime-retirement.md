@@ -23,9 +23,11 @@ Within the retired `src/research_loop/runtime/` tree, the responsibility mapping
 | `operations`, `operation_contract`, `measurements`, `backends` | Backend scheduler and adapters | Local CPU `run_experiment` intent, original-job query/bind/collect and trusted scoring. Remote effects require their original platform. |
 | `migration*`, `legacy*`, `dashboard`, `config_yaml`, `files`, `cli` | Migration/status commands, browser views and Python entry | Supported metadata and original-text `history` inspection only; no old execution imports or automatic state migration. |
 
+The new [Cactus remote training path](../integrations/cactus_remote/README.md) is a separate fixed-program adapter under preparation: Pi and research agents remain local on macOS, while only training and prediction use the existing AutoDL instance. It does not restore the retired bridges or establish that existing services or jobs have been migrated.
+
 The table records source decisions, not verified deployment state. Migration of each caller requires an authorized operator decision; the new local runtime is not a drop-in replacement for old external effects.
 
-Source retirement does not establish a production cutover or a stopped service. No deployment target or active Study migration has been authorized. Installed Python wheels and console scripts, remote supervisors and original job IDs must be checked in their actual environment by an authorized operator. [#94](https://github.com/Chen-HongRu/research_loop/issues/94) and [#97](https://github.com/Chen-HongRu/research_loop/issues/97) remain open.
+Source retirement does not establish a production cutover or a stopped service. No active legacy Study migration has been authorized. The bounded new Cactus test is authorized on the existing instance and does not constitute a legacy deployment cutover. Installed Python wheels and console scripts, remote supervisors and original job IDs must be checked in their actual environment by an authorized operator. [#94](https://github.com/Chen-HongRu/research_loop/issues/94) and [#97](https://github.com/Chen-HongRu/research_loop/issues/97) remain open.
 
 ## Read-only history
 

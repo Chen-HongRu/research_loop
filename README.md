@@ -1,8 +1,8 @@
 # Research Loop
 
-Research Loop runs bounded, evidence-driven investigations using PiDurable 1.5 and official pi-env 1.5. A round freezes a Plan, executes an authorized local CPU operation, and publishes a trusted receipt and independent Review. Development feedback is adaptive and does not establish final-test generalization.
+Research Loop runs bounded, evidence-driven investigations using PiDurable 1.5 and official pi-env 1.5. A round freezes a Plan, executes an authorized operation, and publishes a trusted receipt and independent Review. Development feedback is adaptive and does not establish final-test generalization.
 
-The supported source entry is the root Node package. Node.js >= 22.19, Python and [uv](https://docs.astral.sh/uv/) are required. Native isolation uses macOS `sandbox-exec`; local macOS arm64 CPU is the verified platform. Other platforms, GPU and remote execution are not validated.
+The supported source entry is the root Node package. Node.js >= 22.19, Python and [uv](https://docs.astral.sh/uv/) are required. Native isolation uses macOS `sandbox-exec`; local macOS arm64 CPU is the verified platform. Other platforms, GPU and remote execution are not validated by that evidence. A bounded [Cactus remote training path](integrations/cactus_remote/README.md) is being prepared for acceptance; its real run is not yet claimed.
 
 ```sh
 npm ci

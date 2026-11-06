@@ -47,6 +47,13 @@ export function validateConfig(config: StudyConfig) {
   )
     throw new Error("Invalid durable Study configuration");
   if (
+    config.execution &&
+    (!config.execution.id ||
+      !config.execution.version ||
+      !config.execution.identity)
+  )
+    throw new Error("Freeze the exact execution backend version and identity");
+  if (
     config.inputs.feedback !== "development" ||
     config.evaluation.feedback !== "development"
   )
@@ -98,8 +105,9 @@ export function validateConfig(config: StudyConfig) {
     )
       throw new Error("Candidate paths must stay within the source root");
   if (
-    config.evaluation.predictCommand.length === 0 ||
-    config.evaluation.command.length === 0 ||
+    (!config.execution &&
+      (config.evaluation.predictCommand.length === 0 ||
+        config.evaluation.command.length === 0)) ||
     !config.inputs.version ||
     !config.evaluation.id ||
     !config.evaluation.version

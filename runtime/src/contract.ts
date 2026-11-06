@@ -12,6 +12,7 @@ export interface StudyConfig {
   };
   maxRounds: number;
   minimumRounds?: number;
+  execution?: { id: string; version: string; identity: string };
   source: { root: string; files: string[] };
   inputs: {
     root: string;
@@ -22,7 +23,7 @@ export interface StudyConfig {
     id: string;
     version: string;
     description?: string;
-    // Prediction runs inside the OS sandbox. Scoring never imports candidate code.
+    // The built-in CPU path uses these commands; an injected backend owns execution.
     predictCommand: string[];
     command: string[];
     feedback: "development" | "final-only";
@@ -57,12 +58,29 @@ export interface Receipt {
   evaluationVersion: string;
   feedback: "development";
   jobId: string;
+  backend?: {
+    id: string;
+    version: string;
+    identity: string;
+    operationId: string;
+  };
   executionComplete: boolean;
   valid: boolean;
   metrics: Record<string, number>;
   observations: string[];
   rawResult: string;
   candidatePath: string;
+}
+
+export interface ExperimentBackend {
+  execution: { id: string; version: string; identity: string };
+  run(
+    root: string,
+    config: StudyConfig,
+    workspace: string,
+    slot: string,
+  ): Promise<Receipt>;
+  readReceipts(root: string, config: StudyConfig): Receipt[];
 }
 
 export interface Review {

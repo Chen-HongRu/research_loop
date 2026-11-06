@@ -3,6 +3,7 @@
 import argparse
 import ast
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +15,22 @@ class InvalidSubmissionError(Exception):
 
 
 def official_grade(submission, answers, controller):
+    if set(submission.columns) != {"id", "has_cactus"}:
+        raise InvalidSubmissionError("Expected exactly id and has_cactus columns")
+    if (
+        not submission.id.is_unique
+        or not answers.id.is_unique
+        or len(submission) != len(answers)
+        or set(submission.id) != set(answers.id)
+    ):
+        raise InvalidSubmissionError(
+            "Prediction IDs must exactly match the fixed split"
+        )
+    probabilities = pd.to_numeric(submission.has_cactus, errors="raise")
+    if any(not math.isfinite(value) or not 0 <= value <= 1 for value in probabilities):
+        raise InvalidSubmissionError(
+            "Predictions must be finite probabilities in [0,1]"
+        )
     namespace = {
         "pd": pd,
         "roc_auc_score": roc_auc_score,
