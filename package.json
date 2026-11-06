@@ -26,6 +26,7 @@
     "integrations/protok/README.md",
     "integrations/protok/assets/",
     "integrations/cactus_remote/README.md",
+    "integrations/cactus_remote/observations.json",
     "integrations/cactus_remote/remote_runner.py",
     ".github/PULL_REQUEST_TEMPLATE.md",
     "docs/",

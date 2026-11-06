@@ -2,7 +2,7 @@
 
 Research Loop runs bounded, evidence-driven investigations using PiDurable 1.5 and official pi-env 1.5. A round freezes a Plan, executes an authorized operation, and publishes a trusted receipt and independent Review. Development feedback is adaptive and does not establish final-test generalization.
 
-The supported source entry is the root Node package. Node.js >= 22.19, Python and [uv](https://docs.astral.sh/uv/) are required. Native isolation uses macOS `sandbox-exec`; local macOS arm64 CPU is the verified platform. Other platforms, GPU and remote execution are not validated by that evidence. A bounded [Cactus remote training path](integrations/cactus_remote/README.md) is being prepared for acceptance; its real run is not yet claimed.
+The supported source entry is the root Node package. Node.js >= 22.19, Python and [uv](https://docs.astral.sh/uv/) are required. Native isolation uses macOS `sandbox-exec`; local macOS arm64 CPU is the verified platform. A separate [Cactus remote training path](integrations/cactus_remote/README.md) completed two rounds on an existing AutoDL GPU; its [evidence and limits](docs/autodl-cactus-evidence.md) apply to the fixed trusted program.
 
 ```sh
 npm ci
@@ -14,7 +14,7 @@ node dist/cli.js doctor
 
 ## Evidence and boundaries
 
-The [stage B evidence](docs/durable-research-evidence.md) records observed results and limitations. Source retirement does not establish that any production deployment has switched or that an old service has stopped. Existing installations and jobs require operator reconciliation; issues [#94](https://github.com/Chen-HongRu/research_loop/issues/94) and [#97](https://github.com/Chen-HongRu/research_loop/issues/97) remain open. Historical reports are identified in the [retirement index](docs/runtime-retirement.md#historical-material).
+The [stage B evidence](docs/durable-research-evidence.md) records its observed results and limitations. The later [Cactus deployment](docs/autodl-cactus-evidence.md) validates the selected new Study and installed entry. Existing unselected installations and jobs require their own operator reconciliation; issues [#94](https://github.com/Chen-HongRu/research_loop/issues/94) and [#97](https://github.com/Chen-HongRu/research_loop/issues/97) remain open pending review and merge. Historical reports are identified in the [retirement index](docs/runtime-retirement.md#historical-material).
 
 The [source and package checks](docs/runtime-retirement.md#source-and-package-verification) include 33 passing native tests and an independent installation of the compiled application archive, with one real CPU evaluation and no model call.
 

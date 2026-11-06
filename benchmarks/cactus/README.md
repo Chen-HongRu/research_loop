@@ -1,6 +1,6 @@
 # Cactus task fixture
 
-This is an independent task fixture. Its former controller bridge and smoke/meta-loop runners have been retired. The new [remote training adapter](../../integrations/cactus_remote/README.md) is being prepared for a fixed-program acceptance run; historical results do not validate it. The standalone commands below describe the fixture, not that remote run.
+This is an independent task fixture. Its former controller bridge and smoke/meta-loop runners have been retired. The new [remote training adapter](../../integrations/cactus_remote/README.md) has separate [two-round evidence](../../docs/autodl-cactus-evidence.md); historical results do not validate it. The standalone commands below describe the fixture, not that remote run.
 
 Controller preparation uses the prepared dataset in the [TIGER-Lab mirror](https://huggingface.co/datasets/TIGER-Lab/mle-bench/commit/01a3db85f9245ba64d87ed2a1170d486ee147e1f), pinned to `01a3db85f9245ba64d87ed2a1170d486ee147e1f`. The ~19 MB archive pair contains actual Kaggle Cactus images. No Kaggle credential was available. Mirror image bytes are not independently verified against Kaggle. The official preparation and grading sources are pinned to [MLE-bench commit 507f92e](https://github.com/openai/mle-bench/tree/507f92e1138bb6e40dac5c6ee7a6758e6424bf97).
 

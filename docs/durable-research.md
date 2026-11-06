@@ -1,6 +1,6 @@
 # Durable research operating contract
 
-The [runtime entry point](../runtime/README.md) uses PiDurable 1.5 and official pi-env 1.5. Source retirement does not establish a production cutover; see [retirement](runtime-retirement.md). Native isolation requires macOS `sandbox-exec`; use Node.js >= 22.19, Python, uv and the root npm lockfile. Local macOS arm64 CPU is the verified platform.
+The [runtime entry point](../runtime/README.md) uses PiDurable 1.5 and official pi-env 1.5. Source retirement does not establish a production cutover; see [retirement](runtime-retirement.md). Native isolation requires macOS `sandbox-exec`; use Node.js >= 22.19, Python, uv and the root npm lockfile. Local macOS arm64 CPU and the fixed-program [AutoDL Cactus path](autodl-cactus-evidence.md) have separate measured evidence.
 
 ## Research and evidence
 

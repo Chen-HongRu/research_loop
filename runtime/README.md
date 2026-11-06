@@ -12,7 +12,7 @@ node dist/cli.js doctor
 
 The root `package-lock.json` is the canonical dependency lock. For the application archive and deployment installation, see [installation](../references/installation.md).
 
-The [Cactus remote training adapter](../integrations/cactus_remote/README.md) describes a separate fixed-program acceptance path under preparation; it is not validated by the local CPU evidence.
+The [Cactus remote training adapter](../integrations/cactus_remote/README.md) describes a separate fixed-program path with [two-round remote evidence](../docs/autodl-cactus-evidence.md); the local CPU evidence is separate.
 
 For a bounded synthetic CPU study, supply the exact provider and model you have authorized and configured in Pi. Prepare the fixture and initialize a **different**, nonexistent run directory, both outside the repository. Preparation starts the 900-second absolute authorization clock; initialize and run promptly.
 
