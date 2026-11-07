@@ -494,3 +494,19 @@ def test_queued_knowledge_publication_triggers_planning_before_quiescence(
     result = asyncio.run(scenario())
     assert [r.task.id for r in result.records] == ["from-notes"]
     assert (tmp_path / "study/planning-0002-judge.json").exists()
+
+
+def test_external_client_can_initialize_with_standard_socks_proxy(monkeypatch):
+    from openai import AsyncOpenAI
+
+    monkeypatch.setenv("ALL_PROXY", "socks5://proxy.example.invalid:1080")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+
+    async def initialize_only():
+        client = AsyncOpenAI(
+            api_key="synthetic-test-not-a-credential", max_retries=0, timeout=30
+        )
+        await client.close()  # No request or network connection is made.
+
+    asyncio.run(initialize_only())

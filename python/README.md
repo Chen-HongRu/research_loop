@@ -8,7 +8,8 @@ process-local studies; it does not migrate or resume existing Studies.
 
 ## Run
 
-Python 3.12 and uv are required. From the repository root:
+Python 3.12 and uv are required. The lock includes the SDK and SOCKS transport
+support for standard proxy environment configuration. From the repository root:
 
 ```sh
 uv sync --locked --project python
@@ -120,7 +121,7 @@ uvx ruff format python/src python/tests benchmarks/sdk_coding
 uvx ruff check python/src python/tests benchmarks/sdk_coding
 ```
 
-Observed on the current implementation: 27 focused tests passed, including
+Observed on the current implementation: 28 focused tests passed, including
 parallel Advocate/investigation progress, dependency readiness, human protection,
 stale Judge changes, separate experiment admission, asynchronous serial Manager,
 fresh Review inputs and failure handling. The macOS coding smoke completed two
