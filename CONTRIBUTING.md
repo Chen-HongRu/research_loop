@@ -7,6 +7,8 @@ evaluation and budget before changing behavior.
 
 Use the root Node package: `npm ci`, `npm run build`, `npm run check` and relevant tests. Native tests require `RESEARCH_NATIVE_SANDBOX_TEST=1` on macOS; see [README](README.md#development). Use uv for Python environments and run `uvx ruff format` and `uvx ruff check` on changed Python files, relevant tests and the smallest real smoke. Agent, GPU and remote runs require the appropriate account and resource authorization.
 
+For the separate [Agents SDK package](python/README.md), use `uv sync --locked --project python` and `uv run --locked --project python pytest -q python/tests`. The [coding demo](benchmarks/sdk_coding/README.md) is the smallest real local path; its scripted mode makes no model requests. Keep task-specific code outside the reusable package.
+
 Keep private goals, raw Agent transcripts, deployment/SSH details, credentials,
 data and checkpoints outside commits. Use synthetic fixtures in tests and demos.
 Preserve prior evidence and other contributors' changes. A pull request should
