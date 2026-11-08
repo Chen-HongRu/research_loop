@@ -2,7 +2,7 @@
 
 This is the active source runtime using PiDurable 1.5 and the official pi-env 1.5 daemon. Source retirement does not establish a production cutover. Legacy Studies are not executable here; see [retirement and history](../docs/runtime-retirement.md).
 
-The separate [Python Agents SDK orchestration](../python/README.md) is the new process-local implementation slice for #107. It does not resume this runtime's Studies or replace the durable commands below.
+The separate [Python Agents SDK orchestration](../python/README.md) provides process-local scheduling and stage correction for #107. It does not resume this runtime's Studies or replace the durable commands below.
 
 Requires Node.js >= 22.19, Python and [uv](https://docs.astral.sh/uv/). Native isolation currently supports macOS with `/usr/bin/sandbox-exec` only; local macOS arm64 CPU is verified. Install the locked runtime dependencies from the repository root:
 

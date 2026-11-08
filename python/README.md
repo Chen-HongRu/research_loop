@@ -1,16 +1,15 @@
 # Agents SDK research orchestration
 
-This is the first implementation slice of [#107](https://github.com/Chen-HongRu/research_loop/issues/107).
-The current scope follows the user's 2026-11-07 request: the complete role
-topology, implemented directly with Python Agents SDK, and basic local tracing.
-The existing Node/PiDurable entry remains available. This package starts new
-process-local studies. Explicit application-authorized safe handoffs can continue
-a Study; arbitrary crash recovery is outside this package.
+This package provides process-local research orchestration with the Python
+Agents SDK. Applications supply task-specific tools, evidence collection and
+resource authorization. Explicit application-authorized safe handoffs can
+continue a Study; arbitrary crash recovery is outside this package.
 
 ## Run
 
-Python 3.12 and uv are required. The lock includes the SDK and SOCKS transport
-support for standard proxy environment configuration. From the repository root:
+Python 3.12 and uv are required. The package supports Python versions >=3.12
+and <3.13. The lock includes the SDK and SOCKS transport support for standard
+proxy environment configuration. From the repository root:
 
 ```sh
 uv sync --locked --project python
@@ -82,8 +81,9 @@ flowchart LR
 - Scout runs independently, supplies advisory sources and limitations, and cannot
   alter active Plans or evaluations. The demo retrieves synthetic local material;
   it does not demonstrate live web research.
-- A single background Knowledge Manager consumes frozen batches of accepted
-  Review/Scout inputs. Arrivals during a call remain for the next batch. It
+- A single background Knowledge Manager consumes frozen Review outcomes and Scout
+  reports. Incomplete delivery is explicitly labeled and is not an accepted
+  scientific result. Arrivals during a call remain for the next batch. It
   atomically replaces one Markdown file; investigations can continue before notes
   publish. Each phase reads current published notes at its call boundary. Records
   remain authoritative and can directly inform dependent tasks.
@@ -111,8 +111,10 @@ flowchart LR
   publication. The candidate retains its original context; the callback receives
   current pool/evidence/notes and must reevaluate stale evidence and unresolved
   required tasks. Only an accepted, unchanged current snapshot establishes
-  `goal-achieved`. Without confirmation, a task achievement cannot establish Study
-  completion; the last non-achieved Review supplies the reported goal.
+  `goal-achieved`. A changed snapshot resumes scheduling before another decision.
+  Without confirmation, a task achievement cannot establish Study completion:
+  the latest Review supplies its non-achieved goal, or `unknown` for a local
+  achievement.
 - Optional async `recover_stage(StageFailure)` receives the exact phase, task,
   directory, exception, input, output and SDK `run_data`. Return
   `RecoveryDecision("retry", reason, progress_key, retry_after=...)` only after
@@ -135,11 +137,12 @@ flowchart LR
   and `ResearchResult.failures`; independent tasks continue.
 - A Plan freezes `execution_kind` (`analysis` by default, or `measurement`) and
   `required_artifacts`, with optional `numeric_fields` pointing to selected small
-  numeric summaries (for example `summary.json#/delta`). The application verifies actual execution and artifact
-  receipts against that frozen delivery through its host evidence callback.
-- A Review can set `delivery_complete=false`. Host `execution_complete` and `valid`, that flag
-  and optional `assess_completion(record)` must all pass before completion releases
-  dependencies. Missing evidence is published as an incomplete Review and enters
+  numeric summaries (for example `summary.json#/delta`). The application verifies
+  actual execution and artifact receipts against that frozen delivery through its
+  host evidence callback.
+- A Review can set `delivery_complete=false`. Host `execution_complete` and `valid`,
+  that flag and optional `assess_completion(record)` must all pass before completion
+  releases dependencies. Missing evidence is published as an incomplete Review and enters
   recovery phase `delivery`, whose output is the original Record. Only this phase
   permits `RecoveryDecision.restart_from="plan"` or `"execute"`: the same task's
   revision archives the old artifacts and supplies prior output/Review as correction
@@ -162,6 +165,8 @@ flowchart LR
   The application owns the handoff receipt, resource reconciliation and single-writer
   activation. Restore only that explicit receipt with `TaskPool.from_snapshot`,
   `initial_records` and `initial_scout_reports`. Active task snapshots are rejected.
+  Initial reviewed IDs must be unique; repaired IDs retain their investigation's
+  sequence so subsequent records cannot reuse them.
   `initial_stage_inputs` restores exact SDK role history once, keyed by task ID
   with `phase` and `input`. Execute continuation requires its frozen `plan`;
   Review continuation requires `completed_execution`. Completed execution cannot
@@ -220,12 +225,6 @@ counts. Trace configuration is process-global. Inputs/source may be private;
 keep all runtime files outside commits. Abrupt exit can leave incomplete traces.
 No trace server, UI or second execution journal is introduced.
 
-DBOS integration is deferred: `DBOSRunner` checkpoints model responses, while
-tool bodies require explicit durable boundaries. Whole-study recovery also
-requires durable completion ordering, deterministic pool replay, frozen knowledge
-inputs/batches and replay-safe publication. Adding a wrapper around this asyncio
-loop would not provide those semantics. The SDK-only entry has no DBOS dependency.
-
 ## Verification
 
 ```sh
@@ -234,25 +233,6 @@ uvx ruff format python/src python/tests benchmarks/sdk_coding
 uvx ruff check python/src python/tests benchmarks/sdk_coding
 ```
 
-The initial implementation passed 28 focused tests, including
-parallel Advocate/investigation progress, dependency readiness, human protection,
-stale Judge changes, separate experiment admission, asynchronous serial Manager,
-fresh Review inputs and failure handling. The macOS coding smoke completed two
-human investigations and one dependent autonomous investigation: five SDK test
-tool calls returned `1, 1, 0, 0, 0`, and three independent host evaluations returned
-zero. Local trace recorded all roles without errors. The demo ended at the round
-limit with `goal=not-achieved`; a further admitted task remained pending.
-
-The failure-isolation update passed 38 focused tests, including ordinary SDK and
-phase errors, blocked failed-task dependents, cancellation, wrapped fatal tool
-errors, a fatal Advocate with a blocked peer, and Manager failure followed by
-publication without replay. A fresh offline coding smoke again completed three
-Reviews with no failures, the same five tool exit codes and three zero-exit host
-evaluations. An initial attempt inside the outer execution sandbox could not
-start `sandbox-exec`; that attempt retained two isolated failures and does not
-establish successful fixture execution.
-
-The model responses and Scout source were synthetic. Live model decisions, web
-retrieval, DBOS recovery, external resources and other execution platforms remain
-unverified. These observations establish the local orchestration path, not a
-general research benefit.
+The coding demo uses synthetic model responses and a synthetic Scout source.
+Live model decisions, web retrieval, arbitrary crash recovery, external resources
+and other execution platforms require separate verification.

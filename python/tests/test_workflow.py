@@ -22,6 +22,7 @@ from research_loop.workflow import (
     Plan,
     Proposal,
     ResearchAgents,
+    Record,
     RecoveryDecision,
     Review,
     ScoutReport,
@@ -1302,6 +1303,134 @@ def test_plan_freezes_generic_delivery_contract():
     assert Plan.model_validate(plan.model_dump()).required_artifacts == (
         "metrics.json",
     )
+
+
+def reviewed_record(identifier="r1-repair-1"):
+    retained = retained_execution(valid=True)
+    return Record(
+        id=identifier,
+        task=TaskRequest(id="a", question="previous investigation"),
+        source="human",
+        plan=retained.plan,
+        execute=retained.execute_summary,
+        evidence=retained.evidence,
+        review=Review(
+            interpretation="reviewed",
+            limitations=(),
+            knowledge_changed=True,
+            goal="not-achieved",
+            continue_research=True,
+            next_question="next",
+        ),
+    )
+
+
+def test_repaired_record_handoff_reserves_its_original_sequence(tmp_path, sink):
+    async def scenario():
+        original = reviewed_record()
+        agents, prepare, stats = program()
+        ready = False
+
+        async def recover(failure):
+            nonlocal ready
+            assert failure.phase == "delivery" and failure.task.request.id == "b"
+            ready = True
+            return RecoveryDecision(
+                "retry",
+                "Implement missing delivery",
+                "implementation-changed",
+                restart_from="execute",
+            )
+
+        pool = TaskPool.from_snapshot(
+            [
+                {
+                    "request": original.task.model_dump(mode="json"),
+                    "source": "human",
+                    "status": "reviewed",
+                    "record_id": original.id,
+                },
+                {
+                    "request": TaskRequest(id="b", question="next").model_dump(
+                        mode="json"
+                    ),
+                    "source": "human",
+                    "status": "pending",
+                },
+            ]
+        )
+        result = await run_research(
+            goal="test",
+            pool=pool,
+            agents=agents,
+            prepare=prepare,
+            output_dir=tmp_path / "study",
+            max_rounds=1,
+            initial_records=(original,),
+            assess_completion=lambda record: ready,
+            recover_stage=recover,
+        )
+        assert [record.id for record in result.records] == [
+            "r1-repair-1",
+            "r2-repair-1",
+        ]
+        assert result.records[1].plan.based_on == (original.id,)
+        assert stats["calls"]["Plan:b"] == 1
+        assert (tmp_path / "study/r2-repair-1/record.json").is_file()
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_initial_review_ids_rejected_before_output_creation(tmp_path, sink):
+    original = reviewed_record()
+    with pytest.raises(ValueError, match="record IDs must be unique"):
+        run(tmp_path, options={"initial_records": (original, original)})
+    assert not (tmp_path / "study").exists()
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_stop_confirmation_mutation_dispatches_new_work(tmp_path, sink, confirmed):
+    async def scenario():
+        agents, prepare, stats = program(review_decisions={"a": ("achieved", False)})
+        pool = TaskPool(
+            [
+                TaskRequest(id="a", question="first"),
+                TaskRequest(id="b", question="second"),
+            ]
+        )
+        added = False
+
+        async def confirm(candidate, context):
+            nonlocal added
+            if not added:
+                added = True
+                await asyncio.sleep(0)
+                pool.add_human(
+                    TaskRequest(id="late", question="arrived during confirmation")
+                )
+            return confirmed
+
+        result = await run_research(
+            goal="test",
+            pool=pool,
+            agents=agents,
+            prepare=prepare,
+            output_dir=tmp_path / "study",
+            max_rounds=8,
+            max_planning_rounds=3,
+            max_scout_runs=1,
+            confirm_stop=confirm,
+        )
+        assert stats["calls"]["Plan:late"] == stats["collected"]["late"] == 1
+        assert {record.task.id for record in result.records} == {
+            "a",
+            "b",
+            "auto",
+            "late",
+        }
+        assert not result.failures
+
+    asyncio.run(scenario())
 
 
 def test_native_invalid_plan_json_preserves_history_and_corrects_same_stage(

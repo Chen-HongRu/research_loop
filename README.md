@@ -4,7 +4,7 @@ Research Loop runs bounded, evidence-driven investigations using PiDurable 1.5 a
 
 The existing durable source entry is the root Node package. Node.js >= 22.19, Python and [uv](https://docs.astral.sh/uv/) are required. Native isolation uses macOS `sandbox-exec`; local macOS arm64 CPU is the verified platform. A separate [Cactus remote training path](integrations/cactus_remote/README.md) completed two rounds on an existing AutoDL GPU; its [evidence and limits](docs/autodl-cactus-evidence.md) apply to the fixed trusted program.
 
-The new [Python Agents SDK entry](python/README.md) implements parallel Advocates, Judge and a protected task pool, concurrent Plan/Execute/fresh Review, background Scout and asynchronous Knowledge Manager, with local JSONL trace. Its offline coding demo uses real test subprocesses. This first slice of [#107](https://github.com/Chen-HongRu/research_loop/issues/107) starts new process-local runs; DBOS recovery and external resources follow separately.
+The separate [Python Agents SDK entry](python/README.md) implements parallel Advocates, Judge and a protected task pool, concurrent Plan/Execute/fresh Review, background Scout and asynchronous Knowledge Manager, with local JSONL trace. Its offline coding demo uses real test subprocesses. This SDK-only part of [#107](https://github.com/Chen-HongRu/research_loop/issues/107) supports process-local stage correction and explicit settled handoffs. Applications own external resources and their reconciliation; arbitrary crash recovery and DBOS integration are deferred.
 
 ```sh
 npm ci

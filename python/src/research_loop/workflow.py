@@ -1,8 +1,8 @@
 """Research policy in ordinary asyncio and native Agents SDK calls."""
 
 import asyncio
-import json
 import inspect
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -196,6 +196,12 @@ def save_json(path: Path, value: BaseModel | dict | list) -> None:
         stream.write(json.dumps(data, indent=2) + "\n")
 
 
+def _record_sequence(identifier: str) -> int:
+    """A delivery repair retains its original investigation's sequence number."""
+    base = identifier.partition("-repair-")[0]
+    return int(base[1:]) if base.startswith("r") and base[1:].isdigit() else 0
+
+
 async def run_research(
     *,
     goal: str,
@@ -253,19 +259,14 @@ async def run_research(
         raise ValueError(
             "Use two Proposal Advocates, a JudgeDecision Judge and ScoutReport Scout"
         )
+    if len({record.id for record in initial_records}) != len(initial_records):
+        raise ValueError("Initial reviewed record IDs must be unique")
     output_dir.mkdir(parents=True, exist_ok=False)
     config = RunConfig(
         trace_include_sensitive_data=True, call_model_input_filter=trace_model_input
     )
     records: list[Record] = list(initial_records)
-    record_offset = max(
-        (
-            int(r.id[1:])
-            for r in initial_records
-            if r.id.startswith("r") and r.id[1:].isdigit()
-        ),
-        default=0,
-    )
+    record_offset = max((_record_sequence(r.id) for r in records), default=0)
     failures: list[Failure] = []
     reports: list[ScoutReport] = list(initial_scout_reports)
     experiments = asyncio.Semaphore(experiment_concurrency)
@@ -537,6 +538,22 @@ async def run_research(
         decision = await ask(agents.judge, {**frozen, "advocates": outcomes})
         return decision, frozen["pool"]
 
+    async def collect(setup, state, directory, shared):
+        phase = "collect_evidence"
+        with custom_span(phase) as span:
+            while True:
+                pool.stage(state.request.id, phase)
+                try:
+                    async with experiments:
+                        evidence = await setup.collect_evidence()
+                except Exception as exc:
+                    if remember_fatal(exc):
+                        raise
+                    await recover(StageFailure(phase, state, directory, exc, shared))
+                else:
+                    span.span_data.data = evidence.model_dump(mode="json")
+                    return evidence
+
     async def investigate_once(state, number, delivery=None):
         record_id = f"r{number:04d}" if isinstance(number, int) else f"r{number}"
         directory = output_dir / record_id
@@ -594,21 +611,10 @@ async def run_research(
                         raise ValueError("Completed execution cannot resume Execute")
                 if delivery is not None and delivery.decision.restart_from is None:
                     phase = "collect_evidence"
-                    while True:
-                        try:
-                            async with experiments:
-                                corrected = await setup.collect_evidence()
-                            break
-                        except Exception as exc:
-                            if remember_fatal(exc):
-                                raise
-                            await recover(
-                                StageFailure(phase, state, directory, exc, shared)
-                            )
                     retained = CompletedExecution(
                         plan=delivery.plan,
                         execute_summary=delivery.execute,
-                        evidence=corrected,
+                        evidence=await collect(setup, state, directory, shared),
                     )
                 resumed = stage_inputs.get(state.request.id)
                 if delivery is not None and delivery.decision.restart_from == "execute":
@@ -654,20 +660,7 @@ async def run_research(
                         )
                     )
                     phase = "collect_evidence"
-                    with custom_span("collect_evidence") as evidence_span:
-                        while True:
-                            pool.stage(state.request.id, phase)
-                            try:
-                                async with experiments:
-                                    evidence = await setup.collect_evidence()
-                                break
-                            except Exception as exc:
-                                if remember_fatal(exc):
-                                    raise
-                                await recover(
-                                    StageFailure(phase, state, directory, exc, shared)
-                                )
-                        evidence_span.span_data.data = evidence.model_dump(mode="json")
+                    evidence = await collect(setup, state, directory, shared)
                 else:
                     execute = retained.execute_summary
                     evidence = retained.evidence
@@ -753,7 +746,6 @@ async def run_research(
                     )
                     # The repair callback can arrange missing execution; re-collect host
                     # evidence and review it without replaying prior confirmed effects.
-                    phase = "delivery"
                     raise DeliveryRetry(setup, plan, execute, record, decision)
                 return record
             except DeliveryRetry:
@@ -945,7 +937,9 @@ async def run_research(
                         confirmed = await confirm_stop(candidate, current)
                         # Callback may wait while external evidence/conditions change;
                         # compare the exact process-owned snapshot after it returns.
-                        if confirmed and current == context():
+                        if current != context():
+                            continue
+                        if confirmed:
                             admission_closed = True
                             stopped = "goal-achieved"
                     if (
@@ -958,6 +952,8 @@ async def run_research(
                             continue
                     break
                 kind, key, done = await events.get()
+                if done is not None:
+                    owned.discard(done)
                 if kind == "fatal":
                     raise fatal_error
                 if kind == "manager_idle":

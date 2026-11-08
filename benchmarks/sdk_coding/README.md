@@ -13,7 +13,7 @@ From the repository root, on macOS with `/usr/bin/sandbox-exec` available:
 
 ```sh
 uv sync --locked --project python
-uv run --locked --project python python benchmarks/sdk_coding/run.py /private/tmp/research-sdk-demo
+uv run --locked --project python python benchmarks/sdk_coding/run.py /path/to/new-private-run
 ```
 
 The output directory must be new and outside Git. Defaults are `--rounds 3`,
@@ -60,7 +60,7 @@ Explicit external mode uses an exact Chat Completions model ID:
 ```sh
 OPENAI_API_KEY=... OPENAI_BASE_URL=https://example.invalid/v1 \
   uv run --locked --project python python benchmarks/sdk_coding/run.py \
-  /private/tmp/research-sdk-external --model YOUR_AUTHORIZED_MODEL_ID
+  /path/to/new-private-external-run --model YOUR_AUTHORIZED_MODEL_ID
 ```
 
 Set the standard environment variables to an authorized provider (omit
@@ -70,9 +70,9 @@ most 12 turns per role call. It can incur provider charges and its decisions may
 differ from scripted mode; the run timeout is not a spending cap. No external
 model execution is required for this demo's local smoke.
 
-This is a bounded process-local demonstration, not a durable service. DBOS,
-arbitrary crash recovery, GPUs and a trace server are deferred. The generic
-controller also supports application-owned stage correction and explicit safe
-handoffs; this finite demo does not configure those callbacks. The existing macOS
+This is a bounded process-local demonstration. It does not demonstrate arbitrary
+crash recovery, GPUs or a trace server. The generic controller supports
+application-owned stage correction and explicit safe handoffs; this finite demo
+does not configure those callbacks. The existing macOS
 subprocess boundary is specific to this fixture; portability and production
 isolation are not demonstrated. No private dataset or holdout evaluation is used.
