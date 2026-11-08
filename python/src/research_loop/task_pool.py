@@ -24,8 +24,14 @@ class TaskState(BaseModel):
     request: TaskRequest
     source: Literal["human", "autonomous"]
     revision: int = 1
-    status: Literal["pending", "running", "reviewed", "cancelled", "failed"] = "pending"
+    status: Literal[
+        "pending", "running", "correcting", "blocked", "reviewed", "cancelled", "failed"
+    ] = "pending"
     record_id: str | None = None
+    phase: str | None = None
+    attempts: int = 0
+    blocked_reason: str | None = None
+    wakeup: str | None = None
 
 
 class CreateTask(BaseModel):
@@ -72,6 +78,42 @@ class TaskPool:
                 raise ValueError(f"Task ID already exists: {task.id}")
             self._tasks[task.id] = TaskState(request=task, source="human")
         self._validate(self._tasks)
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Sequence[dict], max_pending: int = 8):
+        """Restore an explicit safe-point handoff, never an arbitrary live snapshot."""
+        pool = cls([], max_pending=max_pending)
+        states = [TaskState.model_validate(value) for value in snapshot]
+        if len({s.request.id for s in states}) != len(states):
+            raise ValueError("Snapshot contains duplicate IDs")
+        if any(s.status in {"running", "correcting"} for s in states):
+            raise ValueError("Handoff contains active tasks")
+        pool._tasks = {s.request.id: s for s in states}
+        pool._validate(pool._tasks)
+        return pool
+
+    def state(self, task_id: str) -> TaskState:
+        return self._tasks[task_id]
+
+    def stage(self, task_id: str, phase: str, *, correcting=False):
+        current = self._tasks[task_id]
+        if current.status not in {"running", "correcting", "blocked"}:
+            raise ValueError(f"Task is not active: {task_id}")
+        return self._replace(
+            task_id,
+            phase=phase,
+            status="correcting" if correcting else "running",
+            attempts=current.attempts + (not correcting),
+            blocked_reason=None,
+            wakeup=None,
+        )
+
+    def block(self, task_id: str, reason: str, wakeup: str):
+        if not reason or not wakeup:
+            raise ValueError("Blocked tasks require a named condition and wakeup")
+        return self._replace(
+            task_id, status="blocked", blocked_reason=reason, wakeup=wakeup
+        )
 
     def snapshot(self) -> list[dict]:
         return [task.model_dump(mode="json") for task in self._tasks.values()]
@@ -187,7 +229,11 @@ class TaskPool:
 
     def _finish(self, task_id: str, status: str, record_id: str | None) -> TaskState:
         current = self._tasks.get(task_id)
-        if current is None or current.status != "running":
+        if current is None or current.status not in {
+            "running",
+            "correcting",
+            "blocked",
+        }:
             raise ValueError(f"Task is not running: {task_id}")
         return self._replace(task_id, status=status, record_id=record_id)
 

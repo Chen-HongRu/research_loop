@@ -1,5 +1,14 @@
 # Native SDK coding demo
 
+This demo uses the controller's default explicit-input mode. Applications that
+require Agents to retrieve their own knowledge can use the optional
+`run_research(prepare_input=...)` boundary and attach knowledge tools to all
+roles; see the [SDK execution contract](../../python/README.md#execution-contract).
+The demo does not configure that application-owned knowledge service.
+It also retains single-file Markdown publication. A whole-tree knowledge
+application owns draft tools, immutable Evidence and atomic activation through
+`publish_knowledge`; the SDK does not write through its live directory pointer.
+
 From the repository root, on macOS with `/usr/bin/sandbox-exec` available:
 
 ```sh
@@ -38,6 +47,13 @@ Local tracing is configured before the first SDK call. Inspect `trace.jsonl`,
 `evidence.json`, `record.json` and candidate files, planning receipts, Scout
 reports, Knowledge Manager inputs and `research/research.md`. These contain
 inputs and candidate source; keep the run directory private and outside commits.
+Ordinary investigation failures produce per-record `error.json` receipts and
+`research/result.json` includes a `failures` list; independent work continues,
+while dependencies on failed tasks remain blocked. Manager failures retain prior
+notes and pending Evidence, then retry the pending batch with new inputs. The
+optional application diagnosis hook can retry sooner after a verified repair. Inspect these failures and
+pool states before interpreting completion. Cancellation and application-declared
+`FatalResearchError` still stop the study; see the [failure contract](../../python/README.md#execution-contract).
 
 Explicit external mode uses an exact Chat Completions model ID:
 
@@ -55,6 +71,8 @@ differ from scripted mode; the run timeout is not a spending cap. No external
 model execution is required for this demo's local smoke.
 
 This is a bounded process-local demonstration, not a durable service. DBOS,
-recovery/resume, GPUs and a trace server are deferred. The existing macOS
+arbitrary crash recovery, GPUs and a trace server are deferred. The generic
+controller also supports application-owned stage correction and explicit safe
+handoffs; this finite demo does not configure those callbacks. The existing macOS
 subprocess boundary is specific to this fixture; portability and production
 isolation are not demonstrated. No private dataset or holdout evaluation is used.

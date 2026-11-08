@@ -4,7 +4,8 @@ This is the first implementation slice of [#107](https://github.com/Chen-HongRu/
 The current scope follows the user's 2026-11-07 request: the complete role
 topology, implemented directly with Python Agents SDK, and basic local tracing.
 The existing Node/PiDurable entry remains available. This package starts new
-process-local studies; it does not migrate or resume existing Studies.
+process-local studies. Explicit application-authorized safe handoffs can continue
+a Study; arbitrary crash recovery is outside this package.
 
 ## Run
 
@@ -43,7 +44,7 @@ flowchart LR
   N --> B
 ```
 
-- Two Advocates receive the same captured pool/evidence context and run in
+- By default two Advocates receive the same captured pool/evidence context and run in
   parallel. Judge waits for both outcomes, including individual failures. At
   least one successful proposal is required to call Judge.
 - Judge applies ordered `create/update/cancel` changes. Omitted tasks are retained.
@@ -51,16 +52,26 @@ flowchart LR
   the task to remain pending and autonomous. Human, running and reviewed tasks
   are protected. IDs remain reserved after cancellation. Conflicting entries
   are reported while unrelated valid changes apply.
-- The bounded pool counts all pending tasks, including blocked ones. Ready human
+- The bounded pool counts pending tasks, including pending dependency waits.
+  In-place correction and external-blocked states do not consume proposal capacity. Ready human
   tasks precede autonomous tasks, then lower numeric priority and ID. Dependencies
   become ready after prerequisite Review publication, including reviewed negative
   results; an execution summary alone does not unblock a task.
 - Each claimed task gets its own native Plan, Execute and Review Agents and
   application-scoped tools. Plan is frozen before execution. Review receives
   the frozen Plan, trusted development evidence, public Execute summary, prior
-  reviewed records and advisory notes/Scout information. Every call starts with
-  explicit input and no SDK Session or previous response ID; Execute's hidden
-  conversation is not inherited by Review.
+  reviewed records and advisory notes/Scout information. Every initial call starts with
+  explicit input and no SDK Session or previous response ID; a corrected stage
+  can continue its own SDK history. Execute's hidden conversation is not inherited by Review.
+- Applications can supply `prepare_input(agent, payload)` to `run_research` to
+  publish each controller-generated role input in a private knowledge store and
+  return only a retrieval reference to the Agent. Attach read-only knowledge
+  tools to every role so Agents retrieve context themselves. The callback runs
+  once per role invocation, before `Runner.run`, not per model/tool turn. It must
+  preserve frozen input and evidence identities; it does not change controller
+  acceptance checks or authorize computation. Without it, explicit inputs remain
+  unchanged. This is an input boundary, not a bundled knowledge service or
+  process-recovery mechanism.
 - Investigation concurrency and experiment concurrency are separate. The
   controller gates host evaluation with an `asyncio.Semaphore`. Application
   Execute tools must use that same supplied semaphore around experiments; the
@@ -73,21 +84,120 @@ flowchart LR
   atomically replaces one Markdown file; investigations can continue before notes
   publish. Each phase reads current published notes at its call boundary. Records
   remain authoritative and can directly inform dependent tasks.
-- Initial work, new Reviews, Scout reports and knowledge publications trigger
-  bounded, coalesced planning. Judge's own changes do not trigger another round.
-  Defaults limit investigations to 3, simultaneous investigations to 2,
-  experiments to 1, planning rounds to 4 and Scout runs to 2. These are admission
-  limits, not success conditions or a provider spending cap.
-- Judge/Review research stop closes new task admission; already claimed
-  investigations finish and knowledge work drains. This is not an operator STOP
-  API or a guarantee that cancellation terminates external processes. The first
-  stop reason is retained. Round exhaustion never establishes goal achievement;
-  `achieved` requires complete valid evidence and the minimum reviewed-round count.
-- Scout/planning failures preserve existing tasks and write advisory errors.
-  Plan, Execute, Review or Manager failure aborts the run without automatic retry;
-  accepted artifacts and prior published notes remain. Owned coroutines are
-  cancelled and joined. A failed run's pool may retain unsettled claimed tasks;
-  those files do not authorize replay of unknown tool effects.
+- The default publication above is one Markdown file. For a Study-wide file
+  library, applications can set `knowledge_path` to their live Index and supply
+  `publish_knowledge(final_output)`. With that callback the workflow archives
+  the final response but **does not write to the live path**: the application
+  exclusively publishes the Manager's complete private draft, for example by
+  atomically activating a versioned directory. Give only Manager draft edit
+  tools; all roles read the published tree independently of any Index. Keep
+  immutable experiment/literature Evidence outside the editable tree. The
+  application must serialize baseline validation and activation and advance its
+  Evidence acknowledgment cursor only with successful activation; a rejected
+  draft leaves Evidence pending. This callback does not supply a database or
+  DBOS recovery mechanism.
+- Initial work, new Reviews, Scout reports and successful knowledge publications
+  trigger coalesced planning. Judge edits do not trigger another round. Finite
+  demo defaults remain 3 investigations, 2 simultaneous investigations, 1 experiment,
+  4 planning rounds and 2 Scout runs. Set `max_rounds`, `max_planning_rounds` and
+  `max_scout_runs` to `None` for an application-owned continuous Study. These are
+  admission limits, never scientific success conditions or a spending cap.
+- Review/Judge stops are scoped candidates. They never directly close admission.
+  Optional async `confirm_stop(candidate, current_context)` performs the independent
+  whole-Study judgment at a quiescent boundary, after all ready work and knowledge
+  publication. The candidate retains its original context; the callback receives
+  current pool/evidence/notes and must reevaluate stale evidence and unresolved
+  required tasks. Only an accepted, unchanged current snapshot establishes
+  `goal-achieved`. Without confirmation, a task achievement cannot establish Study
+  completion; the last non-achieved Review supplies the reported goal.
+- Optional async `recover_stage(StageFailure)` receives the exact phase, task,
+  directory, exception, input, output and SDK `run_data`. Return
+  `RecoveryDecision("retry", reason, progress_key, retry_after=...)` only after
+  a verified new action/condition, or `RecoveryDecision("blocked", reason, wakeup=...)`
+  with a named external condition. A wakeup callback waits for that condition and
+  diagnosis runs again. Without a wakeup the task remains blocked. Repeating the
+  same phase/error/progress key blocks across task aliases. Diagnosis must ground
+  progress keys in actual changes; arbitrary new strings do not prove progress.
+  No generic retry quota or automatic whole-experiment replay is added.
+- Corrected role stages receive their original SDK history plus exact error/output
+  feedback. Confirmed tool outputs remain present; unresolved tool calls require
+  application-reconciled `continuation_input` before continuation. Native SDK
+  invalid-final-output and max-turn handlers capture the run snapshot before
+  error redaction, preserve failure and pass it to diagnosis without inventing
+  a scientific output or automatically resetting a role's quota. Other failures require
+  SDK history or explicitly reconciled continuation. A successful
+  Execute/collection is archived in `completed-execution.json` before Review, and
+  Review errors retry only Review. Cancellation and fatal errors still propagate.
+  Without a recovery callback ordinary failures stay isolated, with `error.json`
+  and `ResearchResult.failures`; independent tasks continue.
+- A Plan freezes `execution_kind` (`analysis` by default, or `measurement`) and
+  `required_artifacts`, with optional `numeric_fields` pointing to selected small
+  numeric summaries (for example `summary.json#/delta`). The application verifies actual execution and artifact
+  receipts against that frozen delivery through its host evidence callback.
+- A Review can set `delivery_complete=false`. Host `execution_complete` and `valid`, that flag
+  and optional `assess_completion(record)` must all pass before completion releases
+  dependencies. Missing evidence is published as an incomplete Review and enters
+  recovery phase `delivery`, whose output is the original Record. Only this phase
+  permits `RecoveryDecision.restart_from="plan"` or `"execute"`: the same task's
+  revision archives the old artifacts and supplies prior output/Review as correction
+  context. With no restart selection it re-collects host evidence and reviews it.
+  True measured negative results may complete; absence of a number cannot stand
+  in for the frozen quantitative delivery. The application defines that delivery.
+- Optional `validate_evidence_refs(refs, reviewed_records)` resolves exact immutable
+  evidence provenance, including application-owned prior reviewed sources. Raise
+  on false or unreviewed sources; no suffix-based identity guessing is performed.
+  The default accepts only exact current Record IDs.
+- Knowledge failures retain published notes and pending Evidence, archive the failed
+  frozen batch and retry through diagnosis or with the next new evidence batch.
+  Publication alone advances the pending cursor. Failure does not trigger empty
+  planning or an immediate Manager replay. Inspect `pending_knowledge`, `failures`
+  and pool states before interpreting completion.
+- `should_drain(context)` latches a requested drain before the next task, planning
+  or Scout admission; existing work and knowledge publication finish. Then
+  `on_quiescent(context)` can seal a planned safe handoff only when no role,
+  investigation or knowledge batch is active/pending; true returns `stopped="handoff"`.
+  The application owns the handoff receipt, resource reconciliation and single-writer
+  activation. Restore only that explicit receipt with `TaskPool.from_snapshot`,
+  `initial_records` and `initial_scout_reports`. Active task snapshots are rejected.
+  `initial_stage_inputs` restores exact SDK role history once, keyed by task ID
+  with `phase` and `input`. Execute continuation requires its frozen `plan`;
+  Review continuation requires `completed_execution`. Completed execution cannot
+  resume as Execute. Tool-enabled failures without SDK history require explicit
+  reconciled continuation input before retry.
+  This is not arbitrary process-crash recovery. Optional async `idle_wait(context)`
+  can wait for an actual external event when an unlimited Study has no runnable
+  work; true reopens planning, false returns its current empty/blocked disposition.
+  The workflow does not install recurring model polling.
+- Applications must raise generic `FatalResearchError` when further dispatch is
+  unsafe, including unknown external resource effects. Fatal errors are detected
+  through SDK exception causes/contexts and abort the whole run, as do cancellation
+  and other `BaseException` signals. Owned coroutines are cancelled and joined;
+  accepted artifacts and prior notes remain. A fatal run's pool may retain
+  unsettled claimed tasks. These files never authorize replay or establish that
+  external processes stopped. The controller cannot infer unknown resource state
+  from an arbitrary ordinary exception; adapters own that fatal classification.
+
+## Application-authorized Review-only continuation
+
+An adapter may explicitly supply `Investigation.completed_execution` as a frozen
+`CompletedExecution(plan=..., execute_summary=..., evidence=...)` when execution
+has finished and only a fresh independent Review is needed. The adapter owns
+input authorization and reconciliation of external resource state before preparing
+this investigation. Use the exact frozen Plan, public Execute summary and trusted
+host-collected evidence; do not replace evidence validity with execution completion.
+
+The controller requires `evidence.execution_complete=true` and applies the same
+`Plan.based_on` check or configured exact provenance resolver. Prior-study sources
+require explicit application authorization; they are not accepted by string shape. It copies the Plan,
+evidence and `completed-execution.json` into the new record directory, skips the
+Planner, Execute and evidence callback, and calls Review with the normal shared
+context. Review receives no private Execute history. Ordinary Review failure remains
+isolated to that task and does not release its dependents.
+
+This is an explicit application-supplied continuation in a new process-local study,
+not automatic discovery, replay, whole-study recovery or DBOS durability. Existing
+files alone never authorize execution or continuation. With `completed_execution=None`
+(the default), the ordinary Plan/Execute/evidence/Review path is unchanged.
 
 ## Code and trace
 
@@ -121,7 +231,7 @@ uvx ruff format python/src python/tests benchmarks/sdk_coding
 uvx ruff check python/src python/tests benchmarks/sdk_coding
 ```
 
-Observed on the current implementation: 28 focused tests passed, including
+The initial implementation passed 28 focused tests, including
 parallel Advocate/investigation progress, dependency readiness, human protection,
 stale Judge changes, separate experiment admission, asynchronous serial Manager,
 fresh Review inputs and failure handling. The macOS coding smoke completed two
@@ -129,6 +239,15 @@ human investigations and one dependent autonomous investigation: five SDK test
 tool calls returned `1, 1, 0, 0, 0`, and three independent host evaluations returned
 zero. Local trace recorded all roles without errors. The demo ended at the round
 limit with `goal=not-achieved`; a further admitted task remained pending.
+
+The failure-isolation update passed 38 focused tests, including ordinary SDK and
+phase errors, blocked failed-task dependents, cancellation, wrapped fatal tool
+errors, a fatal Advocate with a blocked peer, and Manager failure followed by
+publication without replay. A fresh offline coding smoke again completed three
+Reviews with no failures, the same five tool exit codes and three zero-exit host
+evaluations. An initial attempt inside the outer execution sandbox could not
+start `sandbox-exec`; that attempt retained two isolated failures and does not
+establish successful fixture execution.
 
 The model responses and Scout source were synthetic. Live model decisions, web
 retrieval, DBOS recovery, external resources and other execution platforms remain
