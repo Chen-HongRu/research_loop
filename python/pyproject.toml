@@ -3,7 +3,11 @@ name = "research-loop-sdk"
 version = "0.1.0"
 description = "Minimal research orchestration with the OpenAI Agents SDK"
 requires-python = ">=3.12,<3.13"
-dependencies = ["openai-agents==0.24.0", "httpx2[socks]==2.16.0"]
+dependencies = [
+    "openai-agents==0.24.0",
+    "httpx2[socks]==2.16.0",
+    "openai-codex==0.167.0",
+]
 
 [dependency-groups]
 dev = ["pytest==9.2.0"]

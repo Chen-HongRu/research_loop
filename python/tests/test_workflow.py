@@ -7,6 +7,7 @@ from agents import (
     Agent,
     MaxTurnsExceeded,
     ModelBehaviorError,
+    Runner,
     function_tool,
     set_trace_processors,
 )
@@ -323,6 +324,31 @@ def run(tmp_path, *, options=None, **kwargs):
         return result, stats
 
     return asyncio.run(scenario())
+
+
+def test_application_role_runner_preserves_scheduler_and_validation(tmp_path, sink):
+    calls = []
+    publications = []
+
+    async def role_runner(agent, data, *, validate, **options):
+        calls.append((agent.name, validate is not None))
+        result = await Runner.run(agent, data, **options)
+        if validate is not None:
+            checked = validate(result.final_output)
+            if asyncio.iscoroutine(checked):
+                await checked
+        return result
+
+    result, stats = run(
+        tmp_path,
+        options={"role_runner": role_runner, "publish_knowledge": publications.append},
+    )
+    assert len(result.records) == 3 and not result.failures
+    assert {name for name, _ in calls} == set(stats["calls"])
+    assert Counter(name for name, _ in calls)["Exec:a"] == 1
+    assert len(publications) == stats["calls"]["Manager"]
+    assert any(name.startswith("Plan:") and checked for name, checked in calls)
+    assert all(stats["collected"][key] == 1 for key in ("a", "b", "auto"))
 
 
 def test_full_parallel_topology_and_local_trace(tmp_path, sink, monkeypatch):

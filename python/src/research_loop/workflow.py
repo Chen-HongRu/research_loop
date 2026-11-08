@@ -230,6 +230,7 @@ async def run_research(
     initial_records: tuple[Record, ...] = (),
     initial_scout_reports: tuple[ScoutReport, ...] = (),
     initial_stage_inputs: dict[str, dict[str, Any]] | None = None,
+    role_runner: Callable[..., Awaitable[Any]] | None = None,
 ) -> ResearchResult:
     """Run a process-local Study; optional limits keep offline demos bounded.
 
@@ -426,7 +427,9 @@ async def run_research(
                         data = json.dumps(data)
                         prepared = True
                     dispatched = True
-                    result = await Runner.run(
+                    runner = role_runner or Runner.run
+                    runner_options = {"validate": validate} if role_runner else {}
+                    result = await runner(
                         agent,
                         data,
                         max_turns=max_turns,
@@ -435,15 +438,23 @@ async def run_research(
                             "invalid_final_output": capture_error,
                             "max_turns": capture_error,
                         },
+                        **runner_options,
                     )
                     output = result.final_output
-                    if validate is not None:
+                    if validate is not None and role_runner is None:
                         await resolve(validate(output))
                     span.span_data.data["output"] = (
                         output.model_dump(mode="json")
                         if isinstance(output, BaseModel)
                         else output
                     )
+                    if role_runner is not None:
+                        span.span_data.data["human_summary"] = getattr(
+                            result, "summary", None
+                        )
+                        span.span_data.data["summary_missing"] = getattr(
+                            result, "summary_missing", False
+                        )
                     return output
                 except BaseException as exc:
                     if captured_error is not None and isinstance(exc, Exception):
@@ -805,6 +816,9 @@ async def run_research(
                         draft = knowledge_path.with_name(knowledge_path.name + ".tmp")
                         draft.write_text(content + "\n")
                         draft.replace(knowledge_path)
+
+                # A backend must not retry a publication inside a submission call.
+                publish.codex_side_effecting = True
 
                 content = str(
                     await ask(

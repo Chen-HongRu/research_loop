@@ -25,6 +25,7 @@
     "benchmarks/cactus/",
     "benchmarks/sdk_coding/",
     "python/README.md",
+    "python/CODEX.md",
     "python/pyproject.toml",
     "python/uv.lock",
     "python/src/",

@@ -5,6 +5,10 @@ Agents SDK. Applications supply task-specific tools, evidence collection and
 resource authorization. Explicit application-authorized safe handoffs can
 continue a Study; arbitrary crash recovery is outside this package.
 
+A [Codex role backend](CODEX.md) can run these roles with Codex subscription
+authentication, validated submission tools and human summaries while retaining
+the application-owned scheduler and resource contracts.
+
 ## Run
 
 Python 3.12 and uv are required. The package supports Python versions >=3.12
