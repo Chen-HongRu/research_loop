@@ -25,7 +25,14 @@ class TaskState(BaseModel):
     source: Literal["human", "autonomous"]
     revision: int = 1
     status: Literal[
-        "pending", "running", "correcting", "blocked", "reviewed", "cancelled", "failed"
+        "pending",
+        "resuming",
+        "running",
+        "correcting",
+        "blocked",
+        "reviewed",
+        "cancelled",
+        "failed",
     ] = "pending"
     record_id: str | None = None
     phase: str | None = None
@@ -63,6 +70,8 @@ PoolChange = CreateTask | UpdateTask | CancelTask
 class TaskPool:
     """Keep all IDs for the lifetime of one run; only pending tasks use capacity.
 
+    Explicit safe handoffs can restore already-admitted tasks as resuming. They
+    precede fresh pending work and retain their admission outside proposal capacity.
     Dependencies must exist and form a DAG. Cancelled or failed dependencies keep
     their dependents blocked until the Judge explicitly revises those dependents.
     Revisions advance on every mutation, including execution state transitions.
@@ -123,13 +132,14 @@ class TaskPool:
             (
                 task
                 for task in self._tasks.values()
-                if task.status == "pending"
+                if task.status in {"pending", "resuming"}
                 and all(
                     self._tasks[dependency].status == "reviewed"
                     for dependency in task.request.dependencies
                 )
             ),
             key=lambda task: (
+                task.status != "resuming",
                 task.source != "human",
                 task.request.priority,
                 task.request.id,

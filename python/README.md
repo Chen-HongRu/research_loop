@@ -53,8 +53,11 @@ flowchart LR
   are protected. IDs remain reserved after cancellation. Conflicting entries
   are reported while unrelated valid changes apply.
 - The bounded pool counts pending tasks, including pending dependency waits.
-  In-place correction and external-blocked states do not consume proposal capacity. Ready human
-  tasks precede autonomous tasks, then lower numeric priority and ID. Dependencies
+  In-place correction and external-blocked states do not consume proposal capacity.
+  An explicit safe handoff can restore already-admitted continuations as `resuming`;
+  these keep their prior admission, precede fresh pending work and cannot be edited
+  by Judge. They do not enlarge the hard cap on new pending proposals. Within each
+  group, ready human tasks precede autonomous tasks, then lower numeric priority and ID. Dependencies
   become ready after prerequisite Review publication, including reviewed negative
   results; an execution summary alone does not unblock a task.
 - Each claimed task gets its own native Plan, Execute and Review Agents and

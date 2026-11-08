@@ -151,3 +151,72 @@ def test_ids_are_safe_and_requests_frozen(task_id):
     request = task("valid_1-A")
     with pytest.raises(ValidationError):
         request.question = "changed"
+
+
+def test_safe_handoff_restores_admitted_continuations_at_full_pending_capacity():
+    from research_loop.task_pool import TaskState
+
+    pending = TaskPool([task(f"pending-{index}") for index in range(8)])
+    resumptions = [
+        TaskState(
+            request=task(f"resume-{index}"),
+            source="autonomous",
+            status="resuming",
+            phase="review",
+            attempts=3,
+        ).model_dump(mode="json")
+        for index in range(2)
+    ]
+    pool = TaskPool.from_snapshot([*pending.snapshot(), *resumptions], max_pending=8)
+    assert ids(pool)[:2] == ["resume-0", "resume-1"]
+    assert sum(s["status"] == "pending" for s in pool.snapshot()) == 8
+
+    for task_id in ("resume-0", "resume-1"):
+        claimed = pool.claim(task_id)
+        assert claimed.status == "running" and claimed.attempts == 3
+    assert len(pool.snapshot()) == 10
+    assert pool.max_pending == 8
+    with pytest.raises(ValueError, match="pending capacity exceeded"):
+        pool.add_human(task("ninth-pending"))
+    result = pool.apply([create(task("ninth-proposal"))], pool.snapshot())
+    assert result["applied"] == []
+    assert result["conflicts"][0]["reason"] == "pending capacity exceeded"
+    pool.claim("pending-0")
+    assert pool.apply([create(task("replacement-pending"))], pool.snapshot())[
+        "applied"
+    ] == ["replacement-pending"]
+    assert sum(s["status"] == "pending" for s in pool.snapshot()) == 8
+
+
+def test_judge_cannot_edit_resuming_continuation():
+    from research_loop.task_pool import TaskState
+
+    state = TaskState(request=task("resume"), source="autonomous", status="resuming")
+    pool = TaskPool.from_snapshot([state.model_dump(mode="json")])
+    snapshot = pool.snapshot()
+    for change in (update(task("resume", priority=-1)), cancel("resume")):
+        result = pool.apply([change], snapshot)
+        assert result["applied"] == []
+        assert (
+            result["conflicts"][0]["reason"]
+            == "only pending autonomous tasks may be edited"
+        )
+        assert pool.snapshot() == snapshot
+
+
+def test_resuming_continuation_still_requires_reviewed_dependencies():
+    from research_loop.task_pool import TaskState
+
+    states = [
+        TaskState(request=task("prerequisite"), source="human"),
+        TaskState(
+            request=task("resume", dependencies=("prerequisite",)),
+            source="autonomous",
+            status="resuming",
+        ),
+    ]
+    pool = TaskPool.from_snapshot([s.model_dump(mode="json") for s in states])
+    assert ids(pool) == ["prerequisite"]
+    pool.claim("prerequisite")
+    pool.complete("prerequisite", "reviewed-prerequisite")
+    assert ids(pool) == ["resume"]

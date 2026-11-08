@@ -878,7 +878,7 @@ async def run_research(
                     admission_closed = True
                     stopped = "handoff"
                     break
-                # Human-ready tasks precede autonomous work, without preemption.
+                # Committed continuations precede fresh work, then human priority.
                 while (
                     not admission_closed
                     and not draining
@@ -1070,7 +1070,7 @@ async def run_research(
                     else "pool-blocked"
                     if knowledge_pending
                     or any(
-                        t["status"] in {"pending", "blocked", "failed"}
+                        t["status"] in {"pending", "resuming", "blocked", "failed"}
                         for t in pool.snapshot()
                     )
                     else "pool-empty"
