@@ -177,6 +177,7 @@ class CodexRoleRunner:
             "mcp_servers={}",
             "features.shell_tool=true",
             "features.shell_snapshot=false",
+            "allow_login_shell=false",
             "features.apps=false",
             "features.plugins=false",
             "features.multi_agent=false",
@@ -215,9 +216,9 @@ class CodexRoleRunner:
                 child_env[key] = value
         # Keep the runtime's original model catalog and native project tools.
         # Commands get a clean environment, independent of service credentials.
+        self._shell_environment = {"PATH": child_env["PATH"], "HOME": child_env["HOME"]}
         overrides += (
-            "shell_environment_policy.set="
-            + self._toml_map({"PATH": child_env["PATH"], "HOME": child_env["HOME"]}),
+            "shell_environment_policy.set=" + self._toml_map(self._shell_environment),
         )
         overrides += self._permission_overrides(
             "subscription_probe",
@@ -302,6 +303,7 @@ class CodexRoleRunner:
             "readable_roots",
             "writable_roots",
             "web_search",
+            "env",
         }:
             raise ValueError("Invalid native role workspace configuration")
         cwd = Path(supplied.get("cwd", self._cwd)).resolve()
@@ -317,11 +319,21 @@ class CodexRoleRunner:
         web = supplied.get("web_search", False)
         if not isinstance(web, bool):
             raise ValueError("web_search must be a boolean")
+        env = supplied.get("env", {})
+        if (
+            not isinstance(env, dict)
+            or set(env) - {"PATH"}
+            or any(
+                not isinstance(value, str) or "\0" in value for value in env.values()
+            )
+        ):
+            raise ValueError("Native role env accepts only an explicit PATH string")
         return {
             "cwd": str(cwd),
             "readable_roots": sorted(reads),
             "writable_roots": writes,
             "web_search": web,
+            "env": dict(env),
         }
 
     def _permission_overrides(self, name, workspace):
@@ -381,6 +393,16 @@ class CodexRoleRunner:
                 role.permissions, role.workspace
             ):
                 command.extend(["--config", override])
+            if role.workspace["env"]:
+                command.extend(
+                    [
+                        "--config",
+                        "shell_environment_policy.set="
+                        + self._toml_map(
+                            self._shell_environment | role.workspace["env"]
+                        ),
+                    ]
+                )
             command.extend(
                 [
                     "--config",

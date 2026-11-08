@@ -598,8 +598,9 @@ def test_durable_controlled_resume_uses_native_thread_and_binding(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("changed", ["writable_roots", "env"])
 def test_native_workspace_binding_rejects_live_permission_changes(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, changed
 ):
     async def scenario():
         async def script(runtime, thread, turn):
@@ -616,7 +617,9 @@ def test_native_workspace_binding_rejects_live_permission_changes(
         agent = Agent(name="Plan")
         with pytest.raises(codex.CodexRoleError) as failed:
             await runner.run(agent, "read the project")
-        workspace["writable_roots"] = [tmp_path]
+        workspace[changed] = (
+            [tmp_path] if changed == "writable_roots" else {"PATH": "/synthetic/bin"}
+        )
         with pytest.raises(codex.CodexRoleError, match="unsafe to resume"):
             await runner.run(agent, failed.value.run_data.history)
         assert len(runtime.started) == 1
@@ -979,5 +982,110 @@ def test_native_active_terminal_control_receipts_precede_delivery(
             "list",
         ]
         runner._stream.close()
+
+    asyncio.run(scenario())
+
+
+def test_native_workspace_env_rejects_credentials(tmp_path, monkeypatch):
+    async def scenario():
+        runner, _ = prepared(
+            tmp_path,
+            monkeypatch,
+            [],
+            role_workspace=lambda agent: {
+                "env": {"OPENAI_API_KEY": "synthetic-forbidden-value"}
+            },
+        )
+        with pytest.raises(ValueError, match="only an explicit PATH"):
+            await runner._workspace(Agent(name="Execute"))
+        runner._stream.close()
+
+    asyncio.run(scenario())
+
+
+def test_native_role_path_reaches_official_cli_environment(tmp_path):
+    """Auth-free native server check: no thread, model, GPU or private inputs."""
+    import os
+    import sys
+
+    if (
+        sys.platform != "darwin"
+        or os.environ.get("RESEARCH_NATIVE_SANDBOX_TEST") != "1"
+    ):
+        pytest.skip("requires explicit native macOS sandbox test authorization")
+
+    async def scenario():
+        project = tmp_path / "project"
+        project.mkdir()
+        state = tmp_path / "state"
+        state.mkdir()
+        home = state / "home"
+        home.mkdir()
+        native_path = str(codex.Path(sys.prefix) / "bin") + os.pathsep + os.defpath
+        runner = codex.CodexRoleRunner(
+            event_path=tmp_path / "events",
+            cwd=project,
+            role_workspace=lambda agent: {"env": {"PATH": native_path}},
+        )
+        runner._loop = asyncio.get_running_loop()
+        runner._cwd, runner._state_root, runner._home = project, state, home
+        runner._shell_environment = {"PATH": os.defpath, "HOME": str(home)}
+        command = [
+            "/usr/bin/env",
+            "-i",
+            f"CODEX_HOME={home}",
+            f"HOME={home}",
+            f"PATH={os.defpath}",
+            str(codex.bundled_codex_path()),
+        ]
+        for override in [
+            "allow_login_shell=false",
+            "features.shell_snapshot=false",
+            'shell_environment_policy.inherit="none"',
+            "shell_environment_policy.set="
+            + runner._toml_map(runner._shell_environment),
+        ]:
+            command.extend(["--config", override])
+        command.extend(["app-server", "--listen", "stdio://"])
+        runner._config = codex.CodexConfig(
+            cwd=str(project), launch_args_override=tuple(command)
+        )
+        role, _ = await runner._definition(Agent(name="Execute"), None, None, None)
+        client = await runner._new_client(role)
+        try:
+            configuration = codex._json(
+                await client._client.request(
+                    "config/read",
+                    {"includeLayers": False},
+                    response_model=codex.RootModel[dict],
+                )
+            )["config"]
+            assert configuration["allow_login_shell"] is False
+            assert (
+                configuration["shell_environment_policy"]["set"]["PATH"] == native_path
+            )
+            response = codex._json(
+                await client._client.request(
+                    "command/exec",
+                    {
+                        "command": [
+                            "/bin/zsh",
+                            "-c",
+                            'python3 -c "import json,sys; print(json.dumps(sys.prefix))"',
+                        ],
+                        "cwd": str(project),
+                        "permissionProfile": role.permissions,
+                        "timeoutMs": 10000,
+                    },
+                    response_model=codex.RootModel[dict],
+                )
+            )
+            assert response["exitCode"] == 0, response
+            assert (
+                codex.Path(json.loads(response["stdout"])).resolve()
+                == codex.Path(sys.prefix).resolve()
+            )
+        finally:
+            await client.close()
 
     asyncio.run(scenario())

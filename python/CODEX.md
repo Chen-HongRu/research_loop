@@ -34,7 +34,10 @@ Each role uses Codex's native project search, shell, file and patch tools, plus
 its supplied application function tools and one structured submission tool.
 `project_roots` grants project-wide reading. `role_workspace(agent)` supplies a
 real `cwd`, additional `readable_roots`, permitted `writable_roots`, and optional
-`web_search=True`. Leave writes empty for read-only roles; grant only task output
+`web_search=True` and `env={"PATH": "/path/to/project-env/bin:..."}`. Only
+PATH can be supplied through `env`; it is included in the session binding.
+Native model shell tools default to non-login shells (`allow_login_shell=false`)
+to preserve that PATH. Changing it requires a new session. Leave writes empty for read-only roles; grant only task output
 directories or the Knowledge Manager's private draft where writes are needed.
 Agents retrieve context from real files; a virtual read/write/bash adapter is
 not required. The application still owns remote resources and their budgets.
