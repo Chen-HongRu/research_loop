@@ -6,8 +6,8 @@ resource authorization. Explicit application-authorized safe handoffs can
 continue a Study; arbitrary crash recovery is outside this package.
 
 A [Codex role backend](CODEX.md) can run these roles with Codex subscription
-authentication, validated submission tools and human summaries while retaining
-the application-owned scheduler and resource contracts.
+authentication, native project tools, validated submissions and human summaries
+while retaining the application-owned scheduler and resource contracts.
 
 ## Run
 
@@ -176,6 +176,8 @@ flowchart LR
   Review continuation requires `completed_execution`. Completed execution cannot
   resume as Execute. Tool-enabled failures without SDK history require explicit
   reconciled continuation input before retry.
+  A `collect_evidence` entry requires the frozen `plan` and confirmed
+  `execute_summary`; it resumes host collection without calling Plan or Execute.
   This is not arbitrary process-crash recovery. Optional async `idle_wait(context)`
   can wait for an actual external event when an unlimited Study has no runnable
   work; true reopens planning, false returns its current empty/blocked disposition.

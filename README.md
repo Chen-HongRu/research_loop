@@ -6,7 +6,7 @@ The existing durable source entry is the root Node package. Node.js >= 22.19, Py
 
 The separate [Python Agents SDK entry](python/README.md) implements parallel Advocates, Judge and a protected task pool, concurrent Plan/Execute/fresh Review, background Scout and asynchronous Knowledge Manager, with local JSONL trace. Its offline coding demo uses real test subprocesses. This SDK-only part of [#107](https://github.com/Chen-HongRu/research_loop/issues/107) supports process-local stage correction and explicit settled handoffs. Applications own external resources and their reconciliation; arbitrary crash recovery and DBOS integration are deferred.
 
-The optional [Codex role backend](python/CODEX.md) uses Codex subscription execution with structured submission tools; the application retains scheduling and resource accounting.
+The optional [Codex role backend](python/CODEX.md) uses Codex subscription execution, native project tools and structured submissions; the application retains scheduling and resource accounting.
 
 ```sh
 npm ci

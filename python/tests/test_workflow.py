@@ -351,6 +351,35 @@ def test_application_role_runner_preserves_scheduler_and_validation(tmp_path, si
     assert all(stats["collected"][key] == 1 for key in ("a", "b", "auto"))
 
 
+def test_explicit_collection_continuation_does_not_repeat_plan_or_execute(
+    tmp_path, sink
+):
+    plan = Plan(
+        question="first",
+        change="retained computation",
+        rationale="collect only",
+        based_on=(),
+    )
+    result, stats = run(
+        tmp_path,
+        options={
+            "initial_stage_inputs": {
+                "a": {
+                    "phase": "collect_evidence",
+                    "plan": plan.model_dump(mode="json"),
+                    "execute_summary": "Confirmed original execution",
+                }
+            }
+        },
+    )
+    assert not result.failures
+    assert stats["calls"]["Plan:a"] == stats["calls"]["Exec:a"] == 0
+    assert stats["collected"]["a"] == stats["calls"]["Review:a"] == 1
+    record = next(record for record in result.records if record.task.id == "a")
+    assert record.plan == plan
+    assert record.execute == "Confirmed original execution"
+
+
 def test_full_parallel_topology_and_local_trace(tmp_path, sink, monkeypatch):
     # A configured key must not cause the replaced default exporter to be used.
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-test-not-a-credential")

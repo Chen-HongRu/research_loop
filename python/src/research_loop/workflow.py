@@ -288,12 +288,19 @@ async def run_research(
     knowledge_pending = []
     stage_inputs = dict(initial_stage_inputs or {})
     if any(
-        value.get("phase") not in {"plan", "execute", "review"}
+        value.get("phase") not in {"plan", "execute", "collect_evidence", "review"}
         for value in stage_inputs.values()
     ):
         raise ValueError(
-            "Only explicit Plan/Execute/Review stage inputs can be resumed"
+            "Only explicit Plan/Execute/collect_evidence/Review stage inputs can be resumed"
         )
+    for value in stage_inputs.values():
+        if value["phase"] == "collect_evidence":
+            Plan.model_validate(value["plan"])
+            if not isinstance(value.get("execute_summary"), str):
+                raise ValueError(
+                    "Collection continuation requires the confirmed Execute summary"
+                )
     knowledge_path = (
         Path(knowledge_path)
         if knowledge_path is not None
@@ -634,7 +641,7 @@ async def run_research(
                 elif (
                     delivery is None
                     and resumed is not None
-                    and resumed["phase"] == "execute"
+                    and resumed["phase"] in {"execute", "collect_evidence"}
                 ):
                     plan = Plan.model_validate(resumed["plan"])
                     retained = None
@@ -656,20 +663,24 @@ async def run_research(
                 await resolve(validate_plan(plan))
                 save_json(directory / "plan.json", plan)
                 if retained is None:
-                    phase = "execute"
-                    execute = str(
-                        await ask(
-                            setup.executor,
-                            {
-                                **shared,
-                                "frozen_plan": plan.model_dump(),
-                                "notes": notes(),
-                            },
-                            phase=phase,
-                            state=state,
-                            directory=directory,
+                    if resumed is not None and resumed["phase"] == "collect_evidence":
+                        execute = resumed["execute_summary"]
+                        stage_inputs.pop(state.request.id)
+                    else:
+                        phase = "execute"
+                        execute = str(
+                            await ask(
+                                setup.executor,
+                                {
+                                    **shared,
+                                    "frozen_plan": plan.model_dump(),
+                                    "notes": notes(),
+                                },
+                                phase=phase,
+                                state=state,
+                                directory=directory,
+                            )
                         )
-                    )
                     phase = "collect_evidence"
                     evidence = await collect(setup, state, directory, shared)
                 else:

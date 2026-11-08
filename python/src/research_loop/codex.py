@@ -2,7 +2,7 @@
 
 The pinned SDK has no public dynamic-tool registration helper. The two private
 seams below install its request handler and start a thread with the runtime's
-experimental ``dynamicTools`` and ``environments`` fields. No RPC transport or
+experimental ``dynamicTools`` and ``permissions`` fields. No RPC transport or
 Agents Runner is implemented here.
 """
 
@@ -12,8 +12,12 @@ import inspect
 import json
 import os
 import re
+import shutil
+import sys
 import tempfile
-from dataclasses import dataclass, field
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,7 +30,7 @@ from openai_codex import AsyncCodex, CodexConfig
 from openai_codex.api import AsyncThread, AsyncTurnHandle
 from openai_codex.errors import InvalidRequestError
 from openai_codex.generated.v2_all import ReasoningEffort
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, RootModel, TypeAdapter
 
 MODEL = "gpt-6.1-sol"
 EFFORT = ReasoningEffort.medium
@@ -74,6 +78,12 @@ class _Role:
     client: Any = None
     terminal: bool = False
     interrupt_requested: bool = False
+    workspace: dict = field(default_factory=dict)
+    permissions: str = ""
+    binding: str = ""
+    native_spans: dict = field(default_factory=dict)
+    delivery_pending: bool = False
+    settle_attempted: bool = False
 
 
 async def _resolve(value):
@@ -103,11 +113,17 @@ class CodexRoleRunner:
         cwd: Path | None = None,
         state_dir: Path | None = None,
         allow_native_response_budget: bool = False,
+        project_roots: tuple[Path, ...] = (),
+        role_workspace: Callable | None = None,
+        on_event: Callable | None = None,
     ):
         self.event_path = Path(event_path)
         self.cwd = Path(cwd) if cwd is not None else None
         self.state_dir = Path(state_dir) if state_dir is not None else None
         self.allow_native_response_budget = allow_native_response_budget
+        self.project_roots = tuple(Path(path).resolve() for path in project_roots)
+        self.role_workspace = role_workspace
+        self.on_event = on_event
         self._client = None
         self._roles = {}
         self._stream = None
@@ -131,6 +147,7 @@ class CodexRoleRunner:
                     "state_dir must be owned by this user with mode 0700"
                 )
         home = root / "home"
+        self._state_root = root.resolve()
         self._bindings = root / "roles"
         self._bindings.mkdir(mode=0o700, exist_ok=True)
         home.mkdir(mode=0o700, exist_ok=True)
@@ -152,31 +169,35 @@ class CodexRoleRunner:
         cwd = self.cwd or root / "workspace"
         cwd.mkdir(parents=True, exist_ok=True)
         self._cwd = cwd.resolve()
+        self._home = home.resolve()
         self._stream = self.event_path.open("x", encoding="utf-8")
         self.event_path.chmod(0o600)
         overrides = (
             'forced_login_method="chatgpt"',
             "mcp_servers={}",
-            "features.shell_tool=false",
+            "features.shell_tool=true",
+            "features.shell_snapshot=false",
             "features.apps=false",
             "features.plugins=false",
             "features.multi_agent=false",
             "features.multi_agent_v2=false",
             "features.goals=false",
             "features.view_image=false",
+            "features.browser_use=false",
+            "features.computer_use=false",
+            "features.image_generation=false",
+            "features.request_permissions_tool=false",
             "features.skip_host_skill_discovery=true",
             "features.hooks=false",
             "features.sleep_tool=false",
             'web_search="disabled"',
-            'permissions.study.filesystem={":root"="none"}',
-            "permissions.study.network.enabled=false",
-            'default_permissions="study"',
+            'shell_environment_policy.inherit="none"',
         )
         # CodexConfig.env merges with the parent. Use env -i so provider keys,
         # endpoint overrides and inherited application secrets cannot cross.
         child_env = {
             "CODEX_HOME": str(home),
-            "PATH": os.defpath,
+            "PATH": os.environ.get("PATH", os.defpath),
             "HOME": str(Path.home()),
         }
         for key, value in os.environ.items():
@@ -192,42 +213,16 @@ class CodexRoleRunner:
                 "TZ",
             }:
                 child_env[key] = value
-        # Native model capabilities control built-ins that feature flags alone
-        # leave registered. Retain the bundled model's identity and reasoning
-        # settings, changing only its tool capability fields.
-        probe = await asyncio.create_subprocess_exec(
-            str(bundled_codex_path()),
-            "debug",
-            "models",
-            "--bundled",
-            env=child_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        # Keep the runtime's original model catalog and native project tools.
+        # Commands get a clean environment, independent of service credentials.
+        overrides += (
+            "shell_environment_policy.set="
+            + self._toml_map({"PATH": child_env["PATH"], "HOME": child_env["HOME"]}),
         )
-        stdout, _stderr = await probe.communicate()
-        if probe.returncode:
-            raise CodexRoleError("Unable to read the pinned runtime model catalog")
-        matches = [
-            entry
-            for entry in json.loads(stdout)["models"]
-            if entry.get("slug") == MODEL
-        ]
-        if len(matches) != 1:
-            raise CodexRoleError(
-                "Pinned runtime does not contain the exact required model"
-            )
-        entry = matches[0]
-        entry.update(
-            multi_agent_version=None,
-            multi_agent_reasoning_effort=None,
-            apply_patch_tool_type=None,
-            experimental_supported_tools=[],
-            tool_mode=None,
+        overrides += self._permission_overrides(
+            "subscription_probe",
+            {"cwd": str(self._cwd), "readable_roots": [], "writable_roots": []},
         )
-        catalog = root / "model-catalog.json"
-        catalog.write_text(json.dumps({"models": [entry]}))
-        catalog.chmod(0o600)
-        overrides += ("model_catalog_json=" + json.dumps(str(catalog)),)
         command = [
             "/usr/bin/env",
             "-i",
@@ -285,10 +280,120 @@ class CodexRoleRunner:
             if self._temporary is not None:
                 self._temporary.cleanup()
 
-    async def _new_client(self):
+    @staticmethod
+    def _toml_map(values):
+        return (
+            "{"
+            + ",".join(
+                f"{json.dumps(str(key))}={json.dumps(value)}"
+                for key, value in values.items()
+            )
+            + "}"
+        )
+
+    async def _workspace(self, agent):
+        supplied = (
+            await _resolve(self.role_workspace(agent))
+            if self.role_workspace is not None
+            else {}
+        )
+        if not isinstance(supplied, dict) or set(supplied) - {
+            "cwd",
+            "readable_roots",
+            "writable_roots",
+            "web_search",
+        }:
+            raise ValueError("Invalid native role workspace configuration")
+        cwd = Path(supplied.get("cwd", self._cwd)).resolve()
+        if not cwd.is_dir():
+            raise ValueError("Native role cwd must be an existing directory")
+        reads = {str(path) for path in self.project_roots} | {str(cwd)}
+        reads.update(
+            str(Path(path).resolve()) for path in supplied.get("readable_roots", ())
+        )
+        writes = sorted(
+            {str(Path(path).resolve()) for path in supplied.get("writable_roots", ())}
+        )
+        web = supplied.get("web_search", False)
+        if not isinstance(web, bool):
+            raise ValueError("web_search must be a boolean")
+        return {
+            "cwd": str(cwd),
+            "readable_roots": sorted(reads),
+            "writable_roots": writes,
+            "web_search": web,
+        }
+
+    def _permission_overrides(self, name, workspace):
+        # :minimal is the native platform runtime baseline. uv's interpreter
+        # and package paths can be outside it, so allow those dependencies only.
+        paths = {
+            ":root": "deny",
+            ":minimal": "read",
+            ":slash_tmp": "deny",
+            ":tmpdir": "deny",
+        }
+        base = Path(sys.base_prefix).absolute()
+        runtime = {
+            Path(sys.base_prefix).resolve(),
+            Path(sys.prefix).resolve(),
+            Path(bundled_codex_path()).resolve().parent.parent,
+        }
+        if base.is_symlink() and base.parent not in {Path(base.anchor), Path.home()}:
+            # uv's stable installation alias needs readlink access in its
+            # interpreter directory as well as access to the resolved install.
+            runtime.add(base.parent)
+        uv = shutil.which("uv")
+        if uv:
+            runtime.add(Path(uv).resolve())
+        for path in (
+            *runtime,
+            *self.project_roots,
+            Path(workspace["cwd"]),
+            *workspace["readable_roots"],
+        ):
+            paths[str(path)] = "read"
+        for path in workspace["writable_roots"]:
+            paths[str(path)] = "write"
+            for protected in (".git", ".agents", ".codex", ".aws"):
+                paths[str(Path(path) / protected)] = "read"
+        # Deny secrets even if a host accidentally grants an ancestor root.
+        for path in (
+            Path.home() / ".codex",
+            Path.home() / ".ssh",
+            self._state_root,
+            self._home,
+        ):
+            paths[str(path.resolve())] = "deny"
+        return (
+            f"permissions.{name}.filesystem=" + self._toml_map(paths),
+            f"permissions.{name}.network.enabled=false",
+            "default_permissions=" + json.dumps(name),
+        )
+
+    async def _new_client(self, role=None):
         if self._config is None:
             return self._client
-        client = AsyncCodex(self._config)
+        config = self._config
+        if role is not None:
+            command = list(config.launch_args_override[:-3])
+            for override in self._permission_overrides(
+                role.permissions, role.workspace
+            ):
+                command.extend(["--config", override])
+            command.extend(
+                [
+                    "--config",
+                    'web_search="live"'
+                    if role.workspace["web_search"]
+                    else 'web_search="disabled"',
+                ]
+            )
+            command.extend(config.launch_args_override[-3:])
+            config = replace(
+                config, cwd=role.workspace["cwd"], launch_args_override=tuple(command)
+            )
+        client = AsyncCodex(config)
         client._client._sync._approval_handler = self._request
         try:
             await client.__aenter__()
@@ -302,7 +407,7 @@ class CodexRoleRunner:
         started, subscription = await role.client._client._start_turn(
             role.thread.id,
             [{"type": "text", "text": prompt}],
-            {"model": MODEL, "effort": "medium", "environments": []},
+            {"model": MODEL, "effort": "medium"},
             for_handle=True,
         )
         return AsyncTurnHandle(
@@ -426,7 +531,9 @@ class CodexRoleRunner:
                     raise ValueError(
                         f"Guardrail {guardrail.get_name()}: {checked.output.output_info}"
                     )
-            if role.validate is not None:
+            if role.validate is not None and not getattr(
+                role.validate, "codex_side_effecting", False
+            ):
                 try:
                     await _resolve(role.validate(output))
                 except BaseException as exc:
@@ -449,11 +556,21 @@ class CodexRoleRunner:
                 False, f"Submission rejected: {type(exc).__name__}: {exc}"
             )
         role.output, role.arguments, role.accepted = output, args, True
-        role.receipt = {"accepted": True, "role": role.agent.name}
+        role.delivery_pending = bool(
+            role.validate is not None
+            and getattr(role.validate, "codex_side_effecting", False)
+        )
+        role.receipt = {
+            "accepted": True,
+            "role": role.agent.name,
+            "delivery_pending": role.delivery_pending,
+        }
         if self._config is not None:
             sidecar = self._bindings / f"{role.thread.id}.json"
             saved = json.loads(sidecar.read_text())
             saved["sealed"] = True
+            if role.delivery_pending:
+                saved["delivery_pending"] = True
             draft = sidecar.with_suffix(".tmp")
             draft.write_text(json.dumps(saved))
             draft.chmod(0o600)
@@ -462,6 +579,106 @@ class CodexRoleRunner:
             "submission.accepted", thread_id=role.thread.id, role=role.agent.name
         )
         return self._reply(True, json.dumps(role.receipt))
+
+    async def _settle(self, role):
+        """Drain SDK-managed terminals before closing this role's native client."""
+        if self._config is None or role.client is None:
+            return
+        role.settle_attempted = True
+        if not role.terminal:
+            raise CodexRoleError("Native role has no confirmed terminal boundary")
+
+        # This experimental method is in the pinned CLI's generated protocol,
+        # though the Python package does not yet expose a typed convenience API.
+        observer_error = None
+
+        async def request(method, params):
+            nonlocal observer_error
+            result = _json(
+                await role.client._client.request(
+                    method, params, response_model=RootModel[dict]
+                )
+            )
+            event = {
+                "method": method,
+                "data": result,
+                "thread_id": role.thread.id,
+                "turn_id": role.handle.id if role.handle is not None else None,
+            }
+            self._event("codex.native.control", role=role.agent.name, **event)
+            if self.on_event is not None and role.abort is None and role.fatal is None:
+                try:
+                    await _resolve(self.on_event(role.agent, event))
+                except BaseException as exc:
+                    observer_error = exc
+                    self._fail(role, exc)
+            return result
+
+        cursor = None
+        stopped = []
+        while True:
+            page = _json(
+                await request(
+                    "thread/backgroundTerminals/list",
+                    {"threadId": role.thread.id, "cursor": cursor},
+                )
+            )
+            for terminal in page["data"]:
+                await request(
+                    "thread/backgroundTerminals/terminate",
+                    {"threadId": role.thread.id, "processId": terminal["processId"]},
+                )
+                stopped.append(terminal)
+            cursor = page.get("nextCursor")
+            if cursor is None:
+                break
+        await request("thread/backgroundTerminals/clean", {"threadId": role.thread.id})
+        remaining = _json(
+            await request(
+                "thread/backgroundTerminals/list",
+                {"threadId": role.thread.id},
+            )
+        )
+        if remaining.get("data") or remaining.get("nextCursor"):
+            raise CodexRoleError("Native background terminals did not settle")
+        for terminal in stopped:
+            span = role.native_spans.pop(terminal["itemId"], None)
+            if span is not None:
+                span.span_data.output = json.dumps(
+                    {
+                        "status": "stopped_at_role_boundary",
+                        "processId": terminal["processId"],
+                    }
+                )
+                span.finish()
+        await role.client.close()
+        self._clients.remove(role.client)
+        role.client = None
+        self._event("role.settled", thread_id=role.thread.id, role=role.agent.name)
+        if observer_error is not None:
+            raise observer_error
+
+    async def _deliver(self, role):
+        if not role.delivery_pending:
+            return
+        try:
+            await _resolve(role.validate(role.output))
+            if self._config is not None:
+                sidecar = self._bindings / f"{role.thread.id}.json"
+                saved = json.loads(sidecar.read_text())
+                saved.pop("delivery_pending", None)
+                draft = sidecar.with_suffix(".tmp")
+                draft.write_text(json.dumps(saved))
+                draft.chmod(0o600)
+                draft.replace(sidecar)
+            self._event(
+                "submission.delivered", thread_id=role.thread.id, role=role.agent.name
+            )
+        except BaseException as exc:
+            role.abort = exc
+            raise
+        role.delivery_pending = False
+        role.receipt["delivery_pending"] = False
 
     async def _stop(self, role):
         role.stopping = True
@@ -484,6 +701,95 @@ class CodexRoleRunner:
             if exc.code != -32600 or "no active turn to interrupt" not in exc.message:
                 raise
 
+    async def _definition(self, agent, context, validate, run_config):
+        tools = {}
+        wrapper = RunContextWrapper(context=context)
+        for tool in agent.tools:
+            if not isinstance(tool, FunctionTool):
+                raise TypeError(
+                    "Codex roles accept only explicit FunctionTool handlers"
+                )
+            if (
+                tool.needs_approval is not False
+                or tool.tool_input_guardrails
+                or tool.tool_output_guardrails
+            ):
+                raise ValueError(
+                    "Approval/tool guardrail policies require explicit host support"
+                )
+            enabled = tool.is_enabled
+            if callable(enabled):
+                enabled = await _resolve(enabled(wrapper, agent))
+            if enabled:
+                if tool.name in tools:
+                    raise ValueError("Duplicate role tool name")
+                tools[tool.name] = tool
+        submit = "submit_" + re.sub(r"[^a-z0-9_]", "_", agent.name.lower())
+        if submit in tools:
+            raise ValueError("Role tool collides with submission tool")
+        schema = (
+            {
+                "type": "object",
+                "properties": {"output": {"type": "string"}},
+                "required": ["output"],
+                "additionalProperties": False,
+            }
+            if agent.output_type in (None, str)
+            else TypeAdapter(agent.output_type).json_schema()
+        )
+        role = _Role(agent, tools, submit, schema, wrapper, validate, run_config)
+        role.workspace = await self._workspace(agent)
+        role.permissions = "role_" + uuid.uuid4().hex
+        instructions = agent.instructions
+        if callable(instructions):
+            instructions = await _resolve(instructions(wrapper, agent))
+        instructions = (instructions or "") + (
+            f"\nSubmit the stage result using {submit}. Fix rejected submissions "
+            "in this thread. After acceptance, give a brief natural-language "
+            "summary. Submission does not replace independent scientific Review."
+        )
+        params = {
+            "model": MODEL,
+            "allowModelFallback": False,
+            "cwd": role.workspace["cwd"],
+            "baseInstructions": instructions,
+            "approvalPolicy": "never",
+            "permissions": role.permissions,
+            "config": {"model_reasoning_effort": "medium"},
+            "dynamicTools": [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.params_json_schema,
+                }
+                for tool in tools.values()
+            ]
+            + [
+                {
+                    "type": "function",
+                    "name": submit,
+                    "description": "Validate and seal this stage result; then summarize in natural language.",
+                    "inputSchema": schema,
+                }
+            ],
+        }
+        role.binding = hashlib.sha256(
+            json.dumps(
+                {
+                    "role": agent.name,
+                    "instructions": instructions,
+                    "tools": params["dynamicTools"],
+                    "model": MODEL,
+                    "effort": "medium",
+                    "native_project_tools": 1,
+                    "workspace": role.workspace,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        return role, params
+
     async def run(
         self,
         agent,
@@ -504,6 +810,7 @@ class CodexRoleRunner:
             raise CodexRoleError("Enter CodexRoleRunner before running a role")
         if self._blocked_error is not None:
             raise self._blocked_error
+        candidate, params = await self._definition(agent, context, validate, run_config)
         history = input if isinstance(input, list) else []
         refs = [item for item in history if item.get("type") == REFERENCE]
         resume_id = None
@@ -522,7 +829,11 @@ class CodexRoleRunner:
                     "Cross-process continuation requires explicit state_dir"
                 )
         if role is not None:
-            if role.agent is not agent or role.fatal is not None:
+            if (
+                role.agent is not agent
+                or role.fatal is not None
+                or role.binding != candidate.binding
+            ):
                 raise CodexRoleError(
                     "Native role thread is unavailable or unsafe to resume"
                 )
@@ -532,107 +843,37 @@ class CodexRoleRunner:
             role.validate = validate
             role.stopping, role.abort = False, None
             if role.client is None:
-                role.client = await self._new_client()
+                role.client = await self._new_client(role)
                 await role.client._client.thread_resume(
                     resume_id,
-                    {"permissions": "study", "model": MODEL, "excludeTurns": True},
+                    {
+                        "permissions": role.permissions,
+                        "model": MODEL,
+                        "excludeTurns": True,
+                        "cwd": role.workspace["cwd"],
+                        "approvalPolicy": "never",
+                    },
                 )
                 role.thread = AsyncThread(role.client, resume_id)
         else:
-            tools = {}
-            wrapper = RunContextWrapper(context=context)
-            for tool in agent.tools:
-                if not isinstance(tool, FunctionTool):
-                    raise TypeError(
-                        "Codex roles accept only explicit FunctionTool handlers"
-                    )
-                if (
-                    tool.needs_approval is not False
-                    or tool.tool_input_guardrails
-                    or tool.tool_output_guardrails
-                ):
-                    raise ValueError(
-                        "Approval/tool guardrail policies require explicit host support"
-                    )
-                enabled = tool.is_enabled
-                if callable(enabled):
-                    enabled = await _resolve(enabled(wrapper, agent))
-                if enabled:
-                    if tool.name in tools:
-                        raise ValueError("Duplicate role tool name")
-                    tools[tool.name] = tool
-            submit = "submit_" + re.sub(r"[^a-z0-9_]", "_", agent.name.lower())
-            if submit in tools:
-                raise ValueError("Role tool collides with submission tool")
-            schema = (
-                {
-                    "type": "object",
-                    "properties": {"output": {"type": "string"}},
-                    "required": ["output"],
-                    "additionalProperties": False,
-                }
-                if agent.output_type in (None, str)
-                else TypeAdapter(agent.output_type).json_schema()
-            )
-            role = _Role(agent, tools, submit, schema, wrapper, validate, run_config)
-            instructions = agent.instructions
-            if callable(instructions):
-                instructions = await _resolve(instructions(wrapper, agent))
-            instructions = (instructions or "") + (
-                f"\nSubmit the stage result using {submit}. Fix rejected submissions "
-                "in this thread. After acceptance, give a brief natural-language "
-                "summary. Submission does not replace independent scientific Review."
-            )
-            params = {
-                "model": MODEL,
-                "allowModelFallback": False,
-                "cwd": str(self._cwd),
-                "baseInstructions": instructions,
-                "approvalPolicy": "never",
-                "permissions": "study",
-                "environments": [],
-                "config": {"model_reasoning_effort": "medium"},
-                "dynamicTools": [
-                    {
-                        "type": "function",
-                        "name": tool.name,
-                        "description": tool.description,
-                        "inputSchema": tool.params_json_schema,
-                    }
-                    for tool in tools.values()
-                ]
-                + [
-                    {
-                        "type": "function",
-                        "name": submit,
-                        "description": "Validate and seal this stage result; then summarize in natural language.",
-                        "inputSchema": schema,
-                    }
-                ],
-            }
-            binding = hashlib.sha256(
-                json.dumps(
-                    {
-                        "role": agent.name,
-                        "instructions": instructions,
-                        "tools": params["dynamicTools"],
-                        "model": MODEL,
-                        "effort": "medium",
-                    },
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
+            role = candidate
             if resume_id is not None:
                 saved = json.loads((self._bindings / f"{resume_id}.json").read_text())
-                if saved != {"binding": binding, "sealed": False}:
+                if saved != {"binding": role.binding, "sealed": False}:
                     raise CodexRoleError(
                         "Native thread role/tool binding differs or submission is sealed"
                     )
-            role.client = await self._new_client()
+            role.client = await self._new_client(role)
             if resume_id is not None:
                 started = await role.client._client.thread_resume(
                     resume_id,
-                    {"permissions": "study", "model": MODEL, "excludeTurns": True},
+                    {
+                        "permissions": role.permissions,
+                        "model": MODEL,
+                        "excludeTurns": True,
+                        "cwd": role.workspace["cwd"],
+                        "approvalPolicy": "never",
+                    },
                 )
             else:
                 started = await role.client._client.thread_start(params)
@@ -645,7 +886,9 @@ class CodexRoleRunner:
                 sidecar = self._bindings / f"{role.thread.id}.json"
                 if resume_id is None:
                     with sidecar.open("x") as stream:
-                        stream.write(json.dumps({"binding": binding, "sealed": False}))
+                        stream.write(
+                            json.dumps({"binding": role.binding, "sealed": False})
+                        )
                     sidecar.chmod(0o600)
             self._roles[role.thread.id] = role
             prompt = (
@@ -667,6 +910,7 @@ class CodexRoleRunner:
         with agent_span(name=agent.name, tools=[*role.tools, role.submit]) as span:
             role.span = span
             role.terminal = False
+            role.settle_attempted = False
             role.interrupt_requested = False
             consume = None
             try:
@@ -688,6 +932,12 @@ class CodexRoleRunner:
                     raise role.abort
                 if not role.accepted:
                     raise CodexRoleError("Role ended without an accepted submission")
+                try:
+                    await self._settle(role)
+                except BaseException as exc:
+                    role.abort = exc
+                    raise
+                await self._deliver(role)
                 return CodexRoleResult(
                     role.output,
                     role.thread.id,
@@ -702,7 +952,16 @@ class CodexRoleRunner:
                         asyncio.gather(consume, return_exceptions=True)
                     )
                 span.set_error({"message": type(exc).__name__, "data": {}})
-                if role.accepted and role.fatal is None and isinstance(exc, Exception):
+                if (
+                    role.accepted
+                    and role.fatal is None
+                    and role.abort is None
+                    and not role.delivery_pending
+                    and isinstance(exc, Exception)
+                ):
+                    # Transport failure after acceptance is recoverable only
+                    # after the native runtime confirms a safe stop boundary.
+                    await self._settle(role)
                     self._event(
                         "role.summary_missing",
                         thread_id=role.thread.id,
@@ -721,10 +980,69 @@ class CodexRoleRunner:
                 raise
             finally:
                 role.handle = None
+                for native_span in role.native_spans.values():
+                    native_span.set_error(
+                        {"message": "Native item did not complete", "data": {}}
+                    )
+                    native_span.finish()
+                role.native_spans.clear()
                 if self._config is not None and role.client is not None:
-                    await role.client.close()
-                    self._clients.remove(role.client)
-                    role.client = None
+                    try:
+                        if role.terminal and not role.settle_attempted:
+                            await self._settle(role)
+                        else:
+                            self._event(
+                                "role.unsettled",
+                                thread_id=role.thread.id,
+                                role=role.agent.name,
+                            )
+                    finally:
+                        if role.client is not None:
+                            await role.client.close()
+                            self._clients.remove(role.client)
+                            role.client = None
+
+    async def _observe(self, role, event, payload):
+        item = payload.get("item", {})
+        kind = item.get("type")
+        if kind in {"commandExecution", "fileChange"} and event.method in {
+            "item/started",
+            "item/completed",
+        }:
+            identifier = item["id"]
+            span = role.native_spans.get(identifier)
+            if span is None:
+                span = function_span(
+                    name="codex." + kind, input=json.dumps(item), parent=role.span
+                )
+                span.start()
+                role.native_spans[identifier] = span
+            if event.method == "item/completed":
+                span.span_data.output = json.dumps(item)
+                if item.get("status") in {"failed", "declined"} or item.get(
+                    "exitCode", 0
+                ):
+                    span.set_error({"message": "Native tool failed", "data": {}})
+                span.finish()
+                role.native_spans.pop(identifier)
+        if self.on_event is not None and role.abort is None and role.fatal is None:
+            try:
+                await _resolve(
+                    self.on_event(
+                        role.agent,
+                        {
+                            "method": event.method,
+                            "data": payload,
+                            "thread_id": role.thread.id,
+                            "turn_id": role.handle.id,
+                        },
+                    )
+                )
+            except BaseException as exc:
+                self._fail(role, exc)
+                # Async event consumption is separate from the SDK reader, so
+                # interrupt here and keep consuming to the terminal boundary.
+                await self._interrupt(role)
 
     async def _consume(self, role):
         summary = ""
@@ -739,6 +1057,7 @@ class CodexRoleRunner:
                 thread_id=role.thread.id,
                 turn_id=role.handle.id,
             )
+            await self._observe(role, event, payload)
             if event.method == "item/completed":
                 item = payload.get("item", {})
                 if (
