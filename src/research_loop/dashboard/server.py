@@ -44,6 +44,13 @@ ROLE_LABELS = {
     "Critic": "独立批判",
     "unknown": "未确认角色",
 }
+HOST_ROLES = {role.lower() for role in ROLE_LABELS if role != "unknown"}
+HOST_TASK_STATES = {
+    "queued": "pending",
+    "running": "working",
+    "completed": "completed",
+    "failed": "failed",
+}
 ARTIFACT_LIMIT = 64 * 1024
 
 
@@ -483,10 +490,19 @@ class Session:
                 elif typ in {"function_call", "custom_tool_call"}:
                     self.tool_count += 1
 
-    def card(self, activity=None):
+    def card(self, activity=None, host_role=None):
         activity = activity or {}
+        host_role = host_role or {}
         path = self.path or activity.get("path") or ""
-        task = path.rsplit("/", 1)[-1]
+        task = host_role.get("task") or path.rsplit("/", 1)[-1]
+        role = task_role(task)
+        role_source = "inferred-from-task-name" if role != "unknown" else "unknown"
+        if host_role:
+            role = next(
+                (r for r in ROLE_LABELS if r.lower() == host_role.get("role")),
+                "unknown",
+            )
+            role_source = "host-role-record" if role != "unknown" else "unknown"
         title = "".join(TASK_WORDS.get(word, word) for word in task.split("_"))
         messages = list(self.messages.values())
         finals = [m for m in messages if m["phase"] == "final_answer"]
@@ -496,16 +512,16 @@ class Session:
             if self.status != "unknown"
             else activity.get("status", "unknown")
         )
+        if host_role:
+            status = HOST_TASK_STATES.get(host_role.get("status"), status)
         return {
             "id": self.id,
             "parent_id": self.parent_id,
             "name": self.name,
             "task_name": task,
-            "role": task_role(task),
-            "role_label": ROLE_LABELS[task_role(task)],
-            "role_source": "inferred-from-task-name"
-            if task_role(task) != "unknown"
-            else "unknown",
+            "role": role,
+            "role_label": ROLE_LABELS[role],
+            "role_source": role_source,
             "fresh_context": "unknown",
             "started_at": self.started_at or activity.get("started_at"),
             "iteration": None,
@@ -535,6 +551,7 @@ class State:
         self.messages = OrderedDict()
         self.tools = OrderedDict()
         self.agents = {}
+        self.host_activity = {}
         self.plan = []
 
     def tool(self, identifier, **fields):
@@ -551,6 +568,13 @@ class State:
             self.lead_id = event.get("thread_id")
         if kind in {"codex.event", "resource.tool"}:
             self.last_event_at = at
+        if kind in {"role.task.started", "role.task.finished"}:
+            thread = event.get("thread_id")
+            if isinstance(thread, str) and thread:
+                activity = self.host_activity.setdefault(thread, {})
+                activity["at"] = at
+                if kind == "role.task.started":
+                    activity.setdefault("started_at", at)
         if kind == "resource.tool":
             name = event.get("tool")
             pending = next(
@@ -708,6 +732,30 @@ class State:
             supervisor = read_json(self.root / "supervisor.json", {}) or {}
             pid, alive = supervisor_process(supervisor)
             messages, children, known = list(self.messages.values()), [], set()
+            role_document = read_json(self.root / "roles.json", {})
+            role_threads = (
+                role_document.get("threads")
+                if isinstance(role_document, dict)
+                else None
+            )
+            host_roles = (
+                {
+                    tid: row
+                    for tid, row in role_threads.items()
+                    if isinstance(tid, str)
+                    and tid
+                    and tid != self.lead_id
+                    and isinstance(row, dict)
+                    and isinstance(row.get("task"), str)
+                    and row["task"]
+                    and isinstance(row.get("role"), str)
+                    and isinstance(row.get("status"), str)
+                    and row["role"] in HOST_ROLES
+                    and row["status"] in HOST_TASK_STATES
+                }
+                if isinstance(role_threads, dict)
+                else {}
+            )
             descendants = {self.lead_id} if self.lead_id else set()
             for _ in self.sessions:
                 added = {
@@ -723,15 +771,25 @@ class State:
                     if not messages:
                         messages = list(session.messages.values())
                 elif session.id and (
-                    session.id in descendants or session.id in self.agents
+                    session.id in descendants
+                    or session.id in self.agents
+                    or session.id in host_roles
                 ):
-                    children.append(session.card(self.agents.get(session.id)))
+                    activity = {
+                        **self.agents.get(session.id, {}),
+                        **self.host_activity.get(session.id, {}),
+                    }
+                    children.append(session.card(activity, host_roles.get(session.id)))
                     known.add(session.id)
-            for identifier, activity in self.agents.items():
+            for identifier in {**self.agents, **host_roles}:
                 if identifier not in known:
+                    activity = {
+                        **self.agents.get(identifier, {}),
+                        **self.host_activity.get(identifier, {}),
+                    }
                     stub = Session(self.root / "unavailable")
                     stub.id = identifier
-                    children.append(stub.card(activity))
+                    children.append(stub.card(activity, host_roles.get(identifier)))
             boundaries = iteration_metadata(self.root)
             for child in children:
                 started = timestamp(child["started_at"])

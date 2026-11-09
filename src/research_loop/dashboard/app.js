@@ -85,7 +85,7 @@ function agentPeriod(agent) {
   if (agent.iteration == null || ui.iteration == null) return 'unknown';
   return String(agent.iteration) === String(ui.iteration) ? 'current' : 'historical';
 }
-function roleName(agent) { const role = agentRole(agent); return role === 'unknown' ? '角色未知' : `${role} · ${roles[role]}（推测）`; }
+function roleName(agent) { const role = agentRole(agent); return role === 'unknown' ? '角色未知' : `${role} · ${roles[role]}${agent.role_source === 'host-role-record' ? '（已记录）' : '（推测）'}`; }
 function renderRoles(agents) {
   const root = byId('role-cards'); root.replaceChildren();
   for (const [role, label] of Object.entries(roles)) {
@@ -111,7 +111,7 @@ function renderRoles(agents) {
   }
   const unknown = agents.filter(agent => agentRole(agent) === 'unknown');
   const hint = byId('role-note');
-  if (hint) hint.textContent = unknown.length ? `另有 ${unknown.length} 个任务的角色未确认，可在“查看全部任务”中查看。角色标签依据任务名推测。` : '角色标签依据任务名推测；点击卡片查看任务与返回结果。';
+  if (hint) hint.textContent = `${unknown.length ? `另有 ${unknown.length} 个任务的角色未确认，可在“查看全部任务”中查看。` : ''}Host 委派角色来自显式记录，其余角色依据任务名推测；点击卡片查看任务与返回结果。`;
 }
 function provenance(item, currentIteration) {
   if (!item) return '';
