@@ -663,16 +663,23 @@ class Slurm:
         argv = ["sacct", "-n", "-P", "-X", "-S", start]
         argv += ["-j", job] if job else ["--name", entry["job_name"]]
         output = await self._query(
-            [*argv, "-o", "JobIDRaw,JobName%128,State,ElapsedRaw,AllocTRES%256"]
+            [
+                *argv,
+                "-o",
+                "JobIDRaw,JobName%128,State,ElapsedRaw,AllocTRES%256,Start,ExitCode",
+            ]
         )
-        accounting = [
-            row
-            for line in output.splitlines()
-            if len(row := line.split("|")) >= 5
-            and row[1] == entry["job_name"]
-            and row[0].isdigit()
-            and (job is None or row[0] == job)
-        ]
+        accounting = [line.split("|") for line in output.splitlines() if line.strip()]
+        if any(
+            len(row) != 7
+            or row[1] != entry["job_name"]
+            or not row[0].isdigit()
+            or (job is not None and row[0] != job)
+            for row in accounting
+        ):
+            raise RuntimeError(
+                "malformed or conflicting original allocation accounting"
+            )
         if not accounting and not rows and job is None:
             # OpenSSH's banner exchange precedes authentication and remote command
             # execution. An exact, protected allocator diagnostic proves that this
@@ -711,11 +718,21 @@ class Slurm:
         entry["job_id"] = row[0]
         self._persist()
         state = row[2].split()[0].rstrip("+") if row[2].strip() else "UNKNOWN"
+        # An unset Start is affirmative no-start evidence only with this complete
+        # cancellation receipt. Missing fields or rounded zero elapsed alone do
+        # not establish zero use; allocated jobs still require one GPU.
+        never_started = (
+            state == "CANCELLED"
+            and row[3] == "0"
+            and row[4] == ""
+            and row[5] in {"None", "Unknown"}
+            and row[6] == "0:0"
+        )
         if (
             rows
             or state not in TERMINAL
             or not row[3].isdigit()
-            or not re.search(r"(?:^|,)gres/gpu=1(?:,|$)", row[4])
+            or not (re.search(r"(?:^|,)gres/gpu=1(?:,|$)", row[4]) or never_started)
         ):
             raise RuntimeError(
                 "original job is live or lacks exact terminal single-GPU accounting"
@@ -728,6 +745,8 @@ class Slurm:
             "elapsed_seconds": seconds,
             "gpu_hours": seconds / 3600,
         }
+        if never_started:
+            receipt["evidence"] = "Slurm cancellation before allocation start"
         entry.update(
             status="TERMINAL",
             receipt=receipt,

@@ -63,7 +63,7 @@ elif command == "sacct":
     for job in state["jobs"]:
         if ("-j" in argv and job["id"] != argv[argv.index("-j") + 1]) or ("--name" in argv and job["name"] != argv[argv.index("--name") + 1]):
             continue
-        print("|".join((job["id"], job["name"], job["state"], str(job["elapsed"]), job["gpu"])))
+        print("|".join((job["id"], job["name"], job["state"], str(job["elapsed"]), job["gpu"], job.get("start", "2026-01-01T00:00:00"), job.get("exit_code", "0:0"))))
 else:
     raise RuntimeError("unexpected scheduler command: " + command)
 """
@@ -208,6 +208,117 @@ class SlurmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.status()["budget"]["used_seconds"], 0)
         self.assertEqual(sum(call[0] == "salloc" for call in self.calls), 1)
         self.assertEqual(self.scheduler()["jobs"], [])
+
+    async def test_never_started_cancellation_settles_original_after_restart(self):
+        self.scheduler(mode="ack_loss")
+        adapter = self.adapter()
+        with self.assertRaises(RuntimeError):
+            await self.invoke(adapter, "gpu_exec", command="printf must-not-run")
+        entry = adapter._ledger["entries"][0]
+        entry["job_id"] = "100"
+        adapter._persist()
+        with patch.object(adapter, "_observe", side_effect=RuntimeError("unresolved")):
+            await adapter.close()
+        state = self.scheduler()
+        state["jobs"][0].update(
+            state="CANCELLED by 1234", elapsed=0, gpu="", start="None", exit_code="0:0"
+        )
+        self.scheduler(**state)
+        adapter = Slurm(self.config, adapter.root)
+        self.adapters.append(adapter)
+        before_reconcile = len(self.calls)
+        receipt = await self.invoke(
+            adapter, "gpu_reconcile", reservation_id=entry["reservation_id"]
+        )
+        self.assertEqual(receipt["job_id"], "100")
+        self.assertEqual(receipt["job_name"], entry["job_name"])
+        self.assertEqual(receipt["state"], "CANCELLED")
+        self.assertEqual(receipt["elapsed_seconds"], 0)
+        self.assertEqual(receipt["gpu_hours"], 0.0)
+        status = adapter.status()
+        self.assertEqual(
+            status["reservations"][0]["reservation_id"], entry["reservation_id"]
+        )
+        self.assertEqual(status["budget"]["used_seconds"], 0)
+        self.assertEqual(status["budget"]["reserved_seconds"], 0)
+        self.assertEqual(status["budget"]["remaining_seconds"], 600)
+        self.assertFalse(status["budget"]["continuation_blocked"])
+        queries = [call for call in self.calls if call[0] == "sacct"]
+        self.assertIn("100", queries[-1])
+        self.assertIn("Start,ExitCode", queries[-1][-1])
+        self.assertEqual(sum(call[0] == "salloc" for call in self.calls), 1)
+        self.assertEqual(
+            [call[0] for call in self.calls[before_reconcile:]], ["squeue", "sacct"]
+        )
+
+    async def test_zero_use_requires_complete_unambiguous_no_start_evidence(self):
+        self.scheduler(mode="ack_loss")
+        adapter = self.adapter()
+        with self.assertRaises(RuntimeError):
+            await self.invoke(adapter, "gpu_exec", command="printf must-not-run")
+        entry = adapter._ledger["entries"][0]
+        entry["job_id"] = "100"
+        adapter._persist()
+        fields = ["100", entry["job_name"], "CANCELLED", "0", "", "Unknown", "0:0"]
+        cases = [
+            ("missing Start", {5: ""}),
+            ("started", {5: "2026-01-01T00:00:00"}),
+            ("malformed Start", {5: "unknown"}),
+            ("missing exit", {6: ""}),
+            ("failed exit", {6: "1:0"}),
+            ("signal", {6: "0:15"}),
+            ("malformed exit", {6: "0"}),
+            ("elapsed use", {3: "1"}),
+            ("missing elapsed", {3: ""}),
+            ("malformed elapsed", {3: "0.0"}),
+            ("other allocation", {4: "cpu=1"}),
+            ("wrong GPU count", {4: "gres/gpu=2"}),
+            ("other terminal state", {2: "FAILED"}),
+            ("live state", {2: "PENDING"}),
+            ("conflicting job", {0: "101"}),
+            ("conflicting name", {1: "rl-other"}),
+        ]
+        observations = []
+        for label, changes in cases:
+            changed = fields.copy()
+            for index, value in changes.items():
+                changed[index] = value
+            observations.append((label, "", "|".join(changed)))
+        valid = "|".join(fields)
+        observations.extend(
+            [
+                ("missing columns", "", "|".join(fields[:5])),
+                ("duplicate receipt", "", valid + "\n" + valid),
+                (
+                    "conflicting extra receipt",
+                    "",
+                    valid + "\n101|rl-other|CANCELLED|0||None|0:0",
+                ),
+                ("live queue", f"100|{entry['job_name']}|PENDING", valid),
+                ("conflicting queue", f"101|{entry['job_name']}|PENDING", valid),
+                ("missing accounting", "", ""),
+            ]
+        )
+        for label, queue, accounting in observations:
+            with self.subTest(label=label):
+                with patch.object(adapter, "_query", side_effect=[queue, accounting]):
+                    with self.assertRaises(RuntimeError):
+                        await self.invoke(
+                            adapter,
+                            "gpu_reconcile",
+                            reservation_id=entry["reservation_id"],
+                        )
+                status = adapter.status()
+                self.assertEqual(status["reservations"][0]["status"], "UNKNOWN")
+                self.assertEqual(status["budget"]["reserved_seconds"], 150)
+                self.assertEqual(status["budget"]["used_seconds"], 0)
+                self.assertTrue(status["budget"]["continuation_blocked"])
+        with patch.object(adapter, "_query", side_effect=["", valid]):
+            receipt = await self.invoke(
+                adapter, "gpu_reconcile", reservation_id=entry["reservation_id"]
+            )
+        self.assertEqual(receipt["elapsed_seconds"], 0)
+        self.assertEqual(sum(call[0] == "salloc" for call in self.calls), 1)
 
     async def test_missing_accounting_or_mixed_output_does_not_prove_non_dispatch(self):
         self.scheduler(mode="banner_timeout")

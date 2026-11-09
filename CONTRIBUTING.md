@@ -20,6 +20,27 @@ RESEARCH_MODEL_TEST=1 uv run pytest tests/test_native_integration.py::test_nativ
 
 These flags do not authorize a research loop or remote compute.
 
+For a controlled lifecycle comparison, the following opt-in test makes real
+model calls through OpenAI subscription/native delegation, subscription/host
+delegation, and a configured provider/host delegation. Each runs the same two
+local arithmetic requests, fresh read-only Critics, a request edit during the
+first iteration, publication and cached restart. The real Slurm adapter reads
+synthetic scheduler replies for a never-started cancellation; the test never
+allocates a GPU or connects to a cluster. This checks controller contracts,
+not model quality, scientific benefit or output-text parity.
+
+```sh
+export RESEARCH_PARITY_PROVIDER=example
+export RESEARCH_PARITY_BASE_URL=https://provider.example/v1
+export RESEARCH_PARITY_KEY_ENV=PROVIDER_API_KEY
+export RESEARCH_PARITY_MODEL=MODEL
+RESEARCH_PROVIDER_PARITY_TEST=1 uv run pytest tests/test_provider_lifecycle_integration.py
+```
+
+The named API-key environment variable and an existing Codex subscription login
+must be available. The flag permits model calls only when the account/provider
+has already been authorized. Keep pytest output and native traces private.
+
 Keep private goals, raw Agent transcripts, deployment/SSH details, credentials,
 data and checkpoints outside commits. Use synthetic fixtures in tests and demos.
 Preserve prior evidence and other contributors' changes. A pull request should
