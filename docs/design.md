@@ -113,6 +113,22 @@ Historical and current iteration results remain distinct. Raw tool details load
 only when requested. Assets and API calls support a reverse-proxy path prefix;
 external access control belongs to the deployment.
 
+Repeated `--study` arguments register explicit directories. `--studies-dir` opts
+into dynamic discovery of immediate, non-symlink children with a regular
+`status.json`. `/api/studies` lists stable opaque IDs and recorded status;
+`/api/state`, `/api/metrics` and `/api/tool` accept a `study` ID. Omitting the ID
+selects the first registered Study for compatibility; invalid IDs return 404.
+Each Study owns its incremental readers. The browser scopes tool caches and
+in-flight responses to its selection and preserves that ID in the URL.
+
+The state response includes a numerically ordered iteration history projected
+from archived status and result records, with source paths and explicit missing
+results. Result fields are allowlisted; no reasoning, encrypted content or raw
+transcripts enter this projection. Legacy root results are used only without
+archive directories. The timeline displays reported summaries, goal judgments,
+continuation decisions, next steps, limitations and evidence references; it does
+not infer experimental success or synthesize new conclusions.
+
 If `supervisor.json` identifies a systemd service, the dashboard resolves its live
 `MainPID` and `ActiveState`; a saved PID must not override that service state.
 Inspection failure is unknown, not proof of process exit. Unmanaged processes

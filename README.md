@@ -20,6 +20,10 @@ An optional `--resource FILE` on `init` supplies authorized Slurm resources. `in
 
 To view a Study locally, run `uv run python -m research_loop.dashboard.server --study RUN --port 8768` and open `http://localhost:8768/`. The read-only dashboard displays Study messages, work records and tool details; use it only where those records may be viewed. It binds to loopback and refreshes every five seconds. Optional historical curves can be supplied in `RUN/inputs/historical-curves.json`.
 
+To switch among running and historical Studies, repeat `--study RUN_A --study RUN_B`, or use `--studies-dir STUDIES` to discover immediate child directories with `status.json`. These options can be combined; only include Studies whose records may be viewed by everyone with dashboard access. Discovery refreshes every five seconds and skips symlink children. The selector keeps the chosen Study in the page URL; messages, tools and metrics follow that selection. Unknown or removed selections show an error rather than another Study's records.
+
+The overview includes a chronological research timeline from `iterations/NNNNNN/status.json` and `result.json`: reported summaries, goal judgments, next steps, limitations and evidence references. Status-only rounds are marked as having no result. Legacy root results appear only when there are no archived rounds. This is a projection of saved reports, not an independently verified scientific conclusion or a generated synthesis. It does not reconstruct experiments that were never recorded in those reports. Optional historical curves remain separate background material.
+
 The repository supports only the pinned native Codex runtime. The Python host, Slurm resource adapter and read-only dashboard use that runtime. The synthetic goal in [examples/goal.md](examples/goal.md) demonstrates its research contract.
 
 Run `uv run research-loop efficiency RUN` for an offline JSON audit of recorded

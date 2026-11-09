@@ -1,7 +1,7 @@
 'use strict';
 
 const byId = id => document.getElementById(id);
-const ui = { view: 'conversation', agent: null, expanded: new Set(), details: new Set(), last: '', role: 'all', period: 'all', agents: [], iteration: null };
+const ui = { view: 'conversation', agent: null, expanded: new Set(), details: new Set(), last: '', role: 'all', period: 'all', agents: [], iteration: null, study: new URLSearchParams(location.search).get('study'), epoch: 0, loaded: false };
 const stateNames = { starting: '准备下一轮', 'iteration-completed': '本轮已归档', initialized: '已初始化', running: '运行中', completed: '已完成', stopped: '已停止', failed: '失败', interrupted: '已中断', working: '工作中', inProgress: '进行中', pending: '等待中', unknown: '未知', 'needs-reconciliation': '需要对账' };
 const nameState = value => stateNames[value] || value || '未知';
 function friendlyTime(value) {
@@ -71,7 +71,7 @@ function renderMarkdown(node, value) {
 }
 function setView(view) {
   ui.view = view;
-  document.querySelectorAll('.view').forEach(el => { el.hidden = el.id !== `view-${view}`; });
+  document.querySelectorAll('.view').forEach(el => { el.hidden = !ui.loaded || el.id !== `view-${view}`; });
   document.querySelectorAll('.nav').forEach(el => el.classList.toggle('active', el.dataset.view === view));
 }
 document.querySelectorAll('.nav').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
@@ -230,7 +230,8 @@ function renderAgents(agents) {
 }
 const toolCache = new Map();
 async function loadToolDetails(tool, body) {
-  const version = JSON.stringify([tool.id, tool.at, tool.status]);
+  const study = ui.study, epoch = ui.epoch;
+  const version = JSON.stringify([study, tool.id, tool.at, tool.status]);
   if (body.dataset.loading === version) return;
   body.dataset.version = version;
   const cached = toolCache.get(version);
@@ -238,9 +239,10 @@ async function loadToolDetails(tool, body) {
   body.dataset.loading = version;
   body.textContent = '正在读取工具详情…';
   try {
-    const response = await fetch(`api/tool?id=${encodeURIComponent(tool.id)}`, { cache: 'no-store' });
+    const response = await fetch(apiURL('tool', study, { id: tool.id }), { cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const full = await response.json();
+    if (epoch !== ui.epoch) return;
     if (String(full.id) !== String(tool.id) || full.at !== tool.at || full.status !== tool.status) {
       throw new Error('记录已变化');
     }
@@ -299,6 +301,7 @@ function render(data) {
   byId('activity').textContent = `${status.iteration ? `第 ${status.iteration} 轮 · ` : ''}${activity.label || '暂无当前活动记录'} · 最后事件 ${friendlyTime(data.last_event_at) || '尚无'}`;
   ui.iteration = status.iteration ?? null;
   renderResearch(data);
+  renderHistory(data.history);
   const messages = (Array.isArray(data.messages) ? data.messages : []).filter(item => item && typeof item.text === 'string' && item.text.trim())
     .sort((a, b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0));
   renderMessages(byId('latest-message'), messages.slice(-1), '主 Agent · 最新');
@@ -360,22 +363,92 @@ function renderMetrics(data) {
     }
   } else if (data.comparison_status === 'invalid') line('前后对照', '文件无效');
 }
-async function refreshMetrics() {
-  try {
-    const response = await fetch('api/metrics', { cache: 'no-store' });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    renderMetrics(await response.json());
-  } catch (_) { renderMetrics({ available: false, status: 'invalid' }); }
+function apiURL(endpoint, study, params = {}) {
+  const query = new URLSearchParams(params);
+  if (study) query.set('study', study);
+  return `api/${endpoint}?${query}`;
 }
+function renderHistory(history) {
+  const root = byId('research-history'); root.replaceChildren();
+  const rows = history?.iterations || [];
+  const counts = history?.counts || {};
+  byId('history-count').textContent = `${counts.total || 0} 轮记录 · ${counts.with_result || 0} 轮有结果 · ${counts.missing_result || 0} 轮未报告结果`;
+  if (!rows.length) { root.append(text('p', '暂无轮次记录。研究开始后将在这里显示研究线路。', 'empty')); return; }
+  for (const row of rows) {
+    const card = document.createElement('article'); card.className = 'history-entry';
+    card.append(text('h3', `${row.iteration == null ? '早期研究记录' : `第 ${row.iteration} 轮`} · ${nameState(row.status)}`));
+    card.append(text('p', [row.started_at && `开始 ${friendlyTime(row.started_at)}`, row.ended_at && `结束 ${friendlyTime(row.ended_at)}`].filter(Boolean).join(' · '), 'muted'));
+    const result = row.result || {};
+    const summary = document.createElement('div'); summary.className = 'markdown';
+    renderMarkdown(summary, result.summary || (row.result_available ? '本轮未记录总结。' : '本轮尚无结果记录；请结合状态与当前活动查看进展。')); card.append(summary);
+    for (const [key, label] of [['goal', '目标判断'], ['study_action', '研究安排'], ['stop_reason', '停止原因'], ['next_action', '下一步'], ['limitations', '局限'], ['evidence_refs', '证据引用']]) {
+      const value = result[key];
+      if (value == null || value === '' || (Array.isArray(value) && !value.length)) continue;
+      const body = document.createElement('div'); body.className = 'markdown';
+      if (key === 'goal') body.textContent = ({ achieved: '问题已回答', 'not-achieved': '尚未解决', unknown: '尚不能判断' })[value] || value;
+      else if (key === 'study_action') body.textContent = ({continue:'继续下一轮',stop:'结束 Study'})[value] || value;
+      else if (Array.isArray(value)) { const list = document.createElement('ul'); value.forEach(v => { const li = document.createElement('li'); renderMarkdown(li, v); list.append(li); }); body.append(list); }
+      else renderMarkdown(body, value);
+      card.append(details(`history-${row.iteration}-${key}`, text('summary', label), body));
+    }
+    card.append(text('p', `来源：${row.source || '无可用记录'}`, 'muted provenance'));
+    root.append(card);
+  }
+}
+function selectStudy(study) {
+  ui.study = study; ui.epoch++; ui.last = ''; ui.refreshing = false; ui.loaded = false;
+  ui.agent = null; ui.agents = []; ui.iteration = null;
+  ui.expanded.clear(); ui.details.clear(); toolCache.clear();
+  ui.role = 'all'; ui.period = 'all';
+  byId('role-filter').value = 'all'; byId('period-filter').value = 'all';
+  byId('state').textContent = study ? '加载中' : '暂无 Study';
+  byId('budget').textContent = ''; byId('agent-count').textContent = '';
+  document.querySelectorAll('.view').forEach(el => { el.hidden = true; });
+  const url = new URL(location.href);
+  if (study) url.searchParams.set('study', study); else url.searchParams.delete('study');
+  history.replaceState(null, '', url);
+}
+byId('study-select').addEventListener('change', event => { selectStudy(event.target.value); refresh(); });
+window.addEventListener('popstate', () => { selectStudy(new URLSearchParams(location.search).get('study')); refresh(); });
 async function refresh() {
   if (ui.refreshing) return;
   ui.refreshing = true;
+  let epoch = ui.epoch;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
-  try {
-    const response = await fetch('api/state', { cache: 'no-store', signal: controller.signal });
+  const get = async url => {
+    const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
+    return response.json();
+  };
+  try {
+    const catalog = await get('api/studies');
+    if (epoch !== ui.epoch) return;
+    const selector = byId('study-select');
+    selector.replaceChildren();
+    for (const study of catalog.studies) {
+      const option = text('option', `${study.name} · ${nameState(study.status)}${study.iteration != null ? ` · 第 ${study.iteration} 轮` : ''}`);
+      option.value = study.id; selector.append(option);
+    }
+    if (!catalog.studies.length) {
+      selectStudy(null); epoch = ui.epoch;
+      selector.append(text('option', '暂无可用 Study')); selector.disabled = true;
+      byId('refresh-error').textContent = '目录中暂无 Study；新 Study 会在下次同步时出现。'; byId('refresh-error').hidden = false;
+      return;
+    }
+    selector.disabled = false;
+    if (!ui.study) { selectStudy(catalog.default); epoch = ui.epoch; ui.refreshing = true; }
+    if (!catalog.studies.some(study => study.id === ui.study)) {
+      const missing = text('option', '所选 Study 已不可用，请切换'); missing.value = ui.study; selector.append(missing);
+      selector.value = ui.study;
+      throw new Error('所选 Study 已不可用');
+    }
+    selector.value = ui.study;
+    const [data, metrics] = await Promise.all([
+      get(apiURL('state', ui.study)),
+      get(apiURL('metrics', ui.study)).catch(() => ({ available: false, status: 'invalid' }))
+    ]);
+    if (epoch !== ui.epoch) return;
     byId('refresh-error').hidden = true;
     const serialized = JSON.stringify(data, (key, value) => key === 'as_of' ? undefined : value);
     if (serialized !== ui.last) {
@@ -383,11 +456,13 @@ async function refresh() {
       render(data); ui.last = serialized;
       window.scrollTo({ top: scroll, behavior: 'instant' });
     }
+    ui.loaded = true; renderMetrics(metrics); setView(ui.view);
   } catch (error) {
-    byId('refresh-error').textContent = `刷新失败：${error.message}。当前显示上次获取的记录。`;
+    if (epoch !== ui.epoch) return;
+    byId('refresh-error').textContent = `刷新失败：${error.message}。${ui.last ? '当前显示所选 Study 上次获取的记录。' : '尚未读取所选 Study 的记录。'}`;
     byId('refresh-error').hidden = false;
   } finally {
-    clearTimeout(timeout); ui.refreshing = false;
+    clearTimeout(timeout); if (epoch === ui.epoch) ui.refreshing = false;
   }
 }
-setView(ui.view); refresh(); refreshMetrics(); setInterval(refresh, 5000); setInterval(refreshMetrics, 5000);
+setView(ui.view); refresh(); setInterval(refresh, 5000);
