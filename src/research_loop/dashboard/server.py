@@ -44,6 +44,13 @@ ROLE_LABELS = {
     "Critic": "独立批判",
     "unknown": "未确认角色",
 }
+HOST_ROLES = {role.lower() for role in ROLE_LABELS if role != "unknown"}
+HOST_TASK_STATES = {
+    "queued": "pending",
+    "running": "working",
+    "completed": "completed",
+    "failed": "failed",
+}
 ARTIFACT_LIMIT = 64 * 1024
 
 
@@ -506,12 +513,7 @@ class Session:
             else activity.get("status", "unknown")
         )
         if host_role:
-            status = {
-                "queued": "pending",
-                "running": "working",
-                "completed": "completed",
-                "failed": "failed",
-            }.get(host_role.get("status"), status)
+            status = HOST_TASK_STATES.get(host_role.get("status"), status)
         return {
             "id": self.id,
             "parent_id": self.parent_id,
@@ -748,6 +750,8 @@ class State:
                     and row["task"]
                     and isinstance(row.get("role"), str)
                     and isinstance(row.get("status"), str)
+                    and row["role"] in HOST_ROLES
+                    and row["status"] in HOST_TASK_STATES
                 }
                 if isinstance(role_threads, dict)
                 else {}

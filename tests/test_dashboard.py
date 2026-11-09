@@ -648,6 +648,8 @@ def test_host_role_without_history_has_original_iteration_and_refreshes(tmp_path
         '{"threads": []}',
         '{"threads": {"bad": null, "invalid": {"task": 1}}}',
         '{"threads": {"bad": {"task": "x", "role": [], "status": []}}}',
+        '{"threads": {"native-child": {"task": "broken", "role": "invalid", "status": "completed"}}}',
+        '{"threads": {"native-child": {"task": "broken", "role": "critic", "status": "invalid"}}}',
     ],
 )
 def test_invalid_host_metadata_preserves_native_cards(tmp_path, content):
