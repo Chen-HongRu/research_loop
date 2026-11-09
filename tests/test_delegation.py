@@ -284,3 +284,90 @@ def test_role_identity_survives_a_new_delegator_and_names_are_unique(tmp_path):
 
     roles = json.loads((tmp_path / "roles.json").read_text())["threads"]
     assert sorted(row["role"] for row in roles.values()) == ["analyst", "scout"]
+
+
+class BlockingStart(Client):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def thread_start(self, definition):
+        self.entered.set()
+        assert self.release.wait(5)
+        return super().thread_start(definition)
+
+
+def test_delegate_task_returns_before_the_child_starts(tmp_path):
+    client = BlockingStart()
+    instance = delegator(tmp_path, client)
+    began = time.monotonic()
+    started = instance.start("scout", "frontier", "Synthetic assignment")
+    elapsed = time.monotonic() - began
+    assert started["status"] == "queued"
+    assert elapsed < 1
+    assert client.entered.wait(5)
+    client.release.set()
+    rows = wait_for(instance, [started["task_id"]])
+    assert rows[0]["status"] == "completed"
+    instance.settle()
+    instance.close()
+
+
+def test_v1_native_spawn_function_call_fails_the_role_task(tmp_path):
+    class V1Spawn(Client):
+        def turn_start(self, thread_id, message, params):
+            with self.lock:
+                self.turns += 1
+                turn_id = f"turn-{next(self._ids)}"
+            stream = queue.Queue()
+            self.queues[turn_id] = stream
+            stream.put(
+                SimpleNamespace(
+                    method="item/completed",
+                    payload={
+                        "item": {
+                            "type": "function_call",
+                            "name": "spawn_agent",
+                            "arguments": "{}",
+                        }
+                    },
+                )
+            )
+            stream.put(
+                SimpleNamespace(
+                    method="turn/completed",
+                    payload={"turn": {"status": "interrupted"}},
+                )
+            )
+            return Object({"turn": {"id": turn_id}})
+
+    client = V1Spawn()
+    instance = delegator(tmp_path, client)
+    started = instance.start("scout", "frontier", "Synthetic assignment")
+    rows = wait_for(instance, [started["task_id"]])
+    assert rows[0]["status"] == "failed"
+    assert "native delegation" in rows[0]["error"]
+    assert client.interrupted
+    instance.close()
+
+
+def test_malformed_roles_mapping_aborts_before_model_work(tmp_path):
+    path = tmp_path / "roles.json"
+    path.write_text(json.dumps({"version": 1, "threads": []}))
+    with pytest.raises(RuntimeError, match="invalid shape"):
+        delegator(tmp_path, Client())
+    path.write_text("{not json")
+    with pytest.raises(RuntimeError, match="unreadable"):
+        delegator(tmp_path, Client())
+
+
+def test_settle_timeout_interrupts_a_live_role(tmp_path):
+    client = Client(hold=True)
+    instance = delegator(tmp_path, client)
+    started = instance.start("experimenter", "smoke", "Prepare a smoke.")
+    instance.settle(timeout=0.05)
+    rows = instance.wait([started["task_id"]])["tasks"]
+    assert rows[0]["status"] == "failed"
+    assert client.interrupted
+    instance.close()

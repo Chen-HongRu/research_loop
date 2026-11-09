@@ -658,3 +658,23 @@ def test_provider_flags_are_complete_and_use_a_declared_catalog(tmp_path, monkey
     catalog.write_text(json.dumps({"models": [{"slug": "synthetic-model"}]}))
     settings = loop.provider_config(provider_flags(model_catalog=catalog))
     assert settings["model_catalog"] == str(catalog.resolve())
+
+
+def test_legacy_provider_runs_use_one_delegation_mode_for_inspect_and_run(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    goal = tmp_path / "goal.md"
+    goal.write_text("Synthetic.")
+    root = tmp_path / "run"
+    loop.initialize(root, project, goal, model="synthetic-model")
+    config = json.loads((root / "config.json").read_text())
+    config.pop("delegation")
+    config["provider"] = {"name": "synthetic"}
+    (root / "config.json").write_text(json.dumps(config))
+    assert loop.delegation_mode(config, {}) == "host"
+    assert loop.inspect(root)["delegation"] == "host"
+    status = json.loads((root / "status.json").read_text())
+    status["thread_id"] = "lead"
+    (root / "status.json").write_text(json.dumps(status))
+    assert loop.delegation_mode(config, status) == "native"
+    assert loop.inspect(root)["delegation"] == "native"

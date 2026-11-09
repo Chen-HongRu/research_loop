@@ -475,3 +475,75 @@ def test_supplied_provider_catalog_must_use_plaintext_v1_delegation(
     catalog.write_text(json.dumps({"models": [entry]}))
     _, effective = configure()
     assert effective["model_catalog"] == str(catalog)
+
+
+def test_host_delegation_disables_native_multi_agent(tmp_path, monkeypatch):
+    settings = provider(tmp_path, monkeypatch)
+    root = tmp_path / "run"
+    root.mkdir()
+    args = configuration(
+        root,
+        tmp_path,
+        [root / "work"],
+        "synthetic-model",
+        "medium",
+        provider=settings,
+        delegation="host",
+    )[0].launch_args_override
+    assert "features.multi_agent=false" in args
+    assert "features.multi_agent=true" not in args
+    assert "features.multi_agent_v2=false" in args
+
+
+def test_host_delegation_catalog_disables_native_subagents(tmp_path, monkeypatch):
+    settings = provider(tmp_path, monkeypatch)
+    root = tmp_path / "run"
+    root.mkdir()
+    _, effective = configuration(
+        root,
+        tmp_path,
+        [root / "work"],
+        "synthetic-model",
+        "medium",
+        provider=settings,
+        delegation="host",
+    )
+    entry = json.loads((root / "native/models.json").read_text())["models"][0]
+    assert entry["multi_agent_version"] is None
+    assert entry["supports_search_tool"] is False
+    assert effective["multi_agent_version"] is None
+
+
+def test_supplied_catalog_must_match_the_delegation_mode(tmp_path, monkeypatch):
+    settings = provider(tmp_path, monkeypatch)
+    root = tmp_path / "run"
+    root.mkdir()
+    entry = {
+        "slug": "synthetic-model",
+        "multi_agent_version": "v1",
+        "supports_search_tool": False,
+    }
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"models": [entry]}))
+    settings["model_catalog"] = str(catalog)
+    with pytest.raises(RuntimeError, match="without multi_agent_version"):
+        configuration(
+            root,
+            tmp_path,
+            [root / "work"],
+            "synthetic-model",
+            "medium",
+            provider=settings,
+            delegation="host",
+        )
+    entry["multi_agent_version"] = None
+    catalog.write_text(json.dumps({"models": [entry]}))
+    configuration(
+        root,
+        tmp_path,
+        [root / "work"],
+        "synthetic-model",
+        "medium",
+        provider=settings,
+        delegation="host",
+    )

@@ -20,8 +20,9 @@ templates from [`roles.md`](../src/research_loop/roles.md):
 | Critic | Independent scientific challenge and concrete evidence requests |
 
 The coordinator manages dependencies, useful concurrency, resource dispatch,
-tradeoffs and summaries. Every assignment uses a new native child with
-`fork_turns="none"`, including revisions. Handoffs contain the common contract,
+tradeoffs and summaries. Native delegation uses a new native child with
+`fork_turns="none"`, including revisions; host delegation starts a new thread per
+assignment. Handoffs contain the common contract,
 selected role, goal and project paths, relevant positive and negative evidence,
 file ownership, output and completion condition. Children do not inherit or read
 parent chats, resume old assignments or create further delegates. Necessary
@@ -30,8 +31,10 @@ scientific artifacts remain available to new contexts.
 Role invocation order is dynamic. Direction decisions compare alternatives with
 continuing the incumbent. Scientific proposals, interpretation and code belong
 to specialists; the coordinator executes prepared commands and integrates their
-reports. Role selection, fresh spawning and read-only review are prompt contracts,
-not host tool-call gates. Children inherit native filesystem permissions.
+reports. Role selection, fresh spawning and read-only review are prompt contracts
+in native delegation; host delegation additionally caps concurrency, disables
+native subagent tools, and fails a role that attempts native delegation. Children
+inherit native filesystem permissions.
 
 Assignments identify exact relevant evidence and completed work rather than
 copying the entire knowledge history. Roles start with the goal, project
@@ -47,8 +50,9 @@ freeze an explicit OpenAI-compatible provider (name, base URL, API-key environme
 variable, model catalog) and a delegation mode; the run records store only the
 variable name, never the key value. Provider runs default to host delegation:
 the lead receives `delegate_task`/`wait_tasks`, and the host runs each role in a
-new plain-message thread with the canonical role contract. Native Codex spawns
-remain available as an explicit comparison mode. Each turn receives paths to the goal, project, work, draft and published
+new plain-message thread with the canonical role contract. Host-mode catalogs
+disable native Codex subagent tools; native spawns remain available as an
+explicit comparison mode. Each turn receives paths to the goal, project, work, draft and published
 index, a resource snapshot, iteration number and previous result. The agent reads referenced files
 with native tools; their contents are not automatically embedded in that input.
 `inspect` exposes these application instructions, schema, tools and permissions.
@@ -114,7 +118,9 @@ observed differences do not establish a causal improvement or scientific value.
 `python -m research_loop.dashboard.server --study RUN` serves a read-only loopback
 view of public messages, role activity, actual work records, result provenance
 and resource metadata. Hidden reasoning and encrypted content are excluded. Role
-inference from task names and unknown/missing records are labeled explicitly.
+cards come from native spawn linkage; host-delegated roles are attributed in
+`roles.json` and in `efficiency`/`metrics`, not in the dashboard. Role inference
+from task names and unknown/missing records are labeled explicitly.
 Historical and current iteration results remain distinct. Raw tool details load
 only when requested. Assets and API calls support a reverse-proxy path prefix;
 external access control belongs to the deployment.

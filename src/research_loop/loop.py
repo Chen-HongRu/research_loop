@@ -138,10 +138,24 @@ def initialize(
     return {"root": str(root), **config}
 
 
+def delegation_mode(config, state=None):
+    mode = config.get("delegation")
+    if mode in {"native", "host"}:
+        return mode
+    # Pre-upgrade provider runs: native only after they created their lead thread.
+    return (
+        "host"
+        if config.get("provider") and not (state or {}).get("thread_id")
+        else "native"
+    )
+
+
 def inspect(root):
     config = read_config(root)
     adapter = resource(config, root)
-    mode = config.get("delegation") or "native"
+    status = root / "status.json"
+    state = json.loads(status.read_text()) if status.exists() else {}
+    mode = delegation_mode(config, state)
     return {
         "config": config,
         "delegation": mode,
@@ -232,6 +246,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
             config["model"],
             config["effort"],
             provider=config.get("provider"),
+            delegation=mode,
         )
         effective["delegation"] = mode
         call["effective_native_permissions"] = effective

@@ -18,6 +18,15 @@ from .state import now, write_json
 
 MAX_ACTIVE = 4
 TASK_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+NATIVE_DELEGATION_TOOLS = {
+    "spawn_agent",
+    "send_input",
+    "wait_agent",
+    "resume_agent",
+    "close_agent",
+    "followup_task",
+    "spawn_agents_on_csv",
+}
 
 DELEGATE_TOOL = {
     "name": "delegate_task",
@@ -118,16 +127,24 @@ class HostDelegation:
         if self.roles_path is not None and self.roles_path.exists():
             try:
                 document = json.loads(self.roles_path.read_text())
-                if isinstance(document.get("threads"), dict):
-                    self.roles = document["threads"]
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as error:
+                raise RuntimeError(
+                    f"{self.roles_path} is unreadable; repair or remove it before run"
+                ) from error
+            if not isinstance(document, dict) or not isinstance(
+                document.get("threads", {}), dict
+            ):
+                raise RuntimeError(
+                    f"{self.roles_path} has an invalid shape; repair or remove it"
+                )
+            self.roles = document.get("threads", {})
         self.tasks = {}
         self._counter = 0
         self._threads = []
         self._lock = threading.Lock()
         self._record_lock = threading.Lock()
         self._stopping = False
+        self._closed = False
 
     def start(self, role, task_name, message):
         if role not in ROLE_NAMES:
@@ -164,7 +181,8 @@ class HostDelegation:
             task_name=task_name,
         )
         worker = threading.Thread(target=self._run, args=(task,), daemon=True)
-        self._threads.append(worker)
+        with self._lock:
+            self._threads.append(worker)
         worker.start()
         return {"task_id": task.id, "role": role, "status": "queued"}
 
@@ -191,36 +209,58 @@ class HostDelegation:
             ]
         return {"tasks": rows}
 
-    def stop(self):
+    def _interrupt_running(self):
         with self._lock:
-            self._stopping = True
             running = [
                 (task.thread_id, task.turn_id)
                 for task in self.tasks.values()
-                if task.status == "running" and task.thread_id and task.turn_id
+                if task.status in {"running", "queued"} and task.thread_id
             ]
         for thread_id, turn_id in running:
-            try:
-                self.client.turn_interrupt(thread_id, turn_id)
-            except Exception:
-                pass
+            if turn_id:
+                try:
+                    self.client.turn_interrupt(thread_id, turn_id)
+                except Exception:
+                    pass
+        return running
+
+    def stop(self):
+        with self._lock:
+            self._stopping = True
+        self._interrupt_running()
 
     def settle(self, timeout=30):
+        with self._lock:
+            workers = list(self._threads)
         deadline = time.monotonic() + timeout
-        for worker in self._threads:
+        for worker in workers:
             worker.join(max(0, deadline - time.monotonic()))
-        if any(worker.is_alive() for worker in self._threads):
+        alive = [worker for worker in workers if worker.is_alive()]
+        if alive:
+            self._interrupt_running()
+            grace = time.monotonic() + 5
+            for worker in alive:
+                worker.join(max(0, grace - time.monotonic()))
+            alive = [worker for worker in alive if worker.is_alive()]
+        if alive:
+            with self._lock:
+                active = [
+                    task.id
+                    for task in self.tasks.values()
+                    if task.status in {"queued", "running"}
+                ]
             raise RuntimeError(
                 "Host-delegated roles are still active; retain the draft and "
-                "inspect the original thread histories"
+                f"inspect the original thread histories: {active}"
             )
 
     def close(self):
         self.stop()
         try:
             self.settle()
-        except RuntimeError:
-            pass
+        finally:
+            with self._lock:
+                self._closed = True
 
     def _run(self, task):
         final = ""
@@ -267,6 +307,12 @@ class HostDelegation:
             turn_id = turn["turn"]["id"]
             with self._lock:
                 task.turn_id = turn_id
+                stopping = self._stopping or self._closed
+            if stopping:
+                try:
+                    self.client.turn_interrupt(thread_id, turn_id)
+                except Exception:
+                    pass
             status = "completed"
             error = None
             violation = None
@@ -275,10 +321,14 @@ class HostDelegation:
                 method = notification.method
                 payload = _plain(notification.payload)
                 item = payload.get("item", {}) if isinstance(payload, dict) else {}
-                if method == "item/completed" and item.get("type") in {
+                native_item = item.get("type") in {
                     "collabAgentToolCall",
                     "subAgentActivity",
-                }:
+                } or (
+                    item.get("type") in {"function_call", "custom_tool_call"}
+                    and item.get("name") in NATIVE_DELEGATION_TOOLS
+                )
+                if method == "item/completed" and native_item:
                     violation = (
                         "A delegated role attempted native delegation; roles must "
                         "return proposed work to the coordinator"
@@ -328,6 +378,9 @@ class HostDelegation:
             task.result = result
             task.error = error
             task.ended_at = now()
+            closed = self._closed
+        if closed:
+            return
         self._record()
         self.journal.emit(
             "role.task.finished",
@@ -343,15 +396,17 @@ class HostDelegation:
     def _record(self):
         if self.roles_path is None:
             return
-        with self._lock:
-            for task in self.tasks.values():
-                if task.thread_id:
-                    self.roles[task.thread_id] = {
-                        "role": task.role,
-                        "task": task.name,
-                        "task_id": task.id,
-                        "status": task.status,
-                    }
-            threads = dict(self.roles)
         with self._record_lock:
+            with self._lock:
+                if self._closed:
+                    return
+                for task in self.tasks.values():
+                    if task.thread_id:
+                        self.roles[task.thread_id] = {
+                            "role": task.role,
+                            "task": task.name,
+                            "task_id": task.id,
+                            "status": task.status,
+                        }
+                threads = dict(self.roles)
             write_json(self.roles_path, {"version": 1, "threads": threads})

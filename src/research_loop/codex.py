@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,7 +61,9 @@ BASE_INSTRUCTIONS = (
 PROVIDER_MULTI_AGENT_VERSION = "v1"
 
 
-def model_catalog(model, effort, context_window):
+def model_catalog(
+    model, effort, context_window, multi_agent_version=PROVIDER_MULTI_AGENT_VERSION
+):
     levels = ["low", "medium", "high"]
     if effort not in levels:
         levels.append(effort)
@@ -80,7 +83,7 @@ def model_catalog(model, effort, context_window):
                 "truncation_policy": {"mode": "tokens", "limit": 10000},
                 "supports_parallel_tool_calls": True,
                 "tool_mode": None,
-                "multi_agent_version": PROVIDER_MULTI_AGENT_VERSION,
+                "multi_agent_version": multi_agent_version,
                 "use_responses_lite": False,
                 "include_skills_usage_instructions": False,
                 "auto_review_model_override": None,
@@ -112,7 +115,9 @@ def model_catalog(model, effort, context_window):
     }
 
 
-def configuration(root, project, writable, model, effort, provider=None):
+def configuration(
+    root, project, writable, model, effort, provider=None, delegation="native"
+):
     home = root / "native"
     home.mkdir(mode=0o700, exist_ok=True)
     home.chmod(0o700)
@@ -153,7 +158,6 @@ def configuration(root, project, writable, model, effort, provider=None):
     }
     common = [
         "mcp_servers={}",
-        "features.multi_agent=true",
         "features.multi_agent_v2_dynamic_tools=false",
         "features.plugins=false",
         "features.apps=false",
@@ -193,12 +197,16 @@ def configuration(root, project, writable, model, effort, provider=None):
         "child_dynamic_tools": False,
     }
     if provider is None:
-        overrides = [
-            'forced_login_method="chatgpt"',
-            "features.multi_agent_v2=true",
-            *common,
-            'web_search="live"',
-        ]
+        overrides = ['forced_login_method="chatgpt"']
+        if delegation == "host":
+            overrides.extend(
+                ["features.multi_agent=false", "features.multi_agent_v2=false"]
+            )
+        else:
+            overrides.extend(
+                ["features.multi_agent=true", "features.multi_agent_v2=true"]
+            )
+        overrides.extend([*common, 'web_search="live"'])
     else:
         key_env = provider["api_key_env"]
         key = os.environ.get(key_env)
@@ -207,12 +215,18 @@ def configuration(root, project, writable, model, effort, provider=None):
                 f"The provider API key environment variable {key_env} is unset"
             )
         name = provider["name"]
+        catalog_version = None if delegation == "host" else PROVIDER_MULTI_AGENT_VERSION
         catalog = provider.get("model_catalog")
         if catalog is None:
             catalog = home / "models.json"
             catalog.write_text(
                 json.dumps(
-                    model_catalog(model, effort, provider["context_window"]),
+                    model_catalog(
+                        model,
+                        effort,
+                        provider["context_window"],
+                        multi_agent_version=catalog_version,
+                    ),
                     indent=2,
                 )
             )
@@ -230,9 +244,14 @@ def configuration(root, project, writable, model, effort, provider=None):
                 raise RuntimeError(
                     "The provider model catalog does not declare the configured model"
                 )
-            if entry.get("multi_agent_version") != PROVIDER_MULTI_AGENT_VERSION:
+            if entry.get("multi_agent_version") != catalog_version:
+                if delegation == "host":
+                    raise RuntimeError(
+                        "Host delegation requires a model catalog without "
+                        "multi_agent_version so native subagent tools stay disabled"
+                    )
                 raise RuntimeError(
-                    "Provider model catalogs require multi_agent_version v1 so "
+                    "Native provider delegation requires multi_agent_version v1 so "
                     "delegated tasks reach non-OpenAI models as plain user messages"
                 )
             if entry.get("supports_search_tool") is not False:
@@ -242,6 +261,9 @@ def configuration(root, project, writable, model, effort, provider=None):
                 )
         environment[key_env] = key
         overrides = [
+            "features.multi_agent=false"
+            if delegation == "host"
+            else "features.multi_agent=true",
             "features.multi_agent_v2=false",
             *common,
             'web_search="disabled"',
@@ -259,10 +281,11 @@ def configuration(root, project, writable, model, effort, provider=None):
         ]
         effective.update(
             model_provider=name,
-            multi_agent_version=PROVIDER_MULTI_AGENT_VERSION,
+            multi_agent_version=catalog_version,
             model_catalog=str(catalog),
             web_search=False,
         )
+    effective["delegation"] = delegation
     command = [
         "/usr/bin/env",
         "-i",
@@ -284,11 +307,24 @@ class Native:
         self.thread_id = None
         self.turn_id = None
         self.children = set()
+        self.children_lock = threading.Lock()
         self.stopping = False
         self.loop = None
         self.active = False
         self.settled = False
         self.closed = False
+
+    def _add_child(self, thread_id):
+        with self.children_lock:
+            self.children.add(thread_id)
+
+    def _add_children(self, thread_ids):
+        with self.children_lock:
+            self.children.update(thread_ids)
+
+    def _child_snapshot(self):
+        with self.children_lock:
+            return set(self.children)
 
     async def open(self):
         self.loop = asyncio.get_running_loop()
@@ -312,6 +348,36 @@ class Native:
             return {"answers": {}}
         return {}
 
+    @staticmethod
+    def _journal_arguments(name, arguments):
+        if name == "delegate_task" and isinstance(arguments, dict):
+            message = arguments.get("message")
+            return {
+                "role": arguments.get("role"),
+                "task_name": arguments.get("task_name"),
+                "message_chars": len(message) if isinstance(message, str) else None,
+            }
+        if name == "wait_tasks" and isinstance(arguments, dict):
+            return {"task_ids": arguments.get("task_ids")}
+        return arguments
+
+    @staticmethod
+    def _journal_output(name, output):
+        if name == "wait_tasks" and isinstance(output, dict):
+            rows = output.get("tasks")
+            if isinstance(rows, list):
+                return {
+                    "tasks": [
+                        {
+                            "task_id": row.get("task_id"),
+                            "status": row.get("status"),
+                        }
+                        for row in rows
+                        if isinstance(row, dict)
+                    ]
+                }
+        return output
+
     async def _tool(self, params):
         name = params.get("tool")
         success = False
@@ -329,9 +395,9 @@ class Native:
             "resource.tool",
             thread_id=params.get("threadId"),
             tool=name,
-            arguments=params.get("arguments"),
+            arguments=self._journal_arguments(name, params.get("arguments")),
             success=success,
-            output=output,
+            output=self._journal_output(name, output),
         )
         return {
             "success": success,
@@ -374,7 +440,7 @@ class Native:
             model=model,
             effort=effort,
             roles_path=roles_path,
-            on_thread=self.children.add,
+            on_thread=self._add_child,
         )
 
         async def delegate(arguments):
@@ -472,9 +538,9 @@ class Native:
             self.journal.emit("codex.event", method=method, data=data)
             item = data.get("item", {})
             if item.get("type") == "collabAgentToolCall":
-                self.children.update(item.get("receiverThreadIds", []))
+                self._add_children(item.get("receiverThreadIds", []))
             if item.get("type") == "subAgentActivity":
-                self.children.add(item["agentThreadId"])
+                self._add_child(item["agentThreadId"])
             if (
                 method == "item/completed"
                 and item.get("type") == "agentMessage"
@@ -506,7 +572,7 @@ class Native:
         loaded = (
             await self.rpc("thread/loaded/list", {}) if self.thread_id else {"data": []}
         )
-        threads = set(loaded.get("data", [])) | self.children
+        threads = set(loaded.get("data", [])) | self._child_snapshot()
         if self.thread_id:
             threads.add(self.thread_id)
         unsettled = []
