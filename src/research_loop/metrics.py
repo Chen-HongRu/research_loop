@@ -548,6 +548,15 @@ class Collector:
 
     def _allocation(self, config, status):
         resource = config.get("resource") or {}
+        if isinstance(resource, dict) and resource.get("adapter") == "ssh-process":
+            return {
+                "available": False,
+                "state": "not-applicable",
+                "adapter": "ssh-process",
+                "dispatched_jobs": None,
+                "elapsed_seconds": None,
+                "reason": "job registry only; GPU accounting is not provided",
+            }
         configured = resource.get("ledger_path") if isinstance(resource, dict) else None
         if configured is not None and (
             not isinstance(configured, str) or not configured

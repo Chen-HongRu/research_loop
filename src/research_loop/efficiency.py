@@ -399,6 +399,10 @@ def report(
     )
     explicit_ledger = ledger_path is not None
     resource_config = config.get("resource") or {}
+    ssh_process = (
+        isinstance(resource_config, dict)
+        and resource_config.get("adapter") == "ssh-process"
+    )
     configured_ledger = (
         resource_config.get("ledger_path")
         if isinstance(resource_config, dict)
@@ -415,9 +419,11 @@ def report(
     resource_expected = bool(
         explicit_ledger or resource_config or status.get("resource") or events
     )
-    available = ledger_path.exists()
+    available = ledger_path.exists() and not ssh_process
     ledger = (
-        reader.json(ledger_path, "ledger") if available or resource_expected else {}
+        reader.json(ledger_path, "ledger")
+        if not ssh_process and (available or resource_expected)
+        else {}
     )
     allocation = {
         "available": available,
@@ -470,6 +476,15 @@ def report(
         else:
             allocation["nonterminal_jobs"] += 1
     allocation["states"] = dict(states)
+    if ssh_process:
+        allocation = {
+            "available": False,
+            "state": "not-applicable",
+            "adapter": "ssh-process",
+            "dispatched_jobs": None,
+            "elapsed_seconds": None,
+            "reason": "job registry only; GPU accounting is not provided",
+        }
     return {
         "schema_version": 1,
         "window": {

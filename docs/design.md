@@ -93,6 +93,17 @@ blocks duplicate allocation. Cleanup attempts do not prove a remote job stopped;
 original receipts remain authoritative. The adapter accounts for its allocations,
 not unrelated jobs submitted elsewhere by the account.
 
+The optional `ssh-process` adapter registers `ssh_prepare`, `ssh_start`,
+`ssh_status`, `ssh_stop` and `ssh_fetch` through the same lead-only tool boundary.
+Its frozen operator configuration disables starts by default and fixes device
+selection. A locked local registry reserves the original job identity before SSH
+dispatch; uncertain effects are reconciled by that identity and never retried.
+Cleanup controls only this run's recorded jobs. The configured remote launcher
+owns process identity checks and job-relative artifact access; the host downloads
+explicit files into new local work artifacts. This backend provides process
+receipts, not scheduler allocation, time limits, pricing or GPU-budget accounting.
+See the [protocol and limits](../references/ssh-process.md).
+
 The host contains no research task pool, fixed role scheduler, scientific
 acceptance gate, runtime self-repair or automatic version activation. Host transfer
 uses the [Linux deployment procedure](../references/linux-deployment.md).

@@ -294,7 +294,7 @@ function renderCharts(curves) {
 function render(data) {
   const status = data.status || {}, budget = data.budget || {};
   byId('state').textContent = status.status === 'completed' ? '研究已结束' : nameState(status.status);
-  byId('budget').textContent = budget.state === 'recorded' ? `剩余 ${(budget.remaining_seconds / 3600).toFixed(2)} / ${(budget.authorized_seconds / 3600).toFixed(0)} GPU 小时` : '预算状态待确认';
+  byId('budget').textContent = budget.state === 'not-applicable' ? 'SSH 作业记录；无 GPU 预算计量' : budget.state === 'recorded' ? `剩余 ${(budget.remaining_seconds / 3600).toFixed(2)} / ${(budget.authorized_seconds / 3600).toFixed(0)} GPU 小时` : '预算状态待确认';
   const activity = data.activity || {};
   byId('activity').textContent = `${status.iteration ? `第 ${status.iteration} 轮 · ` : ''}${activity.label || '暂无当前活动记录'} · 最后事件 ${friendlyTime(data.last_event_at) || '尚无'}`;
   ui.iteration = status.iteration ?? null;
@@ -350,7 +350,7 @@ function renderMetrics(data) {
   line('任务（已完成非混合 / 待完成 / 混合）', ['completed', 'pending', 'mixed'].map(k => show(data.tasks?.[k])).join(' / '));
   line('等待超时', data.wait_timeouts);
   line('资源失败 / 空 poll', [show(data.resources?.failed_calls), show(data.resources?.successful_empty_running_gpu_polls)].join(' / '));
-  line('Allocation 秒数', data.allocation?.available === true ? data.allocation?.elapsed_seconds : null);
+  line('Allocation 秒数', data.allocation?.state === 'not-applicable' ? '不适用（SSH 作业记录）' : data.allocation?.available === true ? data.allocation?.elapsed_seconds : null);
   line('采集器最近耗时（秒） / 读取字节', [show(data.reader?.previous_poll_total_seconds ?? data.reader?.elapsed_seconds), show(data.reader?.bytes_read)].join(' / '));
   if (data.comparison) {
     for (const key of ['baseline', 'optimized']) {

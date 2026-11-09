@@ -31,6 +31,13 @@ def resource(config, root):
             raise ValueError(
                 "The GPU ledger and its lock must be outside agent-writable directories"
             )
+        adapter = config["resource"].get("adapter", "slurm")
+        if adapter == "ssh-process":
+            from .ssh_process import SSHProcess
+
+            return SSHProcess(config["resource"], root)
+        if adapter != "slurm":
+            raise ValueError("Unknown resource adapter")
         return Slurm(config["resource"], root)
     return None
 

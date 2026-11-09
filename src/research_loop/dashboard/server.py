@@ -293,7 +293,14 @@ def metrics_snapshot(root):
         ),
         "allocation": _fields(
             value.get("allocation"),
-            ("available", "dispatched_jobs", "elapsed_seconds", "unknown_jobs"),
+            (
+                "available",
+                "state",
+                "adapter",
+                "dispatched_jobs",
+                "elapsed_seconds",
+                "unknown_jobs",
+            ),
         ),
         "reader": _fields(
             value.get("reader"),
@@ -671,9 +678,16 @@ class State:
             ledger_path = (
                 Path(resource["ledger_path"]) if resource.get("ledger_path") else None
             )
-            ledger = read_json(ledger_path) if ledger_path else None
+            ssh_process = resource.get("adapter") == "ssh-process"
+            ledger = read_json(ledger_path) if ledger_path and not ssh_process else None
             budget = {"state": "unavailable"}
-            if isinstance(ledger, dict) and isinstance(ledger.get("entries"), list):
+            if ssh_process:
+                budget = {
+                    "state": "not-applicable",
+                    "adapter": "ssh-process",
+                    "reason": "job registry only; GPU accounting is not provided",
+                }
+            elif isinstance(ledger, dict) and isinstance(ledger.get("entries"), list):
                 try:
                     entries = ledger["entries"]
                     used = sum(
