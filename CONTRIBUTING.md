@@ -7,6 +7,10 @@ evaluation and budget before changing behavior.
 
 Use Python 3.12 and `uv sync --locked`. After changing Python files, run `uvx ruff format` and `uvx ruff check` on the changed files, relevant tests and the smallest real smoke. Agent, GPU and remote runs require the appropriate account and resource authorization.
 
+For dashboard changes, also run `node tests/dashboard_frontend.cjs` to exercise
+rendering, study selection, stale response handling and tool cache isolation
+without a browser. This check does not verify visual layout.
+
 The pinned native checks are opt-in. The first checks SDK metadata without a model call; the second calls the authorized subscription model for a synthetic Proposer → Experimenter → Critic smoke. It checks fresh contexts, an arithmetic plan and script, coordinator execution, and a read-only critique against native histories and output artifacts, without GPU or remote access:
 
 ```sh

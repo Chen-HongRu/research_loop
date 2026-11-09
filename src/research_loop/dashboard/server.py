@@ -109,6 +109,94 @@ def iteration_metadata(root):
     return sorted(rows)
 
 
+def research_history(root):
+    """Project archived public results without interpreting research conclusions."""
+    archive = root / "iterations"
+    directories = []
+    if not archive.is_symlink():
+        try:
+            directories = sorted(
+                (
+                    path
+                    for path in archive.iterdir()
+                    if path.name.isdecimal() and not path.is_symlink() and path.is_dir()
+                ),
+                key=lambda path: (int(path.name), path.name),
+            )
+        except OSError:
+            pass
+
+    def read_record(path):
+        if path.is_symlink():
+            return None
+        value = read_json(path)
+        return value if isinstance(value, dict) else None
+
+    rows = []
+    candidates = [(int(path.name), path) for path in directories]
+    if not candidates:
+        # Pre-iteration Studies retained only the latest root records.
+        if read_record(root / "result.json") is not None:
+            candidates = [(None, root)]
+    for iteration, directory in candidates:
+        status_path, result_path = directory / "status.json", directory / "result.json"
+        status, result = read_record(status_path), read_record(result_path)
+        if status is None and result is None:
+            continue
+        status = status or {}
+        projected = None
+        if result is not None:
+            projected = {
+                field: public_text(result[field])
+                for field in (
+                    "summary",
+                    "next_action",
+                    "goal",
+                    "study_action",
+                    "stop_reason",
+                )
+                if isinstance(result.get(field), str)
+            }
+            for field, source in (
+                ("limitations", "limitations"),
+                ("evidence_refs", "evidence"),
+            ):
+                values = result.get(source)
+                if isinstance(values, list):
+                    projected[field] = [
+                        text
+                        for value in values
+                        if isinstance(value, str) and (text := public_text(value))
+                    ]
+        status_source = str(status_path.relative_to(root)) if status else None
+        result_source = (
+            str(result_path.relative_to(root)) if result is not None else None
+        )
+        rows.append(
+            {
+                "iteration": iteration,
+                "status": public_text(status.get("status")) or "unknown",
+                "started_at": public_text(status.get("started_at")) or None,
+                "ended_at": public_text(status.get("ended_at")) or None,
+                "source": result_source or status_source,
+                "status_source": status_source,
+                "result_source": result_source,
+                "result_available": result is not None,
+                "missing_result": result is None,
+                "result": projected,
+            }
+        )
+    available = sum(row["result_available"] for row in rows)
+    return {
+        "iterations": rows,
+        "counts": {
+            "total": len(rows),
+            "with_result": available,
+            "missing_result": len(rows) - available,
+        },
+    }
+
+
 def research_state(root, status):
     current = status.get("iteration")
     latest = None
@@ -855,7 +943,69 @@ class State:
             }
 
 
+class Studies:
+    """Explicit study allowlist plus immediate children of an opted-in directory."""
+
+    def __init__(self, roots=(), directory=None):
+        self.roots = [Path(root).resolve() for root in roots]
+        self.directory = Path(directory).resolve() if directory else None
+        self.states = {}
+        self.lock = threading.Lock()
+
+    def paths(self):
+        paths = list(self.roots)
+        if self.directory and self.directory.is_dir():
+            paths.extend(
+                child
+                for child in sorted(self.directory.iterdir())
+                if child.is_dir()
+                and not child.is_symlink()
+                and (child / "status.json").is_file()
+                and not (child / "status.json").is_symlink()
+            )
+        return dict.fromkeys(paths)
+
+    def catalog(self):
+        rows = []
+        for path in self.paths():
+            value = read_json(path / "status.json", {})
+            status = value if isinstance(value, dict) else {}
+            rows.append(
+                {
+                    "id": self.identifier(path),
+                    "name": path.name,
+                    "status": status.get("status", "unknown"),
+                    "iteration": status.get("iteration"),
+                }
+            )
+        return {"studies": rows, "default": rows[0]["id"] if rows else None}
+
+    @staticmethod
+    def identifier(path):
+        # Stable opaque selection key; clients never supply filesystem paths.
+        import hashlib
+
+        return hashlib.sha256(str(path).encode()).hexdigest()[:24]
+
+    def select(self, identifier=None):
+        paths = self.paths()
+        path = (
+            next((p for p in paths if self.identifier(p) == identifier), None)
+            if identifier is not None
+            else next(iter(paths), None)
+        )
+        if path is None or not path.is_dir():
+            return None
+        with self.lock:
+            for old in set(self.states) - set(paths):
+                del self.states[old]
+            if path not in self.states:
+                self.states[path] = State(path)
+            return self.states[path]
+
+
 def handler_for(state, allowed_hosts):
+    studies = state if isinstance(state, Studies) else Studies([state.root])
     directory = Path(__file__).resolve().parent
     static = {
         "/": (directory / "index.html", "text/html; charset=utf-8"),
@@ -874,21 +1024,28 @@ def handler_for(state, allowed_hosts):
                 return
             parsed = urlsplit(self.path)
             path = parsed.path
-            if path == "/api/state":
-                body = json.dumps(state.snapshot(), ensure_ascii=False).encode()
+            if path == "/api/studies":
+                body = json.dumps(studies.catalog(), ensure_ascii=False).encode()
                 content_type = "application/json; charset=utf-8"
-            elif path == "/api/metrics":
-                body = json.dumps(
-                    metrics_snapshot(state.root), ensure_ascii=False
-                ).encode()
-                content_type = "application/json; charset=utf-8"
-            elif path == "/api/tool":
-                identifier = parse_qs(parsed.query).get("id", [""])[0]
-                tool = state.tool_detail(identifier)
-                if tool is None:
-                    self.send_error(404, "Tool record unavailable in current view")
+            elif path in {"/api/state", "/api/metrics", "/api/tool"}:
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                selected = studies.select(query.get("study", [None])[0])
+                if selected is None:
+                    self.send_error(404, "Study unavailable")
                     return
-                body = json.dumps(tool, ensure_ascii=False).encode()
+                if path == "/api/state":
+                    value = selected.snapshot()
+                    value["history"] = research_history(selected.root)
+                elif path == "/api/metrics":
+                    value = metrics_snapshot(selected.root)
+                else:
+                    value = selected.tool_detail(query.get("id", [""])[0])
+                    if value is None:
+                        self.send_error(
+                            404, "Tool record unavailable in selected study"
+                        )
+                        return
+                body = json.dumps(value, ensure_ascii=False).encode()
                 content_type = "application/json; charset=utf-8"
             elif path in static:
                 source, content_type = static[path]
@@ -916,13 +1073,17 @@ def handler_for(state, allowed_hosts):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--study", type=Path, required=True)
+    parser.add_argument("--study", type=Path, action="append", default=[])
+    parser.add_argument("--studies-dir", type=Path)
     parser.add_argument("--port", type=int, default=8768)
     parser.add_argument("--allowed-host", action="append", default=[])
     args = parser.parse_args()
+    if not args.study and not args.studies_dir:
+        parser.error("provide --study or --studies-dir")
     allowed = {f"127.0.0.1:{args.port}", f"localhost:{args.port}", *args.allowed_host}
     server = ThreadingHTTPServer(
-        ("127.0.0.1", args.port), handler_for(State(args.study.resolve()), allowed)
+        ("127.0.0.1", args.port),
+        handler_for(Studies(args.study, args.studies_dir), allowed),
     )
     server.serve_forever()
 

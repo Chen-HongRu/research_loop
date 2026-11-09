@@ -39,3 +39,9 @@ Run the dashboard separately on loopback. If using a reverse-proxy path prefix,
 retain its trailing slash and serve relative asset/API URLs. Keep existing HTTPS
 and access control. Verify both the backend and external route without exposing
 research artifacts or credentials publicly.
+
+For several Studies, configure the dashboard with repeated `--study RUN` flags
+or `--studies-dir STUDIES` for immediate-child discovery. Existing single-Study
+commands remain valid. Every discovered Study is readable to dashboard visitors;
+choose the directory and access control accordingly. This changes only the
+read-only view, and does not start or resume a research controller.

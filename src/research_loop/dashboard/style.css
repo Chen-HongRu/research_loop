@@ -475,3 +475,12 @@ h1 {
 .role-card .role-task { margin-top: 9px; color: #3c4840; font-size: 12px; overflow-wrap: anywhere; }
 .role-card .role-status { color: #65806e; font-size: 11px; }
 .role-card .role-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: #7c857e; font-size: 11px; overflow-wrap: anywhere; }
+
+.study-picker { display:flex; align-items:center; gap:8px; min-width:0; }
+.study-picker select { font:inherit; max-width: min(38vw, 420px); padding:6px 10px; border:1px solid #dce2dc; border-radius:8px; background:#fff; }
+.research-history { border-left:2px solid #c8d8cc; margin-left:7px; padding-left:22px; }
+.history-entry { position:relative; padding:0 0 24px; overflow-wrap:anywhere; }
+.history-entry::before { content:''; position:absolute; left:-29px; top:10px; width:12px; height:12px; border-radius:50%; background:#658d74; border:2px solid white; }
+.history-entry h3 { margin:0; font-size:16px; }
+.history-entry p { margin:6px 0; }
+@media (max-width:760px) { .topbar { height:auto; min-height:66px; flex-wrap:wrap; gap:8px; padding:10px 16px; } .study-picker { order:3; width:100%; } .study-picker select { max-width:calc(100vw - 100px); } }
