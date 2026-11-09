@@ -107,6 +107,35 @@ The host contains no research task pool, fixed role scheduler, scientific
 acceptance gate, runtime self-repair or automatic version activation. Host transfer
 uses the [Linux deployment procedure](../references/linux-deployment.md).
 
+## Human experiment input
+
+The user authors `inputs/human.md` directly or through a separately authorized
+Codex session. The operator `experiment` and `edit-experiment` commands share
+`inputs/human.lock` with admission and acknowledgement. Direct editing during
+execution must use this lock; arbitrary unlocked editor writes are not coordinated.
+Research lead and specialist permissions keep inputs and iteration snapshots
+read-only. Only the controller consumes requests.
+
+At iteration admission, a nonempty UTF-8 request is read once, identified by its
+file revision and text, archived under the iteration and supplied as
+`human_request` before direction selection. Missing or empty input leaves
+autonomous planning unchanged. The request selects a priority experiment within
+the existing goal, protocol and resource authorization. Mid-iteration changes
+belong to later admissions. The coordinator delegates design, implementation and
+analysis through the existing roles; it returns a matching request ID, disposition,
+evidence and reason independently of Study action and goal status.
+
+Completion requires execution, analysis and summary, including negative findings.
+The host validates disposition shape and identity, not scientific correctness.
+Blocked requests halt for intervention; unfinished requests remain pending.
+Publication metadata carries the admitted snapshot and result. Only activated
+publication commits a completed request. Afterwards, acknowledgement clears only
+the still-matching revision under the input lock. Recovery replays acknowledgement
+from the active publication before admission, preserving any newer edit and
+avoiding replay of published work. Failed or unpublished work is not consumed.
+See the [contract](human-experiment-input.md) and
+[operator interface](../references/operations.md#human-experiments).
+
 An optional [efficiency collector](../references/efficiency.md) runs separately
 from the controller. It reads native traces and resource records incrementally,
 writes private aggregate observations outside the Study, and never calls a model

@@ -148,6 +148,10 @@ def configuration(
         paths[str(path.resolve())] = "write"
         for name in (".git", ".codex", ".agents", ".aws"):
             paths[str(path.resolve() / name)] = "read"
+    # User requests and admitted snapshots stay read-only for lead and children,
+    # including when a Study is nested within an otherwise writable directory.
+    for path in (root / "inputs", root / "iterations"):
+        paths[str(path.resolve())] = "read"
     for path in (Path.home() / ".codex", Path.home() / ".ssh", home):
         paths[str(path.resolve())] = "deny"
     shell_env = {
