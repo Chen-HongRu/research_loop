@@ -20,7 +20,21 @@ An optional `--resource FILE` on `init` supplies authorized Slurm resources. `in
 
 To view a Study locally, run `uv run python -m research_loop.dashboard.server --study RUN --port 8768` and open `http://localhost:8768/`. The read-only dashboard displays Study messages, work records and tool details; use it only where those records may be viewed. It binds to loopback and refreshes every five seconds. Optional historical curves can be supplied in `RUN/inputs/historical-curves.json`.
 
-The former Node/Pi runtime is retired and remains in Git history. The old integration directory retains historical static assets only. Its results describe that implementation and do not validate this one; see the [history index](docs/runtime-retirement.md).
+The repository supports only the pinned native Codex runtime. The Python host, Slurm resource adapter and read-only dashboard use that runtime. The synthetic goal in [examples/goal.md](examples/goal.md) demonstrates its research contract.
+
+Run `uv run research-loop efficiency RUN` for an offline JSON audit of recorded
+token usage, delegate activity, waiting, resource calls and settled allocations.
+Use `--since` and `--until` with timezone-aware ISO 8601 timestamps to compare
+periods. This reads existing traces on demand, makes no model or remote call,
+and leaves the Study unchanged. Cached input is reported separately; allocation
+time is not GPU utilization. See [the metric definitions](references/operations.md#efficiency-diagnostics)
+for coverage and interpretation limits.
+
+For continuous measurement, run `uv run research-loop metrics watch RUN --output
+/path/to/private-metrics/baseline --since 2026-01-01T08:00:00+08:00 --phase baseline`.
+The separate collector tails new trace bytes, checkpoints its progress and makes
+no model or resource calls. Compare saved phases with `uv run research-loop
+metrics compare BASELINE_DIR OPTIMIZED_DIR`; see [continuous measurements](references/efficiency.md).
 
 ## Development
 

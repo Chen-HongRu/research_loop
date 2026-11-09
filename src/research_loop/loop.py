@@ -345,10 +345,17 @@ async def run(root, *, continue_run=False, native_factory=Native):
 
 
 def main():
+    if sys.argv[1:2] == ["metrics"]:
+        from .metrics import main as metrics_main
+
+        return metrics_main(sys.argv[2:])
     parser = argparse.ArgumentParser(
         description="Codex-led research with native delegation"
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser(
+        "metrics", help="Continuously collect or compare local efficiency measurements"
+    )
     commands.add_parser(
         "doctor", help="Check local runtime metadata without a model call"
     )
@@ -361,11 +368,20 @@ def main():
     init.add_argument("--resource", type=Path)
     init.add_argument("--model", default="gpt-6.1-sol")
     init.add_argument("--effort", default="medium")
-    for name in ("inspect", "run", "status", "stop"):
+    for name in ("inspect", "run", "status", "stop", "efficiency"):
         command = commands.add_parser(name)
         command.add_argument("root", type=Path)
         if name == "run":
             command.add_argument("--continue", action="store_true", dest="continue_run")
+        elif name == "efficiency":
+            command.add_argument(
+                "--since", help="Inclusive ISO 8601 time with timezone"
+            )
+            command.add_argument(
+                "--until", help="Exclusive ISO 8601 time with timezone"
+            )
+            command.add_argument("--sessions-dir", type=Path)
+            command.add_argument("--ledger-path", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "doctor":
@@ -393,6 +409,16 @@ def main():
                 )
             elif args.command == "inspect":
                 result = inspect(root)
+            elif args.command == "efficiency":
+                from .efficiency import report
+
+                result = report(
+                    root,
+                    since=args.since,
+                    until=args.until,
+                    sessions_dir=args.sessions_dir,
+                    ledger_path=args.ledger_path,
+                )
             elif args.command == "run":
                 result = asyncio.run(run(root, continue_run=args.continue_run))
             elif args.command == "status":

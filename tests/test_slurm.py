@@ -24,6 +24,10 @@ def save():
     path.write_text(json.dumps(state))
 command = argv[0]
 if command == "salloc":
+    if state["mode"] == "banner_timeout":
+        print("Connection timed out during banner exchange")
+        print("Connection to UNKNOWN port 65535 timed out")
+        sys.exit(255)
     name = next(x.split("=", 1)[1] for x in argv if x.startswith("--job-name="))
     job = {"id": str(100 + len(state["jobs"])), "name": name, "state": "RUNNING", "elapsed": 7, "gpu": "gres/gpu=1"}
     state["jobs"].append(job)
@@ -179,6 +183,47 @@ class SlurmTests(unittest.IsolatedAsyncioTestCase):
         self.scheduler(mode="normal")
         await self.invoke(adapter, "gpu_exec", command="printf explicit-next-command")
         self.assertEqual(len(self.scheduler()["jobs"]), 2)
+
+    async def test_banner_timeout_reconciles_original_without_a_second_dispatch(self):
+        self.scheduler(mode="banner_timeout")
+        adapter = self.adapter()
+        with self.assertRaises(RuntimeError):
+            await self.invoke(adapter, "gpu_exec", command="printf must-not-run")
+        entry = adapter.status()["reservations"][0]
+        self.assertEqual(entry["status"], "UNKNOWN")
+        # Preserve the pre-fix UNKNOWN receipt, then recover in a fresh process-like
+        # adapter using the original protected log and ledger.
+        with patch.object(
+            adapter, "_observe", side_effect=RuntimeError("old unresolved dispatch")
+        ):
+            await adapter.close()
+        adapter = Slurm(self.config, adapter.root)
+        self.adapters.append(adapter)
+        receipt = await self.invoke(
+            adapter, "gpu_reconcile", reservation_id=entry["reservation_id"]
+        )
+        self.assertEqual(receipt["state"], "NOT_DISPATCHED")
+        self.assertEqual(receipt["elapsed_seconds"], 0)
+        self.assertEqual(adapter.status()["budget"]["reserved_seconds"], 0)
+        self.assertEqual(adapter.status()["budget"]["used_seconds"], 0)
+        self.assertEqual(sum(call[0] == "salloc" for call in self.calls), 1)
+        self.assertEqual(self.scheduler()["jobs"], [])
+
+    async def test_missing_accounting_or_mixed_output_does_not_prove_non_dispatch(self):
+        self.scheduler(mode="banner_timeout")
+        adapter = self.adapter()
+        with self.assertRaises(RuntimeError):
+            await self.invoke(adapter, "gpu_exec", command="printf must-not-run")
+        entry = adapter.status()["reservations"][0]
+        log = adapter.root / (entry["reservation_id"] + ".allocator.log")
+        diagnostic = log.read_bytes()
+        for output in (b"", b"salloc: submitting job\n" + diagnostic, b"x" * 4097):
+            log.write_bytes(output)
+            with self.assertRaisesRegex(RuntimeError, "accounting unavailable"):
+                await self.invoke(
+                    adapter, "gpu_reconcile", reservation_id=entry["reservation_id"]
+                )
+            self.assertEqual(adapter.status()["reservations"][0]["status"], "UNKNOWN")
 
     async def test_status_before_allocation_has_no_side_effects(self):
         adapter = self.adapter()

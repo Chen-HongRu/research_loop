@@ -1,7 +1,7 @@
 # Source distribution boundary
 
 The current source tree contains the native Codex runtime, reusable read-only
-dashboard, role instructions, synthetic tests and independent benchmark fixtures.
+dashboard, role instructions, synthetic tests and a synthetic goal example.
 Private Studies, raw transcripts, credentials, deployment configuration, research
 inputs and results stay outside commits. The MIT license covers project code;
 third-party assets retain the licenses listed in [notices](../THIRD_PARTY_NOTICES.md).

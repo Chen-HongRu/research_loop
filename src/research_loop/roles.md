@@ -11,7 +11,10 @@ work to the coordinator, which applies the same fresh-context contract.
 
 ## Common contract
 
-Read the supplied goal, project instructions and selected evidence directly.
+First read the supplied goal, project instructions, short knowledge index and
+specified evidence directly. Follow links or search further only when needed;
+do not read the whole library or all history by default, or repeatedly reread
+common instructions for the same task.
 Your role and task are supplied explicitly; never assume access to the parent
 conversation. Do not read parent/previous agent chats or raw transcripts. Use
 scientific artifacts, including negative results and uncertainty, as evidence;
@@ -32,7 +35,9 @@ inferences, negative/inconclusive evidence, limitations and a concrete next acti
 Distinguish a prepared script from executed evidence. Identify the uncertainty
 and smallest useful experiment; do not add validation infrastructure without a
 concrete need. If evidence is missing, request a bounded task rather than inventing
-it. Read-only roles return their assessment for the coordinator to persist.
+it. If blocked on a dependency, return the specific missing artifact and what
+can be done now; do not wait in a message loop. Read-only roles return their
+assessment for the coordinator to persist.
 
 ## Scout
 
@@ -45,7 +50,10 @@ route; do not merely find support for the coordinator's preferred direction.
 Maintain a short diverse frontier of untested ideas, including revived negative
 results only when a new testable reason exists. For each: source, mechanism,
 relationship to attempted ideas, uncertainty, cheapest discriminating experiment
-and estimated cost. Novelty alone is not a reason to spend compute.
+and estimated cost. Each contribution should add a distinct prediction and
+minimum executable discriminator; reuse inspected sources unless new evidence
+requires retrieval. Neither a new best nor literature volume rewards exploration.
+Novelty alone is not a reason to spend compute.
 
 ## Proposer
 
@@ -69,6 +77,11 @@ Do not claim a submitted job succeeded or rerun completed computation just to
 improve a report. Return data/implementation concerns to Proposer rather than
 silently changing the experiment's meaning. Collect useful timing when available;
 never confuse allocation duration with GPU computation utilization.
+Have runners emit a short machine-readable summary of status, key metrics and
+control deltas, failures/limitations, actual step/state and full artifact
+references. Save complete per-example, support and gradient details separately
+instead of printing large JSON by default; retain precise extraction on demand
+for review. The coordinator mechanically extracts facts and operational summaries.
 
 ## Analyst
 
@@ -88,6 +101,8 @@ not executor chats. Assess both experiment validity and whether the direction
 merits further compute relative to alternatives. Look for confounding, leakage,
 metric/protocol changes, missing controls and unsupported claims. Say accept,
 revise or abandon with concrete reasons and the smallest evidence that could
-change the assessment. Acceptance applies to the stated claim, not the Study as
-a whole. Remain read-only; request substantive supplementary experiments rather
+change the assessment. Use the accepted shared baseline and independently verify
+the new mathematical, code and empirical delta and necessary underlying evidence;
+do not require a complete repeat of historical review. Acceptance applies to the
+stated claim, not the Study as a whole. Remain read-only; request substantive supplementary experiments rather
 than repeated wording changes. Agreement is not independent experimental evidence.

@@ -165,7 +165,9 @@ function message(entry, label, index) {
   wrapper.append(text('div', label.startsWith('主 Agent') ? 'R' : '子', 'avatar'));
   const body = document.createElement('div');
   const head = document.createElement('div'); head.className = 'message-head';
-  head.append(text('strong', label), text('time', friendlyTime(entry.at)));
+  const time = text('time', friendlyTime(entry.at));
+  if (entry.at) time.dateTime = entry.at;
+  head.append(text('strong', label), time);
   const content = document.createElement('div'); content.className = 'markdown long-message';
   const value = entry.text ?? '';
   structuredContent(content, value, id);
@@ -297,7 +299,8 @@ function render(data) {
   byId('activity').textContent = `${status.iteration ? `第 ${status.iteration} 轮 · ` : ''}${activity.label || '暂无当前活动记录'} · 最后事件 ${friendlyTime(data.last_event_at) || '尚无'}`;
   ui.iteration = status.iteration ?? null;
   renderResearch(data);
-  const messages = (Array.isArray(data.messages) ? data.messages : []).filter(item => item && typeof item.text === 'string' && item.text.trim());
+  const messages = (Array.isArray(data.messages) ? data.messages : []).filter(item => item && typeof item.text === 'string' && item.text.trim())
+    .sort((a, b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0));
   renderMessages(byId('latest-message'), messages.slice(-1), '主 Agent · 最新');
   const latest = messages.at(-1);
   const coordinator = byId('coordinator-message'); coordinator.replaceChildren();
@@ -310,7 +313,7 @@ function render(data) {
   const done = agents.filter(a => a.status === 'completed').length;
   agentLink.textContent = `查看全部 ${agents.length} 个任务 →`;
   const older = byId('older-section'); older.hidden = !messages.length;
-  renderMessages(byId('conversation'), messages.slice(0, -1), '主 Agent');
+  renderMessages(byId('conversation'), messages.slice(0, -1).reverse(), '主 Agent');
   const result = status.result ?? status.error;
   const last = messages.at(-1)?.text;
   const duplicate = result != null && last && JSON.stringify(structured(last) || last) === JSON.stringify(structured(result) || result);
@@ -329,6 +332,40 @@ function render(data) {
   const plan = byId('plan'); plan.replaceChildren();
   if (Array.isArray(data.plan) && data.plan.length) data.plan.forEach(item => plan.append(text('p', `${item.step} · ${nameState(item.status)}`)));
   else plan.append(text('p', '暂无原生计划记录。', 'muted'));
+}
+function renderMetrics(data) {
+  const root = byId('metrics'); root.replaceChildren();
+  if (!data.available) {
+    root.append(text('p', data.status === 'missing' ? '指标尚不可用。' : '指标文件无效或无法读取。'));
+    return;
+  }
+  const show = value => value == null ? '未测' : String(value);
+  const line = (label, value) => root.append(text('p', `${label}：${show(value)}`));
+  line('阶段', data.phase);
+  line('采样时间', data.window?.until);
+  line('最近源事件', data.last_source_event_at);
+  line('覆盖', data.coverage?.complete === true ? '完整' : data.coverage?.complete === false ? '不完整' : null);
+  line('Token 计量', data.llm_measurable === true ? '可计量' : data.llm_measurable === false ? '不完整或不可计量；仅显示已观测非零值' : '未测');
+  line('Token（input / cache / uncached / output）', ['input_tokens', 'cached_input_tokens', 'uncached_input_tokens', 'output_tokens'].map(k => show(data.llm_measurable !== true && data.llm?.[k] === 0 ? null : data.llm?.[k])).join(' / '));
+  line('任务（已完成非混合 / 待完成 / 混合）', ['completed', 'pending', 'mixed'].map(k => show(data.tasks?.[k])).join(' / '));
+  line('等待超时', data.wait_timeouts);
+  line('资源失败 / 空 poll', [show(data.resources?.failed_calls), show(data.resources?.successful_empty_running_gpu_polls)].join(' / '));
+  line('Allocation 秒数', data.allocation?.available === true ? data.allocation?.elapsed_seconds : null);
+  line('采集器最近耗时（秒） / 读取字节', [show(data.reader?.previous_poll_total_seconds ?? data.reader?.elapsed_seconds), show(data.reader?.bytes_read)].join(' / '));
+  if (data.comparison) {
+    for (const key of ['baseline', 'optimized']) {
+      const item = data.comparison[key];
+      const token = item.coverage?.usage_records_observed ? item.llm?.uncached_input_tokens : null;
+      line(`${key} 描述性对照（已完成非混合 / 待完成 / 混合；已观测 uncached input；覆盖完整）`, [show(item.tasks?.completed_unmixed), show(item.tasks?.pending), show(item.tasks?.mixed), show(token), show(item.coverage?.complete)].join(' / '));
+    }
+  } else if (data.comparison_status === 'invalid') line('前后对照', '文件无效');
+}
+async function refreshMetrics() {
+  try {
+    const response = await fetch('api/metrics', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    renderMetrics(await response.json());
+  } catch (_) { renderMetrics({ available: false, status: 'invalid' }); }
 }
 async function refresh() {
   if (ui.refreshing) return;
@@ -353,4 +390,4 @@ async function refresh() {
     clearTimeout(timeout); ui.refreshing = false;
   }
 }
-setView(ui.view); refresh(); setInterval(refresh, 5000);
+setView(ui.view); refresh(); refreshMetrics(); setInterval(refresh, 5000); setInterval(refreshMetrics, 5000);

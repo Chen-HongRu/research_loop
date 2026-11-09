@@ -2,8 +2,8 @@
 
 本仓库使用原生 Codex GitHub Review，评审规则在根目录
 [AGENTS.md](../AGENTS.md#code-review-rules)。它检查 PR 的文档同步、数据脱敏和
-通用控制器与任务适配器的边界；Research Loop 内部的 Plan → Execute → Review
-属于研究执行协议，与这里的代码评审分开。
+通用控制器与任务代码的边界；Research Loop 内部由 native Codex 协调研究角色，
+其中 Critic 的科学评议与这里的代码评审分开。
 
 ## 启用自动评审
 
@@ -36,7 +36,7 @@
 
 例如：删除 CLI 参数却保留相关 README 命令、提交真实部署访问配置，或让
 `src/research_loop/` 按任务名选择固定指标，均需指出具体影响和最小修复。
-仅在 ProTok 适配器内使用该任务自己的指标，不构成抽象破坏。
+仅在任务代码内使用该任务自己的指标，不构成抽象破坏。
 
 贡献者提交前使用 [PR 模板](../.github/PULL_REQUEST_TEMPLATE.md) 逐项自检，
 说明实际检查与未验证项。维护者核对 review 对应的 head；若 PR 更新，确认新 head

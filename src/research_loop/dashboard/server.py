@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import threading
 from collections import OrderedDict
 from datetime import UTC, datetime
@@ -157,11 +159,203 @@ def research_state(root, status):
     }
 
 
+def supervisor_process(supervisor):
+    """Resolve a managed service live; a saved PID is only a fallback."""
+    service = supervisor.get("service", "")
+    if (
+        isinstance(service, str)
+        and re.fullmatch(r"[A-Za-z0-9_.@:-]+\.service", service)
+        and shutil.which("systemctl")
+    ):
+        try:
+            result = subprocess.run(
+                [
+                    "systemctl",
+                    "show",
+                    "-p",
+                    "MainPID",
+                    "-p",
+                    "ActiveState",
+                    "--",
+                    service,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            values = dict(
+                line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+            )
+            pid = int(values.get("MainPID", "0")) or None
+            if result.returncode == 0:
+                if values.get("ActiveState") == "active" and pid:
+                    return pid, "alive"
+                if values.get("ActiveState") in {"inactive", "failed"}:
+                    return pid, "dead"
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        # Failed service inspection does not prove the recorded process died.
+        return None, "unknown"
+    pid, alive = supervisor.get("pid"), "unknown"
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        try:
+            os.kill(pid, 0)
+            alive = "alive"
+        except ProcessLookupError:
+            alive = "dead"
+        except (PermissionError, OSError):
+            pass
+    return pid, alive
+
+
 def read_json(path, default=None):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return default
+
+
+METRICS_LIMIT = 2 * 1024 * 1024
+
+
+def _metrics_file(root, name):
+    """Read one bounded JSON object contained by the resolved metrics root."""
+    try:
+        base = (root / "metrics").resolve(strict=True)
+        path = (base / name).resolve(strict=True)
+        if not path.is_relative_to(base):
+            return None, "invalid"
+        with path.open("rb") as stream:
+            data = stream.read(METRICS_LIMIT + 1)
+        if len(data) > METRICS_LIMIT:
+            return None, "invalid"
+        value = json.loads(data)
+        return (value, "available") if isinstance(value, dict) else (None, "invalid")
+    except FileNotFoundError:
+        return None, "missing"
+    except (OSError, ValueError, RuntimeError):
+        return None, "invalid"
+
+
+def _fields(value, keys):
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value[key]
+        for key in keys
+        if key in value and isinstance(value[key], (str, int, float, bool))
+    }
+
+
+def metrics_snapshot(root):
+    value, status = _metrics_file(root, "current/latest.json")
+    if value is None:
+        return {"available": False, "status": status}
+    if not isinstance(value.get("phase"), str) or not isinstance(
+        value.get("llm"), dict
+    ):
+        return {"available": False, "status": "invalid"}
+    llm = value["llm"]
+    result = {
+        "available": True,
+        "status": "available",
+        "phase": value["phase"],
+        "last_source_event_at": value.get("last_source_event_at")
+        if isinstance(value.get("last_source_event_at"), str)
+        else None,
+        "llm_measurable": llm.get("measurable")
+        if isinstance(llm.get("measurable"), bool)
+        else None,
+        "window": _fields(value.get("window"), ("since", "until")),
+        "coverage": _fields(
+            value.get("coverage"),
+            (
+                "complete",
+                "session_files_discovered",
+                "selected_threads",
+                "excluded_session_threads",
+                "usage_records_observed",
+            ),
+        ),
+        "llm": _fields(
+            llm.get("total"),
+            (
+                "input_tokens",
+                "cached_input_tokens",
+                "uncached_input_tokens",
+                "output_tokens",
+                "responses",
+            ),
+        ),
+        "resources": _fields(
+            value.get("resources"),
+            ("calls", "failed_calls", "successful_empty_running_gpu_polls"),
+        ),
+        "allocation": _fields(
+            value.get("allocation"),
+            ("available", "dispatched_jobs", "elapsed_seconds", "unknown_jobs"),
+        ),
+        "reader": _fields(
+            value.get("reader"),
+            ("bytes_read", "elapsed_seconds", "previous_poll_total_seconds"),
+        ),
+    }
+    tasks = llm.get("by_task")
+    if isinstance(tasks, list) and all(
+        isinstance(t, dict)
+        and all(k in t for k in ("role", "active_in_phase", "completed_at", "mixed"))
+        for t in tasks
+    ):
+        children = [
+            t for t in tasks if t["role"] != "lead" and t["active_in_phase"] is True
+        ]
+        result["tasks"] = {
+            "completed": sum(
+                bool(t["completed_at"]) and t["mixed"] is False for t in children
+            ),
+            "pending": sum(not t["completed_at"] for t in children),
+            "mixed": sum(t["mixed"] is True for t in children),
+        }
+    roles = llm.get("by_role")
+    if isinstance(roles, dict) and all(
+        isinstance(r, dict) and isinstance(r.get("wait_timeouts"), int)
+        for r in roles.values()
+    ):
+        result["wait_timeouts"] = sum(r["wait_timeouts"] for r in roles.values())
+    comparison, comparison_status = _metrics_file(root, "comparison.json")
+    result["comparison_status"] = comparison_status
+    if comparison is not None:
+        phases = {}
+        for name in ("baseline", "optimized"):
+            item = comparison.get(name)
+            if not isinstance(item, dict):
+                result["comparison_status"] = "invalid"
+                break
+            totals = item.get("totals") if isinstance(item.get("totals"), dict) else {}
+            phases[name] = {
+                "phase": item.get("phase")
+                if isinstance(item.get("phase"), str)
+                else None,
+                "tasks": _fields(
+                    item.get("task_cohorts"), ("completed_unmixed", "pending", "mixed")
+                ),
+                "coverage": _fields(
+                    item.get("coverage"), ("complete", "usage_records_observed")
+                ),
+                "llm": _fields(
+                    totals.get("llm"),
+                    (
+                        "input_tokens",
+                        "cached_input_tokens",
+                        "uncached_input_tokens",
+                        "output_tokens",
+                        "responses",
+                    ),
+                ),
+            }
+        else:
+            result["comparison"] = phases
+    return result
 
 
 def public_text(value):
@@ -512,15 +706,7 @@ class State:
                     "configured_seconds": resource.get("gpu_seconds_total"),
                 }
             supervisor = read_json(self.root / "supervisor.json", {}) or {}
-            pid, alive = supervisor.get("pid"), "unknown"
-            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-                try:
-                    os.kill(pid, 0)
-                    alive = "alive"
-                except ProcessLookupError:
-                    alive = "dead"
-                except (PermissionError, OSError):
-                    pass
+            pid, alive = supervisor_process(supervisor)
             messages, children, known = list(self.messages.values()), [], set()
             descendants = {self.lead_id} if self.lead_id else set()
             for _ in self.sessions:
@@ -632,6 +818,11 @@ def handler_for(state, allowed_hosts):
             path = parsed.path
             if path == "/api/state":
                 body = json.dumps(state.snapshot(), ensure_ascii=False).encode()
+                content_type = "application/json; charset=utf-8"
+            elif path == "/api/metrics":
+                body = json.dumps(
+                    metrics_snapshot(state.root), ensure_ascii=False
+                ).encode()
                 content_type = "application/json; charset=utf-8"
             elif path == "/api/tool":
                 identifier = parse_qs(parsed.query).get("id", [""])[0]

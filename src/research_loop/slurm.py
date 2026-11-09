@@ -673,6 +673,34 @@ class Slurm:
             and row[0].isdigit()
             and (job is None or row[0] == job)
         ]
+        if not accounting and not rows and job is None:
+            # OpenSSH's banner exchange precedes authentication and remote command
+            # execution. An exact, protected allocator diagnostic proves that this
+            # attempt never reached salloc; absence from accounting alone does not.
+            log = self.root / (entry["reservation_id"] + ".allocator.log")
+            try:
+                with log.open("rb") as stream:
+                    diagnostic = stream.read(4097)
+            except OSError:
+                diagnostic = b""
+            if len(diagnostic) <= 4096 and re.fullmatch(
+                rb"Connection timed out during banner exchange\r?\n"
+                rb"Connection to [^\r\n]+ port [0-9]+ timed out\r?\n",
+                diagnostic,
+            ):
+                receipt = {
+                    "state": "NOT_DISPATCHED",
+                    "job_id": None,
+                    "job_name": entry["job_name"],
+                    "elapsed_seconds": 0,
+                    "gpu_hours": 0.0,
+                    "evidence": "OpenSSH banner timeout before remote command",
+                }
+                entry.update(
+                    status="TERMINAL", receipt=receipt, continuation_authorized=True
+                )
+                self._persist()
+                return receipt
         if len(accounting) != 1:
             raise RuntimeError(
                 "exact original allocation accounting unavailable; reservation remains charged"

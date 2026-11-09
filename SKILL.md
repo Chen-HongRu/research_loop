@@ -9,4 +9,8 @@ Install the repository as described in [installation](references/installation.md
 
 Initialize and inspect a run before starting it; see [operations](references/operations.md). The main Codex agent coordinates dependencies, efficiency, resources and summaries, dynamically invoking the Scout, Proposer, Experimenter, Analyst and Critic role templates for scientific work. Each role invocation uses a fresh native subagent with `fork_turns="none"` and a self-contained task; do not resume, reuse or follow up in an existing role context. Research resource tools are available to the lead only. Report evidence and limitations, and distinguish incomplete work or exhausted resources from achieving the goal. Independent context does not create a separate sandbox.
 
-Do not launch model, GPU or remote work without authorization. Do not repeat an uncertain remote submission or reset its budget. Inspect the original operation and job identity and reconcile unknown effects. The [history index](docs/runtime-retirement.md) describes the retired runtime; old results do not validate the current one.
+For optional operator-side continuous efficiency measurements and descriptive
+before/after comparisons, see [measurements](references/efficiency.md). Collection
+does not start research, call a model or authorize additional resources.
+
+Use only the pinned native Codex runtime. Do not launch model, GPU or remote work without authorization. Do not repeat an uncertain remote submission or reset its budget. Inspect the original operation and job identity and reconcile unknown effects.

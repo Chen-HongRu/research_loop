@@ -1,8 +1,128 @@
 """Public-message projection checks; no model, remote data or network calls."""
 
 import json
+import io
+import subprocess
+from unittest.mock import patch
 
 from research_loop.dashboard import server
+
+
+def test_metrics_projection_and_endpoint(tmp_path):
+    initialize(tmp_path)
+    metrics = tmp_path / "external-metrics"
+    phase = metrics / "baseline"
+    phase.mkdir(parents=True)
+    (tmp_path / "metrics").symlink_to(metrics, target_is_directory=True)
+    (metrics / "current").symlink_to("baseline", target_is_directory=True)
+    (phase / "latest.json").write_text(
+        json.dumps(
+            {
+                "phase": "baseline",
+                "last_source_event_at": "2026-01-01T12:00:00Z",
+                "window": {"until": "now", "secret": "PRIVATE"},
+                "coverage": {"complete": False, "issues": {"PRIVATE": 1}},
+                "llm": {
+                    "total": {"input_tokens": 10, "secret": "PRIVATE"},
+                    "by_role": {"scout": {"wait_timeouts": 2}},
+                    "by_task": [
+                        {
+                            "role": "scout",
+                            "active_in_phase": True,
+                            "completed_at": "now",
+                            "mixed": False,
+                        }
+                    ],
+                },
+                "resources": {"failed_calls": 1},
+                "reader": {"bytes_read": 5},
+                "secret": "PRIVATE",
+            }
+        )
+    )
+    (metrics / "comparison.json").write_text(
+        json.dumps(
+            {
+                name: {
+                    "phase": name,
+                    "task_cohorts": {"completed_unmixed": 1, "secret": "PRIVATE"},
+                    "totals": {"llm": {"input_tokens": 3}},
+                }
+                for name in ("baseline", "optimized")
+            }
+        )
+    )
+    result = server.metrics_snapshot(tmp_path)
+    assert result["available"] and result["coverage"]["complete"] is False
+    assert result["last_source_event_at"] == "2026-01-01T12:00:00Z"
+    assert result["tasks"] == {"completed": 1, "pending": 0, "mixed": 0}
+    assert result["wait_timeouts"] == 2
+    assert result["comparison"]["baseline"]["llm"]["input_tokens"] == 3
+    assert "PRIVATE" not in json.dumps(result)
+    handler_type = server.handler_for(server.State(tmp_path), {"localhost"})
+    for path in ("/api/metrics", "/api/state"):
+        handler = object.__new__(handler_type)
+        handler.path, handler.headers, handler.wfile = (
+            path,
+            {"Host": "localhost"},
+            io.BytesIO(),
+        )
+        handler.send_response = lambda code: None
+        handler.send_header = lambda *args: None
+        handler.end_headers = lambda: None
+        handler.do_GET()
+        assert isinstance(json.loads(handler.wfile.getvalue()), dict)
+
+
+def test_metrics_missing_invalid_oversize_and_escape(tmp_path):
+    assert server.metrics_snapshot(tmp_path) == {
+        "available": False,
+        "status": "missing",
+    }
+    metrics = tmp_path / "metrics"
+    current = metrics / "current"
+    current.mkdir(parents=True)
+    latest = current / "latest.json"
+    for data in ("[]", "{", "x" * (server.METRICS_LIMIT + 1)):
+        latest.write_text(data)
+        assert server.metrics_snapshot(tmp_path)["status"] == "invalid"
+    latest.unlink()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"phase":"x","llm":{}}')
+    latest.symlink_to(outside)
+    assert server.metrics_snapshot(tmp_path)["status"] == "invalid"
+    latest.unlink()
+    current.rmdir()
+    current.symlink_to(tmp_path, target_is_directory=True)
+    (tmp_path / "latest.json").write_text(outside.read_text())
+    assert server.metrics_snapshot(tmp_path)["status"] == "invalid"
+
+
+def test_service_pid_overrides_stale_record_and_failed_queries_stay_unknown():
+    saved = {"pid": 123, "service": "research-example.service"}
+    with patch.object(server.shutil, "which", return_value="/usr/bin/systemctl"):
+        with patch.object(
+            server.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                [], 0, "MainPID=456\nActiveState=active\n"
+            ),
+        ):
+            assert server.supervisor_process(saved) == (456, "alive")
+        with patch.object(
+            server.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                [], 0, "MainPID=0\nActiveState=failed\n"
+            ),
+        ):
+            assert server.supervisor_process(saved) == (None, "dead")
+        with patch.object(
+            server.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired("systemctl", 2),
+        ):
+            assert server.supervisor_process(saved) == (None, "unknown")
 
 
 def append(path, *values):

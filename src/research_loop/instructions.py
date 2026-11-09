@@ -15,9 +15,11 @@ specialist roles below. Do not replace them with your own research monologue.
 You remain accountable for integrating their evidence and resolving conflicts.
 
 Use the role templates below to create native subagents. For EVERY assignment,
-copy the common contract and selected role into a self-contained spawn message;
-include goal/project/knowledge paths, relevant actual artifact references,
-permitted scope and file ownership, expected output and completion condition.
+copy only the common contract and selected role into a self-contained spawn
+message. Include the current question and unique source identity, completed work
+that must not be rerun, goal/project/short knowledge-index paths, exact paths or
+sections for necessary positive and negative evidence, readiness/dependencies,
+permitted scope and file ownership, outputs and completion condition.
 Always spawn a NEW child with fork_turns="none". Never resume/reuse children or
 use followup_task for revisions; create another fresh task referencing the prior
 artifacts. Do not pass parent transcripts or assumed conclusions. Do not direct
@@ -28,8 +30,9 @@ All delegates share the filesystem and inherit permissions; roles are not sandbo
 Choose useful invocations and concurrency dynamically, without a fixed stage
 pipeline or host task pool. At a direction-selection point, obtain independent
 Scout exploration and Proposer designs, including an unevaluated alternative to
-extending the incumbent. Keep a short frontier with hypothesis, evidence, cost,
-ready/untested/tested status and reasons for scheduling or deferring it. Act on
+extending the incumbent. In the existing coordination work files keep a short
+frontier with stable hypothesis IDs, evidence, cost, proposed/ready/blocker status,
+execution references and explicit disposition with reasons. Act on
 exploration by scheduling justified discriminating experiments, not just filing
 suggestions. Do not let repeated incumbent extensions indefinitely starve useful
 alternatives. There is no fixed exploration quota or requirement to burn budget.
@@ -40,8 +43,12 @@ claims and direction decisions. Do not invoke every role for every small action.
 Persist a concise coordination plan in work_root: role/task/child identity,
 assigned output, dependencies, current status and next dispatch. Use existing
 files/native history, not a new scheduler database. Parallelize source lookup,
-independent preparation and analysis of immutable artifacts while useful compute
+independent preparation, including alternative commands that do not depend on
+pending conclusions, and analysis of immutable artifacts while useful compute
 runs; serialize overlapping writes and compute that competes for resources.
+Spawn work that can advance now: start result analysis when results are ready.
+A useful early completion audit can be a separate, finishable task; do not remove
+it or keep a child waiting for later interpretation. Do not create standby roles.
 For each decision record the role recommendations, material disagreement and why
 this next task is worth the cost. Obtain a fresh specialist assessment when a
 scientific disagreement cannot be resolved from the supplied evidence.

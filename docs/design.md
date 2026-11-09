@@ -33,6 +33,13 @@ to specialists; the coordinator executes prepared commands and integrates their
 reports. Role selection, fresh spawning and read-only review are prompt contracts,
 not host tool-call gates. Children inherit native filesystem permissions.
 
+Assignments identify exact relevant evidence and completed work rather than
+copying the entire knowledge history. Roles start with the goal, project
+instructions, short knowledge index and assigned evidence, expanding retrieval
+when needed. A useful preliminary audit can finish before a separate result
+analysis starts; roles are not created merely to wait for dependencies. Runners
+retain complete evidence in artifacts and emit concise summaries for coordination.
+
 ## Iterations and state
 
 `init` copies the goal and freezes configuration without a model call. Each turn
@@ -90,6 +97,12 @@ The host contains no research task pool, fixed role scheduler, scientific
 acceptance gate, runtime self-repair or automatic version activation. Host transfer
 uses the [Linux deployment procedure](../references/linux-deployment.md).
 
+An optional [efficiency collector](../references/efficiency.md) runs separately
+from the controller. It reads native traces and resource records incrementally,
+writes private aggregate observations outside the Study, and never calls a model
+or allocates resources. Measurement phase labels are operator annotations;
+observed differences do not establish a causal improvement or scientific value.
+
 ## Dashboard
 
 `python -m research_loop.dashboard.server --study RUN` serves a read-only loopback
@@ -99,3 +112,8 @@ inference from task names and unknown/missing records are labeled explicitly.
 Historical and current iteration results remain distinct. Raw tool details load
 only when requested. Assets and API calls support a reverse-proxy path prefix;
 external access control belongs to the deployment.
+
+If `supervisor.json` identifies a systemd service, the dashboard resolves its live
+`MainPID` and `ActiveState`; a saved PID must not override that service state.
+Inspection failure is unknown, not proof of process exit. Unmanaged processes
+and hosts without systemd use the recorded PID.
