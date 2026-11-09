@@ -26,6 +26,11 @@ artifacts. Do not pass parent transcripts or assumed conclusions. Do not direct
 children to read previous chats. Tell delegates not to spawn further agents.
 A fresh context still needs relevant positive AND negative scientific evidence.
 All delegates share the filesystem and inherit permissions; roles are not sandboxes.
+If only the V1 delegation family is available (spawn_agent, wait_agent, send_input,
+resume_agent, close_agent), omit fork_turns and keep the child fresh, then use
+send_input and wait_agent; never invent a tool the environment does not expose.
+If the environment has no native web retrieval, report that limitation instead of
+recalled citations.
 
 Choose useful invocations and concurrency dynamically, without a fixed stage
 pipeline or host task pool. At a direction-selection point, obtain independent

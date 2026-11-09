@@ -3,10 +3,13 @@
 import argparse
 import asyncio
 import json
+import os
+import re
 import signal
 import sys
 from importlib.metadata import version
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .codex import Native, configuration
 from .instructions import INSTRUCTIONS, RESULT_SCHEMA
@@ -15,6 +18,55 @@ from .state import Journal, Knowledge, PublicationStopped, now, write_json, writ
 
 def read_config(root):
     return json.loads((root / "config.json").read_text())
+
+
+DEFAULT_MODEL = "gpt-6.1-sol"
+DEFAULT_MODEL_CONTEXT_WINDOW = 131072
+
+
+def provider_config(args):
+    """Resolve an optional OpenAI-compatible provider; secrets stay in the environment."""
+    if not any((args.provider, args.provider_base_url, args.api_key_env)):
+        if (
+            args.model_catalog
+            or args.model_context_window != DEFAULT_MODEL_CONTEXT_WINDOW
+        ):
+            raise ValueError(
+                "--model-catalog and --model-context-window require a provider"
+            )
+        return None
+    if not all((args.provider, args.provider_base_url, args.api_key_env)):
+        raise ValueError(
+            "--provider, --provider-base-url and --api-key-env are required together"
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", args.provider):
+        raise ValueError("Provider names use letters, digits, underscore and hyphen")
+    url = urlparse(args.provider_base_url)
+    if url.scheme not in {"http", "https"} or not url.netloc:
+        raise ValueError("--provider-base-url requires an http(s) URL")
+    if not args.model:
+        raise ValueError("--model is required for an OpenAI-compatible provider")
+    if not os.environ.get(args.api_key_env):
+        # Report only the name: the value is never recorded or printed.
+        raise ValueError(f"Environment variable {args.api_key_env} is unset")
+    if args.model_context_window < 1:
+        raise ValueError("--model-context-window must be positive")
+    catalog = None
+    if args.model_catalog:
+        path = args.model_catalog.resolve(strict=True)
+        document = json.loads(path.read_text())
+        if args.model not in [
+            entry.get("slug") for entry in document.get("models", [])
+        ]:
+            raise ValueError("The model catalog does not declare the configured model")
+        catalog = str(path)
+    return {
+        "name": args.provider,
+        "base_url": args.provider_base_url.rstrip("/"),
+        "api_key_env": args.api_key_env,
+        "model_catalog": catalog,
+        "context_window": args.model_context_window,
+    }
 
 
 def resource(config, root):
@@ -36,7 +88,14 @@ def resource(config, root):
 
 
 def initialize(
-    root, project, goal, *, resource_file=None, model="gpt-6.1-sol", effort="medium"
+    root,
+    project,
+    goal,
+    *,
+    resource_file=None,
+    model="gpt-6.1-sol",
+    effort="medium",
+    provider=None,
 ):
     project, goal = project.resolve(strict=True), goal.resolve(strict=True)
     if not project.is_dir() or not goal.is_file():
@@ -46,6 +105,7 @@ def initialize(
         "project": str(project),
         "model": model,
         "effort": effort,
+        "provider": provider,
         "resource_file": str(resource_file.resolve(strict=True))
         if resource_file
         else None,
@@ -153,6 +213,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
             [root / "work", knowledge.draft],
             config["model"],
             config["effort"],
+            provider=config.get("provider"),
         )
         call["effective_native_permissions"] = effective
         call["input"].update(
@@ -164,7 +225,9 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
         )
         await native.open()
         watch = asyncio.create_task(observe_stop())
-        await native.verify(config["model"], config["effort"])
+        await native.verify(
+            config["model"], config["effort"], provider=config.get("provider")
+        )
         if (root / "STOP").exists():
             state.update(status="stopped")
             return state
@@ -366,8 +429,27 @@ def main():
     init.add_argument("--project", type=Path, required=True)
     init.add_argument("--goal", type=Path, required=True)
     init.add_argument("--resource", type=Path)
-    init.add_argument("--model", default="gpt-6.1-sol")
+    init.add_argument("--model")
     init.add_argument("--effort", default="medium")
+    init.add_argument("--provider", help="OpenAI-compatible provider name")
+    init.add_argument(
+        "--provider-base-url", help="Provider Responses API root, for example /v1"
+    )
+    init.add_argument(
+        "--api-key-env",
+        help="Name of the environment variable holding the provider API key",
+    )
+    init.add_argument(
+        "--model-catalog",
+        type=Path,
+        help="Existing Codex model catalog JSON for the provider model",
+    )
+    init.add_argument(
+        "--model-context-window",
+        type=int,
+        default=DEFAULT_MODEL_CONTEXT_WINDOW,
+        help="Context window declared for a generated provider model catalog",
+    )
     for name in ("inspect", "run", "status", "stop", "efficiency"):
         command = commands.add_parser(name)
         command.add_argument("root", type=Path)
@@ -404,8 +486,9 @@ def main():
                     args.project,
                     args.goal,
                     resource_file=args.resource,
-                    model=args.model,
+                    model=args.model or DEFAULT_MODEL,
                     effort=args.effort,
+                    provider=provider_config(args),
                 )
             elif args.command == "inspect":
                 result = inspect(root)

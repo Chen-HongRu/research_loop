@@ -16,6 +16,16 @@ uv run research-loop stop RUN
 
 Each iteration settles native work and authorized resources, publishes an independent knowledge snapshot, and follows the lead's explicit `study_action`: `continue` starts the next iteration in the same thread; `stop` ends the Study with a `stop_reason`. Scientific goal status is reported separately. Completing one diagnostic does not complete the Study. Results and status are retained under `iterations/NNNNNN/`; root records show the latest iteration. Failed work, UNKNOWN resources and STOP halt continuation and retain drafts.
 
+An optional OpenAI-compatible provider can drive the same native harness instead of the Codex ChatGPT subscription. Supply it at initialization; the API key is read from the named environment variable at run time and is never written to the run records:
+
+```sh
+uv run research-loop init RUN --project PROJECT --goal GOAL \
+  --provider NAME --provider-base-url https://provider.example/v1 \
+  --api-key-env PROVIDER_API_KEY --model MODEL --effort medium
+```
+
+Unless `--model-catalog FILE` supplies an existing Codex catalog, the host generates one declaring the model and `--model-context-window` (default 131072). Non-OpenAI Responses gateways cannot read Codex V2 inter-agent task payloads, so generated catalogs select the V1 delegation family, which delivers each role task as a plain user message; hosted web search is disabled in this mode. Provider mode needs the pinned Codex runtime but no ChatGPT login. Model and remote execution still require explicit authorization, and provider-mode results are not evidence of parity with the subscription baseline. See [operations](references/operations.md#openai-compatible-provider).
+
 An optional `--resource FILE` on `init` supplies authorized Slurm resources. `inspect` shows the resolved run configuration without a model call; a completed Study is cached unless explicitly continued with `run RUN --continue`, including Studies completed by the earlier single-iteration runtime. Continuation preserves the original thread and ledger. See [installation](references/installation.md), [operations](references/operations.md), [Linux deployment](references/linux-deployment.md), and the [design](docs/design.md). Model calls and remote compute require explicit authorization. Keep private inputs, credentials, runtime artifacts and checkpoints outside Git.
 
 To view a Study locally, run `uv run python -m research_loop.dashboard.server --study RUN --port 8768` and open `http://localhost:8768/`. The read-only dashboard displays Study messages, work records and tool details; use it only where those records may be viewed. It binds to loopback and refreshes every five seconds. Optional historical curves can be supplied in `RUN/inputs/historical-curves.json`.

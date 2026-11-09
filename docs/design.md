@@ -42,9 +42,11 @@ retain complete evidence in artifacts and emit concise summaries for coordinatio
 
 ## Iterations and state
 
-`init` copies the goal and freezes configuration without a model call. Each turn
-receives paths to the goal, project, work, draft and published index, a resource
-snapshot, iteration number and previous result. The agent reads referenced files
+`init` copies the goal and freezes configuration without a model call. It can also
+freeze an explicit OpenAI-compatible provider (name, base URL, API-key environment
+variable, model catalog); the run records store only the variable name, never the
+key value. Each turn receives paths to the goal, project, work, draft and published
+index, a resource snapshot, iteration number and previous result. The agent reads referenced files
 with native tools; their contents are not automatically embedded in that input.
 `inspect` exposes these application instructions, schema, tools and permissions.
 
@@ -72,7 +74,7 @@ and iteration records do not guarantee recovery from arbitrary crashes.
 
 | Boundary | Protected condition |
 | --- | --- |
-| Native authentication, exact model and permissions | Use the configured subscription/model/effort without provider fallback; prevent agent access to protected paths. Prompts cannot enforce filesystem isolation. |
+| Native authentication, exact model and permissions | Use the configured authentication (ChatGPT subscription by default, or an explicit OpenAI-compatible provider), model and effort without implicit provider fallback; prevent agent access to protected paths. Prompts cannot enforce filesystem isolation. |
 | Shared resource ledger and lock | Reserve and settle the original authorization across allocations. A prompt cannot atomically reserve shared budget. |
 | Original operation identity, UNKNOWN and STOP | Reconcile uncertain effects without duplicate dispatch; prevent new research dispatch after STOP. Physical receipts establish job state. |
 | Single writer and atomic publication | Prevent concurrent publication and partial knowledge snapshots. The writer lock is host-local, not a cross-host ownership service. |

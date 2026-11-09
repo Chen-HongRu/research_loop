@@ -57,7 +57,7 @@ def test_real_cpu_smoke_and_completed_restart_no_replay(tmp_path, monkeypatch):
             return super().turn_start(thread_id, prompt, params)
 
     monkeypatch.setattr(
-        loop, "configuration", lambda *args: (None, {"synthetic": True})
+        loop, "configuration", lambda *args, **kwargs: (None, {"synthetic": True})
     )
 
     def factory(config, journal, tools):
@@ -79,7 +79,7 @@ def test_failed_turn_preserves_thread_draft_and_no_publication(tmp_path, monkeyp
         def next_turn_notification(self, turn_id):
             raise RuntimeError("synthetic transport failure")
 
-    monkeypatch.setattr(loop, "configuration", lambda *args: (None, {}))
+    monkeypatch.setattr(loop, "configuration", lambda *args, **kwargs: (None, {}))
 
     def factory(config, journal, tools):
         return Native(config, journal, tools, client_factory=BrokenClient)
@@ -167,7 +167,7 @@ def test_unknown_resource_cleanup_retains_result_without_publishing(
             return self.status()
 
     monkeypatch.setattr(loop, "resource", lambda *args: Unknown())
-    monkeypatch.setattr(loop, "configuration", lambda *args: (None, {}))
+    monkeypatch.setattr(loop, "configuration", lambda *args, **kwargs: (None, {}))
 
     def factory(config, journal, tools):
         return Native(config, journal, tools, client_factory=Client)
@@ -180,7 +180,7 @@ def test_unknown_resource_cleanup_retains_result_without_publishing(
 
 def scripted_native(monkeypatch, results, on_turn=None, fail_at=None):
     clients = []
-    monkeypatch.setattr(loop, "configuration", lambda *args: (None, {}))
+    monkeypatch.setattr(loop, "configuration", lambda *args, **kwargs: (None, {}))
 
     class ScriptedClient(Client):
         def __init__(self, *args, **kwargs):
@@ -592,3 +592,67 @@ def test_scheduled_signal_during_snapshot_copy_prevents_activation(
     assert (root / "knowledge/current").resolve() == baseline
     assert (root / "knowledge/draft/index.md").exists()
     assert not list((root / "knowledge/publications").glob("*.json"))
+
+
+def provider_flags(**overrides):
+    from argparse import Namespace
+
+    values = {
+        "provider": "synthetic",
+        "provider_base_url": "https://provider.example/v1",
+        "api_key_env": "SYNTHETIC_PROVIDER_KEY",
+        "model": "synthetic-model",
+        "model_catalog": None,
+        "model_context_window": 131072,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
+def test_provider_initialization_records_metadata_not_the_secret(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNTHETIC_PROVIDER_KEY", "SYNTHETIC_NOT_A_CREDENTIAL")
+    project = tmp_path / "project"
+    project.mkdir()
+    goal = tmp_path / "goal.md"
+    goal.write_text("Synthetic provider check.")
+    root = tmp_path / "run"
+    settings = loop.provider_config(provider_flags())
+    loop.initialize(
+        root,
+        project,
+        goal,
+        model="synthetic-model",
+        provider=settings,
+    )
+    config = json.loads((root / "config.json").read_text())
+    assert config["provider"] == settings
+    assert "SYNTHETIC_NOT_A_CREDENTIAL" not in (root / "config.json").read_text()
+    assert loop.inspect(root)["config"]["provider"]["api_key_env"] == (
+        "SYNTHETIC_PROVIDER_KEY"
+    )
+
+
+def test_provider_flags_are_complete_and_use_a_declared_catalog(tmp_path, monkeypatch):
+    assert (
+        loop.provider_config(
+            provider_flags(provider=None, provider_base_url=None, api_key_env=None)
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="required together"):
+        loop.provider_config(provider_flags(provider_base_url=None))
+    with pytest.raises(ValueError, match="http"):
+        loop.provider_config(provider_flags(provider_base_url="provider.example"))
+    with pytest.raises(ValueError, match="--model is required"):
+        loop.provider_config(provider_flags(model=None))
+    monkeypatch.delenv("SYNTHETIC_PROVIDER_KEY", raising=False)
+    with pytest.raises(ValueError, match="SYNTHETIC_PROVIDER_KEY is unset"):
+        loop.provider_config(provider_flags())
+    monkeypatch.setenv("SYNTHETIC_PROVIDER_KEY", "SYNTHETIC_NOT_A_CREDENTIAL")
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"models": [{"slug": "other-model"}]}))
+    with pytest.raises(ValueError, match="does not declare"):
+        loop.provider_config(provider_flags(model_catalog=catalog))
+    catalog.write_text(json.dumps({"models": [{"slug": "synthetic-model"}]}))
+    settings = loop.provider_config(provider_flags(model_catalog=catalog))
+    assert settings["model_catalog"] == str(catalog.resolve())

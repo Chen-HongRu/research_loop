@@ -13,6 +13,23 @@ uv run research-loop stop RUN
 
 Omit `--resource FILE` when remote resources are not authorized. Resource JSON specifies `host`, `partition`, `remote_root`, `ledger_path`, `gpu_seconds_total`, and `job_seconds`; `account`, `cpus`, `memory`, and `grace_seconds` are optional. Initialization freezes the parsed configuration and resolves `ledger_path` relative to the source configuration file. The shared ledger and its lock must be outside the agent-writable work and draft directories.
 
+## OpenAI-compatible provider
+
+`init` can point the same native harness at an OpenAI-compatible Responses endpoint instead of the Codex ChatGPT subscription:
+
+```sh
+uv run research-loop init RUN --project PROJECT --goal GOAL \
+  --provider NAME --provider-base-url https://provider.example/v1 \
+  --api-key-env PROVIDER_API_KEY --model MODEL --effort medium \
+  --model-context-window 131072
+```
+
+`--provider`, `--provider-base-url` and `--api-key-env` are required together, and `--model` is then required. Only the environment variable name is recorded; `config.json`, `call.json` and the event journal never contain the key value. Initialization fails early when the variable is unset, and `run` rechecks it before launching the native process. The key is forwarded only through the isolated process environment, not the agent shell or the sandbox filesystem policy.
+
+Unless `--model-catalog FILE` points at an existing Codex catalog, `run` generates `RUN/native/models.json` for the configured model, effort levels and `--model-context-window`. Generated catalogs set `multi_agent_version = "v1"` and `supports_search_tool = false`: non-OpenAI Responses gateways cannot decrypt the V2 `encrypted_content` task payload, so V1 delegation is used to deliver each role assignment as a plain user message. The harness disables Codex V2 delegation and hosted web search in provider mode. A supplied catalog must declare the same `multi_agent_version = "v1"` and `supports_search_tool = false` for the configured model; `run` rejects one that does not. Roles still run in fresh contexts because V1 `spawn_agent` does not inherit the lead conversation unless asked to. A lead or Scout that needs external sources must report the missing retrieval instead of citing recalled material.
+
+`inspect` reports the provider name, base URL, API-key variable name and catalog path without a model call. Each iteration's `call.json` records the effective native permissions, including `web_search: false`. `verify` accepts this mode without a ChatGPT account but still requires the configured model and reasoning effort to appear in the catalog. Provider mode is a separate execution baseline: do not present its results as equivalent to the subscription model without a controlled comparison.
+
 `inspect` shows the main instructions, output schema, native permission plan, resource snapshot and tool schemas without a model call, account access or ledger write. The final result separates scientific `goal` from required `study_action` (`continue` or `stop`) and string `stop_reason`. A finished diagnostic or Review does not itself stop the Study. The lead either defines the next falsifiable experiment or names a Study-level reason to stop: overall goal satisfaction, exhausted resources, an external block, or no useful justified action remaining. The host follows that action without judging scientific quality.
 
 For `continue`, the host settles and closes native and resource sessions, publishes the knowledge snapshot, then resumes the same original lead thread for the next iteration automatically. One writer lock spans all iterations. `iterations/NNNNNN/status.json` and `result.json` retain iteration history; root `status.json` and `result.json` show the latest state and returned result. `iteration-completed` means the snapshot was published and the Study intends to continue; `completed` means an explicit Study stop. A plain `run` returns a cached completed Study. Use `run RUN --continue` explicitly to continue a completed Study, including one created by the earlier single-iteration runtime, or to clear STOP. Original pre-upgrade status and result files are archived before replacement, and the original thread and resource ledger are retained. An interrupted published iteration advances to the next number; unfinished work resumes its original thread. STOP after publication preserves that iteration's archive and durable `next_iteration`, so continuation starts the following iteration without overwriting the published result.

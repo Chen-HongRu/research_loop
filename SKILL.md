@@ -13,4 +13,4 @@ For optional operator-side continuous efficiency measurements and descriptive
 before/after comparisons, see [measurements](references/efficiency.md). Collection
 does not start research, call a model or authorize additional resources.
 
-Use only the pinned native Codex runtime. Do not launch model, GPU or remote work without authorization. Do not repeat an uncertain remote submission or reset its budget. Inspect the original operation and job identity and reconcile unknown effects.
+Use only the pinned native Codex runtime. Do not launch model, GPU or remote work without authorization. Do not repeat an uncertain remote submission or reset its budget. Inspect the original operation and job identity and reconcile unknown effects. An alternative OpenAI-compatible provider changes the model baseline, disables hosted web search and uses V1 delegation; see [operations](references/operations.md#openai-compatible-provider) before interpreting such a Study.

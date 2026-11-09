@@ -45,15 +45,81 @@ def _toml(values):
     )
 
 
-def configuration(root, project, writable, model, effort):
+BASE_INSTRUCTIONS = (
+    "You are Codex, a coding agent. You and the user share one workspace. "
+    "Use the available tools to inspect files, run commands and make edits, "
+    "and follow the developer instructions and safety constraints supplied in "
+    "the conversation.\n"
+)
+
+# A non-OpenAI Responses provider cannot decrypt inter-agent payloads, so the
+# generated catalog selects the V1 delegation family that sends tasks as plain
+# user messages. Hosted web search is unavailable through such a gateway.
+PROVIDER_MULTI_AGENT_VERSION = "v1"
+
+
+def model_catalog(model, effort, context_window):
+    levels = ["low", "medium", "high"]
+    if effort not in levels:
+        levels.append(effort)
+    return {
+        "models": [
+            {
+                "slug": model,
+                "display_name": model,
+                "description": "OpenAI-compatible provider model",
+                "prefer_websockets": False,
+                "support_verbosity": True,
+                "default_verbosity": "low",
+                "apply_patch_tool_type": "freeform",
+                "web_search_tool_type": "text",
+                "input_modalities": ["text"],
+                "supports_image_detail_original": False,
+                "truncation_policy": {"mode": "tokens", "limit": 10000},
+                "supports_parallel_tool_calls": True,
+                "tool_mode": None,
+                "multi_agent_version": PROVIDER_MULTI_AGENT_VERSION,
+                "use_responses_lite": False,
+                "include_skills_usage_instructions": False,
+                "auto_review_model_override": None,
+                "context_window": context_window,
+                "max_context_window": context_window,
+                "effective_context_window_percent": 95,
+                "auto_compact_token_limit": None,
+                "comp_hash": "3000",
+                "reasoning_summary_format": "experimental",
+                "default_reasoning_summary": "none",
+                "default_reasoning_level": effort,
+                "supported_reasoning_levels": [
+                    {"effort": level, "description": level} for level in levels
+                ],
+                "shell_type": "shell_command",
+                "visibility": "list",
+                "minimal_client_version": "0.144.0",
+                "supported_in_api": True,
+                "availability_nux": None,
+                "upgrade": None,
+                "priority": 1,
+                "experimental_supported_tools": [],
+                "supports_search_tool": False,
+                "default_service_tier": None,
+                "supports_reasoning_summaries": True,
+                "base_instructions": BASE_INSTRUCTIONS,
+            }
+        ]
+    }
+
+
+def configuration(root, project, writable, model, effort, provider=None):
     home = root / "native"
     home.mkdir(mode=0o700, exist_ok=True)
     home.chmod(0o700)
-    auth = Path.home() / ".codex/auth.json"
-    if not auth.is_file():
-        raise RuntimeError("Sign in to the official Codex CLI with ChatGPT first")
-    if not (home / "auth.json").exists():
-        (home / "auth.json").symlink_to(auth)
+    if provider is None:
+        auth = Path.home() / ".codex/auth.json"
+        if not auth.is_file():
+            raise RuntimeError("Sign in to the official Codex CLI with ChatGPT first")
+        if not (home / "auth.json").exists():
+            (home / "auth.json").symlink_to(auth)
     paths = {
         ":root": "deny",
         ":minimal": "read",
@@ -83,11 +149,9 @@ def configuration(root, project, writable, model, effort):
         "TMPDIR": str(root / "work/tmp"),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    overrides = [
-        'forced_login_method="chatgpt"',
+    common = [
         "mcp_servers={}",
         "features.multi_agent=true",
-        "features.multi_agent_v2=true",
         "features.multi_agent_v2_dynamic_tools=false",
         "features.plugins=false",
         "features.apps=false",
@@ -101,7 +165,6 @@ def configuration(root, project, writable, model, effort):
         'default_permissions="research"',
         "model=" + json.dumps(model),
         "model_reasoning_effort=" + json.dumps(effort),
-        'web_search="live"',
     ]
     environment = {
         "HOME": str(Path.home()),
@@ -119,6 +182,85 @@ def configuration(root, project, writable, model, effort):
             "TZ",
         }:
             environment[key] = value
+    effective = {
+        "model": model,
+        "effort": effort,
+        "filesystem": paths,
+        "network": False,
+        "native_multi_agent": True,
+        "child_dynamic_tools": False,
+    }
+    if provider is None:
+        overrides = [
+            'forced_login_method="chatgpt"',
+            "features.multi_agent_v2=true",
+            *common,
+            'web_search="live"',
+        ]
+    else:
+        key_env = provider["api_key_env"]
+        key = os.environ.get(key_env)
+        if not key:
+            raise RuntimeError(
+                f"The provider API key environment variable {key_env} is unset"
+            )
+        name = provider["name"]
+        catalog = provider.get("model_catalog")
+        if catalog is None:
+            catalog = home / "models.json"
+            catalog.write_text(
+                json.dumps(
+                    model_catalog(model, effort, provider["context_window"]),
+                    indent=2,
+                )
+            )
+            catalog.chmod(0o600)
+        else:
+            entry = next(
+                (
+                    item
+                    for item in json.loads(Path(catalog).read_text()).get("models", [])
+                    if item.get("slug") == model
+                ),
+                None,
+            )
+            if entry is None:
+                raise RuntimeError(
+                    "The provider model catalog does not declare the configured model"
+                )
+            if entry.get("multi_agent_version") != PROVIDER_MULTI_AGENT_VERSION:
+                raise RuntimeError(
+                    "Provider model catalogs require multi_agent_version v1 so "
+                    "delegated tasks reach non-OpenAI models as plain user messages"
+                )
+            if entry.get("supports_search_tool") is not False:
+                raise RuntimeError(
+                    "Provider model catalogs require supports_search_tool=false so "
+                    "V1 delegation tools are exposed directly"
+                )
+        environment[key_env] = key
+        overrides = [
+            "features.multi_agent_v2=false",
+            *common,
+            'web_search="disabled"',
+            "model_provider=" + json.dumps(name),
+            f"model_providers.{name}="
+            + _toml(
+                {
+                    "name": name,
+                    "base_url": provider["base_url"],
+                    "env_key": key_env,
+                    "wire_api": "responses",
+                }
+            ),
+            "model_catalog_json=" + json.dumps(str(catalog)),
+        ]
+        effective.update(
+            model_provider=name,
+            multi_agent_version=PROVIDER_MULTI_AGENT_VERSION,
+            model_catalog=str(catalog),
+            web_search=False,
+        )
     command = [
         "/usr/bin/env",
         "-i",
@@ -128,14 +270,7 @@ def configuration(root, project, writable, model, effort):
     for item in overrides:
         command.extend(["--config", item])
     command.extend(["app-server", "--listen", "stdio://"])
-    return CodexConfig(cwd=str(project), launch_args_override=tuple(command)), {
-        "model": model,
-        "effort": effort,
-        "filesystem": paths,
-        "network": False,
-        "native_multi_agent": True,
-        "child_dynamic_tools": False,
-    }
+    return CodexConfig(cwd=str(project), launch_args_override=tuple(command)), effective
 
 
 class Native:
@@ -202,9 +337,9 @@ class Native:
             ],
         }
 
-    async def verify(self, model, effort):
+    async def verify(self, model, effort, provider=None):
         account = await self.rpc("account/read", {"refreshToken": False})
-        if (account.get("account") or {}).get("type") != "chatgpt":
+        if provider is None and (account.get("account") or {}).get("type") != "chatgpt":
             raise RuntimeError(
                 "ChatGPT subscription authentication is required; no API-key fallback"
             )
@@ -218,6 +353,11 @@ class Native:
                 matches[0].get("supported_reasoning_efforts", []),
             )
         ):
+            if provider is not None:
+                raise RuntimeError(
+                    "The configured provider model/reasoning effort is missing "
+                    "from the model catalog"
+                )
             raise RuntimeError(
                 "The exact configured model/reasoning effort is unavailable"
             )

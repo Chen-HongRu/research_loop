@@ -339,3 +339,139 @@ def test_native_configuration_isolates_secrets_and_enables_delegation(
     assert not any("SYNTHETIC_NOT_A_CREDENTIAL" in value for value in args)
     assert effective["filesystem"][str((home / ".codex").resolve())] == "deny"
     assert effective["filesystem"][str((root / "work").resolve())] == "write"
+
+
+def provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNTHETIC_PROVIDER_KEY", "SYNTHETIC_NOT_A_CREDENTIAL")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "owner")
+    return {
+        "name": "synthetic",
+        "base_url": "https://provider.example/v1",
+        "api_key_env": "SYNTHETIC_PROVIDER_KEY",
+        "model_catalog": None,
+        "context_window": 65536,
+    }
+
+
+def test_provider_configuration_keeps_the_key_out_of_records(tmp_path, monkeypatch):
+    settings = provider(tmp_path, monkeypatch)
+    root = tmp_path / "run"
+    root.mkdir()
+    config, effective = configuration(
+        root,
+        tmp_path,
+        [root / "work"],
+        "synthetic-model",
+        "medium",
+        provider=settings,
+    )
+    args = config.launch_args_override
+    assert "features.multi_agent=true" in args
+    assert "features.multi_agent_v2=false" in args
+    assert 'web_search="disabled"' in args
+    assert 'model_provider="synthetic"' in args
+    assert not (root / "native/auth.json").exists()
+    catalog = json.loads((root / "native/models.json").read_text())
+    entry = catalog["models"][0]
+    assert entry["slug"] == "synthetic-model"
+    assert entry["multi_agent_version"] == "v1"
+    assert entry["supports_search_tool"] is False
+    assert "medium" in [item["effort"] for item in entry["supported_reasoning_levels"]]
+    assert effective["model_provider"] == "synthetic"
+    assert effective["multi_agent_version"] == "v1"
+    assert effective["web_search"] is False
+    key_tokens = [
+        token for token in args if token.startswith("SYNTHETIC_PROVIDER_KEY=")
+    ]
+    assert key_tokens == ["SYNTHETIC_PROVIDER_KEY=SYNTHETIC_NOT_A_CREDENTIAL"]
+    assert not any(
+        "SYNTHETIC_NOT_A_CREDENTIAL" in value
+        for value in effective.values()
+        if isinstance(value, str)
+    )
+
+
+def test_provider_configuration_requires_the_key_environment(tmp_path, monkeypatch):
+    settings = provider(tmp_path, monkeypatch)
+    monkeypatch.delenv("SYNTHETIC_PROVIDER_KEY")
+    root = tmp_path / "run"
+    root.mkdir()
+    with pytest.raises(RuntimeError, match="SYNTHETIC_PROVIDER_KEY"):
+        configuration(
+            root,
+            tmp_path,
+            [root / "work"],
+            "synthetic-model",
+            "medium",
+            provider=settings,
+        )
+
+
+def test_provider_verify_accepts_the_generated_catalog_without_chatgpt(tmp_path):
+    async def check():
+        class ProviderClient(Client):
+            def request(self, method, params, **kwargs):
+                if method == "account/read":
+                    return {"account": None, "requiresOpenaiAuth": False}
+                if method == "model/list":
+                    return {
+                        "data": [
+                            {
+                                "model": "synthetic-model",
+                                "supportedReasoningEfforts": [
+                                    {"reasoningEffort": "medium"}
+                                ],
+                            }
+                        ]
+                    }
+                return super().request(method, params, **kwargs)
+
+        journal = Journal(tmp_path / "events")
+        native = Native(None, journal, client_factory=ProviderClient)
+        await native.open()
+        with pytest.raises(RuntimeError, match="ChatGPT subscription"):
+            await native.verify("synthetic-model", "medium")
+        await native.verify("synthetic-model", "medium", provider={"name": "synthetic"})
+        with pytest.raises(RuntimeError, match="provider model/reasoning effort"):
+            await native.verify("other-model", "medium", provider={"name": "synthetic"})
+        await native.close()
+        journal.close()
+
+    asyncio.run(check())
+
+
+def test_supplied_provider_catalog_must_use_plaintext_v1_delegation(
+    tmp_path, monkeypatch
+):
+    settings = provider(tmp_path, monkeypatch)
+    root = tmp_path / "run"
+    root.mkdir()
+    entry = {
+        "slug": "synthetic-model",
+        "multi_agent_version": "v2",
+        "supports_search_tool": True,
+    }
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"models": [entry]}))
+    settings["model_catalog"] = str(catalog)
+
+    def configure():
+        return configuration(
+            root,
+            tmp_path,
+            [root / "work"],
+            "synthetic-model",
+            "medium",
+            provider=settings,
+        )
+
+    with pytest.raises(RuntimeError, match="multi_agent_version v1"):
+        configure()
+    entry["multi_agent_version"] = "v1"
+    catalog.write_text(json.dumps({"models": [entry]}))
+    with pytest.raises(RuntimeError, match="supports_search_tool=false"):
+        configure()
+    entry["supports_search_tool"] = False
+    catalog.write_text(json.dumps({"models": [entry]}))
+    _, effective = configure()
+    assert effective["model_catalog"] == str(catalog)
