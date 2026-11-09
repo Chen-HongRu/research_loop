@@ -118,9 +118,13 @@ observed differences do not establish a causal improvement or scientific value.
 `python -m research_loop.dashboard.server --study RUN` serves a read-only loopback
 view of public messages, role activity, actual work records, result provenance
 and resource metadata. Hidden reasoning and encrypted content are excluded. Role
-cards come from native spawn linkage; host-delegated roles are attributed in
-`roles.json` and in `efficiency`/`metrics`, not in the dashboard. Role inference
-from task names and unknown/missing records are labeled explicitly.
+cards come from native spawn linkage or explicit host-delegation mappings in
+`roles.json`. Host lifecycle status comes from that mapping; public replies come
+from the mapped native history. Missing histories retain a role card with no
+invented reply. A thread appears once even when both sources identify it. Explicit
+host roles, native roles inferred from task names, and unknown/missing records are
+labeled separately. Host start events supply iteration timing when history is
+unavailable. These projections do not change either delegation runtime.
 Historical and current iteration results remain distinct. Raw tool details load
 only when requested. Assets and API calls support a reverse-proxy path prefix;
 external access control belongs to the deployment.
