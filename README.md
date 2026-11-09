@@ -31,6 +31,13 @@ Provider runs default to `--delegation host`: the host starts each role as a new
 
 An optional `--resource FILE` on `init` supplies authorized Slurm resources. `inspect` shows the resolved run configuration without a model call; a completed Study is cached unless explicitly continued with `run RUN --continue`, including Studies completed by the earlier single-iteration runtime. Continuation preserves the original thread and ledger. See [installation](references/installation.md), [operations](references/operations.md), [Linux deployment](references/linux-deployment.md), and the [design](docs/design.md). Model calls and remote compute require explicit authorization. Keep private inputs, credentials, runtime artifacts and checkpoints outside Git.
 
+With Slurm resources, the lead can use `gpu_exec_script` to execute a prepared
+noninteractive Bash file under `RUN/work` without copying its contents, and
+`remote_read` for bounded artifact windows or metadata under `remote_root`
+without a GPU allocation or ledger write. Script syntax is checked on the host
+before allocation; SSH carries the bytes over stdin. See
+[resource tools](references/operations.md#resource-tools) for bounds and recovery.
+
 To view a Study locally, run `uv run python -m research_loop.dashboard.server --study RUN --port 8768` and open `http://localhost:8768/`. The read-only dashboard displays Study messages, work records and tool details. It includes both native delegates and `roles.json`-mapped host roles, with recorded versus inferred roles labeled separately; use it only where those records may be viewed. It binds to loopback and refreshes every five seconds. Optional historical curves can be supplied in `RUN/inputs/historical-curves.json`.
 
 To switch among running and historical Studies, repeat `--study RUN_A --study RUN_B`, or use `--studies-dir STUDIES` to discover immediate child directories with `status.json`. These options can be combined; only include Studies whose records may be viewed by everyone with dashboard access. Discovery refreshes every five seconds and skips symlink children. The selector keeps the chosen Study in the page URL; messages, tools and metrics follow that selection. Unknown or removed selections show an error rather than another Study's records.

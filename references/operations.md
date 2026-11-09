@@ -100,6 +100,42 @@ Unless `--model-catalog FILE` points at an existing Codex catalog, `run` generat
 
 For `continue`, the host settles and closes native and resource sessions, publishes the knowledge snapshot, then resumes the same original lead thread for the next iteration automatically. One writer lock spans all iterations. `iterations/NNNNNN/status.json` and `result.json` retain iteration history; root `status.json` and `result.json` show the latest state and returned result. `iteration-completed` means the snapshot was published and the Study intends to continue; `completed` means an explicit Study stop. A plain `run` returns a cached completed Study. Use `run RUN --continue` explicitly to continue a completed Study, including one created by the earlier single-iteration runtime, or to clear STOP. Original pre-upgrade status and result files are archived before replacement, and the original thread and resource ledger are retained. An interrupted published iteration advances to the next number; unfinished work resumes its original thread. STOP after publication preserves that iteration's archive and durable `next_iteration`, so continuation starts the following iteration without overwriting the published result.
 
+## Resource tools
+
+The same lead-only Slurm tools are registered for native and host delegation.
+Prefer `gpu_exec_script({"script_path": "prepared.sh"})` for an existing
+noninteractive Bash script inside `RUN/work`; relative paths resolve from that
+work directory. The host requires a regular file resolving within that directory,
+reads at most 1 MiB, and runs local `bash -n` before opening the ledger or allocating
+a GPU. SSH streams the exact validated bytes to Bash inside the original Slurm
+allocation and closes stdin. Scripts cannot accept `gpu_poll` input; use
+`gpu_exec` for interactive commands. Both execution tools return the existing
+session/output contract and retain original allocation accounting. The host needs
+Bash; syntax validation does not establish scientific correctness or compatibility
+with every remote Bash version. Do not copy, re-encode or reconstruct prepared
+script contents in a tool argument.
+
+Use `remote_read({"path": "outputs/summary.json"})` for a small remote artifact,
+`remote_read({"path": "outputs/run.log", "max_bytes": 8192, "tail": true})` for a
+log tail, and `remote_read({"path": "checkpoints/latest.pt", "metadata_only": true})`
+for checkpoint metadata. This fixed Python 3 query uses the configured SSH account
+and host-key checks, without reserving compute or opening/writing the resource
+ledger. Relative paths resolve from `remote_root`; absolute paths and symlinks
+must resolve within it to a regular file. The remote host needs `python3`.
+`max_bytes` defaults to 8192 and must be an integer from 1 to 65536; flags must be
+booleans. Metadata-only queries stat the file without reading content. Content
+queries read one bounded prefix or tail window, decode UTF-8 with replacement,
+and return `size_bytes`, `mtime_ns`, `offset`, `bytes_read`, `truncated`, `complete`
+and `content`. Only `complete=true` identifies a full content snapshot; metadata
+queries return `content=null`, `complete=false`. Live files may change between
+queries. Use metadata-only for checkpoints and large data; these tools do not
+justify whole-artifact scans or hashes. SSH failures leave resource state intact.
+
+For debug allocations, poll the original command session with `gpu_poll`, settle
+original accounting with `gpu_reconcile`, and release idle allocations with
+`gpu_release`. `gpu_job_status`, when supplied by a durable-job adapter, applies
+only to durable submitted jobs and does not replace debug-session polling.
+
 An allocation with no job identity can be reconciled as `NOT_DISPATCHED` only when both scheduler queries are empty and its protected allocator log contains exactly the OpenSSH banner-timeout diagnostic. Banner exchange precedes authentication and remote command execution. Missing accounting, partial or mixed output, and other transport failures remain UNKNOWN. This check runs only during reconciliation, reading at most 4,097 bytes from the original local log; it does not resubmit an allocation.
 
 A cancelled original job settles at zero GPU use when `squeue` is empty and one exact job ID/name `sacct` receipt reports `CANCELLED`, `ElapsedRaw=0`, empty `AllocTRES`, `Start=None` or `Unknown`, and `ExitCode=0:0`. These fields establish cancellation before allocation start; zero elapsed alone does not. Reconciliation queries the original job without resubmitting it. Missing, malformed, conflicting or live evidence keeps the reservation charged as UNKNOWN. Allocated jobs still require exact single-GPU terminal accounting.

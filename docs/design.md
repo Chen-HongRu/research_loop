@@ -87,14 +87,16 @@ and iteration records do not guarantee recovery from arbitrary crashes.
 | Original operation identity, UNKNOWN and STOP | Reconcile uncertain effects without duplicate dispatch; prevent new research dispatch after STOP. Physical receipts establish job state. |
 | Single writer and atomic publication | Prevent concurrent publication and partial knowledge snapshots. The writer lock is host-local, not a cross-host ownership service. |
 
-The Slurm adapter registers five lead-only tools. Children return commands and
+The Slurm adapter registers seven lead-only tools. Children return commands and
 artifact requests to the coordinator:
 
 | Tool | Responsibility |
 | --- | --- |
 | `gpu_status` | Inspect budget, reservations and sessions without dispatch |
 | `gpu_exec` | Execute in the original authorized allocation; no automatic retry |
-| `gpu_poll` | Read incremental session output and optionally send stdin |
+| `gpu_exec_script` | Validate a prepared work-directory Bash file before allocation, then send its bytes over stdin and close EOF |
+| `remote_read` | Read bounded artifact windows or file metadata under `remote_root` without reserving compute or changing the ledger |
+| `gpu_poll` | Read incremental session output; optional stdin applies only to command sessions |
 | `gpu_reconcile` | Query original job identity and terminal accounting |
 | `gpu_release` | Release the allocation and reconcile exact accounting |
 

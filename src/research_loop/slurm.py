@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -48,6 +49,49 @@ SSH_OPTIONS = (
     "ConnectTimeout=12",
 )
 BUFFER_BYTES = 128 * 1024
+
+SCRIPT_BYTES = 1024 * 1024
+REMOTE_READ_BYTES = 64 * 1024
+REMOTE_READ = """
+import json, os, stat, sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve(strict=True)
+target = (root / sys.argv[2]).resolve(strict=True)
+if not target.is_relative_to(root) or target == root:
+    raise ValueError("remote path must stay inside remote_root")
+limit, tail, metadata_only = int(sys.argv[3]), sys.argv[4] == "1", sys.argv[5] == "1"
+# Walk the resolved path without following replacements with symlinks.
+parts = target.relative_to(root).parts
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+data, offset = b"", 0
+try:
+    for part in parts[:-1]:
+        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+        os.close(directory)
+        directory = child
+    metadata = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("remote path must be a regular file")
+    if not metadata_only:
+        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("remote path must be a regular file")
+            offset = max(0, metadata.st_size - limit) if tail else 0
+            stream.seek(offset)
+            data = stream.read(limit)
+finally:
+    os.close(directory)
+print(json.dumps({
+    "path": str(target), "size_bytes": metadata.st_size,
+    "mtime_ns": metadata.st_mtime_ns, "metadata_only": metadata_only,
+    "offset": offset, "bytes_read": len(data),
+    "truncated": not metadata_only and (offset > 0 or len(data) < metadata.st_size),
+    "complete": not metadata_only and offset == 0 and len(data) == metadata.st_size,
+    "content": None if metadata_only else data.decode("utf-8", errors="replace"),
+}))
+"""
 
 
 def _save(path: Path, value: dict) -> None:
@@ -161,6 +205,7 @@ class _Session:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task | None = None
     error: str | None = None
+    stdin_closed: bool = False
 
 
 class Slurm:
@@ -254,6 +299,29 @@ class Slurm:
                 {"command": {"type": "string"}},
                 ["command"],
                 self._exec,
+            ),
+            tool(
+                "gpu_exec_script",
+                "Execute an existing noninteractive Bash script inside the Study work directory (at most 1 MiB). The host validates syntax before allocation and sends its exact bytes over stdin; do not copy or encode prepared scripts. Poll output normally; stdin is closed.",
+                {"script_path": {"type": "string"}},
+                ["script_path"],
+                self._exec_script,
+            ),
+            tool(
+                "remote_read",
+                "Read a bounded UTF-8 replacement window or file metadata inside remote_root through SSH, without allocating a GPU or changing the ledger. Use metadata_only=true for checkpoints and large data; never scan or hash them. Default 8192 bytes, maximum 65536; tail reads the final window.",
+                {
+                    "path": {"type": "string"},
+                    "max_bytes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": REMOTE_READ_BYTES,
+                    },
+                    "tail": {"type": "boolean"},
+                    "metadata_only": {"type": "boolean"},
+                },
+                ["path"],
+                self._remote_read,
             ),
             tool(
                 "gpu_poll",
@@ -551,9 +619,109 @@ class Slurm:
                 "reservation_id": session.reservation_id,
             }
 
+    async def _remote_read(
+        self,
+        path: str,
+        max_bytes: int = 8192,
+        tail: bool = False,
+        metadata_only: bool = False,
+    ):
+        if not isinstance(path, str) or not path.strip() or "\x00" in path:
+            raise ValueError("path must be a nonempty file path without NUL")
+        if type(max_bytes) is not int or not 1 <= max_bytes <= REMOTE_READ_BYTES:
+            raise ValueError("max_bytes must be an integer from 1 to 65536")
+        if type(tail) is not bool or type(metadata_only) is not bool:
+            raise ValueError("tail and metadata_only must be booleans")
+        if self._closed:
+            raise RuntimeError("GPU adapter is closed")
+        # No ledger open, reservation, allocation or remote file mutation.
+        return json.loads(
+            await self._query(
+                [
+                    "python3",
+                    "-c",
+                    REMOTE_READ,
+                    self.config["remote_root"],
+                    path,
+                    str(max_bytes),
+                    str(int(tail)),
+                    str(int(metadata_only)),
+                ]
+            )
+        )
+
+    async def _exec_script(self, script_path: str):
+        if (
+            not isinstance(script_path, str)
+            or not script_path.strip()
+            or "\x00" in script_path
+        ):
+            raise ValueError(
+                "script_path must name a file inside the Study work directory"
+            )
+        work = self.root / "work"
+        if work.is_symlink():
+            raise ValueError("Study work must be a real directory")
+        work = work.resolve(strict=True)
+        path = Path(script_path)
+        path = (path if path.is_absolute() else work / path).resolve(strict=True)
+        if path == work or not path.is_relative_to(work):
+            raise ValueError("script_path must stay inside the Study work directory")
+        parts = path.relative_to(work).parts
+        directory = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in parts[:-1]:
+                child = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory,
+                )
+                os.close(directory)
+                directory = child
+            descriptor = os.open(
+                parts[-1],
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory,
+            )
+        finally:
+            os.close(directory)
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("script_path must be a regular file")
+            if metadata.st_size > SCRIPT_BYTES:
+                raise ValueError("script exceeds the 1 MiB limit")
+            script = stream.read(SCRIPT_BYTES + 1)
+        if not script.strip() or len(script) > SCRIPT_BYTES or b"\x00" in script:
+            raise ValueError("script must be nonempty, NUL-free and at most 1 MiB")
+        checker = await asyncio.create_subprocess_exec(
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-n",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(checker.communicate(script), 10)
+        except BaseException:
+            if checker.returncode is None:
+                checker.kill()
+            await checker.wait()
+            raise
+        if checker.returncode:
+            raise ValueError(
+                "Bash syntax check failed: " + stderr.decode(errors="replace")[:2000]
+            )
+        return await self._start_session(script=script)
+
     async def _exec(self, command: str):
         if not isinstance(command, str) or not command.strip() or "\x00" in command:
             raise ValueError("command must be a nonempty shell string without NUL")
+        return await self._start_session(command=command)
+
+    async def _start_session(self, *, command=None, script=None):
         async with self._operation:
             if self._closed:
                 raise RuntimeError("GPU adapter is closed")
@@ -588,7 +756,10 @@ class Slurm:
                 "--gres=gpu:1",
                 "bash",
                 "-lc",
-                "cd " + shlex.quote(self.config["remote_root"]) + " &&\n" + command,
+                "cd "
+                + shlex.quote(self.config["remote_root"])
+                + " &&\n"
+                + ("exec bash -s --" if script is not None else command),
             ]
             if (self.root / "STOP").exists():
                 await self._finish(cancel=True)
@@ -613,10 +784,29 @@ class Slurm:
                 raise
             identity = uuid.uuid4().hex
             session = _Session(
-                child, self.root / (identity + ".log"), self._current["reservation_id"]
+                child,
+                self.root / (identity + ".log"),
+                self._current["reservation_id"],
+                stdin_closed=script is not None,
             )
             self._sessions[identity] = session
             session.task = asyncio.create_task(self._read_session(session))
+            if script is not None:
+                try:
+                    child.stdin.write(script)
+                    await asyncio.wait_for(child.stdin.drain(), 20)
+                except BaseException as error:
+                    session.error = "script transfer uncertain: " + str(error)[:1000]
+                    self._unknown(error)
+                    if isinstance(error, Exception):
+                        raise RuntimeError(
+                            "script transfer uncertain for original reservation "
+                            + session.reservation_id
+                            + "; poll/reconcile, never replay automatically"
+                        ) from error
+                    raise
+                finally:
+                    child.stdin.close()
         return await self._update(identity, session, 1)
 
     async def _poll(self, session_id: str, chars: str = ""):
@@ -625,6 +815,8 @@ class Slurm:
         session = self._sessions.get(session_id)
         if session is None:
             raise ValueError("unknown GPU session ID")
+        if chars and session.stdin_closed:
+            raise ValueError("script sessions are noninteractive; stdin is closed")
         if chars and not session.done.is_set():
             session.child.stdin.write(chars.encode())
             try:
