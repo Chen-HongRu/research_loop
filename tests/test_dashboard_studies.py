@@ -51,6 +51,21 @@ def test_http_scopes_state_metrics_tools_and_unknown_ids(tmp_path):
     a = create(tmp_path, "a", "running")
     b = create(tmp_path, "b", "completed")
     for path in (a, b):
+        (path / "roles.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "threads": {
+                        "same-child": {
+                            "role": "critic",
+                            "task": f"{path.name}-review",
+                            "task_id": "same-task",
+                            "status": "completed",
+                        }
+                    },
+                }
+            )
+        )
         metrics = path / "metrics/current"
         metrics.mkdir(parents=True)
         (metrics / "latest.json").write_text(
@@ -83,6 +98,8 @@ def test_http_scopes_state_metrics_tools_and_unknown_ids(tmp_path):
             sid = studies.identifier(path)
             state = get(f"/api/state?study={sid}")
             assert state["goal"] == path.name
+            assert state["agents"][0]["task_name"] == f"{path.name}-review"
+            assert state["agents"][0]["role_source"] == "host-role-record"
             assert (
                 state["history"]["iterations"][0]["result"]["summary"]
                 == f"{path.name} result"
