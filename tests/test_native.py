@@ -13,7 +13,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from research_loop.codex import Native, Tool, configuration
-from research_loop.instructions import RESULT_SCHEMA
+from research_loop.instructions import RESULT_SCHEMA, instructions
 from research_loop.state import Journal
 
 RESULT = {
@@ -547,3 +547,83 @@ def test_supplied_catalog_must_match_the_delegation_mode(tmp_path, monkeypatch):
         provider=settings,
         delegation="host",
     )
+
+
+@pytest.mark.parametrize("mode", ["native", "host"])
+@pytest.mark.parametrize("resume", [False, True])
+def test_lead_input_records_sent_start_or_resume_params(tmp_path, mode, resume):
+    from research_loop.slurm import Slurm
+
+    class RecordingClient(Client):
+        def thread_start(self, params):
+            self.sent = ("thread/start", params)
+            return Client.thread_start(self, params)
+
+        def thread_resume(self, thread_id, params):
+            self.sent = ("thread/resume", params)
+            self.resumed_thread = thread_id
+            return Client.thread_start(self, params)
+
+    async def check():
+        ledger = tmp_path / "budget.json"
+        adapter = Slurm(
+            {
+                "host": "example.invalid",
+                "partition": "debug",
+                "remote_root": "/synthetic",
+                "ledger_path": str(ledger),
+                "gpu_seconds_total": 600,
+                "job_seconds": 120,
+            },
+            tmp_path / "study",
+        )
+        tools = adapter.tools()
+        resource_specs = {tool.name: tool.descriptor() for tool in tools}
+        journal = Journal(tmp_path / "events")
+        native = Native(None, journal, tools, client_factory=RecordingClient)
+        try:
+            await native.open()
+            result = await native.run(
+                instructions(mode),
+                {},
+                RESULT_SCHEMA,
+                model="gpt-6.1-sol",
+                effort="medium",
+                thread_id="lead" if resume else None,
+                delegation=mode,
+            )
+            assert result == RESULT
+            method, sent = native.client.sent
+            assert method == ("thread/resume" if resume else "thread/start")
+            assert {"gpu_exec_script", "remote_read"} <= native.tools.keys()
+            if resume:
+                assert native.client.resumed_thread == "lead"
+                assert sent == {
+                    "model": "gpt-6.1-sol",
+                    "permissions": "research",
+                    "approvalPolicy": "never",
+                    "excludeTurns": True,
+                    "developerInstructions": instructions(mode),
+                }
+            else:
+                specs = {tool["name"]: tool for tool in sent["dynamicTools"]}
+                assert {name: specs[name] for name in resource_specs} == resource_specs
+                assert set(specs) == set(resource_specs) | (
+                    {"delegate_task", "wait_tasks"} if mode == "host" else set()
+                )
+                assert sent["allowProviderModelFallback"] is False
+            await native.settle()
+        finally:
+            await native.close()
+            journal.close()
+        rows = [
+            json.loads(line) for line in (tmp_path / "events").read_text().splitlines()
+        ]
+        recorded = next(row for row in rows if row["event"] == "lead.input")
+        assert recorded["native_options"] == sent
+        assert "tools" not in recorded
+        if resume:
+            assert "dynamicTools" not in recorded["native_options"]
+        assert not ledger.exists() and adapter._ledger is None
+
+    asyncio.run(check())

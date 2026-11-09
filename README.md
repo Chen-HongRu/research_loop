@@ -31,12 +31,16 @@ Provider runs default to `--delegation host`: the host starts each role as a new
 
 An optional `--resource FILE` on `init` supplies authorized Slurm resources. `inspect` shows the resolved run configuration without a model call; a completed Study is cached unless explicitly continued with `run RUN --continue`, including Studies completed by the earlier single-iteration runtime. Continuation preserves the original thread and ledger. See [installation](references/installation.md), [operations](references/operations.md), [Linux deployment](references/linux-deployment.md), and the [design](docs/design.md). Model calls and remote compute require explicit authorization. Keep private inputs, credentials, runtime artifacts and checkpoints outside Git.
 
-With Slurm resources, the lead can use `gpu_exec_script` to execute a prepared
+With Slurm resources, a lead whose native thread exposes them can use `gpu_exec_script` to execute a prepared
 noninteractive Bash file under `RUN/work` without copying its contents, and
 `remote_read` for bounded artifact windows or metadata under `remote_root`
 without a GPU allocation or ledger write. Script syntax is checked on the host
 before allocation; SSH carries the bytes over stdin. See
 [resource tools](references/operations.md#resource-tools) for bounds and recovery.
+The pinned 0.167 runtime fixes dynamic tools at `thread/start`; resuming a thread
+or restarting the service does not add tools. Existing Studies need an explicit
+handoff to a fresh native coordinator to obtain a new toolset, preserving their
+Study, ledger, knowledge and history; the runtime does not reset threads automatically.
 
 To view a Study locally, run `uv run python -m research_loop.dashboard.server --study RUN --port 8768` and open `http://localhost:8768/`. The read-only dashboard displays Study messages, work records and tool details. It includes both native delegates and `roles.json`-mapped host roles, with recorded versus inferred roles labeled separately; use it only where those records may be viewed. It binds to loopback and refreshes every five seconds. Optional historical curves can be supplied in `RUN/inputs/historical-curves.json`.
 

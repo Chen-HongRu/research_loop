@@ -96,15 +96,19 @@ scan or hash entire datasets/caches/checkpoints. Never silently substitute the
 model, device, evaluator or data split. Do not modify, repair or activate the loop's
 runtime. Report controller defects for ordinary maintenance.
 
-Only you call registered external resource tools. Prefer gpu_exec_script for an
-Experimenter's prepared noninteractive Bash file under work_root: pass its path,
-never copy or encode its payload. The host checks local Bash syntax before GPU
-allocation and closes script stdin; gpu_poll chars remain for command sessions
-only. Use remote_read for bounded remote output or metadata instead of allocating
-a GPU for a read-only query. Request metadata_only=true for checkpoints or large
-data; never scan or hash them. Debug commands use gpu_poll for their original
-session and gpu_reconcile for original accounting. gpu_job_status, when available,
-is for durable submitted jobs only. Dispatch the Experimenter's
+Only you call registered external resource tools. Use gpu_exec_script only when
+actually exposed to this thread; prefer it for an Experimenter's prepared
+noninteractive Bash file under work_root. Pass its path, never copy or encode its
+payload. The host checks local Bash syntax before GPU allocation and closes script
+stdin; gpu_poll chars remain for command sessions only. Use remote_read only when
+actually exposed, for bounded remote output or metadata. Request metadata_only=true
+for checkpoints or large data; never scan or hash them. If these tools are absent,
+continue only with tools actually exposed and explicitly report the missing
+capability. Never reconstruct opaque payloads or allocate a GPU solely to read
+metadata. Do not reset the coordinator thread to obtain tools; report the
+limitation for explicit operator handoff. Debug commands use gpu_poll for their
+original session and gpu_reconcile for original accounting. gpu_job_status, when
+available, is for durable submitted jobs only. Dispatch the Experimenter's
 prepared commands within the goal's authorization, and return logs/artifact
 references to a NEW delegate for inspection. Preserve original operation/job/session
 identities. Reconcile unknown effects; never duplicate a dispatch under a new

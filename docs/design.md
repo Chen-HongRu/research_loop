@@ -87,8 +87,12 @@ and iteration records do not guarantee recovery from arbitrary crashes.
 | Original operation identity, UNKNOWN and STOP | Reconcile uncertain effects without duplicate dispatch; prevent new research dispatch after STOP. Physical receipts establish job state. |
 | Single writer and atomic publication | Prevent concurrent publication and partial knowledge snapshots. The writer lock is host-local, not a cross-host ownership service. |
 
-The Slurm adapter registers seven lead-only tools. Children return commands and
-artifact requests to the coordinator:
+The Slurm adapter registers seven lead-only tools. The pinned 0.167 runtime
+binds dynamic schemas at native thread creation; resume does not refresh them.
+An existing coordinator uses its exposed toolset. Added tools require an explicit
+operator handoff preserving Study history and resource authorization; the host
+does not reset threads automatically. Children return commands and artifact
+requests to the coordinator:
 
 | Tool | Responsibility |
 | --- | --- |

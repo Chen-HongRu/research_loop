@@ -481,7 +481,7 @@ class Native:
             raise RuntimeError("Stop requested before model admission")
         if delegation == "host":
             self.install_delegation(model, effort, roles_path)
-        definition = {
+        params = {
             "model": model,
             "allowProviderModelFallback": False,
             "developerInstructions": instructions,
@@ -491,19 +491,18 @@ class Native:
             "dynamicTools": [tool.descriptor() for tool in self.tools.values()],
         }
         if thread_id:
+            params = {
+                "model": model,
+                "permissions": "research",
+                "approvalPolicy": "never",
+                "excludeTurns": True,
+                "developerInstructions": instructions,
+            }
             result = await asyncio.to_thread(
-                self.client.thread_resume,
-                thread_id,
-                {
-                    "model": model,
-                    "permissions": "research",
-                    "approvalPolicy": "never",
-                    "excludeTurns": True,
-                    "developerInstructions": instructions,
-                },
+                self.client.thread_resume, thread_id, params
             )
         else:
-            result = await asyncio.to_thread(self.client.thread_start, definition)
+            result = await asyncio.to_thread(self.client.thread_start, params)
         started = plain(result)
         if started.get("model") != model or started.get("reasoningEffort") != effort:
             raise RuntimeError("Codex changed the required model or reasoning effort")
@@ -516,7 +515,7 @@ class Native:
             instructions=instructions,
             input=payload,
             output_schema=schema,
-            tools=definition["dynamicTools"],
+            native_options=params,
         )
         if self.stopping:
             raise RuntimeError("Stop requested before model admission")

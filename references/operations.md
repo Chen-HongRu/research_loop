@@ -102,7 +102,24 @@ For `continue`, the host settles and closes native and resource sessions, publis
 
 ## Resource tools
 
-The same lead-only Slurm tools are registered for native and host delegation.
+The host registers the same lead-only Slurm tools for native and host delegation.
+The pinned SDK/runtime 0.167 protocol accepts dynamic tool schemas at
+`thread/start`; `thread/resume` and restarting the service retain the thread's
+stored toolset. `inspect` reports the host's current capabilities, not proof that
+an existing thread received them. `lead.input.native_options` records the actual
+start/resume parameters; a resume omits `dynamicTools` and does not claim a new
+registry. Use only tools actually exposed to the coordinator. If an artifact tool
+is absent, explicitly report the capability limit; never reconstruct opaque
+payloads or allocate a GPU solely for metadata retrieval.
+
+Obtaining added tools in an existing Study requires an explicit operator handoff
+to a fresh native coordinator after the original work settles. Preserve the
+Study, provider/model configuration, original ledger and spending, published
+knowledge, prior thread history and operation identities. The runtime performs
+no automatic thread reset, history migration or budget reset, and supplies no
+CLI option to refresh a resumed thread's dynamic registry.
+
+When actually exposed to the thread, use the following artifact tools.
 Prefer `gpu_exec_script({"script_path": "prepared.sh"})` for an existing
 noninteractive Bash script inside `RUN/work`; relative paths resolve from that
 work directory. The host requires a regular file resolving within that directory,
