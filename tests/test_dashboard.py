@@ -5,6 +5,8 @@ import io
 import subprocess
 from unittest.mock import patch
 
+import pytest
+
 from research_loop.dashboard import server
 
 
@@ -467,3 +469,203 @@ def test_agent_iteration_comes_from_session_start_not_latest_activity(tmp_path):
     assert child["started_at"] == "2026-01-01T11:30:00Z"
     assert child["role"] == "Critic"
     assert child["fresh_context"] == "unknown"
+
+
+def host_mapping(root, status="completed"):
+    (root / "roles.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "threads": {
+                    "host-child": {
+                        "role": "critic",
+                        "task": "inspect-result",
+                        "task_id": "critic-001",
+                        "status": status,
+                    }
+                },
+            }
+        )
+    )
+
+
+def host_history(root):
+    append(
+        root / "native/sessions/2026/01/01/host.jsonl",
+        {
+            "type": "session_meta",
+            "timestamp": "2026-01-01T12:01:00Z",
+            "payload": {"id": "host-child", "source": "cli"},
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "content": "PRIVATE_HOST_REASONING",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "content": [
+                    {
+                        "type": "encrypted_content",
+                        "encrypted_content": "PRIVATE_ENCRYPTED",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "event_msg",
+            "timestamp": "2026-01-01T12:02:00Z",
+            "payload": {
+                "type": "task_complete",
+                "last_agent_message": "Synthetic verdict.",
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        ("queued", "pending"),
+        ("running", "working"),
+        ("completed", "completed"),
+        ("failed", "failed"),
+    ],
+)
+def test_host_role_uses_explicit_identity_and_host_terminal_status(
+    tmp_path, status, expected
+):
+    initialize(tmp_path)
+    host_mapping(tmp_path, status)
+    host_history(tmp_path)
+    # An independent, unmapped CLI thread must not become a Study delegate.
+    append(
+        tmp_path / "native/sessions/2026/01/01/unrelated.jsonl",
+        {
+            "type": "session_meta",
+            "payload": {"id": "unrelated", "source": "cli"},
+        },
+    )
+    result = server.State(tmp_path).snapshot()
+    assert len(result["agents"]) == 1
+    child = result["agents"][0]
+    assert child["id"] == "host-child"
+    assert child["task_name"] == "inspect-result"
+    assert child["role"] == "Critic"
+    assert child["role_source"] == "host-role-record"
+    assert child["status"] == expected
+    assert child["result"] == "Synthetic verdict."
+    assert "PRIVATE_" not in json.dumps(result)
+
+
+def test_native_and_host_roles_coexist_without_duplicate_cards(tmp_path):
+    initialize(tmp_path)
+    host_mapping(tmp_path)
+    host_history(tmp_path)
+    for tid in ("native-child", "host-child"):
+        append(
+            tmp_path / "events.jsonl",
+            item(
+                {
+                    "type": "subAgentActivity",
+                    "kind": "completed",
+                    "agentThreadId": tid,
+                    "agentPath": "/root/scout-sources",
+                }
+            ),
+        )
+    append(
+        tmp_path / "native/sessions/2026/01/01/native.jsonl",
+        {
+            "type": "session_meta",
+            "payload": {
+                "id": "native-child",
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": "lead",
+                            "agent_path": "/root/scout-sources",
+                        }
+                    },
+                },
+            },
+        },
+    )
+    result = server.State(tmp_path).snapshot()
+    assert result["stats"]["agents"] == 2
+    cards = {c["id"]: c for c in result["agents"]}
+    native = cards["native-child"]
+    assert native["parent_id"] == "lead"
+    assert native["role"] == "Scout"
+    assert native["role_source"] == "inferred-from-task-name"
+    assert native["status"] == "completed"
+    assert cards["host-child"]["role"] == "Critic"
+
+
+def test_host_role_without_history_has_original_iteration_and_refreshes(tmp_path):
+    initialize(tmp_path)
+    for n, start in ((1, "2026-01-01T11:00:00Z"), (2, "2026-01-01T13:00:00Z")):
+        path = tmp_path / f"iterations/{n:06d}/status.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"iteration": n, "started_at": start}))
+    append(
+        tmp_path / "events.jsonl",
+        {
+            "event": "role.task.started",
+            "at": "2026-01-01T12:01:00Z",
+            "thread_id": "host-child",
+        },
+        {
+            "event": "role.task.finished",
+            "at": "2026-01-01T13:30:00Z",
+            "thread_id": "host-child",
+        },
+    )
+    state = server.State(tmp_path)
+    assert not state.snapshot()["agents"]
+    host_mapping(tmp_path, "running")
+    child = state.snapshot()["agents"][0]
+    assert child["iteration"] == 1
+    assert child["status"] == "working"
+    assert child["result"] is None
+    host_mapping(tmp_path, "failed")
+    host_history(tmp_path)
+    child = state.snapshot()["agents"][0]
+    assert child["iteration"] == 1
+    assert child["status"] == "failed"
+    assert child["result"] == "Synthetic verdict."
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{",
+        "[]",
+        '{"threads": []}',
+        '{"threads": {"bad": null, "invalid": {"task": 1}}}',
+        '{"threads": {"bad": {"task": "x", "role": [], "status": []}}}',
+        '{"threads": {"native-child": {"task": "broken", "role": "invalid", "status": "completed"}}}',
+        '{"threads": {"native-child": {"task": "broken", "role": "critic", "status": "invalid"}}}',
+    ],
+)
+def test_invalid_host_metadata_preserves_native_cards(tmp_path, content):
+    initialize(tmp_path)
+    append(
+        tmp_path / "events.jsonl",
+        item(
+            {
+                "type": "subAgentActivity",
+                "kind": "completed",
+                "agentThreadId": "native-child",
+                "agentPath": "/root/critic-review",
+            }
+        ),
+    )
+    state = server.State(tmp_path)
+    before = state.snapshot()["agents"]
+    (tmp_path / "roles.json").write_text(content)
+    assert state.snapshot()["agents"] == before

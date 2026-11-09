@@ -149,6 +149,11 @@ def report(
     if not isinstance(lead, str) or not lead:
         reader.problem("status", "missing_thread_id")
         lead = None
+    roles_path = root / "roles.json"
+    roles = reader.json(roles_path, "roles") if roles_path.exists() else {}
+    role_threads = roles.get("threads") if isinstance(roles, dict) else None
+    if not isinstance(role_threads, dict):
+        role_threads = {}
     # First lead.input is the default window start, independent of file order.
     events = []
     starts = []
@@ -195,6 +200,7 @@ def report(
             continue
         sessions[tid] = (path, payload)
     selected = {lead} if lead else set()
+    selected |= {tid for tid in role_threads if tid in sessions}
     while True:
         children = {
             tid
@@ -220,11 +226,15 @@ def report(
     record_count = 0
     for tid in sorted(selected & sessions.keys()):
         path, meta = sessions[tid]
-        task = meta.get("agent_path", "/root").rsplit("/", 1)[-1]
+        mapped = (
+            role_threads.get(tid) if isinstance(role_threads.get(tid), dict) else {}
+        )
+        task = mapped.get("task") or meta.get("agent_path", "/root").rsplit("/", 1)[-1]
         role = (
             "lead"
             if tid == lead
-            else next(
+            else mapped.get("role")
+            or next(
                 (
                     r
                     for r in ("scout", "proposer", "experimenter", "analyst", "critic")
@@ -530,7 +540,7 @@ def report(
         },
         "limitations": [
             "Recorded usage is assigned by notification time, without prorating responses across window boundaries; input includes cached and output includes reasoning tokens.",
-            "Roles are inferred from task names; only confirmed descendants of status.thread_id are included. Native tool counts exclude calls nested in code execution.",
+            "Host-delegated roles use roles.json; other delegates are inferred from task names. Confirmed descendants and mapped host threads are included. Native tool counts exclude calls nested in code execution.",
             "Allocation seconds are full settled elapsed time for jobs dispatched in the window, not window overlap or GPU core utilization; CANCELLED is a terminal state, not automatically failure.",
             "Wait durations sum observed call-to-return intervals for window-started calls returned before cutoff; parallel waits overlap and do not measure wall-clock time or waste.",
             "Coverage describes readable local records, not proof all remote/native activity was recorded; live sources are not an atomic snapshot. No inference of research quality, wasted work or monetary cost.",

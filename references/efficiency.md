@@ -35,7 +35,7 @@ Usage comes from unique native `token_usage_record` response IDs, including
 compaction. Cumulative token notifications are a cross-check and are never added
 again. Input includes cached input; output includes reasoning. The report keeps
 role/task totals, startup and early-response cohorts, observed waiting, resource
-results and allocation receipts. Roles are inferred from task names. Background
+results and allocation receipts. Host-delegated roles use `RUN/roles.json`; other roles are inferred from task names. Background
 loading is a fixed heuristic associating visible goal/knowledge/instruction reads
 with the next response; handoff text or summaries can move work outside that
 heuristic. It is not a measure of proven waste. Allocation duration is not GPU

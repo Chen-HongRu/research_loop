@@ -66,19 +66,20 @@ def derived(value):
     }
 
 
-def task_state(tid, task, parent):
-    role = (
-        "lead"
-        if parent is None
-        else next(
-            (
-                r
-                for r in ("scout", "proposer", "experimenter", "analyst", "critic")
-                if task.lower().startswith(r)
-            ),
-            "unclassified",
+def task_state(tid, task, parent, role=None):
+    if not (isinstance(role, str) and role):
+        role = (
+            "lead"
+            if parent is None
+            else next(
+                (
+                    r
+                    for r in ("scout", "proposer", "experimenter", "analyst", "critic")
+                    if task.lower().startswith(r)
+                ),
+                "unclassified",
+            )
         )
-    )
     return {
         "thread_id": tid,
         "task": task,
@@ -338,7 +339,26 @@ class Collector:
                 }
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 self._issue("sessions:invalid_or_unreadable_metadata")
+        roles = {}
+        roles_path = self.root / "roles.json"
+        if roles_path.exists():
+            try:
+                document = json.loads(roles_path.read_text())
+                threads = (
+                    document.get("threads", {}) if isinstance(document, dict) else None
+                )
+                if not isinstance(threads, dict):
+                    raise ValueError
+                roles = {
+                    tid: row
+                    for tid, row in threads.items()
+                    if isinstance(tid, str) and isinstance(row, dict)
+                }
+            except (OSError, ValueError, AttributeError):
+                self._issue("roles:invalid")
+        known = {m["thread_id"] for m in self.state["metadata"].values()}
         selected = {lead} if lead else set()
+        selected |= {tid for tid in roles if tid in known}
         while True:
             children = {
                 m["thread_id"]
@@ -348,7 +368,6 @@ class Collector:
             if children <= selected:
                 break
             selected |= children
-        known = {m["thread_id"] for m in self.state["metadata"].values()}
         if lead not in known:
             self._issue("sessions:missing_lead")
         seen = set()
@@ -360,10 +379,32 @@ class Collector:
                 self._issue("sessions:duplicate_thread")
                 continue
             seen.add(tid)
+            mapped = roles.get(tid, {})
+            mapped_task = mapped.get("task")
+            task_name = (
+                mapped_task
+                if isinstance(mapped_task, str) and mapped_task
+                else meta["task"]
+            )
+            mapped_role = mapped.get("role")
             task = self.state["tasks"].setdefault(
                 tid,
-                task_state(tid, meta["task"], None if tid == lead else meta["parent"]),
+                task_state(
+                    tid,
+                    task_name,
+                    None if tid == lead else meta["parent"],
+                    mapped_role
+                    if tid != lead and isinstance(mapped_role, str) and mapped_role
+                    else None,
+                ),
             )
+            if (
+                tid != lead
+                and isinstance(mapped_role, str)
+                and mapped_role
+                and task.get("role") != mapped_role
+            ):
+                task["role"] = mapped_role
             for row, at in self._tail(Path(path), "sessions"):
                 self._source_at(at)
                 self._session(task, row, at)

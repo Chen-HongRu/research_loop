@@ -606,3 +606,29 @@ def test_watch_refreshes_comparison_without_model_calls(study, capsys):
     assert comparison["optimized"]["totals"]["llm"] == snapshot["llm"]["total"]
     assert comparison["baseline"]["totals"]["llm"]["responses"] == 1
     assert comparison["optimized"]["phase"] == "focused"
+
+
+def test_host_role_mapping_selects_unparented_threads(study):
+    session(study, tid="lead", events=[record("lead")])
+    session(study, tid="hostchild", parent=None, events=[record("child")])
+    write(
+        study / "roles.json",
+        {
+            "version": 1,
+            "threads": {
+                "hostchild": {
+                    "role": "scout",
+                    "task": "scout-frontier",
+                    "task_id": "scout-001",
+                    "status": "completed",
+                }
+            },
+        },
+    )
+    with collector(study) as c:
+        snapshot = c.poll(END)
+    assert snapshot["coverage"]["selected_threads"] == 2
+    assert snapshot["llm"]["by_role"]["scout"]["usage"]["input_tokens"] == 100
+    tasks = {row["thread_id"]: row for row in snapshot["llm"]["by_task"]}
+    assert tasks["hostchild"]["role"] == "scout"
+    assert tasks["hostchild"]["task"] == "scout-frontier"
