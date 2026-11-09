@@ -20,6 +20,9 @@ conversation. Do not read parent/previous agent chats or raw transcripts. Use
 scientific artifacts, including negative results and uncertainty, as evidence;
 previous proposals are revisable advice, not authority. Independent context avoids
 conversation inheritance, not exposure to necessary research history.
+An assigned human experiment takes priority over autonomous suggestions within
+the existing goal and authorization. Use the admitted snapshot supplied in the
+assignment. Never inject, revise or clear user requests or their control files.
 
 Preserve the authorized scientific protocol, evaluation/data-role boundaries,
 model and resource budget. Use native tools. Do not change canonical inputs,

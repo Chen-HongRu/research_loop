@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .codex import Native, configuration
+from . import human_input
 from .instructions import RESULT_SCHEMA, instructions
 from .state import Journal, Knowledge, PublicationStopped, now, write_json, writer
 
@@ -169,6 +170,7 @@ def inspect(root):
             "published_knowledge_root": str(root / "knowledge/current"),
             "published_knowledge_index_file": str(root / "knowledge/current/index.md"),
             "resource": adapter.status() if adapter else None,
+            "human_request_file": str(root / "inputs/human.md"),
         },
         "tools": [tool.descriptor() for tool in adapter.tools()] if adapter else [],
         "permissions": {
@@ -225,6 +227,16 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
 
     try:
         call = inspect(root)
+        request = await asyncio.to_thread(human_input.admit, root)
+        state["human_request"] = request
+        if request:
+            write_json(
+                iteration_directory(root, state["iteration"])
+                / f"human-request-{request['id']}.json",
+                request,
+            )
+        call["input"]["human_request"] = request
+        call["output_schema"] = human_input.result_schema(RESULT_SCHEMA, request)
         config = call["config"]
         mode = config.get("delegation")
         if mode not in {"native", "host"}:
@@ -268,7 +280,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
         result = await native.run(
             call["instructions"],
             call["input"],
-            RESULT_SCHEMA,
+            call["output_schema"],
             model=config["model"],
             effort=config["effort"],
             thread_id=state.get("thread_id"),
@@ -283,6 +295,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
                 "Result requires explicit study_action continue/stop and string stop_reason"
             )
         state["result"] = result
+        human_input.validate_result(request, result)
         write_json(
             iteration_directory(root, state["iteration"]) / "result.json", result
         )
@@ -318,6 +331,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
                 else "iteration-completed",
                 knowledge_version=published,
             )
+            await asyncio.to_thread(human_input.consume, root, publication)
             if result["study_action"] == "continue":
                 state["next_iteration"] = state["iteration"] + 1
     except PublicationStopped:
@@ -359,6 +373,8 @@ async def run(root, *, continue_run=False, native_factory=Native):
     with writer(root):
         state = json.loads((root / "status.json").read_text())
         published = Knowledge(root).published_state()
+        if published:
+            await asyncio.to_thread(human_input.consume, root, published)
         if (
             published
             and published["iteration"] >= state.get("iteration", 0)
@@ -420,6 +436,7 @@ async def run(root, *, continue_run=False, native_factory=Native):
                     "started_at",
                     "ended_at",
                     "next_iteration",
+                    "human_request",
                 ):
                     state.pop(key, None)
                 state.update(iteration=number, status="starting", error=None)
@@ -491,6 +508,21 @@ def main():
         choices=("native", "host"),
         help="Role delegation backend; host is selected for provider runs",
     )
+    experiment = commands.add_parser(
+        "experiment",
+        help="Inject a user-authorized priority experiment without a model call",
+    )
+    experiment.add_argument("root", type=Path)
+    source = experiment.add_mutually_exclusive_group(required=True)
+    source.add_argument("--file", type=Path, help="UTF-8 request file")
+    source.add_argument(
+        "--stdin", action="store_true", help="Read request text from stdin"
+    )
+    edit_experiment = commands.add_parser(
+        "edit-experiment",
+        help="Edit the human experiment file under its consumption lock",
+    )
+    edit_experiment.add_argument("root", type=Path)
     for name in ("inspect", "run", "status", "stop", "efficiency"):
         command = commands.add_parser(name)
         command.add_argument("root", type=Path)
@@ -534,6 +566,17 @@ def main():
                 )
             elif args.command == "inspect":
                 result = inspect(root)
+            elif args.command in {"experiment", "edit-experiment"}:
+                read_config(root)
+                if args.command == "edit-experiment":
+                    result = human_input.edit(root)
+                else:
+                    text = (
+                        args.file.read_text(encoding="utf-8")
+                        if args.file
+                        else sys.stdin.read()
+                    )
+                    result = human_input.submit(root, text)
             elif args.command == "efficiency":
                 from .efficiency import report
 

@@ -13,6 +13,68 @@ uv run research-loop stop RUN
 
 Omit `--resource FILE` when remote resources are not authorized. Resource JSON specifies `host`, `partition`, `remote_root`, `ledger_path`, `gpu_seconds_total`, and `job_seconds`; `account`, `cpus`, `memory`, and `grace_seconds` are optional. Initialization freezes the parsed configuration and resolves `ledger_path` relative to the source configuration file. The shared ledger and its lock must be outside the agent-writable work and draft directories.
 
+## Human experiments
+
+Submit a UTF-8 question, hypothesis or experiment design to an initialized Study:
+
+```sh
+uv run research-loop experiment RUN --file experiment.md
+uv run research-loop experiment RUN --stdin < experiment.md
+EDITOR=vi uv run research-loop edit-experiment RUN
+```
+
+These are local operator commands without a model call or resource dispatch.
+You may ask a separate Codex session to run the injection command on your behalf;
+that session must have your authorization and write access to the Study inputs.
+The running lead and specialist agents cannot inject, revise or clear requests.
+Injection refuses to overwrite a nonempty pending request. Use the editor command
+to revise or clear it. It uses `VISUAL`, then `EDITOR`, and requires a foreground
+editor (for GUI editors, configure their wait option).
+
+The input is `RUN/inputs/human.md`. Direct file editing is supported while the
+controller is stopped. During a run, use `edit-experiment`: it holds
+`RUN/inputs/human.lock` for the whole edit, coordinating with admission and
+consumption. Arbitrary editors or Codex writes that bypass this lock cannot be
+protected against concurrent clearing. An open editor may delay iteration
+admission or acknowledgement until it exits. Keep the input directory and file
+as regular local paths, not symlinks.
+
+A missing or whitespace-only file preserves autonomous planning. A nonempty
+request is snapshotted at iteration start and takes priority over autonomous
+experiment selection within the existing Study goal, scientific protocol and
+resource authorization. The Proposer fills in design details; ambiguity that
+changes experiment meaning requires clarification. Edits during execution become
+input to a later iteration and do not interrupt the admitted experiment. One file
+is one request; if it lists multiple experiments, all requested work is its scope.
+
+The input packet includes `human_request` (`id`, `text`) and
+`human_request_file`. For an active request, the output schema additionally
+requires `human_request` with the matching `id`, `status` (`completed`, `pending`
+or `blocked`), `evidence` references and a nonempty `reason`. `completed` means
+the requested scope was executed, analyzed and summarized in the draft, including
+negative or inconclusive findings. Missing work or execution failure is not
+completion. The host checks acknowledgement shape and identity; scientific
+completion remains the team's judgment. `blocked` requires a Study stop and an
+explanation for user intervention; it does not silently fall back to autonomous
+experiments. A pending request may continue in another iteration, carrying exact
+progress so completed operations are not dispatched again.
+
+After native work and resources settle and knowledge publication succeeds, the
+controller clears the request only if its revision still matches the admitted
+snapshot. Rewriting even identical text counts as a new revision. Original
+snapshots remain at `iterations/NNNNNN/human-request-ID.json`, with acknowledgement
+and evidence in that iteration's result and publication metadata. Failure, STOP
+before publication, UNKNOWN resources or unsuccessful publication retains the
+request. An activated publication commits completion even if STOP arrives later.
+Restart replays that receipt's acknowledgement without rerunning the experiment;
+a newer revision is preserved. This does not promise recovery from arbitrary
+crashes or scientific deduplication after unpublished work.
+
+Submitting a request does not start or resume the Study. A running Study reads it
+at its next admission. Start an initialized Study with `run RUN`; explicitly
+resume a stopped or completed Study with `run RUN --continue`. Existing resource
+authorization is unchanged. Human completion is independent of Study completion.
+
 ## OpenAI-compatible provider
 
 `init` can point the same native harness at an OpenAI-compatible Responses endpoint instead of the Codex ChatGPT subscription:
