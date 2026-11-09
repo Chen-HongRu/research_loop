@@ -57,11 +57,14 @@ import json, os, stat, sys
 from pathlib import Path
 root = Path(sys.argv[1]).resolve(strict=True)
 target = (root / sys.argv[2]).resolve(strict=True)
-if not target.is_relative_to(root) or target == root:
+try:
+    parts = target.relative_to(root).parts
+except ValueError:
+    raise ValueError("remote path must stay inside remote_root") from None
+if not parts:
     raise ValueError("remote path must stay inside remote_root")
 limit, tail, metadata_only = int(sys.argv[3]), sys.argv[4] == "1", sys.argv[5] == "1"
 # Walk the resolved path without following replacements with symlinks.
-parts = target.relative_to(root).parts
 directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 data, offset = b"", 0
 try:

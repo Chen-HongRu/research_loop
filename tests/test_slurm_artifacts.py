@@ -1,5 +1,6 @@
 """Prepared script transport and bounded reads use only local synthetic files."""
 
+import ast
 import asyncio
 import json
 import os
@@ -431,3 +432,52 @@ os.open = replace_root
     )
     assert result.returncode != 0 and result.stdout == b""
     assert root.is_symlink()
+
+
+@pytest.mark.parametrize(
+    ("path", "metadata_only", "succeeds"),
+    [
+        ("artifact.json", False, True),
+        ("artifact.json", True, True),
+        (".", False, False),
+        ("../outside.json", False, False),
+        ("escape.json", False, False),
+    ],
+)
+def test_remote_query_uses_python36_syntax_and_keeps_boundaries(
+    tmp_path, path, metadata_only, succeeds
+):
+    root = tmp_path / "remote"
+    root.mkdir()
+    (root / "artifact.json").write_text('{"source":"inside"}')
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"source":"outside"}')
+    (root / "escape.json").symlink_to(outside)
+    # Check syntax/API regression locally; a real Python 3.6 smoke is separate.
+    tree = ast.parse(REMOTE_READ, feature_version=(3, 6))
+    assert not any(
+        isinstance(node, ast.Attribute) and node.attr == "is_relative_to"
+        for node in ast.walk(tree)
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            REMOTE_READ,
+            str(root),
+            path,
+            "8192",
+            "0",
+            str(int(metadata_only)),
+        ],
+        capture_output=True,
+        timeout=5,
+    )
+    if succeeds:
+        assert result.returncode == 0, result.stderr.decode()
+        document = json.loads(result.stdout)
+        assert document["metadata_only"] == metadata_only
+        assert document["content"] == (None if metadata_only else '{"source":"inside"}')
+    else:
+        assert result.returncode != 0 and result.stdout == b""
+        assert b"remote path must stay inside remote_root" in result.stderr

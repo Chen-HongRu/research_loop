@@ -121,7 +121,9 @@ log tail, and `remote_read({"path": "checkpoints/latest.pt", "metadata_only": tr
 for checkpoint metadata. This fixed Python 3 query uses the configured SSH account
 and host-key checks, without reserving compute or opening/writing the resource
 ledger. Relative paths resolve from `remote_root`; absolute paths and symlinks
-must resolve within it to a regular file. The remote host needs `python3`.
+must resolve within it to a regular file. The remote host needs Python 3.6 or newer
+as `python3`; the local controller still requires the project's Python 3.12
+environment.
 `max_bytes` defaults to 8192 and must be an integer from 1 to 65536; flags must be
 booleans. Metadata-only queries stat the file without reading content. Content
 queries read one bounded prefix or tail window, decode UTF-8 with replacement,
