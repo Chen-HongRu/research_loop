@@ -364,3 +364,32 @@ def test_frozen_ledger_and_explicit_snapshot_override(study, tmp_path, capsys):
     assert result["coverage"]["issues"]["ledger:missing"] == 1
     main([str(study), "--until", END, "--ledger-path", str(snapshot)])
     assert json.loads(capsys.readouterr().out)["allocation"]["elapsed_seconds"] == 4
+
+
+def test_host_role_mapping_attributes_unparented_child_threads(study):
+    session(study / "native/sessions/lead.jsonl", "lead", parent=None, task="root")
+    session(
+        study / "native/sessions/host.jsonl",
+        "child",
+        parent=None,
+        task="root",
+        events=[token("2026-01-01T00:02:00Z", 10, 0, 5, 0)],
+    )
+    write_json(
+        study / "roles.json",
+        {
+            "version": 1,
+            "threads": {
+                "child": {
+                    "role": "scout",
+                    "task": "scout-frontier",
+                    "task_id": "scout-001",
+                    "status": "completed",
+                }
+            },
+        },
+    )
+    out = report(study)
+    assert out["coverage"]["selected_threads"] == 2
+    assert out["llm"]["by_role"]["scout"]["input_tokens"] == 10
+    assert out["llm"]["by_role"]["scout"]["uncached_input_tokens"] == 10

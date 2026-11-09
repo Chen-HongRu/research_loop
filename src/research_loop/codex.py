@@ -13,6 +13,8 @@ from openai_codex.client import CodexClient, CodexConfig
 from openai_codex.models import UnknownNotification
 from pydantic import BaseModel, RootModel
 
+from .delegation import DELEGATE_TOOL, WAIT_TOOL, HostDelegation
+
 
 @dataclass(frozen=True)
 class Tool:
@@ -278,6 +280,7 @@ class Native:
         self.journal = journal
         self.tools = {tool.name: tool for tool in tools}
         self.client = client_factory(config=config, approval_handler=self._request)
+        self.delegator = None
         self.thread_id = None
         self.turn_id = None
         self.children = set()
@@ -362,6 +365,35 @@ class Native:
                 "The exact configured model/reasoning effort is unavailable"
             )
 
+    def install_delegation(self, model, effort, roles_path=None):
+        if self.delegator is not None:
+            return
+        self.delegator = HostDelegation(
+            self.client,
+            self.journal,
+            model=model,
+            effort=effort,
+            roles_path=roles_path,
+            on_thread=self.children.add,
+        )
+
+        async def delegate(arguments):
+            return self.delegator.start(
+                arguments.get("role"),
+                arguments.get("task_name"),
+                arguments.get("message"),
+            )
+
+        async def wait(arguments):
+            return self.delegator.wait(arguments.get("task_ids") or [])
+
+        for spec, call in ((DELEGATE_TOOL, delegate), (WAIT_TOOL, wait)):
+            if spec["name"] in self.tools:
+                raise ValueError(f"Delegation tool name collides with {spec['name']}")
+            self.tools[spec["name"]] = Tool(
+                spec["name"], spec["description"], spec["parameters"], call
+            )
+
     async def run(
         self,
         instructions,
@@ -372,9 +404,13 @@ class Native:
         effort,
         thread_id=None,
         on_started=None,
+        delegation="native",
+        roles_path=None,
     ):
         if self.stopping:
             raise RuntimeError("Stop requested before model admission")
+        if delegation == "host":
+            self.install_delegation(model, effort, roles_path)
         definition = {
             "model": model,
             "allowProviderModelFallback": False,
@@ -457,6 +493,8 @@ class Native:
     async def settle(self):
         if self.settled or self.closed:
             return
+        if self.delegator is not None:
+            await asyncio.to_thread(self.delegator.settle)
         # This bounds cleanup of local native work, not research/model usage.
         async with asyncio.timeout(30):
             await self._settle()
@@ -499,6 +537,8 @@ class Native:
 
     async def stop(self):
         self.stopping = True
+        if self.delegator is not None:
+            await asyncio.to_thread(self.delegator.stop)
         if self.thread_id and self.turn_id and self.active and not self.closed:
             await asyncio.to_thread(
                 self.client.turn_interrupt, self.thread_id, self.turn_id
@@ -506,5 +546,7 @@ class Native:
 
     async def close(self):
         if not self.closed:
+            if self.delegator is not None:
+                await asyncio.to_thread(self.delegator.close)
             await asyncio.to_thread(self.client.close)
             self.closed = True

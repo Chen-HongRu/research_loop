@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shutil
+import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,11 +38,13 @@ def writer(root: Path):
 class Journal:
     def __init__(self, path: Path):
         self.stream = path.open("a", encoding="utf-8")
+        self.lock = threading.Lock()
         path.chmod(0o600)
 
     def emit(self, event, **data):
-        self.stream.write(json.dumps({"at": now(), "event": event, **data}) + "\n")
-        self.stream.flush()
+        with self.lock:
+            self.stream.write(json.dumps({"at": now(), "event": event, **data}) + "\n")
+            self.stream.flush()
 
     def close(self):
         self.stream.close()

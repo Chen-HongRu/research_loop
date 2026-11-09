@@ -149,6 +149,11 @@ def report(
     if not isinstance(lead, str) or not lead:
         reader.problem("status", "missing_thread_id")
         lead = None
+    roles_path = root / "roles.json"
+    roles = reader.json(roles_path, "roles") if roles_path.exists() else {}
+    role_threads = roles.get("threads") if isinstance(roles, dict) else None
+    if not isinstance(role_threads, dict):
+        role_threads = {}
     # First lead.input is the default window start, independent of file order.
     events = []
     starts = []
@@ -195,6 +200,7 @@ def report(
             continue
         sessions[tid] = (path, payload)
     selected = {lead} if lead else set()
+    selected |= {tid for tid in role_threads if tid in sessions}
     while True:
         children = {
             tid
@@ -220,11 +226,15 @@ def report(
     record_count = 0
     for tid in sorted(selected & sessions.keys()):
         path, meta = sessions[tid]
-        task = meta.get("agent_path", "/root").rsplit("/", 1)[-1]
+        mapped = (
+            role_threads.get(tid) if isinstance(role_threads.get(tid), dict) else {}
+        )
+        task = mapped.get("task") or meta.get("agent_path", "/root").rsplit("/", 1)[-1]
         role = (
             "lead"
             if tid == lead
-            else next(
+            else mapped.get("role")
+            or next(
                 (
                     r
                     for r in ("scout", "proposer", "experimenter", "analyst", "critic")

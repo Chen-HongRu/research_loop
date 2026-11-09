@@ -626,10 +626,12 @@ def test_provider_initialization_records_metadata_not_the_secret(tmp_path, monke
     )
     config = json.loads((root / "config.json").read_text())
     assert config["provider"] == settings
+    assert config["delegation"] == "host"
     assert "SYNTHETIC_NOT_A_CREDENTIAL" not in (root / "config.json").read_text()
-    assert loop.inspect(root)["config"]["provider"]["api_key_env"] == (
-        "SYNTHETIC_PROVIDER_KEY"
-    )
+    call = loop.inspect(root)
+    assert call["config"]["provider"]["api_key_env"] == "SYNTHETIC_PROVIDER_KEY"
+    assert call["delegation"] == "host"
+    assert "delegate_task" in call["instructions"]
 
 
 def test_provider_flags_are_complete_and_use_a_declared_catalog(tmp_path, monkeypatch):

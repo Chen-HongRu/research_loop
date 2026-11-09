@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .codex import Native, configuration
-from .instructions import INSTRUCTIONS, RESULT_SCHEMA
+from .instructions import RESULT_SCHEMA, instructions
 from .state import Journal, Knowledge, PublicationStopped, now, write_json, writer
 
 
@@ -96,16 +96,22 @@ def initialize(
     model="gpt-6.1-sol",
     effort="medium",
     provider=None,
+    delegation=None,
 ):
     project, goal = project.resolve(strict=True), goal.resolve(strict=True)
     if not project.is_dir() or not goal.is_file():
         raise ValueError("Provide an existing project directory and goal text file")
+    if delegation is None:
+        delegation = "host" if provider else "native"
+    if delegation not in {"native", "host"}:
+        raise ValueError("Delegation mode must be native or host")
     config = {
         "version": 1,
         "project": str(project),
         "model": model,
         "effort": effort,
         "provider": provider,
+        "delegation": delegation,
         "resource_file": str(resource_file.resolve(strict=True))
         if resource_file
         else None,
@@ -135,9 +141,11 @@ def initialize(
 def inspect(root):
     config = read_config(root)
     adapter = resource(config, root)
+    mode = config.get("delegation") or "native"
     return {
         "config": config,
-        "instructions": INSTRUCTIONS,
+        "delegation": mode,
+        "instructions": instructions(mode),
         "output_schema": RESULT_SCHEMA,
         "input": {
             "goal_file": str(root / "goal.md"),
@@ -204,6 +212,16 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
     try:
         call = inspect(root)
         config = call["config"]
+        mode = config.get("delegation")
+        if mode not in {"native", "host"}:
+            # Older runs default to native unless they created a provider thread.
+            mode = (
+                "host"
+                if config.get("provider") and not state.get("thread_id")
+                else "native"
+            )
+        call["delegation"] = mode
+        call["instructions"] = instructions(mode)
         adapter = resource(config, root)
         knowledge = Knowledge(root)
         baseline = knowledge.prepare()
@@ -215,6 +233,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
             config["effort"],
             provider=config.get("provider"),
         )
+        effective["delegation"] = mode
         call["effective_native_permissions"] = effective
         call["input"].update(
             iteration=state["iteration"], previous_iteration_result=previous_result
@@ -232,13 +251,15 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
             state.update(status="stopped")
             return state
         result = await native.run(
-            INSTRUCTIONS,
+            call["instructions"],
             call["input"],
             RESULT_SCHEMA,
             model=config["model"],
             effort=config["effort"],
             thread_id=state.get("thread_id"),
             on_started=started,
+            delegation=mode,
+            roles_path=root / "roles.json",
         )
         if result.get("study_action") not in {"continue", "stop"} or not isinstance(
             result.get("stop_reason"), str
@@ -450,6 +471,11 @@ def main():
         default=DEFAULT_MODEL_CONTEXT_WINDOW,
         help="Context window declared for a generated provider model catalog",
     )
+    init.add_argument(
+        "--delegation",
+        choices=("native", "host"),
+        help="Role delegation backend; host is selected for provider runs",
+    )
     for name in ("inspect", "run", "status", "stop", "efficiency"):
         command = commands.add_parser(name)
         command.add_argument("root", type=Path)
@@ -489,6 +515,7 @@ def main():
                     model=args.model or DEFAULT_MODEL,
                     effort=args.effort,
                     provider=provider_config(args),
+                    delegation=args.delegation,
                 )
             elif args.command == "inspect":
                 result = inspect(root)
