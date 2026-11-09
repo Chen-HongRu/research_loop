@@ -1,4 +1,6 @@
-# Synthetic CPU regression study
+# Historical synthetic CPU regression fixture
+
+This fixture targets the retired runtime and is not a current runtime example. See [runtime history](../../docs/runtime-retirement.md).
 
 This fixture supplies 96 training examples with labels and 48 unlabeled development feature rows. A preparation-only random seed and the development labels remain in the external host's private directory. The candidate's `fit_predict(train, dev)` returns one prediction per development ID. Its initial implementation predicts the training mean.
 
@@ -14,4 +16,4 @@ Prediction runs from a frozen code snapshot inside the OS environment with read 
 
 Preparation also freezes the training-target mean in a private baseline file. Every scoring result includes `baseline_mse` and `baseline_mae`, measured on the exact same development labels as the candidate. Compare candidate `mse`/`mae` directly with those baseline values. R² uses the development-label mean in its denominator; R² ≤ 0 alone does not establish whether the candidate beats the training-mean baseline. The scorer never consults candidate code to determine the baseline.
 
-Two rounds are a test of the research loop, not a promise that the second result improves. Development scores are adaptive feedback and provide no evidence about final-test generalization. This fixture uses real local CPU processes; it does not validate GPU or remote execution. Runtime submission, recovery and CLI instructions are in the runtime documentation.
+Two rounds are a test of the research loop, not a promise that the second result improves. Development scores are adaptive feedback and provide no evidence about final-test generalization. This fixture uses real local CPU processes; it does not validate GPU or remote execution.

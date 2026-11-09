@@ -1,21 +1,18 @@
-# 公开分发与脱敏范围
+# Source distribution boundary
 
-本次整理以 `main` 的 `79c0372d29f35aeef7d569cf3ef26c997bbb7100` 为基线，面向 AeroArm 合作者准备源码。原仓库的未提交工作与运行数据不属于本次发行内容。
+The current source tree contains the native Codex runtime, reusable read-only
+dashboard, role instructions, synthetic tests and independent benchmark fixtures.
+Private Studies, raw transcripts, credentials, deployment configuration, research
+inputs and results stay outside commits. The MIT license covers project code;
+third-party assets retain the licenses listed in [notices](../THIRD_PARTY_NOTICES.md).
 
-## 当前源码树
-
-- 移除了 ProTok 私有研究输入、原始历史报告和归档验证清单。
-- 将个人工作区、具体部署目录、访问别名和主机资源快照从公开说明中清除或泛化。
-- 历史发行时移除了任务特定的默认部署绑定；当前退休范围见[运行时退休说明](runtime-retirement.md)。
-- 增加本地凭据、私有证据与实验产物的忽略规则。忽略规则不影响已经跟踪的文件，不能替代提交审阅。
-- 展示使用合成材料与脚本回复；历史 Cactus/Meta 数值仅保留为明确标记的历史报告，原始运行产物不随源码分发。
-- 项目代码使用 MIT 许可；第三方资产保留原有许可。
-
-检查覆盖跟踪文本中的路径、主机、私有来源和凭据模式。模式检查没有发现可识别的真实 API key、token 或私钥；凭据相关命中主要为脱敏实现和合成测试。这不是对不存在任何秘密的保证。
+Ignore rules do not protect already tracked files. Review the staged file list
+and contents before publishing. Pattern checks are supporting evidence, not proof
+that no sensitive material exists.
 
 ## 历史边界
 
-对本地可达 55 个提交做了有界元数据、文件路径和模式审计：旧提交仍包含已移除的研究输入和部署文档。此次修改只清理发行树，未重写历史，也未改变仓库可见性。Git 作者、提交说明、旧分支、Issue、PR、附件和托管平台缓存不在当前树清理的覆盖范围内。
+历史发行曾对当时本地可达的 55 个提交做有界元数据、文件路径和模式审计：旧提交仍包含已移除的研究输入和部署文档。此次修改只清理发行树，未重写历史，也未改变仓库可见性。Git 作者、提交说明、旧分支、Issue、PR、附件和托管平台缓存不在当前树清理的覆盖范围内。
 
 **不要仅合并本 PR 后就把原仓库改为 public。** 对外共享时可先使用下面的不带历史源码包；要公开一个 Git 仓库，可将该快照作为新仓库的初始提交，再确认要保留的作者署名、贡献记录及托管元数据。处理原仓库历史属于另一个有明确范围的操作。
 
@@ -37,9 +34,8 @@ tar -tzf dist/research-loop-public.tar.gz
 ```sh
 tar -xzf research-loop-public.tar.gz
 cd research-loop
-npm ci
-npm run build
-node dist/cli.js doctor
+uv sync --locked
+uv run research-loop doctor
 ```
 
 模型账户配置与凭据、原始数据、外部任务仓库和训练资源都不在包内。MIT 许可不改变外部数据或模型的使用条件。

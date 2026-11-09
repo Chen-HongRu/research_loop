@@ -2,12 +2,15 @@
 
 The project MIT license covers Research Loop's own code and documentation.
 
-- **KaTeX** is vendored in `integrations/protok/assets/vendor/katex/`.
-  Its license is retained in [LICENSE](integrations/protok/assets/vendor/katex/LICENSE).
-- **markdown-it** is vendored in `integrations/protok/assets/vendor/markdown-it/`.
-  Its license is retained in [LICENSE](integrations/protok/assets/vendor/markdown-it/LICENSE).
+- **markdown-it** is vendored in `src/research_loop/dashboard/vendor/markdown-it/`.
+  Its license is retained in [LICENSE](src/research_loop/dashboard/vendor/markdown-it/LICENSE).
 
-The Cactus adapter references external MLE-bench preparation/grading sources and
+Historical static assets remain under `integrations/protok/assets/` for existing
+read-only deployments. **KaTeX** and the earlier **markdown-it** copy retain their
+licenses in `vendor/katex/LICENSE` and `vendor/markdown-it/LICENSE` there. They are
+not dependencies of the packaged dashboard.
+
+The Cactus fixture references external MLE-bench preparation/grading sources and
 a prepared dataset mirror. These are not bundled with this repository; their
 pinned sources and access conditions are documented in
 [the adapter README](benchmarks/cactus/README.md). The project license does not

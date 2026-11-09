@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Research Loop</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="markdown-it.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">R</span><div><strong>Research Loop</strong><span>Research Loop · 只读</span></div></div>
+    <div class="top-status"><span id="state" class="status-pill">加载中</span><span id="budget">预算读取中</span></div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="side-heading">研究空间</div>
+      <nav aria-label="视图">
+        <button class="nav active" data-view="conversation">研究概览</button>
+        <button class="nav" data-view="agents">子 Agent <span id="agent-count"></span></button>
+        <button class="nav" data-view="tools">工具记录</button>
+        <button class="nav" data-view="background">研究背景</button>
+      </nav>
+      <div class="side-foot">原生消息与协作记录 · 每5秒同步</div>
+    </aside>
+    <main>
+      <div id="refresh-error" class="notice" hidden></div>
+      <section id="view-conversation" class="view">
+        <div class="page-heading"><div><div class="eyebrow">研究进展</div><h1>研究概览</h1><p>已报告的结果与当前协作进展。</p></div></div>
+        <section class="overview-block"><h2>最新研究总结</h2><div id="research-summary" class="summary-card"></div></section>
+        <section class="overview-block"><h2>协调进展</h2><div id="activity" class="activity">等待活动记录</div><div id="coordinator-message" class="markdown coordinator-message"></div><div id="coordinator-meta" class="muted"></div></section>
+        <section class="overview-block"><div class="section-heading"><h2>研究团队</h2><button id="agent-link" class="inline-link" type="button">查看全部任务 →</button></div><div id="role-cards" class="role-cards"></div><p id="role-note" class="muted">角色来自任务名称推测，历史记录可能无法识别。</p></section>
+        <section class="overview-block"><h2>下一步</h2><div id="next-action" class="summary-card"></div><div id="research-docs"></div></section>
+        <details id="older-section" class="panel older" data-key="older-conversation"><summary>协调消息记录</summary><div id="latest-message" class="conversation"></div><div id="conversation" class="conversation"></div><section id="result-section" class="result-section" hidden><h2>本轮总结</h2><div id="result"></div></section></details>
+      </section>
+      <section id="view-agents" class="view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">协作</div><h1>子 Agent</h1><p>任务、状态与已返回的消息。</p></div></div>
+        <div class="agent-filters"><label>角色 <select id="role-filter"><option value="all">全部任务</option><option value="Scout">Scout · 探索</option><option value="Proposer">Proposer · 方案</option><option value="Experimenter">Experimenter · 实验</option><option value="Analyst">Analyst · 分析</option><option value="Critic">Critic · 批判</option><option value="unknown">未知</option></select></label><label>范围 <select id="period-filter"><option value="all">当前与历史</option><option value="current">当前轮</option><option value="historical">历史轮</option><option value="unknown">轮次未知</option></select></label></div><div class="agent-layout"><div id="agent-list" class="agent-list"></div><div id="agent-detail" class="agent-detail"></div></div>
+      </section>
+      <section id="view-tools" class="view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">执行记录</div><h1>工具调用</h1><p>展开后查看原始输入与输出。</p></div></div>
+        <div id="tools"></div>
+      </section>
+      <section id="view-background" class="view" hidden>
+        <div class="page-heading"><div><div class="eyebrow">参考资料</div><h1>研究背景</h1><p>历史数据不代表本次研究的新发现。</p></div></div>
+        <details class="panel" data-key="background-curves"><summary>历史曲线</summary><p class="muted">可选的历史数据；请结合来源与实验条件解读。</p><div id="charts" class="charts"></div><p id="provenance" class="muted"></p></details>
+        <details class="panel" data-key="background-goal"><summary>研究目标与科学范围</summary><div id="goal" class="markdown"></div></details>
+        <details class="panel" data-key="background-plan"><summary>原生计划</summary><div id="plan"></div></details>
+      </section>
+    </main>
+  </div>
+  <nav class="mobile-nav" aria-label="视图"><button class="nav active" data-view="conversation">概览</button><button class="nav" data-view="agents">子 Agent</button><button class="nav" data-view="tools">工具</button><button class="nav" data-view="background">背景</button></nav>
+</body>
+</html>

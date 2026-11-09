@@ -5,7 +5,16 @@ its input/output contract, and the smallest check that demonstrates success.
 For research changes, fix the model/loss, data roles, shapes, masks, time alignment,
 evaluation and budget before changing behavior.
 
-Use the root Node package: `npm ci`, `npm run build`, `npm run check` and relevant tests. Native tests require `RESEARCH_NATIVE_SANDBOX_TEST=1` on macOS; see [README](README.md#development). Use uv for Python environments and run `uvx ruff format` and `uvx ruff check` on changed Python files, relevant tests and the smallest real smoke. Agent, GPU and remote runs require the appropriate account and resource authorization.
+Use Python 3.12 and `uv sync --locked`. After changing Python files, run `uvx ruff format` and `uvx ruff check` on the changed files, relevant tests and the smallest real smoke. Agent, GPU and remote runs require the appropriate account and resource authorization.
+
+The pinned native checks are opt-in. The first checks SDK metadata without a model call; the second calls the authorized subscription model for a synthetic Proposer → Experimenter → Critic smoke. It checks fresh contexts, an arithmetic plan and script, coordinator execution, and a read-only critique against native histories and output artifacts, without GPU or remote access:
+
+```sh
+RESEARCH_NATIVE_TEST=1 uv run pytest tests/test_native_integration.py::test_pinned_native_handshake_without_model
+RESEARCH_MODEL_TEST=1 uv run pytest tests/test_native_integration.py::test_native_fresh_research_roles_and_local_command
+```
+
+These flags do not authorize a research loop or remote compute.
 
 Keep private goals, raw Agent transcripts, deployment/SSH details, credentials,
 data and checkpoints outside commits. Use synthetic fixtures in tests and demos.
