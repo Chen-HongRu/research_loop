@@ -219,18 +219,39 @@ external access control belongs to the deployment.
 Repeated `--study` arguments register explicit directories. `--studies-dir` opts
 into dynamic discovery of immediate, non-symlink children with a regular
 `status.json`. `/api/studies` lists stable opaque IDs and recorded status;
-`/api/state`, `/api/metrics` and `/api/tool` accept a `study` ID. Omitting the ID
+All data routes accept a `study` ID. Omitting the ID
 selects the first registered Study for compatibility; invalid IDs return 404.
 Each Study owns its incremental readers. The browser scopes tool caches and
 in-flight responses to its selection and preserves that ID in the URL.
 
-The state response includes a numerically ordered iteration history projected
+The full `/api/state` response includes a numerically ordered iteration history projected
 from archived status and result records, with source paths and explicit missing
 results. Result fields are allowlisted; no reasoning, encrypted content or raw
 transcripts enter this projection. Legacy root results are used only without
 archive directories. The timeline displays reported summaries, goal judgments,
 continuation decisions, next steps, limitations and evidence references; it does
 not infer experimental success or synthesize new conclusions.
+
+The browser uses `/api/overview` for bounded current state, `/api/history` for ten
+newest-first iteration previews per page, and `/api/iteration` for one full public
+result. `/api/agents` returns twenty task previews per page, filtered by role and
+iteration; `/api/agent` returns the selected task. `/api/activity` returns paged
+coordinator and retained tool previews; `/api/message` and `/api/tool` load details
+on demand. These projections are assembled without first serializing full
+transcript bodies. Context uses the full snapshot on navigation. Operational
+refreshes keep page/filter/selection state; responses are scoped to Study and
+current navigation to prevent late responses replacing another selection.
+
+Publication display reads the existing activated knowledge pointer and matching
+publication metadata. A reported result alone does not establish publication;
+older iterations can show a separate historical publication record when their
+completed archive status and own version match publication metadata. Metadata
+alone does not prove activation. Legacy or unavailable evidence remains unknown.
+This adds no publication writer
+or controller recovery action. `/api/metrics` preserves schema version and token
+authority alongside measurement coverage, and may read optional behavior
+observations from `metrics/behavior/latest.json`. Collectors remain independent;
+the dashboard does not start them or infer missing measurements.
 
 If `supervisor.json` identifies a systemd service, the dashboard resolves its live
 `MainPID` and `ActiveState`; a saved PID must not override that service state.

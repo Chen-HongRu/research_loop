@@ -13,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from research_loop.state import Knowledge
+
 PUBLIC_PHASES = {None, "commentary", "partial_answer", "final_answer"}
 TOOL_TITLES = {
     "gpu_status": "查看资源预算",
@@ -96,21 +98,15 @@ def artifact(root, names):
     return missing
 
 
-def iteration_metadata(root):
-    rows = []
-    for path in sorted((root / "iterations").glob("[0-9]*/status.json")):
-        value = read_json(path, {})
-        if not isinstance(value, dict):
-            continue
-        start = timestamp(value.get("started_at"))
-        iteration = value.get("iteration")
-        if start is not None and isinstance(iteration, int):
-            rows.append((start, iteration))
-    return sorted(rows)
+def _read_record(path):
+    if path.is_symlink():
+        return None
+    value = read_json(path)
+    return value if isinstance(value, dict) else None
 
 
-def research_history(root):
-    """Project archived public results without interpreting research conclusions."""
+def _iteration_candidates(root):
+    """Enumerate real archived directories, without following selected paths."""
     archive = root / "iterations"
     directories = []
     if not archive.is_symlink():
@@ -125,88 +121,216 @@ def research_history(root):
             )
         except OSError:
             pass
+    if directories:
+        return [(int(path.name), path) for path in directories]
+    if _read_record(root / "result.json") is not None:
+        return [(None, root)]
+    return []
 
-    def read_record(path):
-        if path.is_symlink():
-            return None
-        value = read_json(path)
-        return value if isinstance(value, dict) else None
 
+def iteration_metadata(root):
     rows = []
-    candidates = [(int(path.name), path) for path in directories]
-    if not candidates:
-        # Pre-iteration Studies retained only the latest root records.
-        if read_record(root / "result.json") is not None:
-            candidates = [(None, root)]
-    for iteration, directory in candidates:
-        status_path, result_path = directory / "status.json", directory / "result.json"
-        status, result = read_record(status_path), read_record(result_path)
-        if status is None and result is None:
-            continue
-        status = status or {}
-        projected = None
-        if result is not None:
-            projected = {
-                field: public_text(result[field])
-                for field in (
-                    "summary",
-                    "next_action",
-                    "goal",
-                    "study_action",
-                    "stop_reason",
-                )
-                if isinstance(result.get(field), str)
-            }
-            for field, source in (
-                ("limitations", "limitations"),
-                ("evidence_refs", "evidence"),
-            ):
-                values = result.get(source)
-                if isinstance(values, list):
-                    projected[field] = [
-                        text
-                        for value in values
-                        if isinstance(value, str) and (text := public_text(value))
-                    ]
-        status_source = str(status_path.relative_to(root)) if status else None
-        result_source = (
-            str(result_path.relative_to(root)) if result is not None else None
-        )
-        rows.append(
-            {
-                "iteration": iteration,
-                "status": public_text(status.get("status")) or "unknown",
-                "started_at": public_text(status.get("started_at")) or None,
-                "ended_at": public_text(status.get("ended_at")) or None,
-                "source": result_source or status_source,
-                "status_source": status_source,
-                "result_source": result_source,
-                "result_available": result is not None,
-                "missing_result": result is None,
-                "result": projected,
-            }
-        )
+    for number, directory in _iteration_candidates(root):
+        value = _read_record(directory / "status.json") or {}
+        start = timestamp(value.get("started_at"))
+        if number is not None and start is not None:
+            rows.append((start, number))
+    return sorted(rows)
+
+
+def preview(text):
+    """Bound list content in characters, before serializing its detail."""
+    return public_text(text)[:240]
+
+
+def _iteration_row(root, iteration, directory, detail=True):
+    status_path, result_path = directory / "status.json", directory / "result.json"
+    status, result = _read_record(status_path), _read_record(result_path)
+    if status is None and result is None:
+        return None
+    status = status or {}
+    status_source = str(status_path.relative_to(root)) if status else None
+    result_source = str(result_path.relative_to(root)) if result is not None else None
+    row = {
+        "iteration": iteration,
+        "status": public_text(status.get("status")) or "unknown",
+        "started_at": public_text(status.get("started_at")) or None,
+        "ended_at": public_text(status.get("ended_at")) or None,
+        "source": result_source or status_source,
+        "result_available": result is not None,
+    }
+    if not detail:
+        row["summary_preview"] = preview((result or {}).get("summary"))
+        return row
+    projected = None
+    if result is not None:
+        projected = {
+            field: public_text(result[field])
+            for field in (
+                "summary",
+                "next_action",
+                "goal",
+                "study_action",
+                "stop_reason",
+            )
+            if isinstance(result.get(field), str)
+        }
+        for field, source in (
+            ("limitations", "limitations"),
+            ("evidence_refs", "evidence"),
+        ):
+            values = result.get(source)
+            if isinstance(values, list):
+                projected[field] = [
+                    text
+                    for value in values
+                    if isinstance(value, str) and (text := public_text(value))
+                ]
+    row.update(
+        status_source=status_source,
+        result_source=result_source,
+        missing_result=result is None,
+        result=projected,
+    )
+    return row
+
+
+def research_history(root):
+    """Project archived public results without interpreting research conclusions."""
+    rows = [
+        row
+        for iteration, directory in _iteration_candidates(root)
+        if (row := _iteration_row(root, iteration, directory)) is not None
+    ]
+    return {"iterations": rows, "counts": _history_counts(rows)}
+
+
+def _history_counts(rows):
     available = sum(row["result_available"] for row in rows)
     return {
-        "iterations": rows,
-        "counts": {
-            "total": len(rows),
-            "with_result": available,
-            "missing_result": len(rows) - available,
-        },
+        "total": len(rows),
+        "with_result": available,
+        "missing_result": len(rows) - available,
     }
 
 
-def research_state(root, status):
+def _page(rows, page, size):
+    return rows[(page - 1) * size : page * size]
+
+
+def _pagination(total, page, size):
+    return {"page": page, "page_size": size, "total_pages": (total + size - 1) // size}
+
+
+def history_page(root, page=1):
+    # Read public records into bounded previews, never full result projections.
+    rows = [
+        row
+        for number, directory in reversed(_iteration_candidates(root))
+        if (row := _iteration_row(root, number, directory, detail=False)) is not None
+    ]
+    return {
+        "iterations": _page(rows, page, 10),
+        "counts": _history_counts(rows),
+        **_pagination(len(rows), page, 10),
+    }
+
+
+def publication_state(root, iteration):
+    """Only the controller's activated pointer establishes current publication."""
+    try:
+        published = Knowledge(root).published_state()
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError):
+        return {"status": "invalid"}
+    if published is not None and not isinstance(published, dict):
+        return {"status": "invalid"}
+    if published and published.get("iteration") == iteration:
+        return {
+            "status": "published",
+            "iteration": iteration,
+            "knowledge_version": published["knowledge_version"],
+        }
+    historical = _historical_publication(root, iteration)
+    if historical is not None:
+        return historical
+    # A newer numeric iteration than an activated one is not yet published.
+    if (
+        published
+        and isinstance(iteration, int)
+        and isinstance(published.get("iteration"), int)
+        and iteration > published["iteration"]
+    ):
+        return {"status": "unpublished", "iteration": iteration}
+    current = root / "knowledge/current"
+    if current.is_symlink() and not current.exists():
+        return {"status": "invalid"}
+    if (
+        current.exists()
+        and current.resolve().name == "initial"
+        and iteration is not None
+    ):
+        return {"status": "unpublished", "iteration": iteration}
+    return {"status": "unknown"}
+
+
+def _historical_publication(root, iteration):
+    """Match an archived final status to its own publication, without activation claims."""
+    if type(iteration) is not int:
+        return None
+    knowledge = root / "knowledge"
+    publications = knowledge / "publications"
+    if knowledge.is_symlink() or publications.is_symlink():
+        return None
+    for number, directory in _iteration_candidates(root):
+        if number != iteration:
+            continue
+        status = _read_record(directory / "status.json") or {}
+        if type(status.get("iteration")) is not int or status["iteration"] != iteration:
+            return None
+        version = status.get("knowledge_version")
+        if status.get("status") not in {"completed", "iteration-completed"} or not (
+            isinstance(version, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", version)
+        ):
+            return None
+        path = publications / (version + ".json")
+        try:
+            if not path.resolve().is_relative_to(publications.resolve()):
+                return None
+        except (OSError, RuntimeError):
+            return None
+        metadata = _read_record(path) or {}
+        if (
+            metadata.get("knowledge_version") == version
+            and type(metadata.get("iteration")) is int
+            and metadata["iteration"] == iteration
+        ):
+            return {
+                "status": "historical",
+                "iteration": iteration,
+                "knowledge_version": version,
+            }
+    return None
+
+
+def iteration_detail(root, iteration):
+    for number, directory in _iteration_candidates(root):
+        if number == iteration:
+            row = _iteration_row(root, number, directory)
+            if row is not None:
+                row["publication"] = publication_state(root, number)
+            return row
+    return None
+
+
+def research_state(root, status, include_artifacts=True):
     current = status.get("iteration")
     latest = None
-    for path in sorted((root / "iterations").glob("[0-9]*/result.json"), reverse=True):
-        if not path.parent.name.isdecimal():
+    for iteration, directory in reversed(_iteration_candidates(root)):
+        if isinstance(current, int) and iteration is not None and iteration > current:
             continue
-        iteration = int(path.parent.name)
-        if isinstance(current, int) and iteration > current:
-            continue
-        result = read_json(path)
+        path = directory / "result.json"
+        result = _read_record(path)
         if isinstance(result, dict) and isinstance(result.get("summary"), str):
             latest = path, iteration, result
             break
@@ -231,6 +355,8 @@ def research_state(root, status):
                 stale=stale,
             )
         summary["at"] = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+    if not include_artifacts:
+        return {"summary": summary, "next_action": next_action}
     prefix = f"iteration{current}" if isinstance(current, int) else ""
     return {
         "summary": summary,
@@ -344,16 +470,28 @@ def _fields(value, keys):
 
 def metrics_snapshot(root):
     value, status = _metrics_file(root, "current/latest.json")
-    if value is None:
-        return {"available": False, "status": status}
-    if not isinstance(value.get("phase"), str) or not isinstance(
-        value.get("llm"), dict
+    behavior = behavior_snapshot(root)
+    if (
+        value is None
+        or not isinstance(value.get("phase"), str)
+        or not isinstance(value.get("llm"), dict)
     ):
-        return {"available": False, "status": "invalid"}
+        result = {"available": False, "status": status if value is None else "invalid"}
+        if behavior["status"] != "missing":
+            result["behavior"] = behavior
+        return result
     llm = value["llm"]
     result = {
         "available": True,
         "status": "available",
+        "schema_version": value.get("schema_version")
+        if type(value.get("schema_version")) is int
+        else None,
+        "llm_authority": llm.get("authority")
+        if isinstance(llm.get("authority"), str)
+        else "legacy"
+        if value.get("schema_version") == 1
+        else "unknown",
         "phase": value["phase"],
         "last_source_event_at": value.get("last_source_event_at")
         if isinstance(value.get("last_source_event_at"), str)
@@ -395,6 +533,7 @@ def metrics_snapshot(root):
             ("bytes_read", "elapsed_seconds", "previous_poll_total_seconds"),
         ),
     }
+    result["behavior"] = behavior
     tasks = llm.get("by_task")
     if isinstance(tasks, list) and all(
         isinstance(t, dict)
@@ -428,6 +567,12 @@ def metrics_snapshot(root):
                 break
             totals = item.get("totals") if isinstance(item.get("totals"), dict) else {}
             phases[name] = {
+                "schema_version": item.get("schema_version")
+                if type(item.get("schema_version")) is int
+                else None,
+                "llm_authority": item.get("llm_authority")
+                if isinstance(item.get("llm_authority"), str)
+                else "unknown",
                 "phase": item.get("phase")
                 if isinstance(item.get("phase"), str)
                 else None,
@@ -451,6 +596,73 @@ def metrics_snapshot(root):
         else:
             result["comparison"] = phases
     return result
+
+
+BEHAVIOR_TOTAL_FIELDS = (
+    "tasks",
+    "wait_calls",
+    "returned_wait_calls",
+    "open_wait_calls",
+    "wait_seconds",
+    "wait_union_seconds",
+    "output_utf8_bytes",
+    "output_bytes_missing",
+    "over_16kib_count",
+    "explicit_truncated_count",
+    "truncation_marker_missing",
+    "repeated_visible_read_calls",
+    "outputs_awaiting_usage",
+    "over_16kib_bytes_fraction",
+    "dependency_ready_missing_tasks",
+)
+
+
+def behavior_snapshot(root):
+    value, status = _metrics_file(root, "behavior/latest.json")
+    if value is None:
+        return {"available": False, "status": status}
+    behavior = value.get("behavior")
+    if not isinstance(behavior, dict):
+        return {"available": False, "status": "invalid"}
+    return {
+        "available": True,
+        "status": "available",
+        **_fields(value, ("schema_version", "behavior_schema", "phase")),
+        "window": _fields(value.get("window"), ("since", "until")),
+        "total": _fields(behavior.get("total"), BEHAVIOR_TOTAL_FIELDS),
+        "children": _fields(behavior.get("children"), BEHAVIOR_TOTAL_FIELDS),
+        "coverage": {
+            **_fields(
+                value.get("coverage"),
+                ("complete", "selected_threads", "usage_records_observed"),
+            ),
+            **_fields(
+                behavior.get("coverage"),
+                (
+                    "unmatched_readiness_records",
+                    "outputs_awaiting_usage",
+                    "nested_calls_visible",
+                ),
+            ),
+        },
+        "resource_presentations": _fields(
+            value.get("resource_presentations"),
+            (
+                "status",
+                "coverage_mode",
+                "prior_source_bytes_not_replayed",
+                "read_from_at",
+                "read_from_at_basis",
+                "observed_calls",
+                "eligible",
+                "missing_or_legacy",
+                "invalid_metadata",
+                "compacted",
+                "original_output_bytes",
+                "returned_output_bytes",
+            ),
+        ),
+    }
 
 
 def public_text(value):
@@ -578,7 +790,7 @@ class Session:
                 elif typ in {"function_call", "custom_tool_call"}:
                     self.tool_count += 1
 
-    def card(self, activity=None, host_role=None):
+    def card(self, activity=None, host_role=None, detail=True):
         activity = activity or {}
         host_role = host_role or {}
         path = self.path or activity.get("path") or ""
@@ -592,9 +804,6 @@ class Session:
             )
             role_source = "host-role-record" if role != "unknown" else "unknown"
         title = "".join(TASK_WORDS.get(word, word) for word in task.split("_"))
-        messages = list(self.messages.values())
-        finals = [m for m in messages if m["phase"] == "final_answer"]
-        introductions = [m for m in messages if m["phase"] == "commentary"]
         status = (
             self.status
             if self.status != "unknown"
@@ -602,7 +811,7 @@ class Session:
         )
         if host_role:
             status = HOST_TASK_STATES.get(host_role.get("status"), status)
-        return {
+        card = {
             "id": self.id,
             "parent_id": self.parent_id,
             "name": self.name,
@@ -614,14 +823,25 @@ class Session:
             "started_at": self.started_at or activity.get("started_at"),
             "iteration": None,
             "title": title or "子智能体",
-            "purpose": introductions[0]["text"] if introductions else "",
             "status": status,
             "last_at": self.last_at or activity.get("at"),
-            "messages": messages,
-            "result": finals[-1]["text"] if finals else None,
             "tool_count": self.tool_count,
             "task_detail_available": False,
+            "history_available": self.reader.identity is not None,
         }
+        if detail:
+            messages = list(self.messages.values())
+            finals = [m for m in messages if m["phase"] == "final_answer"]
+            introductions = [m for m in messages if m["phase"] == "commentary"]
+            card.update(
+                messages=messages,
+                result=finals[-1]["text"] if finals else None,
+                purpose=introductions[0]["text"] if introductions else "",
+            )
+        else:
+            latest = next(reversed(self.messages.values()), {})
+            card["preview"] = preview(latest.get("text"))
+        return card
 
 
 class State:
@@ -773,141 +993,297 @@ class State:
             record = self.tools.get(identifier)
             return dict(record) if record else None
 
+    def _budget(self):
+        config = read_json(self.root / "config.json", {}) or {}
+        resource = config.get("resource") or {}
+        ledger_path = (
+            Path(resource["ledger_path"]) if resource.get("ledger_path") else None
+        )
+        ledger = read_json(ledger_path) if ledger_path else None
+        budget = {"state": "unavailable"}
+        if isinstance(ledger, dict) and isinstance(ledger.get("entries"), list):
+            try:
+                entries = ledger["entries"]
+                used = sum(
+                    e["receipt"]["elapsed_seconds"]
+                    for e in entries
+                    if e["status"] == "TERMINAL"
+                )
+                reserved = sum(
+                    e["reserved_seconds"] for e in entries if e["status"] != "TERMINAL"
+                )
+                total = ledger["authorized_seconds"]
+                budget = {
+                    "state": "recorded",
+                    "authorized_seconds": total,
+                    "used_seconds": used,
+                    "reserved_seconds": reserved,
+                    "remaining_seconds": max(0, total - used - reserved),
+                    "unsettled": sum(e["status"] != "TERMINAL" for e in entries),
+                }
+            except (KeyError, TypeError, ValueError):
+                budget = {"state": "unreadable"}
+        elif ledger_path and not ledger_path.exists():
+            lock = ledger_path.with_name(ledger_path.name + ".lock")
+            budget = {
+                "state": "missing ledger; reconciliation needed"
+                if lock.exists() and lock.stat().st_size
+                else "not yet created",
+                "configured_seconds": resource.get("gpu_seconds_total"),
+            }
+        return budget
+
+    def _agent_cards(self, detail=True, selected_id=None):
+        children, known = [], set()
+        role_document = read_json(self.root / "roles.json", {})
+        role_threads = (
+            role_document.get("threads") if isinstance(role_document, dict) else None
+        )
+        host_roles = (
+            {
+                tid: row
+                for tid, row in role_threads.items()
+                if isinstance(tid, str)
+                and tid
+                and tid != self.lead_id
+                and isinstance(row, dict)
+                and isinstance(row.get("task"), str)
+                and row["task"]
+                and isinstance(row.get("role"), str)
+                and isinstance(row.get("status"), str)
+                and row["role"] in HOST_ROLES
+                and row["status"] in HOST_TASK_STATES
+            }
+            if isinstance(role_threads, dict)
+            else {}
+        )
+        descendants = {self.lead_id} if self.lead_id else set()
+        for _ in self.sessions:
+            added = {
+                s.id
+                for s in self.sessions.values()
+                if s.parent_id in descendants and s.id
+            }
+            if added <= descendants:
+                break
+            descendants.update(added)
+        for session in self.sessions.values():
+            if (
+                session.id
+                and session.id != self.lead_id
+                and (
+                    session.id in descendants
+                    or session.id in self.agents
+                    or session.id in host_roles
+                )
+            ):
+                if selected_id is not None and session.id != selected_id:
+                    continue
+                activity = {
+                    **self.agents.get(session.id, {}),
+                    **self.host_activity.get(session.id, {}),
+                }
+                children.append(
+                    session.card(activity, host_roles.get(session.id), detail=detail)
+                )
+                known.add(session.id)
+        for identifier in {**self.agents, **host_roles}:
+            if identifier not in known and (
+                selected_id is None or identifier == selected_id
+            ):
+                activity = {
+                    **self.agents.get(identifier, {}),
+                    **self.host_activity.get(identifier, {}),
+                }
+                stub = Session(self.root / "unavailable")
+                stub.id = identifier
+                children.append(
+                    stub.card(activity, host_roles.get(identifier), detail=detail)
+                )
+        boundaries = iteration_metadata(self.root)
+        for child in children:
+            started = timestamp(child["started_at"])
+            if started is not None:
+                matches = [
+                    iteration for start, iteration in boundaries if start <= started
+                ]
+                child["iteration"] = matches[-1] if matches else None
+                child["iteration_source"] = (
+                    "inferred-from-start-time" if matches else "unknown"
+                )
+            else:
+                child["iteration_source"] = "unknown"
+        return children
+
+    def _coordinator_messages(self):
+        if self.messages:
+            return self.messages
+        for session in self.sessions.values():
+            if session.id == self.lead_id:
+                return session.messages
+        return self.messages
+
+    def _activity(self, status, alive):
+        tools = self.tools.values()
+        active = [tool for tool in tools if tool.get("status") == "inProgress"]
+        activity = {"label": "正在处理，等待下一条阶段性进展", "state": "working"}
+        if active:
+            activity["label"] = active[-1]["title"]
+        elif (
+            self.tools
+            and next(reversed(self.tools.values())).get("name") == "gpu_poll"
+            and (next(reversed(self.tools.values())).get("output") or {}).get("running")
+        ):
+            activity["label"] = "GPU 任务正在运行，等待输出"
+        if status.get("status") not in {
+            "starting",
+            "running",
+            "iteration-completed",
+        }:
+            activity = {
+                "label": "本轮已结束"
+                if status.get("ended_at")
+                or status.get("status")
+                in {
+                    "stopped",
+                    "failed",
+                    "interrupted",
+                    "completed",
+                    "needs-reconciliation",
+                }
+                else "尚未开始",
+                "state": "idle",
+            }
+        elif alive == "dead":
+            activity = {"label": "控制进程已退出，等待检查", "state": "interrupted"}
+        return activity
+
+    def overview(self):
+        with self.lock:
+            self.update()
+            status = _read_record(self.root / "status.json") or {}
+            self.lead_id = self.lead_id or status.get("thread_id")
+            supervisor = _read_record(self.root / "supervisor.json") or {}
+            _, alive = supervisor_process(supervisor)
+            children = self._agent_cards(detail=False)
+            current = status.get("iteration")
+            current_children = [
+                child for child in children if child["iteration"] == current
+            ]
+            projected = {
+                key: status[key]
+                for key in ("status", "iteration", "started_at", "ended_at")
+                if key in status
+            }
+            if isinstance(status.get("error"), dict):
+                projected["error"] = _fields(status["error"], ("type", "message"))
+            return {
+                "as_of": datetime.now(UTC).isoformat(),
+                "status": projected,
+                "last_event_at": self.last_event_at,
+                "activity": self._activity(status, alive),
+                "budget": self._budget(),
+                "research": research_state(self.root, status, include_artifacts=False),
+                "publication": publication_state(self.root, current),
+                "stats": {
+                    "agents": len(current_children),
+                    "working": sum(c["status"] == "working" for c in current_children),
+                    "completed": sum(
+                        c["status"] == "completed" for c in current_children
+                    ),
+                },
+            }
+
+    def agents_page(self, iteration="current", role="all", page=1):
+        with self.lock:
+            self.update()
+            status = _read_record(self.root / "status.json") or {}
+            self.lead_id = self.lead_id or status.get("thread_id")
+            current = status.get("iteration")
+            selected = current if iteration == "current" else iteration
+            rows = [
+                card
+                for card in self._agent_cards(detail=False)
+                if (
+                    iteration == "all"
+                    or (
+                        card["iteration"] is None
+                        if iteration == "unknown"
+                        else card["iteration"] == selected
+                    )
+                )
+                and (role == "all" or card["role"] == role)
+            ]
+            rows.sort(
+                key=lambda card: (
+                    timestamp(card["started_at"]) or float("-inf"),
+                    card["id"],
+                ),
+                reverse=True,
+            )
+            return {
+                "agents": _page(rows, page, 20),
+                "total": len(rows),
+                "current_iteration": current,
+                **_pagination(len(rows), page, 20),
+            }
+
+    def agent_detail(self, identifier):
+        with self.lock:
+            self.update()
+            status = _read_record(self.root / "status.json") or {}
+            self.lead_id = self.lead_id or status.get("thread_id")
+            cards = self._agent_cards(selected_id=identifier)
+            return cards[0] if cards else None
+
+    def activity_page(self, page=1):
+        with self.lock:
+            self.update()
+            status = _read_record(self.root / "status.json") or {}
+            self.lead_id = self.lead_id or status.get("thread_id")
+            messages = self._coordinator_messages()
+            # Slice identifiers first; serialize at most one page of previews.
+            message_ids = _page(list(reversed(messages)), page, 20)
+            tool_ids = _page(list(reversed(self.tools)), page, 20)
+            return {
+                "messages": [
+                    {**messages[key], "text": preview(messages[key]["text"])}
+                    for key in message_ids
+                ],
+                "tools": [
+                    {
+                        key: value
+                        for key, value in self.tools[identifier].items()
+                        if key not in {"input", "output"}
+                    }
+                    for identifier in tool_ids
+                ],
+                "total_messages": len(messages),
+                "total_tools": len(self.tools),
+                "retention": 250,
+                **_pagination(max(len(messages), len(self.tools)), page, 20),
+            }
+
+    def message_detail(self, identifier):
+        with self.lock:
+            self.update()
+            status = _read_record(self.root / "status.json") or {}
+            self.lead_id = self.lead_id or status.get("thread_id")
+            record = self._coordinator_messages().get(identifier)
+            return dict(record) if record else None
+
     def snapshot(self):
         with self.lock:
             self.update()
             status = read_json(self.root / "status.json", {}) or {}
             self.lead_id = self.lead_id or status.get("thread_id")
-            config = read_json(self.root / "config.json", {}) or {}
-            resource = config.get("resource") or {}
-            ledger_path = (
-                Path(resource["ledger_path"]) if resource.get("ledger_path") else None
-            )
-            ledger = read_json(ledger_path) if ledger_path else None
-            budget = {"state": "unavailable"}
-            if isinstance(ledger, dict) and isinstance(ledger.get("entries"), list):
-                try:
-                    entries = ledger["entries"]
-                    used = sum(
-                        e["receipt"]["elapsed_seconds"]
-                        for e in entries
-                        if e["status"] == "TERMINAL"
-                    )
-                    reserved = sum(
-                        e["reserved_seconds"]
-                        for e in entries
-                        if e["status"] != "TERMINAL"
-                    )
-                    total = ledger["authorized_seconds"]
-                    budget = {
-                        "state": "recorded",
-                        "authorized_seconds": total,
-                        "used_seconds": used,
-                        "reserved_seconds": reserved,
-                        "remaining_seconds": max(0, total - used - reserved),
-                        "unsettled": sum(e["status"] != "TERMINAL" for e in entries),
-                    }
-                except (KeyError, TypeError, ValueError):
-                    budget = {"state": "unreadable"}
-            elif ledger_path and not ledger_path.exists():
-                lock = ledger_path.with_name(ledger_path.name + ".lock")
-                budget = {
-                    "state": "missing ledger; reconciliation needed"
-                    if lock.exists() and lock.stat().st_size
-                    else "not yet created",
-                    "configured_seconds": resource.get("gpu_seconds_total"),
-                }
+            budget = self._budget()
             supervisor = read_json(self.root / "supervisor.json", {}) or {}
             pid, alive = supervisor_process(supervisor)
-            messages, children, known = list(self.messages.values()), [], set()
-            role_document = read_json(self.root / "roles.json", {})
-            role_threads = (
-                role_document.get("threads")
-                if isinstance(role_document, dict)
-                else None
-            )
-            host_roles = (
-                {
-                    tid: row
-                    for tid, row in role_threads.items()
-                    if isinstance(tid, str)
-                    and tid
-                    and tid != self.lead_id
-                    and isinstance(row, dict)
-                    and isinstance(row.get("task"), str)
-                    and row["task"]
-                    and isinstance(row.get("role"), str)
-                    and isinstance(row.get("status"), str)
-                    and row["role"] in HOST_ROLES
-                    and row["status"] in HOST_TASK_STATES
-                }
-                if isinstance(role_threads, dict)
-                else {}
-            )
-            descendants = {self.lead_id} if self.lead_id else set()
-            for _ in self.sessions:
-                added = {
-                    s.id
-                    for s in self.sessions.values()
-                    if s.parent_id in descendants and s.id
-                }
-                if added <= descendants:
-                    break
-                descendants.update(added)
-            for session in self.sessions.values():
-                if session.id == self.lead_id:
-                    if not messages:
-                        messages = list(session.messages.values())
-                elif session.id and (
-                    session.id in descendants
-                    or session.id in self.agents
-                    or session.id in host_roles
-                ):
-                    activity = {
-                        **self.agents.get(session.id, {}),
-                        **self.host_activity.get(session.id, {}),
-                    }
-                    children.append(session.card(activity, host_roles.get(session.id)))
-                    known.add(session.id)
-            for identifier in {**self.agents, **host_roles}:
-                if identifier not in known:
-                    activity = {
-                        **self.agents.get(identifier, {}),
-                        **self.host_activity.get(identifier, {}),
-                    }
-                    stub = Session(self.root / "unavailable")
-                    stub.id = identifier
-                    children.append(stub.card(activity, host_roles.get(identifier)))
-            boundaries = iteration_metadata(self.root)
-            for child in children:
-                started = timestamp(child["started_at"])
-                if started is not None:
-                    matches = [
-                        iteration for start, iteration in boundaries if start <= started
-                    ]
-                    child["iteration"] = matches[-1] if matches else None
+            messages = list(self._coordinator_messages().values())
+            children = self._agent_cards()
             tools = list(self.tools.values())
-            active = [tool for tool in tools if tool.get("status") == "inProgress"]
-            activity = {"label": "正在处理，等待下一条阶段性进展", "state": "working"}
-            if active:
-                activity["label"] = active[-1]["title"]
-            elif (
-                tools
-                and tools[-1].get("name") == "gpu_poll"
-                and (tools[-1].get("output") or {}).get("running")
-            ):
-                activity["label"] = "GPU 任务正在运行，等待输出"
-            if status.get("status") not in {
-                "starting",
-                "running",
-                "iteration-completed",
-            }:
-                activity = {
-                    "label": "本轮已结束" if status.get("ended_at") else "尚未开始",
-                    "state": "idle",
-                }
-            elif alive == "dead":
-                activity = {"label": "控制进程已退出，等待检查", "state": "interrupted"}
+            activity = self._activity(status, alive)
             try:
                 goal = (self.root / "goal.md").read_text(encoding="utf-8")
             except OSError:
@@ -1004,6 +1380,12 @@ class Studies:
             return self.states[path]
 
 
+def _positive_integer(value):
+    if not re.fullmatch(r"[0-9]+", value) or len(value) > 12 or int(value) < 1:
+        raise ValueError("Expected a positive integer")
+    return int(value)
+
+
 def handler_for(state, allowed_hosts):
     studies = state if isinstance(state, Studies) else Studies([state.root])
     directory = Path(__file__).resolve().parent
@@ -1027,24 +1409,66 @@ def handler_for(state, allowed_hosts):
             if path == "/api/studies":
                 body = json.dumps(studies.catalog(), ensure_ascii=False).encode()
                 content_type = "application/json; charset=utf-8"
-            elif path in {"/api/state", "/api/metrics", "/api/tool"}:
+            elif path in {
+                "/api/state",
+                "/api/metrics",
+                "/api/tool",
+                "/api/overview",
+                "/api/history",
+                "/api/iteration",
+                "/api/agents",
+                "/api/agent",
+                "/api/activity",
+                "/api/message",
+            }:
                 query = parse_qs(parsed.query, keep_blank_values=True)
+                if any(len(values) != 1 for values in query.values()):
+                    self.send_error(400, "Parameters must occur once")
+                    return
                 selected = studies.select(query.get("study", [None])[0])
                 if selected is None:
                     self.send_error(404, "Study unavailable")
                     return
-                if path == "/api/state":
-                    value = selected.snapshot()
-                    value["history"] = research_history(selected.root)
-                elif path == "/api/metrics":
-                    value = metrics_snapshot(selected.root)
-                else:
-                    value = selected.tool_detail(query.get("id", [""])[0])
-                    if value is None:
-                        self.send_error(
-                            404, "Tool record unavailable in selected study"
-                        )
-                        return
+                try:
+                    page = _positive_integer(query.get("page", ["1"])[0])
+                    if path == "/api/state":
+                        value = selected.snapshot()
+                        value["history"] = research_history(selected.root)
+                    elif path == "/api/metrics":
+                        value = metrics_snapshot(selected.root)
+                    elif path == "/api/overview":
+                        value = selected.overview()
+                    elif path == "/api/history":
+                        value = history_page(selected.root, page)
+                    elif path == "/api/iteration":
+                        raw = query.get("iteration", [""])[0]
+                        number = None if raw == "legacy" else _positive_integer(raw)
+                        value = iteration_detail(selected.root, number)
+                    elif path == "/api/agents":
+                        iteration = query.get("iteration", ["current"])[0]
+                        if iteration not in {"current", "all", "unknown"}:
+                            iteration = _positive_integer(iteration)
+                        role = query.get("role", ["all"])[0]
+                        if role not in {"all", *ROLE_LABELS}:
+                            raise ValueError("Invalid role")
+                        value = selected.agents_page(iteration, role, page)
+                    elif path == "/api/activity":
+                        value = selected.activity_page(page)
+                    else:
+                        identifier = query.get("id", [""])[0]
+                        if not identifier:
+                            raise ValueError("Missing record identifier")
+                        value = {
+                            "/api/tool": selected.tool_detail,
+                            "/api/agent": selected.agent_detail,
+                            "/api/message": selected.message_detail,
+                        }[path](identifier)
+                except ValueError as error:
+                    self.send_error(400, str(error))
+                    return
+                if value is None:
+                    self.send_error(404, "Record unavailable in selected study")
+                    return
                 body = json.dumps(value, ensure_ascii=False).encode()
                 content_type = "application/json; charset=utf-8"
             elif path in static:

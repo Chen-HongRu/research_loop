@@ -10,49 +10,58 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="brand-mark">R</span><div><strong>Research Loop</strong><span>Research Loop · 只读</span></div></div>
+    <div class="brand"><span class="brand-mark">R</span><div><strong>Research Loop</strong><span>研究工作空间 · 只读</span></div></div>
     <label class="study-picker">Study <select id="study-select" aria-label="选择 Study"><option>加载中</option></select></label>
-    <div class="top-status"><span id="state" class="status-pill">加载中</span><span id="budget">预算读取中</span></div>
+    <div class="top-status"><span id="state" class="badge">加载中</span><span id="iteration"></span><span id="last-refresh">尚未同步</span></div>
   </header>
   <div class="layout">
-    <aside class="sidebar">
-      <div class="side-heading">研究空间</div>
-      <nav aria-label="视图">
-        <button class="nav active" data-view="conversation">研究概览</button>
-        <button class="nav" data-view="agents">子 Agent <span id="agent-count"></span></button>
-        <button class="nav" data-view="tools">工具记录</button>
-        <button class="nav" data-view="background">研究背景</button>
-      </nav>
-      <div class="side-foot">原生消息与协作记录 · 每5秒同步</div>
-    </aside>
+    <aside class="sidebar"><div class="side-heading">研究空间</div><nav aria-label="视图">
+      <button class="nav active" data-view="overview">研究概览</button>
+      <button class="nav" data-view="history">研究轮次</button>
+      <button class="nav" data-view="agents">任务</button>
+      <button class="nav" data-view="activity">活动记录</button>
+      <button class="nav" data-view="metrics">资源与指标</button>
+      <button class="nav" data-view="context">研究背景</button>
+    </nav><div class="side-foot">当前页面每 5 秒同步<br>背景资料按需读取</div></aside>
     <main>
-      <div id="refresh-error" class="notice" hidden></div>
-      <section id="view-conversation" class="view">
-        <div class="page-heading"><div><div class="eyebrow">研究进展</div><h1>研究概览</h1><p>已报告的结果与当前协作进展。</p></div></div>
-        <section class="overview-block"><h2>最新研究总结</h2><div id="research-summary" class="summary-card"></div></section>
-        <section class="overview-block"><h2>研究线路与摘要</h2><p id="history-count" class="muted"></p><p class="muted">按轮次排列的已记录结果；摘要来自研究报告，尚未独立核验。展开可查看下一步、局限与证据。</p><div id="research-history" class="research-history"></div></section>
-        <section class="overview-block"><h2>协调进展</h2><div id="activity" class="activity">等待活动记录</div><div id="coordinator-message" class="markdown coordinator-message"></div><div id="coordinator-meta" class="muted"></div></section>
-        <section class="overview-block"><h2>效率指标</h2><div id="metrics" class="summary-card">指标读取中</div><p class="muted">Allocation 时长不是 GPU 核利用率；后台关联仅为关联，并非已证明的浪费。不同任务的前后对照仅作描述，不代表因果。</p></section>
-        <section class="overview-block"><div class="section-heading"><h2>研究团队</h2><button id="agent-link" class="inline-link" type="button">查看全部任务 →</button></div><div id="role-cards" class="role-cards"></div><p id="role-note" class="muted">角色来自 host 委派记录或任务名称推测，缺失记录会明确标注。</p></section>
-        <section class="overview-block"><h2>下一步</h2><div id="next-action" class="summary-card"></div><div id="research-docs"></div></section>
-        <details id="older-section" class="panel older" data-key="older-conversation"><summary>协调消息记录</summary><div id="latest-message" class="conversation"></div><div id="conversation" class="conversation"></div><section id="result-section" class="result-section" hidden><h2>本轮总结</h2><div id="result"></div></section></details>
+      <div id="refresh-error" class="notice" role="status" hidden></div>
+      <section id="view-overview" class="view">
+        <div class="page-heading"><div class="eyebrow">STUDY / OVERVIEW</div><h1>研究概览</h1><p>当前执行状态与最近报告；研究结论未经独立核验。</p></div>
+        <div id="overview-status" class="status-card"></div>
+        <div id="overview-error" class="notice" hidden></div>
+        <section class="overview-block"><div class="section-heading"><h2>最近研究总结</h2><button id="summary-link" class="inline-link">查看来源轮次 →</button></div><div id="research-summary" class="panel"></div></section>
+        <section class="overview-block"><h2>已记录的下一步</h2><p class="muted">来自对应轮次报告的建议，不代表正在执行。</p><div id="next-action" class="panel"></div></section>
+        <div class="overview-bottom"><section><div class="section-heading"><h2>本轮任务</h2><button class="inline-link" id="tasks-link">查看任务 →</button></div><div id="task-stats" class="stat-grid"></div></section><section><h2>资源预算</h2><div id="budget" class="panel"></div></section></div>
+      </section>
+      <section id="view-history" class="view" hidden>
+        <div class="page-heading"><div class="eyebrow">RESEARCH / ITERATIONS</div><h1>研究轮次</h1><p>按记录顺序排列；轮次顺序不代表科学进展或因果关系。</p></div>
+        <p id="history-count" class="muted"></p><div id="history-pagination" class="pagination"></div>
+        <div class="split-layout"><div id="history-list" class="record-list"></div><article id="iteration-detail" class="detail panel"></article></div>
       </section>
       <section id="view-agents" class="view" hidden>
-        <div class="page-heading"><div><div class="eyebrow">协作</div><h1>子 Agent</h1><p>任务、状态与已返回的消息。</p></div></div>
-        <div class="agent-filters"><label>角色 <select id="role-filter"><option value="all">全部任务</option><option value="Scout">Scout · 探索</option><option value="Proposer">Proposer · 方案</option><option value="Experimenter">Experimenter · 实验</option><option value="Analyst">Analyst · 分析</option><option value="Critic">Critic · 批判</option><option value="unknown">未知</option></select></label><label>范围 <select id="period-filter"><option value="all">当前与历史</option><option value="current">当前轮</option><option value="historical">历史轮</option><option value="unknown">轮次未知</option></select></label></div><div class="agent-layout"><div id="agent-list" class="agent-list"></div><div id="agent-detail" class="agent-detail"></div></div>
+        <div class="page-heading"><div class="eyebrow">COLLABORATION / TASKS</div><h1>任务</h1><p>角色、轮次关联和原生消息的可用性分别标注。</p></div>
+        <div class="filters"><label>角色 <select id="role-filter"><option value="all">全部角色</option><option>Scout</option><option>Proposer</option><option>Experimenter</option><option>Analyst</option><option>Critic</option><option value="unknown">未知</option></select></label><label>轮次 <select id="period-filter"><option value="current">当前轮</option><option value="all">全部轮次</option><option value="unknown">轮次未知</option></select></label></div>
+        <div id="agents-pagination" class="pagination"></div><div class="split-layout"><div id="agent-list" class="record-list"></div><article id="agent-detail" class="detail panel"></article></div>
       </section>
-      <section id="view-tools" class="view" hidden>
-        <div class="page-heading"><div><div class="eyebrow">执行记录</div><h1>工具调用</h1><p>展开后查看原始输入与输出。</p></div></div>
-        <div id="tools"></div>
+      <section id="view-activity" class="view" hidden>
+        <div class="page-heading"><div class="eyebrow">COORDINATION / ACTIVITY</div><h1>活动记录</h1><p>协调消息与工具记录；完整内容按需读取。</p></div>
+        <div id="activity-pagination" class="pagination"></div><p id="activity-count" class="muted"></p>
+        <div class="activity-columns"><section><h2>协调消息</h2><div id="messages"></div></section><section><h2>工具记录</h2><div id="tools"></div></section></div>
       </section>
-      <section id="view-background" class="view" hidden>
-        <div class="page-heading"><div><div class="eyebrow">参考资料</div><h1>研究背景</h1><p>历史数据不代表本次研究的新发现。</p></div></div>
-        <details class="panel" data-key="background-curves"><summary>历史曲线</summary><p class="muted">可选的历史数据；请结合来源与实验条件解读。</p><div id="charts" class="charts"></div><p id="provenance" class="muted"></p></details>
-        <details class="panel" data-key="background-goal"><summary>研究目标与科学范围</summary><div id="goal" class="markdown"></div></details>
-        <details class="panel" data-key="background-plan"><summary>原生计划</summary><div id="plan"></div></details>
+      <section id="view-metrics" class="view" hidden>
+        <div class="page-heading"><div class="eyebrow">OBSERVATION / RESOURCES</div><h1>资源与指标</h1><p>已记录的用量与覆盖范围；未测量的值不等于零。</p></div>
+        <div id="metrics-budget" class="panel"></div><div id="metrics" class="panel"></div>
+        <p class="muted">Allocation 时长不是 GPU 核利用率；采集范围不证明所有活动均已记录。前后对照仅作描述，不代表因果。</p>
+      </section>
+      <section id="view-context" class="view" hidden>
+        <div class="page-heading"><div class="eyebrow">REFERENCE / CONTEXT</div><h1>研究背景</h1><p>进入页面时读取；历史数据不代表本次研究的新发现。</p></div>
+        <details class="panel" data-key="context-goal" open><summary>研究目标与科学范围</summary><div id="goal" class="markdown doc-content"></div></details>
+        <div id="research-docs"></div>
+        <details class="panel" data-key="context-plan"><summary>已记录的计划</summary><div id="plan" class="doc-content"></div></details>
+        <details class="panel" data-key="context-curves"><summary>历史曲线</summary><div id="charts" class="charts doc-content"></div><p id="provenance" class="muted"></p></details>
       </section>
     </main>
   </div>
-  <nav class="mobile-nav" aria-label="视图"><button class="nav active" data-view="conversation">概览</button><button class="nav" data-view="agents">子 Agent</button><button class="nav" data-view="tools">工具</button><button class="nav" data-view="background">背景</button></nav>
+  <nav class="mobile-nav" aria-label="移动视图"><button class="nav active" data-view="overview">概览</button><button class="nav" data-view="history">轮次</button><button class="nav" data-view="agents">任务</button><button class="nav" data-view="activity">活动</button><button class="nav" data-view="metrics">资源</button><button class="nav" data-view="context">背景</button></nav>
 </body>
 </html>

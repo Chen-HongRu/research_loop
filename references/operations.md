@@ -13,6 +13,26 @@ uv run research-loop stop RUN
 
 Omit `--resource FILE` when remote resources are not authorized. Resource JSON specifies `host`, `partition`, `remote_root`, `ledger_path`, `gpu_seconds_total`, and `job_seconds`; `account`, `cpus`, `memory`, and `grace_seconds` are optional. Initialization freezes the parsed configuration and resolves `ledger_path` relative to the source configuration file. The shared ledger and its lock must be outside the agent-writable work and draft directories.
 
+## Read-only dashboard
+
+Run `uv run python -m research_loop.dashboard.server --study RUN --port 8768`
+and open `http://localhost:8768/`. Register multiple Studies with repeated
+`--study` or opt into immediate-child discovery with `--studies-dir STUDIES`.
+Only expose records authorized for everyone with access to this loopback service
+or its configured reverse proxy.
+
+The overview shows current execution separately from the latest reported result.
+Use iteration history for paged results and evidence, tasks for role/iteration
+filters, activity for coordinator messages and retained tools, resources/metrics
+for existing measurements, and context for the goal and working documents.
+Publication is read from the activated knowledge pointer and matching metadata;
+a result file alone does not establish publication or scientific success.
+Only the active operational page refreshes; context loads on navigation. Links
+retain the Study and selected view. Missing detail or removed Studies show an
+explicit unavailable state. No dashboard action continues/stops a Study or
+dispatches compute. See [metrics setup](efficiency.md) and
+[optional behavior observations](behavior-metrics.md) for existing sidecar outputs.
+
 ## Execution environments
 
 Provision the environment once, outside the research loop, using `uv`. Then
