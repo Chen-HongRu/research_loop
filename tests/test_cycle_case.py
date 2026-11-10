@@ -248,3 +248,24 @@ def test_improvement_threshold_is_strict(tmp_path):
         check(case, workspace, evaluation(disposition="contradicted"))["status"]
         == "pass"
     )
+
+
+def test_prose_evidence_is_not_silently_repaired(case, tmp_path):
+    workspace = build_workspace(case, tmp_path / "candidate")
+    write_result(case, workspace)
+    malformed = evaluation(
+        evidence=["result.json demonstrates the expected improvement."]
+    )
+    result = check(case, workspace, malformed)
+    assert result["status"] == "not-evaluable"
+    assert result["metrics"] == {"control_mse": 1, "candidate_mse": 0, "delta_mse": -1}
+    assert check(case, workspace, evaluation())["status"] == "pass"
+
+
+def test_native_evidence_schema_only_permits_artifact_paths(case):
+    from benchmarks.experiment_cycle.runner import output_schema
+
+    allowed = output_schema("evaluate", case)["properties"]["evidence"]["items"]["enum"]
+    assert case["result_file"] in allowed
+    assert ".cycle/execute.json" in allowed
+    assert "result.json demonstrates the expected improvement." not in allowed

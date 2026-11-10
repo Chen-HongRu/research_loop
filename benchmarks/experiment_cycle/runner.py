@@ -71,7 +71,7 @@ SCHEMAS = {
 TASKS = {
     "plan": "Design this bounded experiment: hypothesis, matched control, permitted change, evaluation rule and outcome interpretations. Do not implement or run the experiment.",
     "prepare": "Implement the supplied plan in the candidate workspace. You may syntax-check only; do not run the substantive experiment or create its result file. Return the exact supplied command, smoke evidence and artifact paths.",
-    "evaluate": "Read the supplied plan, execution receipt and actual result. Independently compute the metrics and return the bounded conclusion, limitations and evidence. Remain read-only and do not rerun the experiment.",
+    "evaluate": "Read the supplied plan, execution receipt and actual result. Independently compute the metrics and return the bounded conclusion and limitations. Each evidence entry must be an exact workspace-relative filename only, without explanation or sentences; include the supplied result_file. Remain read-only and do not rerun the experiment.",
 }
 POLICY = """You are one specialist in a bounded, coordinator-free benchmark.
 A deterministic host transfers artifacts and executes the prepared command.
@@ -80,6 +80,36 @@ network, GPU, package installation or access to other runs or hidden checks.
 Preserve data roles and inputs. Do not change the task or claim unseen results.
 Return the requested JSON schema. Keep your conclusion within the task scope.
 """
+
+
+def output_schema(stage, case):
+    if stage != "evaluate":
+        return SCHEMAS[stage]
+    return {
+        **SCHEMAS[stage],
+        "properties": {
+            **SCHEMAS[stage]["properties"],
+            "evidence": {
+                "type": "array",
+                "description": "Exact workspace-relative filenames only; include result_file. Put explanations in limitations.",
+                "items": {
+                    "type": "string",
+                    "enum": list(
+                        dict.fromkeys(
+                            [
+                                case["result_file"],
+                                ".cycle/plan.json",
+                                ".cycle/prepare.json",
+                                ".cycle/execute.json",
+                                "inputs.json",
+                                case["command"][1],
+                            ]
+                        )
+                    ),
+                },
+            },
+        },
+    }
 
 
 def launch_config(root, workspace, *, writable, model, effort, protected=()):
@@ -133,7 +163,7 @@ class NativeAgent:
                 result = await native.run(
                     POLICY + TASKS[stage],
                     payload,
-                    SCHEMAS[stage],
+                    output_schema(stage, case),
                     model=model,
                     effort=effort,
                     on_started=lambda tid: identity(tid, None),

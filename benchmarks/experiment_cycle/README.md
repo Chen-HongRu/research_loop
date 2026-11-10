@@ -44,7 +44,7 @@ the final report serialization is outside the measured interval.
 A failed stage stops the attempt and keeps its cost; later stages are not-run.
 The CLI exits nonzero on stage failure, incorrect/not-evaluable output, or
 incomplete usage coverage. A successful process exit alone never passes the
-independent checker. The sample checker recomputes paired control/candidate MSE
+independent checker. Evaluation evidence entries are exact workspace-relative filenames, not explanatory sentences; the native output schema constrains them to the supplied artifact paths. Malformed references remain not-evaluable and are never silently repaired. The sample checker recomputes paired control/candidate MSE
 from prediction rows and frozen targets and verifies the restricted conclusion.
 It does not certify arbitrary scientific claims or computation provenance.
 
