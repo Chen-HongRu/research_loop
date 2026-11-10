@@ -406,10 +406,10 @@ def test_cpu_only_and_usage_format_coverage(study):
 
 
 def test_journal_repair_after_sample_append(study, monkeypatch):
-    import research_loop.metrics as metrics
+    import research_loop.sample_store as storage
 
     session(study, events=[record()])
-    original = metrics._atomic
+    original = storage._atomic
 
     def interrupted(path, value):
         if path.name == "latest.json":
@@ -418,7 +418,7 @@ def test_journal_repair_after_sample_append(study, monkeypatch):
 
     c = collector(study)
     with monkeypatch.context() as patch:
-        patch.setattr(metrics, "_atomic", interrupted)
+        patch.setattr(storage, "_atomic", interrupted)
         with pytest.raises(OSError):
             c.poll(END)
     c.close()

@@ -25,6 +25,17 @@ def write_json(path: Path, value):
     temporary.replace(path)
 
 
+def iteration_directory(root, number):
+    path = root / "iterations" / f"{number:06d}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def record_status(root, state):
+    write_json(iteration_directory(root, state["iteration"]) / "status.json", state)
+    write_json(root / "status.json", state)
+
+
 @contextmanager
 def writer(root: Path):
     with (root / "writer.lock").open("a") as stream:

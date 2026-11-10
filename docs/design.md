@@ -77,6 +77,14 @@ STOP at that boundary. The committed pointer permits recovery if root status was
 not written after publication. Newer unfinished work is preserved. Publication
 and iteration records do not guarantee recovery from arbitrary crashes.
 
+`publication.py` owns the two iteration publication entry points: `commit`
+activates the knowledge version and acknowledges its human request; `recover`
+replays acknowledgement and repairs stale result/status records from the active
+version. The controller owns result validation, resource settlement, admission,
+and final status recording on every exit. Both entry points run under its Study
+writer lock. Filesystem publication and input revision locking remain in
+`state.py` and `human_input.py`.
+
 ## Execution environment
 
 An optional initialization-time environment JSON selects an existing local
@@ -164,6 +172,33 @@ from the controller. It reads native traces and resource records incrementally,
 writes private aggregate observations outside the Study, and never calls a model
 or allocates resources. Measurement phase labels are operator annotations;
 observed differences do not establish a causal improvement or scientific value.
+
+`identity.resolve` supplies offline efficiency reports and incremental metrics
+with Study membership, task names, roles and attribution sources from already-read
+metadata and Host role mappings. Readers retain input validation, diagnostics,
+incremental offsets and cached-task update behavior. Attribution sources remain
+internal and add no report or checkpoint fields. The dashboard retains its
+own role interpretation.
+
+`token_usage.accept_record` supplies the shared request-usage validation and
+Study-wide response ID deduplication rule. Offline schema version 2 and continuous
+metrics use accepted receipts as their Token totals; cumulative notifications
+remain separate reconciliation evidence. Readers apply the notification-time
+window after accepting receipts, so pre-window duplicates are not counted again.
+Consumption evidence without any valid receipt marks that thread's usage
+incomplete; this does not prove that other threads have every request recorded.
+Receipts without any recognized usage field are rejected without reserving their
+ID. Continuous reports and checkpoints use version 2; version 1 outputs remain
+historical and require a fresh output directory to recompute under this rule.
+
+`sample_store.publish_pending` completes a checkpointed sample under the
+collector's single-writer lock, both after a poll and during restart. Collectors
+own sample calculation, enrichment and history projection. Their shared poll
+path first saves the pending sample and source offsets in the checkpoint.
+Publication checks the committed journal length, truncates any uncommitted tail,
+appends and fsyncs the projected history, replaces `latest.json`, then saves the
+new journal position without the pending sample. A journal shorter than the
+committed position is an error. Both collectors retain their version 2 formats.
 
 ## Dashboard
 

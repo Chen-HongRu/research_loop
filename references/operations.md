@@ -191,12 +191,48 @@ configured ledger when auditing a copied snapshot. Keep traces and reports priva
 The default period starts at the first recorded `lead.input` and ends at the
 command's start time. Explicit bounds require a timezone and use
 `since <= event_time < until`. Usage is attributed by its notification time,
-without prorating responses crossing a boundary. Cumulative token notifications
-are differenced per thread, with duplicate values removed. Input already includes
-cached input; output already includes reasoning. The separately deduplicated
-response-usage records are a cross-check, not another total to add: differences
-can expose compaction usage or boundary timing. Missing records, partial tails
-and counter resets are reported as coverage limitations.
+without prorating responses crossing a boundary. Token totals use valid
+`token_usage_record` receipts, deduplicated by `response_id` across the selected
+Study threads, including receipts observed before the window. Both the top-level
+record and `event_msg` forms are accepted; compaction requests count when they
+have receipts. Input already includes cached input; output already includes
+reasoning. Cumulative `token_count` differences appear only in
+`llm.reconciliation.cumulative_usage` and per-task `cumulative_window`;
+`record_minus_cumulative` subtracts those differences from request totals.
+The two sources are never added or substituted for each other.
+
+An accepted receipt requires a nonempty string response ID and a usage object
+with at least one recognized Token field. Counts must be nonnegative integers
+(not booleans), and cached input cannot exceed input. Omitted individual counters
+default to zero; an explicit zero count is valid. Rejected receipts do not reserve
+their ID, so a later corrected receipt can be accepted.
+
+Offline reports use `schema_version: 2`. `llm.authority` names the request-usage
+source; `responses` and `duplicate_responses` replace the former
+`usage_updates` and `duplicate_updates` fields in total, role and task usage.
+`llm.reconciliation.record_usage` was removed because request usage is now the
+main total; `unique_response_records` counts accepted requests in the window.
+Malformed cumulative notifications are skipped without resetting the previous
+snapshot, and are reported as coverage gaps.
+Version 1 reports used cumulative differences as their main total. Preserve their
+historical interpretation rather than treating them as version 2 measurements.
+
+Threads showing consumption evidence but no valid request receipts are listed in
+`coverage.usage_records_missing_threads`, with `coverage.complete` and
+`llm.measurable` false. Threads with no such evidence await their first receipt
+and do not invent usage. `usage_records_observed` counts accepted receipts across
+the available history before the cutoff, whereas `responses` counts only the
+window. A recorded zero is not a measured zero for a missing-receipt thread.
+This detection cannot establish that every request in an otherwise recorded
+thread was captured. Invalid receipts, counter resets and partial tails are
+reported as coverage limitations. Complete JSON without a terminating newline
+also remains pending. Readers expect chronological timestamps within each source.
+Both stop Token accounting for a source at the exclusive cutoff. Global duplicate
+IDs are assigned to the first encountered session; initial discovery uses file order.
+For copied IDs across threads, later discovery or Host mapping changes can alter
+attribution relative to a fresh offline snapshot. Matching attribution requires
+the same selected histories and encounter order; unique request IDs avoid this
+ambiguity.
 
 Host-delegated roles use `roles.json`; other delegate roles are inferred from task names. Tool counts include top-level native
 calls; calls nested inside code execution are not counted again. Observed waiting

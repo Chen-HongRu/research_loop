@@ -11,13 +11,11 @@ import signal
 import threading
 from time import perf_counter, process_time
 
-VERSION = 1
-TOKEN_KEYS = (
-    "input_tokens",
-    "cached_input_tokens",
-    "output_tokens",
-    "reasoning_output_tokens",
-)
+from .identity import resolve
+from .sample_store import _atomic, publish_pending
+from .token_usage import AUTHORITY, TOKEN_KEYS, accept_record, cumulative_counts
+
+VERSION = 2
 WAITS = {"wait", "wait_agent", "sleep"}
 TERMINAL = {
     "COMPLETED",
@@ -66,20 +64,7 @@ def derived(value):
     }
 
 
-def task_state(tid, task, parent, role=None):
-    if not (isinstance(role, str) and role):
-        role = (
-            "lead"
-            if parent is None
-            else next(
-                (
-                    r
-                    for r in ("scout", "proposer", "experimenter", "analyst", "critic")
-                    if task.lower().startswith(r)
-                ),
-                "unclassified",
-            )
-        )
+def task_state(tid, task, parent, role):
     return {
         "thread_id": tid,
         "task": task,
@@ -111,17 +96,6 @@ def task_state(tid, task, parent, role=None):
         "last_source_event_at": None,
         "consumption_evidence": False,
     }
-
-
-def _atomic(path, value):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as stream:
-        json.dump(value, stream, separators=(",", ":"), ensure_ascii=False)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
 
 
 class Collector:
@@ -357,17 +331,19 @@ class Collector:
             except (OSError, ValueError, AttributeError):
                 self._issue("roles:invalid")
         known = {m["thread_id"] for m in self.state["metadata"].values()}
-        selected = {lead} if lead else set()
-        selected |= {tid for tid in roles if tid in known}
-        while True:
-            children = {
-                m["thread_id"]
-                for m in self.state["metadata"].values()
-                if m["parent"] in selected
+        # Preserve the collector's typed-field validation, unlike the offline
+        # reader's truthy-field fallback. Neither changes checkpoint contents.
+        normalized_roles = {
+            tid: {
+                key: row.get(key)
+                if isinstance(row.get(key), str) and row[key]
+                else None
+                for key in ("task", "role")
             }
-            if children <= selected:
-                break
-            selected |= children
+            for tid, row in roles.items()
+        }
+        identities = resolve(lead, self.state["metadata"].values(), normalized_roles)
+        selected = identities.keys()
         if lead not in known:
             self._issue("sessions:missing_lead")
         seen = set()
@@ -379,32 +355,20 @@ class Collector:
                 self._issue("sessions:duplicate_thread")
                 continue
             seen.add(tid)
-            mapped = roles.get(tid, {})
-            mapped_task = mapped.get("task")
-            task_name = (
-                mapped_task
-                if isinstance(mapped_task, str) and mapped_task
-                else meta["task"]
+            identity = identities[tid]
+            explicit_role = identity.role_source == "host-role-record"
+            parent = None if tid == lead else meta["parent"]
+            # Existing collector initialization treats parentless tasks without
+            # an explicit role as lead. Keep this historical checkpoint behavior.
+            initial_role = (
+                "lead" if parent is None and not explicit_role else identity.role
             )
-            mapped_role = mapped.get("role")
             task = self.state["tasks"].setdefault(
                 tid,
-                task_state(
-                    tid,
-                    task_name,
-                    None if tid == lead else meta["parent"],
-                    mapped_role
-                    if tid != lead and isinstance(mapped_role, str) and mapped_role
-                    else None,
-                ),
+                task_state(tid, identity.task, parent, initial_role),
             )
-            if (
-                tid != lead
-                and isinstance(mapped_role, str)
-                and mapped_role
-                and task.get("role") != mapped_role
-            ):
-                task["role"] = mapped_role
+            if tid != lead and explicit_role and task.get("role") != identity.role:
+                task["role"] = identity.role
             for row, at in self._tail(Path(path), "sessions"):
                 self._source_at(at)
                 self._session(task, row, at)
@@ -447,12 +411,8 @@ class Collector:
         if kind == "compacted" and inside:
             task["compactions"] += 1
         if kind == "event_msg" and event == "token_count" and p.get("info"):
-            value = p.get("info", {}).get("total_token_usage", {})
-            if isinstance(value, dict) and all(
-                type(value.get(k, 0)) is int and value.get(k, 0) >= 0
-                for k in TOKEN_KEYS
-            ):
-                current = {k: value.get(k, 0) for k in TOKEN_KEYS}
+            current = cumulative_counts(p["info"])
+            if current is not None:
                 if any(current.values()):
                     task["consumption_evidence"] = True
                 delta = {
@@ -468,27 +428,15 @@ class Collector:
         if kind == "token_usage_record" or (
             kind == "event_msg" and event == "token_usage_record"
         ):
-            rid, value = p.get("response_id"), p.get("usage", {})
-            if not isinstance(rid, str) or not rid:
-                self._issue("sessions:missing_response_id")
-                return
-            if rid in self.responses:
+            value, issue = accept_record(p, self.responses)
+            if issue == "duplicate":
                 if inside:
                     task["duplicate_responses"] += 1
                 return
-            if (
-                not isinstance(value, dict)
-                or any(
-                    type(value.get(k, 0)) is not int or value.get(k, 0) < 0
-                    for k in TOKEN_KEYS
-                )
-                or value.get("cached_input_tokens", 0) > value.get("input_tokens", 0)
-            ):
-                self._issue("sessions:invalid_usage_record")
+            if issue:
+                self._issue("sessions:" + issue)
                 return
-            self.responses.add(rid)
             task["lifetime_responses"] += 1
-            value = {**{k: value.get(k, 0) for k in TOKEN_KEYS}, "responses": 1}
             n = task["lifetime_responses"]
             if inside:
                 add(task["usage"], value)
@@ -668,9 +616,9 @@ class Collector:
         return result
 
     def _publish_pending(self):
-        pending = self.state.get("pending_sample")
-        if pending is None:
-            return
+        publish_pending(self.output, self.state, self._sample_history)
+
+    def _sample_history(self, pending):
         history = {
             key: pending[key]
             for key in (
@@ -694,25 +642,7 @@ class Collector:
         history["history"] = {
             "task_details": "Full by_task details are in latest.json, omitted from per-tick history."
         }
-        path = self.output / "samples.jsonl"
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "r+b") as stream:
-            if stream.seek(0, os.SEEK_END) < self.state["sample_offset"]:
-                raise ValueError("sample journal is shorter than committed checkpoint")
-            stream.truncate(self.state["sample_offset"])
-            stream.seek(self.state["sample_offset"])
-            stream.write(
-                (
-                    json.dumps(history, separators=(",", ":"), ensure_ascii=False)
-                    + "\n"
-                ).encode()
-            )
-            stream.flush()
-            os.fsync(stream.fileno())
-            self.state["sample_offset"] = stream.tell()
-        _atomic(self.output / "latest.json", pending)
-        del self.state["pending_sample"]
-        _atomic(self.output / "checkpoint.json", self.state)
+        return history
 
     def poll(self, cutoff=None):
         if self.lock is None:
@@ -887,7 +817,7 @@ class Collector:
                 "excluded_session_threads": excluded,
             },
             "llm": {
-                "authority": "unique response_id token_usage_record",
+                "authority": AUTHORITY,
                 "measurable": bool(observed_records) and not missing_record_threads,
                 "total": derived(total),
                 "by_role": roles,

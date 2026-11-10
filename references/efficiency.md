@@ -31,9 +31,36 @@ research work. Source gaps, partial tails and unrecognized or missing usage are
 coverage conditions, not evidence of zero consumption. A successful sample and a
 new source event are different observations.
 
-Usage comes from unique native `token_usage_record` response IDs, including
-compaction. Cumulative token notifications are a cross-check and are never added
-again. Input includes cached input; output includes reasoning. The report keeps
+Offline audits and this collector share the request-usage acceptance rule:
+valid native `token_usage_record` receipts are deduplicated by `response_id`
+across selected Study threads, including pre-window receipts and compaction
+requests. Cumulative token notifications are a cross-check and are never added
+or used as fallback. Input includes cached input; output includes reasoning.
+Both readers apply the same `[since, until)` notification-time window and wait
+for complete newline-terminated records. For the same selected threads and
+available chronological history, offline, incremental and resumed Token totals
+match. Live sources are not atomic snapshots, so compare at the same cutoff and
+with the same available records.
+
+Threads with consumption evidence but no valid receipts make coverage incomplete
+and `llm.measurable` false. No-evidence threads await first usage. Invalid receipts
+remain coverage gaps across restart; neither rule can detect every omitted
+request in a thread that has some valid receipts. Offline schema version 2 names
+this authority explicitly; older schema version 1 offline reports used cumulative
+differences. See [offline fields and historical interpretation](operations.md#efficiency-diagnostics).
+The collector now uses report/checkpoint version 2. Use a fresh phase output
+directory for version 1 checkpoints: those may have accepted a receipt with no
+usage fields as zero and cannot be repaired from offsets alone. Existing output
+is preserved; this change does not rewrite old samples or rescan a checkpoint.
+The sample publication and restart protocol is unchanged. Both continuous
+collectors now use `sample_store.publish_pending` for normal saving and restart
+repair; each keeps its own statistics and history projection. The pending sample
+and source offsets are checkpointed first. The common path repairs only the
+uncommitted journal tail, appends and fsyncs history, replaces `latest.json`, then
+commits the new journal position without a pending sample. A journal shorter
+than its committed position is rejected. This refactor requires no new output
+directory for version 2 phases and does not change their fields or formats.
+The report keeps
 role/task totals, startup and early-response cohorts, observed waiting, resource
 results and allocation receipts. Host-delegated roles use `RUN/roles.json`; other roles are inferred from task names. Background
 loading is a fixed heuristic associating visible goal/knowledge/instruction reads

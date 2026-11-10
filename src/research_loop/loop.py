@@ -12,9 +12,18 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .codex import Native, configuration
-from . import environment, human_input
+from . import environment, human_input, publication
 from .instructions import RESULT_SCHEMA, instructions
-from .state import Journal, Knowledge, PublicationStopped, now, write_json, writer
+from .state import (
+    Journal,
+    Knowledge,
+    PublicationStopped,
+    iteration_directory,
+    now,
+    record_status,
+    write_json,
+    writer,
+)
 
 
 def read_config(root):
@@ -204,17 +213,6 @@ def inspect(root):
     }
 
 
-def iteration_directory(root, number):
-    path = root / "iterations" / f"{number:06d}"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def record_status(root, state):
-    write_json(iteration_directory(root, state["iteration"]) / "status.json", state)
-    write_json(root / "status.json", state)
-
-
 async def run_iteration(root, state, previous_result, journal, native_factory):
     native, adapter, watch = None, None, None
     cleanup_started = False
@@ -339,27 +337,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
         ):
             state.update(status="needs-reconciliation")
         else:
-            publication = {
-                **state,
-                "status": "completed"
-                if result["study_action"] == "stop"
-                else "iteration-completed",
-                "ended_at": now(),
-            }
-            if result["study_action"] == "continue":
-                publication["next_iteration"] = state["iteration"] + 1
-            published = await asyncio.to_thread(
-                knowledge.publish, baseline, publication=publication
-            )
-            state.update(
-                status="completed"
-                if result["study_action"] == "stop"
-                else "iteration-completed",
-                knowledge_version=published,
-            )
-            await asyncio.to_thread(human_input.consume, root, publication)
-            if result["study_action"] == "continue":
-                state["next_iteration"] = state["iteration"] + 1
+            await publication.commit(root, state, baseline)
     except PublicationStopped:
         state.update(status="stopped")
     except BaseException as error:
@@ -398,18 +376,7 @@ async def run(root, *, continue_run=False, native_factory=Native):
     # One writer owns the entire Study, including publication and round transitions.
     with writer(root):
         state = json.loads((root / "status.json").read_text())
-        published = Knowledge(root).published_state()
-        if published:
-            await asyncio.to_thread(human_input.consume, root, published)
-        if (
-            published
-            and published["iteration"] >= state.get("iteration", 0)
-            and state.get("knowledge_version") != published["knowledge_version"]
-        ):
-            # The active pointer proves publication even if latest status was not written.
-            state = published
-            write_json(root / "result.json", state["result"])
-            record_status(root, state)
+        state = await publication.recover(root, state)
         if not continue_run and state["status"] == "completed":
             return state
         if (root / "STOP").exists():

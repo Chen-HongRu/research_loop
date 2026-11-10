@@ -7,12 +7,9 @@ import json
 from pathlib import Path
 from time import perf_counter
 
-TOKEN_KEYS = (
-    "input_tokens",
-    "cached_input_tokens",
-    "output_tokens",
-    "reasoning_output_tokens",
-)
+from .identity import resolve
+from .token_usage import AUTHORITY, TOKEN_KEYS, accept_record, cumulative_counts
+
 WAIT_TOOLS = {"wait", "wait_agent", "sleep"}
 
 
@@ -57,7 +54,7 @@ def _add(target, value):
 
 
 def _usage():
-    return {**_tokens(), "usage_updates": 0, "duplicate_updates": 0, "compactions": 0}
+    return {**_tokens(), "responses": 0, "duplicate_responses": 0, "compactions": 0}
 
 
 def _derived(value):
@@ -106,6 +103,9 @@ class _Reader:
                 remaining -= len(line)
                 self.bytes += len(line)
                 if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    self.problem(source, "incomplete_tail")
                     break
                 try:
                     row = json.loads(line)
@@ -199,22 +199,24 @@ def report(
             reader.problem("sessions", "duplicate_thread")
             continue
         sessions[tid] = (path, payload)
-    selected = {lead} if lead else set()
-    selected |= {tid for tid in role_threads if tid in sessions}
-    while True:
-        children = {
-            tid
+    identities = resolve(
+        lead,
+        [
+            {
+                "thread_id": tid,
+                "parent": meta["source"]
+                .get("subagent", {})
+                .get("thread_spawn", {})
+                .get("parent_thread_id")
+                if isinstance(meta.get("source"), dict)
+                else None,
+                "task": meta.get("agent_path", "/root"),
+            }
             for tid, (_, meta) in sessions.items()
-            if isinstance(meta.get("source"), dict)
-            and meta["source"]
-            .get("subagent", {})
-            .get("thread_spawn", {})
-            .get("parent_thread_id")
-            in selected
-        }
-        if children <= selected:
-            break
-        selected |= children
+        ],
+        role_threads,
+    )
+    selected = identities.keys()
     if lead and lead not in sessions:
         reader.problem("sessions", "missing_lead")
     totals = _usage()
@@ -222,39 +224,32 @@ def report(
     tasks = []
     tool_names = Counter()
     complete_threads = set()
-    records_total = _tokens()
-    record_count = 0
-    for tid in sorted(selected & sessions.keys()):
+    cumulative_total = _tokens()
+    seen_records = set()
+    missing_record_threads = []
+    awaiting_first_usage_threads = []
+    # Match the collector's initial file-discovery order for Study-wide receipt
+    # deduplication, including duplicate IDs observed before the window.
+    for tid in identities:
         path, meta = sessions[tid]
-        mapped = (
-            role_threads.get(tid) if isinstance(role_threads.get(tid), dict) else {}
-        )
-        task = mapped.get("task") or meta.get("agent_path", "/root").rsplit("/", 1)[-1]
-        role = (
-            "lead"
-            if tid == lead
-            else mapped.get("role")
-            or next(
-                (
-                    r
-                    for r in ("scout", "proposer", "experimenter", "analyst", "critic")
-                    if task.lower().startswith(r)
-                ),
-                "unclassified",
-            )
-        )
+        task, role = identities[tid].task, identities[tid].role
         usage = _usage()
         previous = _tokens()
-        seen_records = set()
         seen_calls = set()
-        records = _tokens()
+        cumulative = _tokens()
+        lifetime_responses = 0
+        consumption_evidence = False
+        token_cutoff_reached = False
         started_at = first_tool_at = completed_at = None
         pending_waits = {}
         returned_waits = set()
         waits = {name: _waits() for name in sorted(WAIT_TOOLS)}
         for row in reader.rows(path, "sessions"):
             at = reader.at(row, "sessions")
-            if at is None or at >= end:
+            if at is None:
+                continue
+            if at >= end:
+                token_cutoff_reached = True
                 continue
             payload = row.get("payload", {})
             if not isinstance(payload, dict):
@@ -262,6 +257,23 @@ def report(
                 continue
             kind = row.get("type")
             event = payload.get("type")
+            # Match incremental token tail cutoff without changing the offline
+            # report's existing handling of non-token activity records.
+            if token_cutoff_reached and (
+                kind == "token_usage_record"
+                or kind == "event_msg"
+                and event in {"token_usage_record", "token_count"}
+            ):
+                continue
+            if (
+                not token_cutoff_reached
+                and kind == "response_item"
+                and (
+                    event in {"function_call", "custom_tool_call", "reasoning"}
+                    or (event == "message" and payload.get("role") == "assistant")
+                )
+            ):
+                consumption_evidence = True
             if kind == "session_meta":
                 started_at = at.isoformat()
             if kind == "event_msg" and event == "task_complete":
@@ -307,39 +319,33 @@ def report(
                         ):
                             waits[name]["wait_agent_timeouts"] += 1
             if kind == "event_msg" and event == "token_count" and payload.get("info"):
-                try:
-                    current = _tokens(payload["info"]["total_token_usage"])
-                    if any(type(v) is not int or v < 0 for v in current.values()):
-                        raise ValueError
-                    delta = {k: current[k] - previous[k] for k in TOKEN_KEYS}
-                except (KeyError, TypeError, ValueError, AttributeError):
-                    reader.problem("sessions", "invalid_token_usage")
+                current = cumulative_counts(payload["info"])
+                if current is None:
+                    reader.problem("sessions", "invalid_cumulative_usage")
                     continue
+                if any(current.values()):
+                    consumption_evidence = True
+                delta = {k: current[k] - previous[k] for k in TOKEN_KEYS}
                 previous = current
                 if any(v < 0 for v in delta.values()):
                     reader.problem("sessions", "cumulative_counter_decrease")
                     continue  # Rebaseline; the reset interval cannot be recovered exactly.
                 if inside(at):
-                    if any(delta.values()):
-                        _add(usage, delta)
-                        usage["usage_updates"] += 1
-                    else:
-                        usage["duplicate_updates"] += 1
+                    _add(cumulative, delta)
             if kind == "token_usage_record" or (
                 kind == "event_msg" and event == "token_usage_record"
             ):
-                rid = payload.get("response_id")
-                if not rid:
-                    reader.problem("sessions", "usage_record_missing_response_id")
-                elif rid not in seen_records:
-                    seen_records.add(rid)
+                value, issue = accept_record(payload, seen_records)
+                if issue == "duplicate":
                     if inside(at):
-                        record = _tokens(payload.get("usage"))
-                        if all(type(v) is int and v >= 0 for v in record.values()):
-                            _add(records, record)
-                            record_count += 1
-                        else:
-                            reader.problem("sessions", "invalid_usage_record")
+                        usage["duplicate_responses"] += 1
+                elif issue:
+                    reader.problem("sessions", issue)
+                else:
+                    lifetime_responses += 1
+                    if inside(at):
+                        _add(usage, value)
+                        usage["responses"] += 1
             if not inside(at):
                 continue
             if kind == "compacted":
@@ -354,7 +360,13 @@ def report(
                 if cid is None or cid not in seen_calls:
                     seen_calls.add(cid)
                     tool_names[payload.get("name", "unknown")] += 1
-        _add(records_total, records)
+        _add(cumulative_total, cumulative)
+        authority_missing = not lifetime_responses and consumption_evidence
+        awaiting_first_usage = not lifetime_responses and not consumption_evidence
+        if authority_missing:
+            missing_record_threads.append(tid)
+        elif awaiting_first_usage:
+            awaiting_first_usage_threads.append(tid)
         for key in usage:
             totals[key] += usage[key]
         aggregate = by_role.setdefault(role, _usage())
@@ -370,8 +382,15 @@ def report(
                 "completed_at": completed_at,
                 "waits_by_tool": waits,
                 "usage": _derived(usage),
+                "cumulative_window": _derived(cumulative),
+                "usage_records_observed": lifetime_responses,
+                "authority_missing": authority_missing,
+                "awaiting_first_usage": awaiting_first_usage,
             }
         )
+
+    if missing_record_threads:
+        reader.problem("sessions", "usage_records_missing")
 
     calls = Counter()
     failed = Counter()
@@ -481,7 +500,7 @@ def report(
             allocation["nonterminal_jobs"] += 1
     allocation["states"] = dict(states)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "window": {
             "since": start.isoformat() if start else None,
             "until": end.isoformat(),
@@ -493,18 +512,23 @@ def report(
             "session_files_discovered": len(paths),
             "selected_threads": len(selected & sessions.keys()),
             "excluded_session_threads": len(sessions.keys() - selected),
+            "usage_records_observed": len(seen_records),
+            "usage_records_missing_threads": missing_record_threads,
+            "awaiting_first_usage_threads": awaiting_first_usage_threads,
         },
         "llm": {
+            "authority": AUTHORITY,
+            "measurable": bool(seen_records) and not missing_record_threads,
             "total": _derived(totals),
             "by_role": {r: _derived(u) for r, u in by_role.items()},
             "by_task": tasks,
             "reconciliation": {
-                "unique_response_records": record_count,
-                "record_usage": _derived(records_total),
+                "unique_response_records": totals["responses"],
+                "cumulative_usage": _derived(cumulative_total),
                 "record_minus_cumulative": {
-                    k: records_total[k] - totals[k] for k in TOKEN_KEYS
+                    k: totals[k] - cumulative_total[k] for k in TOKEN_KEYS
                 },
-                "interpretation": "Separate cross-check; positive differences may include uncounted compaction usage or boundary timing. Never added to cumulative totals.",
+                "interpretation": "Cumulative counts are a separate cross-check, never a fallback or added to request usage. Differences may include compaction usage, boundary timing or missing records.",
             },
         },
         "resources": {
@@ -539,7 +563,8 @@ def report(
             "file_reads": reader.files,
         },
         "limitations": [
-            "Recorded usage is assigned by notification time, without prorating responses across window boundaries; input includes cached and output includes reasoning tokens.",
+            "Usage is unique Study-wide response_id token_usage_record, assigned by notification time in [since, until), including compaction requests. Input includes cached and output includes reasoning; cumulative token_count is only a cross-check.",
+            "Missing request records never fall back to cumulative counts. Threads with consumption evidence and no valid receipts are incomplete; threads without such evidence await first usage. This cannot detect every missing request within an otherwise recorded thread.",
             "Host-delegated roles use roles.json; other delegates are inferred from task names. Confirmed descendants and mapped host threads are included. Native tool counts exclude calls nested in code execution.",
             "Allocation seconds are full settled elapsed time for jobs dispatched in the window, not window overlap or GPU core utilization; CANCELLED is a terminal state, not automatically failure.",
             "Wait durations sum observed call-to-return intervals for window-started calls returned before cutoff; parallel waits overlap and do not measure wall-clock time or waste.",

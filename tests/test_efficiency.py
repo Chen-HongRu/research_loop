@@ -56,6 +56,22 @@ def token(at, inputs, cached, output, reasoning):
     }
 
 
+def receipt(rid, at, inputs, cached=0, output=0, reasoning=0):
+    return {
+        "timestamp": at,
+        "type": "token_usage_record",
+        "payload": {
+            "response_id": rid,
+            "usage": {
+                "input_tokens": inputs,
+                "cached_input_tokens": cached,
+                "output_tokens": output,
+                "reasoning_output_tokens": reasoning,
+            },
+        },
+    }
+
+
 @pytest.fixture
 def study(tmp_path):
     write_json(tmp_path / "status.json", {"thread_id": "lead"})
@@ -102,7 +118,12 @@ def test_usage_window_dedup_reconciliation_and_tree(study):
         "child",
         "lead",
         "critic_one",
-        [token("2026-01-01T00:02:00Z", 10, 0, 3, 1)],
+        [
+            token("2026-01-01T00:02:00Z", 10, 0, 3, 1),
+            receipt(
+                "child-response", "2026-01-01T00:02:05Z", 10, output=3, reasoning=1
+            ),
+        ],
     )
     session(
         study / "native/sessions/other.jsonl",
@@ -112,19 +133,20 @@ def test_usage_window_dedup_reconciliation_and_tree(study):
     result = report(study, until=END)
     total = result["llm"]["total"]
     assert total == {
-        "input_tokens": 70,
+        "input_tokens": 90,
         "cached_input_tokens": 20,
-        "uncached_input_tokens": 50,
-        "output_tokens": 13,
+        "uncached_input_tokens": 70,
+        "output_tokens": 15,
         "reasoning_output_tokens": 6,
-        "usage_updates": 2,
-        "duplicate_updates": 1,
+        "responses": 2,
+        "duplicate_responses": 1,
         "compactions": 1,
     }
     assert (
-        result["llm"]["reconciliation"]["record_minus_cumulative"]["input_tokens"] == 10
+        result["llm"]["reconciliation"]["record_minus_cumulative"]["input_tokens"] == 20
     )
-    assert result["llm"]["reconciliation"]["unique_response_records"] == 1
+    assert result["llm"]["reconciliation"]["unique_response_records"] == 2
+    assert result["llm"]["reconciliation"]["cumulative_usage"]["input_tokens"] == 70
     assert result["coverage"]["excluded_session_threads"] == 1
     assert result["coverage"]["complete"]
 
@@ -205,7 +227,10 @@ def test_counter_reset_is_reported_without_negative_usage(study):
         ],
     )
     result = report(study, until=END)
-    assert result["llm"]["total"]["input_tokens"] == 10
+    assert result["llm"]["total"]["input_tokens"] == 0
+    assert result["llm"]["reconciliation"]["cumulative_usage"]["input_tokens"] == 10
+    assert not result["llm"]["measurable"]
+    assert result["coverage"]["usage_records_missing_threads"] == ["lead"]
     assert result["coverage"]["issues"]["sessions:cumulative_counter_decrease"] == 1
 
 
@@ -225,7 +250,7 @@ def test_timezone_required_and_cli(study, capsys):
         report(study, since=END, until=START)
     session(study / "native/sessions/a.jsonl", "lead")
     main([str(study), "--until", END])
-    assert json.loads(capsys.readouterr().out)["schema_version"] == 1
+    assert json.loads(capsys.readouterr().out)["schema_version"] == 2
 
 
 def test_wait_pairing_and_task_timestamps(study):
@@ -373,7 +398,10 @@ def test_host_role_mapping_attributes_unparented_child_threads(study):
         "child",
         parent=None,
         task="root",
-        events=[token("2026-01-01T00:02:00Z", 10, 0, 5, 0)],
+        events=[
+            token("2026-01-01T00:02:00Z", 10, 0, 5, 0),
+            receipt("host-response", "2026-01-01T00:02:01Z", 10, output=5),
+        ],
     )
     write_json(
         study / "roles.json",

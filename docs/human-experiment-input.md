@@ -46,7 +46,9 @@ the same completed experiment to be dispatched again.
 ## Integration
 
 Observed in the current source: `loop.py:run_iteration` constructs iteration
-input, settles work and publishes knowledge; `instructions.py` defines coordinator
+input and settles work; `publication.py:commit` publishes knowledge and
+acknowledges the request, while `publication.py:recover` replays acknowledgement
+and repairs stale records before admission. `instructions.py` defines coordinator
 policy and result schema; `roles.md` defines Proposer and other specialist roles.
 The interface reuses these entry points and the existing iteration
 archive and publication receipt. It adds no scheduler, task algorithm or resource

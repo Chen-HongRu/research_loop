@@ -54,7 +54,14 @@ Run `uv run research-loop efficiency RUN` for an offline JSON audit of recorded
 token usage, delegate activity, waiting, resource calls and settled allocations.
 Use `--since` and `--until` with timezone-aware ISO 8601 timestamps to compare
 periods. This reads existing traces on demand, makes no model or remote call,
-and leaves the Study unchanged. Cached input is reported separately; allocation
+and leaves the Study unchanged. Both offline and continuous Token totals use
+deduplicated per-request usage; cumulative counters are only a cross-check.
+Missing request records mark coverage incomplete and never supply a cumulative
+fallback. Offline reports now use schema version 2; version 1 totals used
+cumulative counter differences and should not be compared as the same measure.
+Continuous collectors also use version 2; version 1 checkpoints require a fresh
+output directory to recompute from available trace history.
+Cached input is reported separately; allocation
 time is not GPU utilization. See [the metric definitions](references/operations.md#efficiency-diagnostics)
 for coverage and interpretation limits.
 
@@ -63,6 +70,9 @@ For continuous measurement, run `uv run research-loop metrics watch RUN --output
 The separate collector tails new trace bytes, checkpoints its progress and makes
 no model or resource calls. Compare saved phases with `uv run research-loop
 metrics compare BASELINE_DIR OPTIMIZED_DIR`; see [continuous measurements](references/efficiency.md).
+
+For child-agent waiting, explicit dependency-ready receipts and visible tool-output
+sizes, use the separate [behavior collector](references/behavior-metrics.md).
 
 ## Development
 
