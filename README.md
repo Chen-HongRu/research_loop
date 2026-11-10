@@ -74,6 +74,8 @@ metrics compare BASELINE_DIR OPTIMIZED_DIR`; see [continuous measurements](refer
 For child-agent waiting, explicit dependency-ready receipts and visible tool-output
 sizes, use the separate [behavior collector](references/behavior-metrics.md).
 
+For a bounded coordinator-free experiment-cycle benchmark, see [the benchmark guide](benchmarks/experiment_cycle/README.md). It measures planning, preparation, execution and evaluation separately using an explicit task roster. Its supplied CPU sample is synthetic; it is not a recovered historical experiment or evidence of general research benefit.
+
 ## Development
 
 Use `uv` for Python environments. After changing Python files, run `uvx ruff format` and `uvx ruff check` on the changed files, relevant tests and the smallest real smoke. See [Contributing](CONTRIBUTING.md).

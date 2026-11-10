@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "abs_tolerance": 1e-12,
+  "rel_tolerance": 1e-12,
+  "minimum_improvement": 0.5,
+  "observations": [
+    {"id": "a", "target": -1, "control_prediction": -2, "candidate_prediction": -1},
+    {"id": "b", "target": 1, "control_prediction": 0, "candidate_prediction": 1},
+    {"id": "c", "target": 4, "control_prediction": 3, "candidate_prediction": 4},
+    {"id": "d", "target": 6, "control_prediction": 5, "candidate_prediction": 6}
+  ]
+}

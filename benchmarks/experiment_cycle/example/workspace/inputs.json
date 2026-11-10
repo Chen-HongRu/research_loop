@@ -1,0 +1,8 @@
+{
+  "observations": [
+    {"id": "a", "x": -2, "target": -1},
+    {"id": "b", "x": 0, "target": 1},
+    {"id": "c", "x": 3, "target": 4},
+    {"id": "d", "x": 5, "target": 6}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "case_id": "synthetic-paired-offset-v1",
+  "source": {
+    "kind": "synthetic",
+    "reference": "Hand-constructed numeric development fixture; no historical research evidence."
+  },
+  "task": "task.md",
+  "workspace": "workspace",
+  "command": ["{python}", "experiment.py"],
+  "result_file": "result.json",
+  "device": "cpu",
+  "limits": {"stage_seconds": 300, "execute_seconds": 10},
+  "oracle": "oracle.json"
+}
