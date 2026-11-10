@@ -85,6 +85,9 @@ def test_real_model_sees_fixed_environment_in_fresh_role(tmp_path, mode):
         execution_environment=environment,
     )
     verification = f"""This is one bounded synthetic environment smoke, not research.
+This run's delegation mode is {mode}. In host mode you MUST use delegate_task
+and wait_tasks, never native spawn/collaboration tools, even if they are visible.
+In native mode you MUST use native spawn_agent with fork_turns='none'.
 The runtime has supplied execution-environment context to you and fresh children.
 1. Run one local shell command using the unqualified `python` from PATH. Write
 {work / "lead.json"} with fields python (actual sys.executable) and
@@ -144,6 +147,23 @@ an explicit stop_reason that this synthetic smoke is complete. Cite both files.
     events = [
         json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()
     ]
+    starts = [row for row in events if row["event"] == "role.task.started"]
+    finishes = [row for row in events if row["event"] == "role.task.finished"]
+    if mode == "host":
+        assert len(starts) == len(finishes) == 1
+        assert starts[0]["role"] == "analyst"
+        assert finishes[0]["status"] == "completed"
+        assert starts[0]["thread_id"] in children
+        tools = {
+            row["tool"]
+            for row in events
+            if row["event"] == "resource.tool" and row["success"]
+        }
+        assert {"delegate_task", "wait_tasks"} <= tools
+        mapping = json.loads((root / "roles.json").read_text())["threads"]
+        assert mapping[starts[0]["thread_id"]]["status"] == "completed"
+    else:
+        assert not starts and not finishes and not (root / "roles.json").exists()
     histories = {
         row["thread_id"]: Path(row["path"])
         for row in events
