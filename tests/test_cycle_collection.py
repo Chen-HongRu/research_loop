@@ -230,3 +230,138 @@ def test_carry_verified_cycle_retains_cost_without_rerun(tmp_path, monkeypatch):
     assert result["recorded_tokens"] == 1000
     assert result["cycle_wall_seconds"] == 20
     assert result["attempts"][0]["carried_forward"] is True
+
+
+def test_lost_transport_recovers_original_receipt_without_redispatch(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "train.py").write_text("synthetic")
+    output = tmp_path / "execute"
+    output.mkdir()
+    calls = []
+
+    async def query(config, action, identity=None, request=None):
+        calls.append((action, identity))
+        if action == "run":
+            raise RuntimeError("remote transport returned no receipt (exit 255)")
+        return {
+            "exit_code": 0,
+            "operation_id": identity,
+            "baseline": {"score": 0.5},
+            "candidate": {"score": 0.6},
+        }
+
+    monkeypatch.setattr(collection, "remote", query)
+    case = {"remote": {}, "limits": {"execute_seconds": 5}}
+    result = asyncio.run(
+        collection.RemoteExecutor()(case, workspace, output, [], None, None)
+    )
+    assert result["exit_code"] == 0
+    assert [action for action, _ in calls] == ["run", "reconcile"]
+    assert calls[0][1] == calls[1][1]
+    assert json.loads((workspace / "metrics.json").read_text())["candidate_auc"] == 0.6
+
+
+def test_undispatched_fence_allows_fresh_identity_only(tmp_path, monkeypatch):
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "train.py").write_text("synthetic")
+    output = tmp_path / "execute"
+    output.mkdir()
+    calls = []
+
+    async def query(config, action, identity=None, request=None):
+        calls.append((action, identity))
+        if len(calls) == 1:
+            raise RuntimeError("remote transport returned no receipt (exit 255)")
+        if action == "reconcile":
+            return {
+                "exit_code": 1,
+                "operation_id": identity,
+                "status": "not_dispatched",
+                "dispatch_fenced": True,
+            }
+        return {
+            "exit_code": 0,
+            "operation_id": identity,
+            "baseline": {"score": 0.5},
+            "candidate": {"score": 0.6},
+        }
+
+    async def no_delay(seconds):
+        pass
+
+    monkeypatch.setattr(collection, "remote", query)
+    monkeypatch.setattr(collection.asyncio, "sleep", no_delay)
+    case = {"remote": {}, "limits": {"execute_seconds": 5}}
+    result = asyncio.run(
+        collection.RemoteExecutor()(case, workspace, output, [], None, None)
+    )
+    assert result["exit_code"] == 0
+    assert [action for action, _ in calls] == ["run", "reconcile", "run"]
+    assert calls[0][1] != calls[2][1]
+    operation = json.loads((output / "remote-operation.json").read_text())
+    assert operation["attempts"][0]["receipt"]["dispatch_fenced"] is True
+
+
+def test_unknown_operation_is_not_redispatched(tmp_path, monkeypatch):
+    import pytest
+
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "train.py").write_text("synthetic")
+    output = tmp_path / "execute"
+    output.mkdir()
+    calls = []
+
+    async def query(config, action, identity=None, request=None):
+        calls.append(action)
+        if action == "run":
+            raise RuntimeError("remote transport returned no receipt (exit 255)")
+        return {"status": "admitted", "operation_id": identity}
+
+    monkeypatch.setattr(collection, "remote", query)
+    case = {"remote": {}, "limits": {"execute_seconds": 5}}
+    with pytest.raises(RuntimeError, match="no receipt"):
+        asyncio.run(
+            collection.RemoteExecutor()(case, workspace, output, [], None, None)
+        )
+    assert calls == ["run", "reconcile"]
+
+
+def test_fenced_retry_rechecks_dispatch_deadline(tmp_path, monkeypatch):
+    import pytest
+
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "train.py").write_text("synthetic")
+    output = tmp_path / "execute"
+    output.mkdir()
+    calls = []
+
+    async def query(config, action, identity=None, request=None):
+        calls.append(action)
+        if action == "run":
+            raise RuntimeError("remote transport returned no receipt (exit 255)")
+        return {
+            "exit_code": 1,
+            "operation_id": identity,
+            "status": "not_dispatched",
+            "dispatch_fenced": True,
+        }
+
+    async def no_delay(seconds):
+        pass
+
+    monkeypatch.setattr(collection, "remote", query)
+    monkeypatch.setattr(collection.asyncio, "sleep", no_delay)
+    case = {"remote": {}, "limits": {"execute_seconds": 5}}
+    with pytest.raises(RuntimeError, match="stopped before admission"):
+        asyncio.run(
+            collection.RemoteExecutor(can_dispatch=lambda: not calls)(
+                case, workspace, output, [], None, None
+            )
+        )
+    assert calls == ["run", "reconcile"]

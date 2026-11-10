@@ -399,12 +399,38 @@ def run_operation(project, identity, request, gpu_uuid=None):
     return receipt
 
 
+def operation_status(root):
+    path = root / "receipt.json"
+    return json.loads((path if path.exists() else root / "state.json").read_text())
+
+
+def reconcile_operation(project, identity):
+    """Atomically fence an unadmitted identity, or return its original state."""
+    root = project / "evidence/benchmark-baseline" / identity
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    except FileExistsError:
+        return operation_status(root)
+    # run_operation must win this same mkdir before any training starts. A late
+    # dispatch therefore cannot launch after we have certified no admission.
+    receipt = {
+        "status": "not_dispatched",
+        "operation_id": identity,
+        "exit_code": 1,
+        "dispatch_fenced": True,
+        "execution_mode": "direct",
+    }
+    write_record(root / "receipt.json", receipt)
+    write_record(root / "state.json", receipt)
+    return receipt
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Operator-owned fixed single-card Cactus execution"
     )
     parser.add_argument("--project", type=Path, required=True)
-    parser.add_argument("action", choices=("preflight", "run", "status"))
+    parser.add_argument("action", choices=("preflight", "run", "status", "reconcile"))
     parser.add_argument("operation_id", nargs="?")
     parser.add_argument("--allow-gpu", action="store_true")
     parser.add_argument("--gpu-uuid", help="Select an operator-allowlisted GPU")
@@ -426,10 +452,9 @@ def main():
                 raise ValueError("invalid operation identity")
             if args.action == "status":
                 root = args.project / "evidence/benchmark-baseline" / args.operation_id
-                path = root / "receipt.json"
-                result = json.loads(
-                    (path if path.exists() else root / "state.json").read_text()
-                )
+                result = operation_status(root)
+            elif args.action == "reconcile":
+                result = reconcile_operation(args.project, args.operation_id)
             else:
                 if not args.allow_gpu:
                     raise ValueError("run requires --allow-gpu")

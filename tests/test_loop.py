@@ -678,3 +678,12 @@ def test_legacy_provider_runs_use_one_delegation_mode_for_inspect_and_run(tmp_pa
     (root / "status.json").write_text(json.dumps(status))
     assert loop.delegation_mode(config, status) == "native"
     assert loop.inspect(root)["delegation"] == "native"
+
+
+def test_automatic_continuation_cannot_clear_new_operator_stop(tmp_path):
+    root = prepare(tmp_path)
+    (root / "STOP").write_text("new operator stop\n")
+    with pytest.raises(RuntimeError, match="STOP is recorded"):
+        asyncio.run(loop.run(root, continue_run=True, clear_stop=False))
+    assert (root / "STOP").read_text() == "new operator stop\n"
+    assert not (root / "native").exists()

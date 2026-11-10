@@ -372,7 +372,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
     return state
 
 
-async def run(root, *, continue_run=False, native_factory=Native):
+async def run(root, *, continue_run=False, native_factory=Native, clear_stop=True):
     # One writer owns the entire Study, including publication and round transitions.
     with writer(root):
         state = json.loads((root / "status.json").read_text())
@@ -380,7 +380,7 @@ async def run(root, *, continue_run=False, native_factory=Native):
         if not continue_run and state["status"] == "completed":
             return state
         if (root / "STOP").exists():
-            if not continue_run:
+            if not continue_run or not clear_stop:
                 raise RuntimeError(
                     "STOP is recorded; use run --continue for an explicit continuation"
                 )

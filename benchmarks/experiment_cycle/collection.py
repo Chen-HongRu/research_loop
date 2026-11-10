@@ -49,6 +49,10 @@ async def remote(remote_config, action, identity=None, request=None):
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
         remote_config["ssh_host"],
         shlex.join(command),
         stdin=asyncio.subprocess.PIPE,
@@ -82,26 +86,74 @@ async def remote(remote_config, action, identity=None, request=None):
 
 
 class RemoteExecutor:
+    def __init__(self, can_dispatch=None):
+        self.can_dispatch = can_dispatch
+
     async def __call__(self, case, workspace, root, command, model, effort):
-        identity = "cycle-" + uuid4().hex
-        write_json(
-            root / "remote-operation.json",
-            {"operation_id": identity, "status": "dispatching"},
-        )
         source = (workspace / "train.py").read_text()
+        attempts = []
         async with asyncio.timeout(case["limits"]["execute_seconds"]):
-            receipt = await remote(
-                case["remote"],
-                "run",
-                identity,
-                {
-                    "candidate_source": source,
-                    "intervention_id": case.get("intervention_id"),
-                },
-            )
+            while True:
+                if self.can_dispatch is not None and not self.can_dispatch():
+                    raise RuntimeError("Remote dispatch stopped before admission")
+                identity = "cycle-" + uuid4().hex
+                write_json(
+                    root / "remote-operation.json",
+                    {
+                        "operation_id": identity,
+                        "status": "dispatching",
+                        "attempts": attempts,
+                    },
+                )
+                try:
+                    receipt = await remote(
+                        case["remote"],
+                        "run",
+                        identity,
+                        {
+                            "candidate_source": source,
+                            "intervention_id": case.get("intervention_id"),
+                        },
+                    )
+                except RuntimeError as transport:
+                    if not str(transport).startswith(
+                        "remote transport returned no receipt"
+                    ):
+                        raise
+                    try:
+                        receipt = await remote(case["remote"], "reconcile", identity)
+                    except Exception:
+                        raise transport from None
+                    if type(receipt.get("exit_code")) is not int or receipt.get(
+                        "cleanup_uncertain"
+                    ):
+                        raise transport
+                    if (
+                        receipt.get("status") == "not_dispatched"
+                        and receipt.get("dispatch_fenced") is True
+                        and receipt.get("operation_id") == identity
+                    ):
+                        attempts.append({"operation_id": identity, "receipt": receipt})
+                        write_json(
+                            root / "remote-operation.json",
+                            {
+                                "operation_id": identity,
+                                "status": "terminal",
+                                "receipt": receipt,
+                                "attempts": attempts,
+                            },
+                        )
+                        await asyncio.sleep(2)
+                        continue
+                break
         write_json(
             root / "remote-operation.json",
-            {"operation_id": identity, "status": "terminal", "receipt": receipt},
+            {
+                "operation_id": identity,
+                "status": "terminal",
+                "receipt": receipt,
+                "attempts": attempts,
+            },
         )
         if receipt.get("exit_code") == 0:
             baseline = receipt["baseline"]["score"]

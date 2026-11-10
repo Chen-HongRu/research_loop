@@ -53,15 +53,17 @@ Stage wall time includes model scheduling and tools; cycle wall time includes
 runner and checker overhead. Concurrent evaluation reports batch wall time
 separately from summed cycle time.
 
-In the three-evaluation Research Loop pilot, the host evaluates the unmodified
-seed first and saves `baseline.json`. A failed baseline stops the study; after a
-passing baseline the outer loop can evaluate at most two improvements to
-`work/orchestration.py`. Cases run
+The Research Loop entry evaluates the unmodified seed first and saves
+`baseline.json`. A failed baseline stops the study; after a passing baseline the
+outer loop can evaluate improvements to `work/orchestration.py`. Evaluation count
+is unlimited by default; an optional explicit limit includes the baseline. A
+time-window supervisor can continue the same Study until its recorded deadline
+without a count/token budget, preserving all costs and the original passing baseline. Cases run
 in parallel by assigned GPU, with one cycle at a time per GPU. All configured
 cases must pass correctness, complete usage coverage and phase protocol before a
 candidate can be compared. Failed and partial attempts retain recorded costs;
 outer-loop optimization costs are separate. The operator privately configures
-the authorized GPUs, indices 0 and 2, including their UUIDs and paths.
+the authorized GPU UUIDs and paths.
 
 The collection contains ten fixed architecture interventions on one Cactus
 development task, not ten independent benchmarks or held-out evidence. Its

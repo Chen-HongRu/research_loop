@@ -64,3 +64,14 @@ or `--studies-dir STUDIES` for immediate-child discovery. Existing single-Study
 commands remain valid. Every discovered Study is readable to dashboard visitors;
 choose the directory and access control accordingly. This changes only the
 read-only view, and does not start or resume a research controller.
+
+For an explicitly authorized time window, use the experiment-cycle session entry
+with `--hours 10 --allow-model --allow-gpu` under one durable service. Set the
+operator evaluation cap to null without resetting the ledger. Preserve its
+run-window.json across restarts; the original deadline does not move. Automatic
+continuation preserves new STOP requests. The deadline closes admission and
+initiates cleanup; unknown remote state must remain needs-reconciliation. SSH
+receipt loss is reconciled by the worker's atomic operation-identity fence before
+any fresh dispatch. Deploy the matching worker and permit its fixed `reconcile`
+action in an operator SSH gateway before starting this entry. No automatic agent
+wakeup or failure diagnosis is implied by a running systemd service.

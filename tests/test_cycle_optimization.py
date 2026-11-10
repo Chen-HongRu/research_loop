@@ -364,7 +364,7 @@ def test_pending_operation_blocks_then_clears_without_charge(tmp_path, monkeypat
     result = asyncio.run(evaluator({}))
     assert result["correctness_pass"]
     assert json.loads((study / "pending-operations.json").read_text()) == []
-    assert calls == [("status", "cycle-1"), ("status", "cycle-1")]
+    assert calls == [("reconcile", "cycle-1"), ("reconcile", "cycle-1")]
 
 
 def test_dispatch_record_recovered_and_terminal_status_not_requeued(
@@ -439,3 +439,67 @@ def test_explicit_continue_keeps_existing_baseline_and_budget(tmp_path, monkeypa
     )
     assert captured == [True]
     assert json.loads((study / "evaluation-ledger.json").read_text())["charged"] == 1
+
+
+def test_unlimited_study_evaluates_and_resumes_after_three_charges(
+    tmp_path, monkeypatch
+):
+    study = tmp_path / "study"
+    optimization.initialize(study, [CASE])
+    assert json.loads((study / "evaluator.json").read_text())["max_evaluations"] is None
+    (study / "evaluation-ledger.json").write_text(json.dumps({"charged": 3}))
+    baseline = {
+        "correctness_pass": True,
+        "coverage_complete": True,
+        "phase_protocol_pass": True,
+        "evaluation_failed": False,
+    }
+    (study / "baseline.json").write_text(json.dumps(baseline))
+
+    async def run_case(*args, **kwargs):
+        return {
+            "status": "completed",
+            "phase_protocol_pass": True,
+            "correctness": {"status": "pass"},
+            "usage": {"coverage": {"complete": True}, "total": {"total_tokens": 7}},
+        }
+
+    async def resume(root, **kwargs):
+        assert kwargs["continue_run"]
+        return {"status": "running"}
+
+    monkeypatch.setattr(optimization, "run_case", run_case)
+    monkeypatch.setattr(optimization.loop, "run", resume)
+    result = asyncio.run(optimization.Evaluator(study)({}))
+    assert result["evaluations_charged"] == 4
+    assert (
+        asyncio.run(optimization.run_study(study, continue_run=True))["status"]
+        == "running"
+    )
+    assert json.loads((study / "evaluation-ledger.json").read_text())["charged"] == 4
+    assert json.loads((study / "baseline.json").read_text()) == baseline
+
+
+def test_unlimited_native_does_not_stop_at_three(tmp_path):
+    study = tmp_path / "study"
+    optimization.initialize(study, [CASE])
+    (study / "evaluation-ledger.json").write_text(json.dumps({"charged": 3}))
+
+    class FakeNative:
+        async def run(self):
+            return {"study_action": "continue"}
+
+    result = asyncio.run(
+        optimization.BoundedNative(FakeNative(), optimization.Evaluator(study)).run()
+    )
+    assert result["study_action"] == "continue"
+
+
+def test_closed_time_window_does_not_charge_or_dispatch(tmp_path, monkeypatch):
+    study = tmp_path / "study"
+    optimization.initialize(study, [CASE])
+    (study / "run-window.json").write_text(json.dumps({"deadline_unix": 100}))
+    monkeypatch.setattr(optimization, "time", lambda: 100)
+    result = asyncio.run(optimization.Evaluator(study)({}))
+    assert result["time_window_finished"]
+    assert json.loads((study / "evaluation-ledger.json").read_text()) == {"charged": 0}

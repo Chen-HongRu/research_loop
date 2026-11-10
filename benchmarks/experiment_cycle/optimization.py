@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
-from time import monotonic
+from time import monotonic, time
 
 from research_loop import loop
 from research_loop.codex import Native, Tool
@@ -37,10 +37,11 @@ within the fixed plan, prepare, execute and evaluate phases. The host enforces a
 eight-call cap and fixes the model to gpt-6.1-terra at medium effort. Correctness,
 complete usage coverage and the phase protocol across every case are hard gates.
 Among passing candidates minimize input plus output tokens first and batch wall time
-second. Read baseline.json for the host-measured initial program, then make at most
-two improvements and test each candidate before making claims. Read best.json and
-evaluation-history.json for measured results. Record the best measured result and
-stop when the evaluation budget is exhausted. Never modify the evaluator or cases,
+second. Read baseline.json for the host-measured initial program and test each
+candidate before making claims. Read best.json and evaluation-history.json for
+measured results. Evaluations have no count cap unless an operator explicitly
+configures one. If run-window.json exists, keep iterating until its deadline; one
+passing improvement does not finish the window. Record the best measured result. Never modify the evaluator or cases,
 supply paths or commands to it, or seek hidden answers. If resource_blocked, stop
 and ask the operator to resume when resources are available; do not poll.
 """
@@ -91,9 +92,11 @@ async def resource_preflight(cases):
     return None
 
 
-def initialize(study, cases, max_evaluations):
+def initialize(study, cases, max_evaluations=None):
     study = Path(study).resolve()
-    if type(max_evaluations) is not int or max_evaluations < 1:
+    if max_evaluations is not None and (
+        type(max_evaluations) is not int or max_evaluations < 1
+    ):
         raise ValueError("max_evaluations must be positive")
     if not cases:
         raise ValueError("at least one case is required")
@@ -205,7 +208,7 @@ async def reconcile_pending(study):
     resolved = json.loads(resolved_path.read_text()) if resolved_path.exists() else []
     for entry in pending:
         try:
-            receipt = await remote(entry["remote"], "status", entry["operation_id"])
+            receipt = await remote(entry["remote"], "reconcile", entry["operation_id"])
         except Exception:
             remaining.append(entry)
             continue
@@ -319,9 +322,11 @@ class BoundedNative:
             (self.evaluator.study / "evaluation-ledger.json").read_text()
         )
         state = json.loads((self.evaluator.study / "status.json").read_text())
-        if result.get("study_action") == "continue" and (
-            ledger["charged"] >= self.evaluator.config["max_evaluations"]
-            or state.get("iteration", 1) >= self.evaluator.config["max_evaluations"]
+        limit = self.evaluator.config["max_evaluations"]
+        if (
+            limit is not None
+            and result.get("study_action") == "continue"
+            and (ledger["charged"] >= limit or state.get("iteration", 1) >= limit)
         ):
             result = {
                 **result,
@@ -329,6 +334,11 @@ class BoundedNative:
                 "stop_reason": "Host optimization budget exhausted.",
             }
         return result
+
+
+def window_closed(study):
+    path = Path(study) / "run-window.json"
+    return path.exists() and time() >= json.loads(path.read_text())["deadline_unix"]
 
 
 class Evaluator:
@@ -350,10 +360,17 @@ class Evaluator:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     async def _evaluate(self):
+        if window_closed(self.study):
+            return {
+                "resource_blocked": True,
+                "time_window_finished": True,
+                "model_calls": 0,
+            }
         program = load_orchestration(self.study / "work/orchestration.py")
         ledger_path = self.study / "evaluation-ledger.json"
         ledger = json.loads(ledger_path.read_text())
-        if ledger["charged"] >= self.config["max_evaluations"]:
+        limit = self.config["max_evaluations"]
+        if limit is not None and ledger["charged"] >= limit:
             raise ValueError("evaluation budget exhausted")
         if ledger["charged"] == 0:
             seed = (
@@ -414,10 +431,19 @@ class Evaluator:
         async def worker(items):
             nonlocal stopped
             for index, case, loader, checker, executor in items:
-                if stopped or (self.study / "STOP").exists():
+                if (
+                    stopped
+                    or (self.study / "STOP").exists()
+                    or window_closed(self.study)
+                ):
                     stopped = True
                     break
                 try:
+                    if hasattr(executor, "can_dispatch"):
+                        executor.can_dispatch = lambda: (
+                            not (self.study / "STOP").exists()
+                            and not window_closed(self.study)
+                        )
                     report = await run_case(
                         Path(case),
                         evaluation / f"case-{index:04d}",
@@ -536,7 +562,7 @@ def passes(result):
     ) and not result.get("evaluation_failed", True)
 
 
-async def run_study(study, *, continue_run=False):
+async def run_study(study, *, continue_run=False, preserve_stop=False):
     study = Path(study).resolve(strict=True)
     evaluator = Evaluator(study)
     ledger = json.loads((study / "evaluation-ledger.json").read_text())
@@ -552,13 +578,17 @@ async def run_study(study, *, continue_run=False):
     if not passes(baseline):
         return {"status": "baseline_failed", "baseline": baseline}
     ledger = json.loads((study / "evaluation-ledger.json").read_text())
-    if ledger["charged"] >= evaluator.config["max_evaluations"]:
+    limit = evaluator.config["max_evaluations"]
+    if limit is not None and ledger["charged"] >= limit:
         return {"status": "budget_exhausted", "baseline": baseline}
     blocked = await reconcile_evaluations(study, evaluator.config, ledger["charged"])
     if blocked:
         return blocked
     return await loop.run(
-        study, continue_run=continue_run, native_factory=make_native_factory(study)
+        study,
+        continue_run=continue_run,
+        native_factory=make_native_factory(study),
+        clear_stop=not preserve_stop,
     )
 
 
@@ -568,7 +598,7 @@ def main():
     init = sub.add_parser("init", help="Configure a study without starting any model")
     init.add_argument("--case", type=Path, action="append", required=True)
     init.add_argument("--study", type=Path, required=True)
-    init.add_argument("--max-evaluations", type=int, required=True)
+    init.add_argument("--max-evaluations", type=int)
     launch = sub.add_parser("run", help="Start the configured optimization")
     launch.add_argument("study", type=Path)
     launch.add_argument("--allow-model", action="store_true")
@@ -578,6 +608,11 @@ def main():
         dest="continue_run",
         action="store_true",
         help="Explicitly resume a stopped/completed Study without resetting its budget",
+    )
+    launch.add_argument(
+        "--preserve-stop",
+        action="store_true",
+        help="Continue a Study without reopening an operator STOP",
     )
     args = parser.parse_args()
     try:
@@ -592,7 +627,13 @@ def main():
                 and not args.allow_gpu
             ):
                 parser.error("GPU evaluation cases require --allow-gpu")
-            result = asyncio.run(run_study(args.study, continue_run=args.continue_run))
+            result = asyncio.run(
+                run_study(
+                    args.study,
+                    continue_run=args.continue_run,
+                    preserve_stop=args.preserve_stop,
+                )
+            )
             if (
                 result.get("resource_blocked")
                 or result.get("status") == "baseline_failed"

@@ -173,8 +173,11 @@ remain separate from the remote execution environment.
 
 One collection worker runs per host/GPU pair, with at most one cycle on each
 GPU. A failed, blocked or incomplete cycle prevents queued cycles from starting;
-already-running cycles settle. There is no automatic retry, GPU polling or silent
-sample replacement. `collection-status.json` retains attempted reports and
+already-running cycles settle. There is no automatic model retry or silent
+sample replacement. A lost SSH receipt is reconciled against its original operation.
+An absent operation is atomically fenced before retrying the same prepared command
+under a fresh identity, within the existing execution timeout. An admitted or unknown
+operation is never redispatched; its original state must settle first. `collection-status.json` retains attempted reports and
 recorded costs, and distinguishes the sum of cycle wall times from batch wall
 time. If SSH loses its receipt, reconcile the recorded `remote-operation.json`
 operation ID using the remote worker's `status` action and durable logs before
@@ -217,7 +220,7 @@ Configure a Study without model calls (repeat `--case` for all frozen cases):
 ```sh
 uv run python -m benchmarks.experiment_cycle.optimization init \
   --case /path/to/private/cases/cycle-01/case.json \
-  --study /path/to/private/orchestration-study --max-evaluations 3
+  --study /path/to/private/orchestration-study
 
 # Later; GPU cases also require --allow-gpu:
 uv run python -m benchmarks.experiment_cycle.optimization run \
@@ -235,9 +238,10 @@ Only `work/orchestration.py` is the candidate. Its lead receives a no-argument
 `evaluate_candidate` tool; fixed operator configuration selects cases, execution
 and checker. Every dispatched candidate evaluation is charged before execution,
 including failures; resource-blocked checks do not charge the evaluation budget.
-For the three-evaluation pilot, `run` first evaluates the unmodified seed on the
-host and saves `baseline.json`. It stops if the baseline fails; only after it
-passes can the outer Research Loop evaluate up to two candidate improvements. The evaluator runs cases in parallel by assigned
+`run` first evaluates the unmodified seed on the host and saves `baseline.json`.
+It stops if the baseline fails; only after it passes can the outer Research Loop
+evaluate candidate improvements. Evaluations are unlimited by default; pass a
+positive `--max-evaluations` to `init` to set an explicit limit, including the baseline. The evaluator runs cases in parallel by assigned
 GPU, serializing cases on each GPU. All cases must pass correctness, usage coverage
 and phase protocol; failures retain recorded costs. Compare passing candidates by
 recorded cycle tokens first and batch wall time second. The loop's own optimization cost is separate
@@ -247,6 +251,27 @@ Evaluation outputs stay outside the Study and the tool returns aggregate gates/t
 ordinary workspace-write permits local reads, so this is not hidden-answer isolation. Repeated optimization on these cases is development evidence. Historical ten-case
 results were metrics-only under the earlier harness and do not validate this engine; the default
 prompt is unchanged, but this harness requires a fresh baseline.
+
+
+For an operator-authorized wall-clock research window without a count/token budget:
+
+```sh
+uv run python -m benchmarks.experiment_cycle.session \
+  /path/to/private/orchestration-study --hours 10 --allow-model --allow-gpu
+```
+
+The Study's `evaluator.json` must have `max_evaluations: null`; changing that field
+never resets `evaluation-ledger.json`. Run one supervisor only. It records the
+start/deadline in `run-window.json` and keeps that deadline across a process restart.
+Normal lead completion is continued until the deadline. Resource reconciliation
+and availability waiting are deterministic and make no model calls. Unexpected
+controller faults remain blocked for diagnosis; they are not retried blindly.
+New operator STOP requests are never cleared by automatic continuation. At the
+deadline it stops new case/remote dispatch admission and interrupts the owned
+controller, allowing up to 180 seconds for cleanup. Only known terminal remote
+states permit clean completion; unresolved operations remain `needs-reconciliation`.
+The runtime must be owned by an external durable supervisor such as systemd; this
+command does not install an event-to-agent callback or a recurring model poll.
 
 Verify without models or GPUs:
 

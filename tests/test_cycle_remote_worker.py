@@ -162,3 +162,39 @@ def test_gpu_selection_is_operator_allowlisted(tmp_path):
     path.write_text(json.dumps(config))
     with pytest.raises(ValueError, match="profile"):
         operator_config(tmp_path, "GPU-second")
+
+
+def test_reconcile_absent_operation_fences_late_dispatch(tmp_path, monkeypatch):
+    from benchmarks.experiment_cycle import remote_worker as worker
+
+    receipt = worker.reconcile_operation(tmp_path, "lost-before-admission")
+    assert receipt["status"] == "not_dispatched"
+    assert receipt["dispatch_fenced"] is True
+    assert receipt["exit_code"] == 1
+    source = tmp_path / "baseline.py"
+    source.write_text(BASE)
+    monkeypatch.setattr(
+        worker, "operator_config", lambda project: {"baseline_script": str(source)}
+    )
+    monkeypatch.setattr(worker, "preflight", lambda config: {"ready": True})
+    monkeypatch.setattr(worker, "verify_intervention", lambda *args: None)
+    with pytest.raises(FileExistsError):
+        worker.run_operation(
+            tmp_path, "lost-before-admission", {"candidate_source": BASE}
+        )
+    assert worker.reconcile_operation(tmp_path, "lost-before-admission") == receipt
+
+
+def test_reconcile_existing_operation_does_not_claim_no_dispatch(tmp_path):
+    import json
+    from benchmarks.experiment_cycle import remote_worker as worker
+
+    root = tmp_path / "evidence/benchmark-baseline/running"
+    root.mkdir(parents=True)
+    state = {"status": "admitted", "operation_id": "running"}
+    (root / "state.json").write_text(json.dumps(state))
+    assert worker.reconcile_operation(tmp_path, "running") == state
+    (root / "state.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        worker.reconcile_operation(tmp_path, "running")
+    assert not (root / "receipt.json").exists()
