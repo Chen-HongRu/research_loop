@@ -18,7 +18,8 @@ the report. Scientific design belongs to Plan; implementation belongs to Prepare
 interpretation belongs to Evaluate. The runner does not choose new hypotheses,
 reinterpret results, design repairs or rewrite the experiment goal.
 
-Use one fresh context per specialist task with `gpt-6.1-sol` and medium reasoning.
+Use one fresh context per specialist task with `gpt-6.1-terra` and medium reasoning. The earlier live synthetic
+run used Sol; it does not validate the new Cactus execution path.
 Each task has a fresh Native runtime instance, settled and closed before the next
 stage. Reuse current role responsibilities through benchmark-specific assignments
 that identify the runner as executor; omit coordinator delegation policy and
@@ -143,3 +144,14 @@ Keep the small runner/report under `benchmarks/`; reuse Native, artifact handoff
 and receipt logic. Do not change production scheduling or introduce a scheduler
 database, model-driven monitoring or plugin framework. Historical input recovery,
 case correctness rules and resource limits must be verified before each historical replay. The supplied synthetic case checks only the bounded development task.
+
+## Current implementation boundary
+
+The editable orchestration is `benchmarks/experiment_cycle/strategy.json`. The
+runner, accounting, case adapters, executor and correctness checks are fixed
+operator code. The collection and Research Loop optimization entry points,
+prepare-only commands and interpretation limits are specified in
+[the benchmark guide](../benchmarks/experiment_cycle/README.md). The planned
+collection is ten complete architecture experiment cycles on one Cactus
+development task. No new GPU baseline has been run; GPU compatibility and
+measured efficiency remain unverified until the deferred launch.

@@ -28,6 +28,10 @@ def main():
         action="store_true",
         help="Authorize the three model tasks for this case",
     )
+    launch.add_argument(
+        "--strategy", type=Path, help="The only optimizable orchestration file"
+    )
+    launch.add_argument("--model", default="gpt-6.1-terra")
     args = parser.parse_args()
     try:
         if args.action == "inspect":
@@ -44,7 +48,9 @@ def main():
             return
         if not args.allow_model:
             parser.error("run requires --allow-model; inspect makes no model calls")
-        report = asyncio.run(run(args.case, args.output))
+        report = asyncio.run(
+            run(args.case, args.output, strategy=args.strategy, model=args.model)
+        )
     except (ValueError, OSError) as error:
         parser.error(str(error))
     print(

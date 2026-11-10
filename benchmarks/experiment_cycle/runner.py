@@ -16,9 +16,10 @@ from research_loop.state import Journal, write_json
 
 from .accounting import summarize_usage
 from .case import build_workspace, check, load_case, validate_output_directory
+from .policy import load_policy
 
 STAGES = ("plan", "prepare", "execute", "evaluate")
-MODEL = "gpt-6.1-sol"
+MODEL = "gpt-6.1-terra"
 EFFORT = "medium"
 
 
@@ -68,18 +69,27 @@ SCHEMAS = {
         }
     ),
 }
-TASKS = {
-    "plan": "Design this bounded experiment: hypothesis, matched control, permitted change, evaluation rule and outcome interpretations. Do not implement or run the experiment.",
-    "prepare": "Implement the supplied plan in the candidate workspace. You may syntax-check only; do not run the substantive experiment or create its result file. Return the exact supplied command, smoke evidence and artifact paths.",
-    "evaluate": "Read the supplied plan, execution receipt and actual result. Independently compute the metrics and return the bounded conclusion and limitations. Each evidence entry must be an exact workspace-relative filename only, without explanation or sentences; include the supplied result_file. Remain read-only and do not rerun the experiment.",
-}
-POLICY = """You are one specialist in a bounded, coordinator-free benchmark.
-A deterministic host transfers artifacts and executes the prepared command.
-Use only the supplied task, source pack and artifacts. No delegation, web,
-network, GPU, package installation or access to other runs or hidden checks.
-Preserve data roles and inputs. Do not change the task or claim unseen results.
-Return the requested JSON schema. Keep your conclusion within the task scope.
+GUARD = """Execute only the supplied stage of this predefined experiment. The host owns
+execution, scoring, schemas, accounting and permissions. Never change the case,
+input data, hidden checker, stage order or measurement. No nested delegation.
 """
+
+
+def inline_context(workspace, stage):
+    """Only small host-owned control records, never datasets or predictions."""
+    names = {
+        "plan": (),
+        "prepare": ("plan",),
+        "evaluate": ("plan", "prepare", "execute"),
+    }[stage]
+    context = {}
+    for name in names:
+        path = workspace / ".cycle" / f"{name}.json"
+        if path.stat().st_size <= 16 * 1024:
+            context[name] = json.loads(path.read_text())
+        else:
+            context[name] = {"path": str(path), "inline": False}
+    return context
 
 
 def output_schema(stage, case):
@@ -89,6 +99,14 @@ def output_schema(stage, case):
         **SCHEMAS[stage],
         "properties": {
             **SCHEMAS[stage]["properties"],
+            "metrics": schema(
+                {
+                    name: {"type": "number"}
+                    for name in case.get(
+                        "metric_names", ("control_mse", "candidate_mse", "delta_mse")
+                    )
+                }
+            ),
             "evidence": {
                 "type": "array",
                 "description": "Exact workspace-relative filenames only; include result_file. Put explanations in limitations.",
@@ -134,6 +152,9 @@ def launch_config(root, workspace, *, writable, model, effort, protected=()):
 class NativeAgent:
     """One fresh runtime/context per task, without installing delegation tools."""
 
+    def __init__(self, policy=None):
+        self.policy = policy or load_policy()
+
     async def __call__(self, stage, case, workspace, root, identity, model, effort):
         writable = [root / "work"]
         if stage == "prepare":
@@ -160,8 +181,12 @@ class NativeAgent:
                     ],
                     "result_file": case["result_file"],
                 }
+                if self.policy["stages"][stage]["context_mode"] == "inline":
+                    payload["control_artifacts"] = inline_context(workspace, stage)
                 result = await native.run(
-                    POLICY + TASKS[stage],
+                    GUARD
+                    + self.policy["common"]
+                    + self.policy["stages"][stage]["instructions"],
                     payload,
                     output_schema(stage, case),
                     model=model,
@@ -281,9 +306,13 @@ async def run(
     model=MODEL,
     effort=EFFORT,
     measurement_kind="native",
+    strategy=None,
+    case_loader=None,
+    case_checker=None,
 ):
     begin = monotonic()
-    case = load_case(case_path)
+    policy = load_policy(strategy)
+    case = (case_loader or load_case)(case_path)
     output = Path(output).resolve()
     validate_output_directory(case, output)
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -292,7 +321,8 @@ async def run(
     dossier = workspace / ".cycle"
     dossier.mkdir()
     command = [sys.executable if arg == "{python}" else arg for arg in case["command"]]
-    agent = agent or NativeAgent()
+    write_json(output / "strategy.json", policy)
+    agent = agent or NativeAgent(policy)
     executor = executor or execute
     roster = []
     records = []
@@ -385,7 +415,7 @@ async def run(
             write_json(output / "stages.json", records)
     try:
         correctness = (
-            check(case, workspace, evaluation)
+            (case_checker or check)(case, workspace, evaluation)
             if not failure
             else {"status": "not-evaluable", "checks": [], "limitations": [failure]}
         )
@@ -414,6 +444,7 @@ async def run(
             "effort": effort,
             "topology": "direct-specialists",
             "device": case["device"],
+            "strategy": "strategy.json",
         },
         "status": "failed" if failure else "completed",
         "error": failure,

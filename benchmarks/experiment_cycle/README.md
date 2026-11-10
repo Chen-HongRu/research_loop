@@ -14,7 +14,7 @@ uv run python -m benchmarks.experiment_cycle run benchmarks/experiment_cycle/exa
 ```
 
 `--allow-model` explicitly enables the bounded subscription calls. The pinned
-runtime must be installed and authenticated; the model is `gpt-6.1-sol` at medium.
+runtime must be installed and authenticated; the default model is `gpt-6.1-terra` at medium.
 Each specialist has a 300-second sample limit; the CPU command has a 10-second
 limit. These limits are time ceilings, not token or currency budgets. The sample
 is synthetic and tests only this bounded numeric task, not general research value.
@@ -50,9 +50,9 @@ It does not certify arbitrary scientific claims or computation provenance.
 
 Historical cases must first recover the pre-plan workspace, intended inputs,
 allowed change and original device/data protocol. Do not copy the old plan,
-patch, outputs or transcripts into the starting workspace. Version 1 supports
-only the narrow paired-prediction CPU case/checker contract in `case.py`; a
-historical AUC/training experiment cannot be relabeled as this MSE task. No real
+patch, outputs or transcripts into the starting workspace. The numeric adapter in `case.py` supports the narrow paired-prediction CPU
+contract; `cactus_case.py` separately supports the fixed Cactus development
+contract described below. An AUC/training experiment cannot be relabeled as MSE. No real
 historical case has yet been recovered. Keep any private dataset outside Git.
 This is a development benchmark; tuning on it does not establish held-out gains.
 
@@ -66,3 +66,104 @@ These tests use scripted specialists and explicitly synthetic token receipts;
 the successful path executes a real small CPU process. They verify measurement
 and checking, not live model quality. The separate real sandbox probe in task
 acceptance checks allowed execution plus oracle-read denial.
+
+
+## Editable orchestration and frozen measurement
+
+`strategy.json` is the only optimization target. It contains common/stage
+instructions and each stage's `paths` or `inline` handoff mode. The host validates
+its exact schema and snapshots it into every run. Use `--strategy FILE` to compare
+a candidate. Model, budgets, fixed stage guards, filesystem permissions, command
+execution, samples, usage accounting and correctness rules are outside this file.
+`policy.py` loads data only; a strategy cannot import Python or replace a checker.
+
+## Ten Cactus development cycles (prepare first)
+
+The collection adapter prepares ten predefined architecture interventions on
+Aerial Cactus Identification, an MLE-Bench Lite task. Each cycle performs Plan →
+Prepare → paired control/candidate Execute → Evaluate with `gpt-6.1-terra`.
+The ten interventions share one task and development split; they are development
+cases, not ten independent benchmarks or official MLE-Bench leaderboard results.
+The architecture-only AST check freezes data, loss, training and evaluation code.
+Each arm runs from scratch for one epoch, seed 0, batch 128, Adam lr .001, four
+CPU threads, RGB 32×32 inputs, on one configured GPU. Negative AUC deltas are valid
+results; the checker verifies the signed delta and matching interpretation.
+
+Keep deployment configuration, source snapshots, datasets, hidden labels and
+runtime artifacts outside Git. The operator-owned deployment JSON contains
+`starting_source`, `data_metadata` (relative to that JSON), and `remote` with
+`ssh_host`, `project_root`, `data_root`, `controller_root`, `python`, `gpu_uuid`.
+The remote project also needs `evidence/benchmark-collection/config.json` with
+those execution paths plus `baseline_script`, `grade_script`, `codex_bin`,
+`gpu_index`, and a shared `gpu_lock`; `bwrap_bin` defaults to `/usr/bin/bwrap`. These private paths are never strategy fields.
+
+```sh
+# Creates ten case directories and collection.json; no model/GPU work.
+uv run python -m benchmarks.experiment_cycle.collection prepare \
+  --deployment /path/to/private/deployment.json --output /path/to/private/cases
+
+# Read-only availability check; no model calls and no training.
+uv run python -m benchmarks.experiment_cycle.collection preflight /path/to/private/cases
+
+# Later, from an authenticated controller with SSH access to the executor:
+uv run python -m benchmarks.experiment_cycle.collection run /path/to/private/cases \
+  --output /path/to/private/baseline-01 --allow-model --allow-gpu
+```
+
+Run these commands from the repository root. The local controller needs the
+pinned authenticated Codex runtime; the AutoDL executor needs the bubblewrap with permitted Linux namespaces, SSH access and the prepared task's Python/data/grader environment.
+Running the controller locally avoids copying its model credentials to AutoDL.
+`prepare` does not authenticate or start models. Do not launch `run` merely to
+check setup. No baseline is started by installing or preparing these files.
+
+Preflight first tests a CPU-only bubblewrap namespace. An unavailable sandbox
+blocks before model calls, with no unrestricted fallback. The fixed GPU executor
+uses bubblewrap directly, with explicit selected-device binds, read-only runtime/
+data/code mounts, a private writable output, hidden-controller masking and no
+network. This avoids the pinned CLI's unsupported exact writable device roots.
+GPU preflight then requires the exact configured GPU UUID, no reported compute process,
+less than 100 MiB used and at least 8192 MiB free. It exits 75 when unavailable,
+before model dispatch. The worker checks again under the shared lock before
+training. This lock coordinates cooperating launchers; it cannot reserve the GPU
+against unrelated jobs. Training uses the selected UUID, a 25% PyTorch allocator
+fraction, serial arms and a 600-second limit per arm. Actual GPU sandbox/training
+compatibility must still be verified by the first authorized run on an idle card.
+
+A failed or incomplete cycle stops collection with its measured cost retained;
+there is no automatic retry, queue, GPU polling or silent sample replacement.
+`collection-status.json` reports accepted complete cycles and attempted reports.
+If SSH loses its receipt, reconcile the recorded `remote-operation.json` operation
+ID using the remote worker's `status` action and durable logs before any retry.
+Unknown cleanup is recorded as uncertain, not successful completion.
+
+## Research Loop optimization entry
+
+Configure a Study without model calls (repeat `--case` for all frozen cases):
+
+```sh
+uv run python -m benchmarks.experiment_cycle.optimization init \
+  --case /path/to/private/cases/cycle-01/case.json \
+  --study /path/to/private/strategy-study --max-evaluations 3
+
+# Later; GPU cases also require --allow-gpu:
+uv run python -m benchmarks.experiment_cycle.optimization run \
+  /path/to/private/strategy-study --allow-model --allow-gpu
+```
+
+The existing Research Loop runs the optimizer with Terra and host delegation.
+Only `work/strategy.json` is the candidate. Its lead receives a no-argument
+`evaluate_candidate` tool; fixed operator configuration selects cases, execution
+and checker. Every dispatched candidate evaluation is charged before execution,
+including failures; resource-blocked checks do not charge the evaluation budget.
+Each evaluation replays every configured case. Compare only candidates with
+correctness pass and complete token coverage, minimizing recorded cycle tokens
+first and cycle wall time second. The loop's own optimization cost is separate
+from the measured inner cycles and must be included when assessing net benefit.
+Evaluation outputs stay private outside the Study; only aggregate gates/totals
+are returned. Repeated optimization on these cases is development evidence.
+
+Verify without models or GPUs:
+
+```sh
+uv run python -m pytest -q tests/test_cycle_*.py
+```
