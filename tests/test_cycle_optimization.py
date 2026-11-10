@@ -65,6 +65,15 @@ def test_initialize_and_native_tool(tmp_path, monkeypatch):
     assert effective[str(CASE.parent)] == "deny"
     assert str(CASE.parent / "nested") not in effective
     assert effective[str(support)] == "deny"
+    # Linux bubblewrap cannot materialize redundant child masks beneath
+    # an already read-only deny mount. The parent mask protects frozen cases.
+    assert not any(
+        permission == "deny"
+        and Path(path) != support
+        and Path(path).is_relative_to(support)
+        for path, permission in effective.items()
+        if not path.startswith(":")
+    )
     assert effective[str(project)] == "read"
     assert tools[0] == "existing" and tools[1].name == "evaluate_candidate"
 
@@ -422,3 +431,36 @@ def test_dispatch_record_recovered_and_terminal_status_not_requeued(
         asyncio.run(optimization.reconcile_evaluations(study, evaluator.config, 1))
         is None
     )
+
+
+def test_explicit_continue_keeps_existing_baseline_and_budget(tmp_path, monkeypatch):
+    study = tmp_path / "study"
+    optimization.initialize(study, [CASE], 3)
+    (study / "evaluation-ledger.json").write_text(json.dumps({"charged": 1}))
+    (study / "baseline.json").write_text(
+        json.dumps(
+            {
+                "correctness_pass": True,
+                "coverage_complete": True,
+                "phase_protocol_pass": True,
+                "evaluation_failed": False,
+            }
+        )
+    )
+    captured = []
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("completed baseline must not run again")
+
+    async def resume(root, **kwargs):
+        captured.append(kwargs["continue_run"])
+        return {"status": "running"}
+
+    monkeypatch.setattr(optimization, "run_case", forbidden)
+    monkeypatch.setattr(optimization.loop, "run", resume)
+    assert (
+        asyncio.run(optimization.run_study(study, continue_run=True))["status"]
+        == "running"
+    )
+    assert captured == [True]
+    assert json.loads((study / "evaluation-ledger.json").read_text())["charged"] == 1

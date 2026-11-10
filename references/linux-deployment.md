@@ -37,6 +37,13 @@ denied; no permission widening is needed. Verify project/work access and denied
 native/control access with synthetic files, plus one native delegation smoke.
 This storage layout is deployment configuration, not a second runtime.
 
+The experiment-cycle optimizer also removes redundant child deny masks beneath
+an already denied private support directory. Keeping both masks can make
+Bubblewrap try to create a child mount target inside a read-only parent and fail
+before any command starts. The parent deny remains authoritative; only the seed
+has an explicit read exception. Verify allowed goal/candidate reads and denied
+private-case/native reads with CPU-only commands before resuming model work.
+
 Resume the original Study explicitly with `run STUDY --continue` after confirming
 there is one controller owner. Use a supervised service, retain original records
 and inspect the actual resumed thread, resource balance and first live activity.

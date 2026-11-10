@@ -218,6 +218,12 @@ uv run python -m benchmarks.experiment_cycle.optimization run \
   /path/to/private/orchestration-study --allow-model --allow-gpu
 ```
 
+To explicitly resume a stopped or completed Study after fixing its environment,
+use the same `run` command with `--continue`. This preserves the frozen cases,
+measured baseline and charged evaluation ledger; it does not initialize a new
+Study or rerun a passing baseline. Pending remote operations are reconciled before
+additional work. Do not reset the ledger to recover from an environment failure.
+
 The existing Research Loop runs the optimizer with Terra and host delegation.
 Only `work/orchestration.py` is the candidate. Its lead receives a no-argument
 `evaluate_candidate` tool; fixed operator configuration selects cases, execution

@@ -518,6 +518,15 @@ def make_native_factory(study):
         ):
             raise ValueError("case directories and seed must be disjoint")
         roots.append(support)
+        # A denied parent already hides all frozen cases. Redundant child deny
+        # mounts require mkdir under the read-only parent on Linux bubblewrap.
+        roots = [
+            root
+            for root in dict.fromkeys(roots)
+            if not any(
+                root != parent and root.is_relative_to(parent) for parent in roots
+            )
+        ]
         args = list(config.launch_args_override or ())
         prefix = "permissions.research.filesystem="
         indices = [i for i, arg in enumerate(args) if arg.startswith(prefix)]
@@ -565,7 +574,7 @@ def passes(result):
     ) and not result.get("evaluation_failed", True)
 
 
-async def run_study(study):
+async def run_study(study, *, continue_run=False):
     study = Path(study).resolve(strict=True)
     evaluator = Evaluator(study)
     ledger = json.loads((study / "evaluation-ledger.json").read_text())
@@ -586,7 +595,9 @@ async def run_study(study):
     blocked = await reconcile_evaluations(study, evaluator.config, ledger["charged"])
     if blocked:
         return blocked
-    return await loop.run(study, native_factory=make_native_factory(study))
+    return await loop.run(
+        study, continue_run=continue_run, native_factory=make_native_factory(study)
+    )
 
 
 def main():
@@ -600,6 +611,12 @@ def main():
     launch.add_argument("study", type=Path)
     launch.add_argument("--allow-model", action="store_true")
     launch.add_argument("--allow-gpu", action="store_true")
+    launch.add_argument(
+        "--continue",
+        dest="continue_run",
+        action="store_true",
+        help="Explicitly resume a stopped/completed Study without resetting its budget",
+    )
     args = parser.parse_args()
     try:
         if args.action == "init":
@@ -613,7 +630,7 @@ def main():
                 and not args.allow_gpu
             ):
                 parser.error("GPU evaluation cases require --allow-gpu")
-            result = asyncio.run(run_study(args.study))
+            result = asyncio.run(run_study(args.study, continue_run=args.continue_run))
             if (
                 result.get("resource_blocked")
                 or result.get("status") == "baseline_failed"
