@@ -150,6 +150,26 @@ time. If SSH loses its receipt, reconcile the recorded `remote-operation.json`
 operation ID using the remote worker's `status` action and durable logs before
 any retry. Unknown cleanup is recorded as uncertain, not successful completion.
 
+To continue a collection with already accepted cycles, pass `--completed-report`
+once per prior report alongside the ordinary `run` arguments:
+
+```sh
+uv run python -m benchmarks.experiment_cycle.collection run /path/to/private/cases \
+  --output /path/to/private/continuation --allow-model --allow-gpu \
+  --completed-report /path/to/private/prior-cycle/report.json
+```
+
+The operator must select reports from the same fixed case and inputs; the
+collection matches case IDs but does not establish content identity. Each report
+must show a completed cycle, passing correctness, complete usage coverage, the
+configured model, all four completed stages and the same strategy snapshot.
+Carried cycles are not rerun. Their recorded tokens and cycle wall times enter the
+aggregate; `batch_wall_seconds` measures only the current invocation, as stated
+by `batch_wall_scope`. Retain original reports and supporting evidence when using
+an independently rechecked report. The execution receipt uses `candidate_path`
+for the local candidate source path and `candidate` for the remote candidate
+result, preserving both.
+
 A real remote execution-only paired smoke completed both arms (8.18 seconds for
 the baseline and 7.73 seconds for the candidate) and produced scores. This
 checks that execution path only; it does not validate a complete collection or

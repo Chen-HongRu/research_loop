@@ -401,7 +401,7 @@ async def run(
                 metadata = script.stat()
                 execution_identity = {
                     "command": command,
-                    "candidate": str(script),
+                    "candidate_path": str(script),
                     "candidate_size": metadata.st_size,
                     "candidate_mtime_ns": metadata.st_mtime_ns,
                     "case_id": case["case_id"],

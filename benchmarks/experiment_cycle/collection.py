@@ -11,6 +11,7 @@ from uuid import uuid4
 from research_loop.state import write_json
 from . import cactus_case
 from .accounting import summarize_usage
+from .policy import load_policy
 from .runner import run
 
 MODEL = "gpt-6.1-terra"
@@ -222,9 +223,29 @@ async def preflight(cases):
     return list(zip(configs, checks))
 
 
-async def collect(dataset, output, strategy=None):
+async def collect(dataset, output, strategy=None, completed_reports=()):
     case_paths, cases = load_collection(dataset)
-    for _, readiness in await preflight(cases):
+    carried = {}
+    for path in completed_reports:
+        path = Path(path).resolve(strict=True)
+        report = json.loads(path.read_text())
+        identity = report["case_id"]
+        if (
+            identity in carried
+            or identity not in {case["case_id"] for case in cases}
+            or report["status"] != "completed"
+            or report["correctness"]["status"] != "pass"
+            or not report["usage"]["coverage"]["complete"]
+            or report["configuration"]["model"] != MODEL
+            or {stage["stage"] for stage in report["stages"]}
+            != {"plan", "prepare", "execute", "evaluate"}
+            or any(stage["status"] != "completed" for stage in report["stages"])
+            or load_policy(path.parent / "strategy.json") != load_policy(strategy)
+        ):
+            raise ValueError("completed report does not match this collection")
+        carried[identity] = (path, report)
+    pending_cases = [case for case in cases if case["case_id"] not in carried]
+    for _, readiness in await preflight(pending_cases):
         if not readiness.get("ready"):
             return {
                 "status": "blocked",
@@ -235,16 +256,28 @@ async def collect(dataset, output, strategy=None):
     output = Path(output).resolve()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     started = monotonic()
-    reports = []
+    reports = [report for _, report in carried.values()]
     summary = {
         "status": "running",
         "model": MODEL,
         "target_cycles": 10,
-        "cycles_completed": 0,
-        "attempts": [],
+        "cycles_completed": len(carried),
+        "carried_cycles": len(carried),
+        "batch_wall_scope": "current invocation only; carried reports retain their own cycle time",
+        "attempts": [
+            {
+                "case_id": identity,
+                "report": str(path),
+                "accepted": True,
+                "carried_forward": True,
+            }
+            for identity, (path, _) in carried.items()
+        ],
     }
     groups = {}
     for index, case in enumerate(cases):
+        if case["case_id"] in carried:
+            continue
         config = case["remote"]
         groups.setdefault((config["ssh_host"], config["gpu_uuid"]), []).append(index)
     stopped = False
@@ -363,6 +396,13 @@ def main():
     launch.add_argument("--strategy", type=Path)
     launch.add_argument("--allow-model", action="store_true")
     launch.add_argument("--allow-gpu", action="store_true")
+    launch.add_argument(
+        "--completed-report",
+        type=Path,
+        action="append",
+        default=[],
+        help="Explicitly carry a verified complete cycle without rerunning it",
+    )
     args = parser.parse_args()
     try:
         if args.action == "prepare":
@@ -380,7 +420,9 @@ def main():
         else:
             if not (args.allow_model and args.allow_gpu):
                 parser.error("run requires --allow-model and --allow-gpu")
-            result = asyncio.run(collect(args.dataset, args.output, args.strategy))
+            result = asyncio.run(
+                collect(args.dataset, args.output, args.strategy, args.completed_report)
+            )
         print(json.dumps(result, indent=2))
         if (
             result.get("status") in ("blocked", "needs-attention")

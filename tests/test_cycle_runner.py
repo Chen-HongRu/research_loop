@@ -366,3 +366,24 @@ def test_prepare_schema_excludes_future_results():
     )
     assert schema["properties"]["artifacts"]["items"]["enum"] == ["train.py"]
     assert schema["properties"]["artifacts"]["minItems"] == 1
+
+
+def test_executor_candidate_receipt_survives_host_identity(tmp_path):
+    async def paired(case, workspace, root, command, model, effort):
+        receipt = await cpu_executor(case, workspace, root, command, model, effort)
+        receipt["candidate"] = {"exit_code": 0, "score": 0.8}
+        return receipt
+
+    report = asyncio.run(
+        run(
+            EXAMPLE,
+            tmp_path / "run",
+            agent=FixtureAgent(),
+            executor=paired,
+            measurement_kind="synthetic-fixture",
+        )
+    )
+    receipt = json.loads((tmp_path / "run/workspace/.cycle/execute.json").read_text())
+    assert report["correctness"]["status"] == "pass"
+    assert receipt["candidate"] == {"exit_code": 0, "score": 0.8}
+    assert receipt["candidate_path"].endswith("experiment.py")

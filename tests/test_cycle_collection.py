@@ -183,3 +183,48 @@ def test_remote_command_parses_optional_gpu_and_operation(tmp_path, monkeypatch)
     # Missing status is an application JSON error, not argparse's exit 2.
     assert result.returncode == 1
     assert "FileNotFoundError" in json.loads(result.stdout)["error"]
+
+
+def test_carry_verified_cycle_retains_cost_without_rerun(tmp_path, monkeypatch):
+    collection.prepare(deployment(tmp_path), tmp_path / "cases")
+    case = collection.load_collection(tmp_path / "cases")[1][0]
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    (prior / "strategy.json").write_text(json.dumps(collection.load_policy()))
+    report = {
+        "case_id": case["case_id"],
+        "status": "completed",
+        "correctness": {"status": "pass"},
+        "configuration": {"model": collection.MODEL},
+        "stages": [
+            {"stage": s, "status": "completed"}
+            for s in ("plan", "prepare", "execute", "evaluate")
+        ],
+        "usage": {"coverage": {"complete": True}, "total": {"total_tokens": 100}},
+        "wall_seconds": 2.0,
+    }
+    path = prior / "report.json"
+    path.write_text(json.dumps(report))
+    calls = []
+
+    async def ready(*args, **kwargs):
+        return {"ready": True}
+
+    async def run(path, *args, **kwargs):
+        calls.append(collection.cactus_case.load_case(path)["case_id"])
+        return report
+
+    monkeypatch.setattr(collection, "remote", ready)
+    monkeypatch.setattr(collection, "run", run)
+    result = asyncio.run(
+        collection.collect(
+            tmp_path / "cases", tmp_path / "output", completed_reports=[path]
+        )
+    )
+    assert case["case_id"] not in calls
+    assert len(calls) == 9
+    assert result["cycles_completed"] == 10
+    assert result["carried_cycles"] == 1
+    assert result["recorded_tokens"] == 1000
+    assert result["cycle_wall_seconds"] == 20
+    assert result["attempts"][0]["carried_forward"] is True

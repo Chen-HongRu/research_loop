@@ -158,6 +158,13 @@ executes directly without an OS filesystem or network sandbox. The architecture
 AST check freezes the permitted scientific changes, but does not establish
 remote hidden-label isolation.
 
+The operator can explicitly carry completed reports into a continuation. The
+operator must confirm the same fixed case and inputs, since case IDs alone do not
+establish content identity. Carried cycles retain their recorded tokens and cycle
+wall times; the continuation's batch wall time covers only its current invocation.
+The execution receipt keeps `candidate_path` for the local source path and
+`candidate` for the remote candidate result.
+
 A real remote execution-only paired smoke completed both arms and produced scores.
 It does not establish that the full collection completed or that the approach
 provides a general research benefit. Earlier synthetic results retain their
