@@ -116,7 +116,7 @@ def initialize(study, cases, max_evaluations):
     ):
         shutil.rmtree(support)
         raise ValueError("case directories and evaluator root must be disjoint")
-    seed = support / "seed"
+    seed = support.with_name(support.name + "-seed")
     seed.mkdir()
     shutil.copyfile(DEFAULT_PATH, seed / "orchestration.py")
     goal = support / "goal.md"
@@ -162,6 +162,7 @@ def initialize(study, cases, max_evaluations):
         write_json(study / "pending-operations.json", [])
     except BaseException:
         shutil.rmtree(support, ignore_errors=True)
+        shutil.rmtree(seed, ignore_errors=True)
         raise
     return result
 
@@ -356,7 +357,10 @@ class Evaluator:
         if ledger["charged"] >= self.config["max_evaluations"]:
             raise ValueError("evaluation budget exhausted")
         if ledger["charged"] == 0:
-            seed = Path(self.config["support"]) / "seed/orchestration.py"
+            seed = (
+                Path(json.loads((self.study / "config.json").read_text())["project"])
+                / "orchestration.py"
+            )
             if program.source != load_orchestration(seed).source:
                 raise ValueError(
                     "first evaluation requires the unmodified seed program"
@@ -510,7 +514,13 @@ def make_native_factory(study):
 
     def factory(config, journal, tools):
         support = Path(evaluator.config["support"]).resolve()
-        seed = support / "seed"
+        seed = Path(
+            json.loads((Path(study) / "config.json").read_text())["project"]
+        ).resolve()
+        if seed.is_relative_to(support) or support.is_relative_to(seed):
+            raise ValueError(
+                "read-only seed project must be outside private evaluator root"
+            )
         roots = [Path(root).resolve() for root in evaluator.config["source_case_roots"]]
         roots += [Path(case).resolve().parent for case in evaluator.config["cases"]]
         if any(

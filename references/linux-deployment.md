@@ -40,8 +40,11 @@ This storage layout is deployment configuration, not a second runtime.
 The experiment-cycle optimizer also removes redundant child deny masks beneath
 an already denied private support directory. Keeping both masks can make
 Bubblewrap try to create a child mount target inside a read-only parent and fail
-before any command starts. The parent deny remains authoritative; only the seed
-has an explicit read exception. Verify allowed goal/candidate reads and denied
+before any command starts. The parent deny remains authoritative. The read-only
+seed project lives outside that parent: Linux cannot make a child readable through
+a denied ancestor. An older deployment must relocate its seed directory and update
+the Study configuration project path before resuming; retain the identical seed
+contents and all evaluation records. Verify allowed goal/candidate reads and denied
 private-case/native reads with CPU-only commands before resuming model work.
 
 Resume the original Study explicitly with `run STUDY --continue` after confirming

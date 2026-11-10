@@ -236,6 +236,8 @@ GPU, serializing cases on each GPU. All cases must pass correctness, usage cover
 and phase protocol; failures retain recorded costs. Compare passing candidates by
 recorded cycle tokens first and batch wall time second. The loop's own optimization cost is separate
 from the measured inner cycles and must be included when assessing net benefit.
+The read-only seed project and private evaluator root are separate sibling
+directories, so Linux can mount them without a read exception under a denied parent.
 Evaluation outputs stay private outside the Study; only aggregate gates/totals
 are returned. Repeated optimization on these cases is development evidence. Historical ten-case
 results were metrics-only under the earlier harness and do not validate this engine; the default

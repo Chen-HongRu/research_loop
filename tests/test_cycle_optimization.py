@@ -31,7 +31,9 @@ def test_initialize_and_native_tool(tmp_path, monkeypatch):
     support = Path(config["support"])
     project = Path(json.loads((study / "config.json").read_text())["project"])
     assert not support.is_relative_to(study)
-    assert project == support / "seed"
+    assert project != support
+    assert not project.is_relative_to(support)
+    assert not support.is_relative_to(project)
     assert calls[0]["model"] == optimization.MODEL
     assert calls[0]["delegation"] == "host"
     assert (study / "work/orchestration.py").read_bytes() == (
@@ -76,6 +78,17 @@ def test_initialize_and_native_tool(tmp_path, monkeypatch):
     )
     assert effective[str(project)] == "read"
     assert tools[0] == "existing" and tools[1].name == "evaluate_candidate"
+
+
+def test_native_rejects_seed_under_denied_support(tmp_path):
+    study = tmp_path / "study"
+    optimization.initialize(study, [CASE], 2)
+    evaluator = json.loads((study / "evaluator.json").read_text())
+    config = json.loads((study / "config.json").read_text())
+    config["project"] = str(Path(evaluator["support"]) / "seed")
+    (study / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="seed project must be outside"):
+        optimization.make_native_factory(study)(CodexConfig(), None, [])
 
 
 def test_budget_precharged_and_invalid_candidate_never_dispatches(
