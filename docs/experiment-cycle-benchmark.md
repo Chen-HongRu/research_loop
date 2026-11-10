@@ -54,10 +54,10 @@ a CPU toy while claiming the same task. Intake/startup does not scan or hash
 dataset/checkpoint contents.
 
 Historical results are evidence, not ground truth or a required action sequence.
-The checker resides outside Agent/project read permissions. Candidate code runs
-with only intended inputs, never the checker's private-file authority. The first
-case is development data; repeated optimization on it is not held-out evidence,
-even when the checker is hidden from running agents.
+Local specialist permissions keep the checker outside their read access. Remote
+Cactus candidate execution runs directly without an OS filesystem or network
+sandbox, so hidden-label isolation is not established there. The first case is
+development data; repeated optimization on it is not held-out evidence.
 
 ## Stage contract
 
@@ -116,8 +116,8 @@ Report four stage rows with tokens, wall time, model-call count, outcome and
 artifacts. Show runner/checker overhead and unassigned usage separately. Include
 whole-cycle totals, correctness and coverage. Execute normally has zero model
 tokens but nonzero process time. Runner time is not model consumption. Agent
-wall time includes tools and model scheduling, not just inference. A future
-concurrent topology must not add overlapping task lifetimes as cycle wall time.
+wall time includes tools and model scheduling, not just inference. Concurrent
+collection reports batch wall time separately from the sum of cycle wall times.
 
 ## Correctness and acceptance
 
@@ -149,9 +149,16 @@ case correctness rules and resource limits must be verified before each historic
 
 The editable orchestration is `benchmarks/experiment_cycle/strategy.json`. The
 runner, accounting, case adapters, executor and correctness checks are fixed
-operator code. The collection and Research Loop optimization entry points,
-prepare-only commands and interpretation limits are specified in
-[the benchmark guide](../benchmarks/experiment_cycle/README.md). The planned
-collection is ten complete architecture experiment cycles on one Cactus
-development task. No new GPU baseline has been run; GPU compatibility and
-measured efficiency remain unverified until the deferred launch.
+operator code. The collection and Research Loop optimization entry points and
+interpretation limits are specified in [the benchmark guide](../benchmarks/experiment_cycle/README.md).
+The collection comprises ten fixed architecture experiment cycles on one Cactus
+development task, assigned round-robin to configured GPUs. Each cycle uses its
+assigned GPU; concurrent cycles have a separate batch makespan. The remote worker
+executes directly without an OS filesystem or network sandbox. The architecture
+AST check freezes the permitted scientific changes, but does not establish
+remote hidden-label isolation.
+
+A real remote execution-only paired smoke completed both arms and produced scores.
+It does not establish that the full collection completed or that the approach
+provides a general research benefit. Earlier synthetic results retain their
+original scope and do not validate this Cactus execution path.

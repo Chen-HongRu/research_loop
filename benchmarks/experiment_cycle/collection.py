@@ -5,10 +5,12 @@ import asyncio
 import json
 from pathlib import Path
 import shlex
+from time import monotonic
 from uuid import uuid4
 
 from research_loop.state import write_json
 from . import cactus_case
+from .accounting import summarize_usage
 from .runner import run
 
 MODEL = "gpt-6.1-terra"
@@ -33,6 +35,8 @@ async def remote(remote_config, action, identity=None, request=None):
         "--project",
         remote_config["project_root"],
         action,
+        "--gpu-uuid",
+        remote_config["gpu_uuid"],
     ]
     if identity:
         command.append(identity)
@@ -111,6 +115,15 @@ def prepare(deployment, output):
     settings = json.loads(deployment.read_text())
     source = (deployment.parent / settings["starting_source"]).resolve(strict=True)
     metadata = (deployment.parent / settings["data_metadata"]).resolve(strict=True)
+    remote_settings = settings["remote"]
+    gpu_uuids = remote_settings.get("gpu_uuids", [remote_settings.get("gpu_uuid")])
+    if (
+        not isinstance(gpu_uuids, list)
+        or not gpu_uuids
+        or any(not isinstance(gpu, str) or not gpu for gpu in gpu_uuids)
+        or len(set(gpu_uuids)) != len(gpu_uuids)
+    ):
+        raise ValueError("gpu_uuids must be a nonempty list of distinct GPU UUIDs")
     output = Path(output).resolve()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     manifests = []
@@ -156,7 +169,10 @@ full MLE-bench result, an independent task, or a generalization claim.
             "result_file": "metrics.json",
             "device": "cuda:0",
             "limits": {"stage_seconds": 300, "execute_seconds": 1500},
-            "remote": settings["remote"],
+            "remote": {
+                **{k: v for k, v in remote_settings.items() if k != "gpu_uuids"},
+                "gpu_uuid": gpu_uuids[(index - 1) % len(gpu_uuids)],
+            },
         }
         write_json(directory / "case.json", manifest)
         cactus_case.load_case(directory / "case.json")
@@ -178,7 +194,7 @@ full MLE-bench result, an independent task, or a generalization claim.
     }
 
 
-async def collect(dataset, output, strategy=None):
+def load_collection(dataset):
     dataset = Path(dataset).resolve(strict=True)
     specification = json.loads((dataset / "collection.json").read_text())
     if (
@@ -187,24 +203,36 @@ async def collect(dataset, output, strategy=None):
         or len(specification["cases"]) != 10
     ):
         raise ValueError("expected ten fixed Terra experiment cases")
-    case_paths = [
-        (dataset / path).resolve(strict=True) for path in specification["cases"]
-    ]
-    if any(not path.is_relative_to(dataset) for path in case_paths):
+    paths = [(dataset / path).resolve(strict=True) for path in specification["cases"]]
+    if any(not path.is_relative_to(dataset) for path in paths):
         raise ValueError("collection case path escapes dataset")
-    cases = [cactus_case.load_case(path) for path in case_paths]
-    if len({case["remote"]["gpu_uuid"] for case in cases}) != 1:
-        raise ValueError("collection must use one fixed GPU")
-    readiness = await remote(cases[0]["remote"], "preflight")
-    if not readiness.get("ready"):
-        return {
-            "status": "blocked",
-            "reason": readiness["reason"],
-            "model_calls": 0,
-            "cycles_completed": 0,
-        }
+    return paths, [cactus_case.load_case(path) for path in paths]
+
+
+async def preflight(cases):
+    configs = {}
+    for case in cases:
+        config = case["remote"]
+        configs.setdefault((config["ssh_host"], config["gpu_uuid"]), config)
+    checks = await asyncio.gather(
+        *(remote(config, "preflight") for config in configs.values())
+    )
+    return list(zip(configs, checks))
+
+
+async def collect(dataset, output, strategy=None):
+    case_paths, cases = load_collection(dataset)
+    for _, readiness in await preflight(cases):
+        if not readiness.get("ready"):
+            return {
+                "status": "blocked",
+                "reason": readiness["reason"],
+                "model_calls": 0,
+                "cycles_completed": 0,
+            }
     output = Path(output).resolve()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    started = monotonic()
     reports = []
     summary = {
         "status": "running",
@@ -213,48 +241,107 @@ async def collect(dataset, output, strategy=None):
         "cycles_completed": 0,
         "attempts": [],
     }
-    for index, case in enumerate(cases, 1):
-        readiness = await remote(case["remote"], "preflight")
-        if not readiness.get("ready"):
-            summary.update(status="blocked", reason=readiness["reason"])
-            break
-        report = await run(
-            case_paths[index - 1],
-            output / f"cycle-{index:02d}",
-            model=MODEL,
-            strategy=strategy,
-            executor=RemoteExecutor(),
-            case_loader=cactus_case.load_case,
-            case_checker=cactus_case.check,
+    groups = {}
+    for index, case in enumerate(cases):
+        config = case["remote"]
+        groups.setdefault((config["ssh_host"], config["gpu_uuid"]), []).append(index)
+    stopped = False
+
+    def save():
+        summary["recorded_tokens"] = sum(
+            r["usage"]["total"]["total_tokens"] for r in reports
         )
-        reports.append(report)
-        complete = (
-            report["status"] == "completed"
-            and report["correctness"]["status"] == "pass"
-            and report["usage"]["coverage"]["complete"]
-        )
-        summary["attempts"].append(
-            {
-                "case_id": case["case_id"],
-                "report": str(output / f"cycle-{index:02d}/report.json"),
-                "accepted": complete,
-            }
-        )
-        summary["cycles_completed"] += int(complete)
+        summary["cycle_wall_seconds"] = sum(r["wall_seconds"] for r in reports)
+        summary["batch_wall_seconds"] = monotonic() - started
         write_json(output / "collection-status.json", summary)
-        if not complete:
-            summary.update(
-                status="needs-attention",
-                reason="case failed a stage, correctness or coverage; no automatic retry",
-            )
-            break
+
+    async def worker(indices):
+        nonlocal stopped
+        for index in indices:
+            if stopped:
+                return
+            case = cases[index]
+            attempt = {
+                "case_id": case["case_id"],
+                "gpu_uuid": case["remote"]["gpu_uuid"],
+                "ssh_host": case["remote"]["ssh_host"],
+                "report": str(output / f"cycle-{index + 1:02d}/report.json"),
+                "accepted": False,
+            }
+            try:
+                ready = await remote(case["remote"], "preflight")
+                if stopped:
+                    return
+                if not ready.get("ready"):
+                    stopped = True
+                    summary.update(status="blocked", reason=ready["reason"])
+                    attempt["error"] = ready["reason"]
+                else:
+                    report = await run(
+                        case_paths[index],
+                        output / f"cycle-{index + 1:02d}",
+                        model=MODEL,
+                        strategy=strategy,
+                        executor=RemoteExecutor(),
+                        case_loader=cactus_case.load_case,
+                        case_checker=cactus_case.check,
+                    )
+                    reports.append(report)
+                    complete = (
+                        report["status"] == "completed"
+                        and report["correctness"]["status"] == "pass"
+                        and report["usage"]["coverage"]["complete"]
+                    )
+                    attempt["accepted"] = complete
+                    summary["cycles_completed"] += int(complete)
+                    if not complete:
+                        stopped = True
+                        summary.update(
+                            status="needs-attention",
+                            reason="case failed a stage, correctness or coverage; no automatic retry",
+                        )
+            except Exception as error:
+                stopped = True
+                summary.update(
+                    status="needs-attention",
+                    reason="cycle raised an exception; no automatic retry",
+                )
+                attempt["error"] = f"{type(error).__name__}: {error}"
+                report_path = Path(attempt["report"])
+                if report_path.exists():
+                    try:
+                        reports.append(json.loads(report_path.read_text()))
+                    except (OSError, ValueError):
+                        pass
+                else:
+                    try:
+                        tasks = json.loads(
+                            (report_path.parent / "tasks.json").read_text()
+                        )
+                        stages = json.loads(
+                            (report_path.parent / "stages.json").read_text()
+                        )
+                        reports.append(
+                            {
+                                "usage": summarize_usage(tasks["tasks"]),
+                                "wall_seconds": sum(
+                                    stage.get("wall_seconds") or 0 for stage in stages
+                                ),
+                            }
+                        )
+                        attempt["partial_accounting"] = True
+                    except (OSError, ValueError, KeyError):
+                        attempt["partial_accounting_unavailable"] = True
+            summary["attempts"].append(attempt)
+            save()
+            if stopped:
+                return
+
+    save()
+    await asyncio.gather(*(worker(indices) for indices in groups.values()))
     if summary["cycles_completed"] == 10:
         summary["status"] = "completed"
-    summary["recorded_tokens"] = sum(
-        r["usage"]["total"]["total_tokens"] for r in reports
-    )
-    summary["cycle_wall_seconds"] = sum(r["wall_seconds"] for r in reports)
-    write_json(output / "collection-status.json", summary)
+    save()
     return summary
 
 
@@ -279,13 +366,15 @@ def main():
         if args.action == "prepare":
             result = prepare(args.deployment, args.output)
         elif args.action == "preflight":
-            spec = json.loads((args.dataset / "collection.json").read_text())
-            result = asyncio.run(
-                remote(
-                    cactus_case.load_case(args.dataset / spec["cases"][0])["remote"],
-                    "preflight",
-                )
-            )
+            _, cases = load_collection(args.dataset)
+            checks = asyncio.run(preflight(cases))
+            result = {
+                "ready": all(check.get("ready") for _, check in checks),
+                "gpus": [
+                    {"ssh_host": host, "gpu_uuid": gpu, **check}
+                    for (host, gpu), check in checks
+                ],
+            }
         else:
             if not (args.allow_model and args.allow_gpu):
                 parser.error("run requires --allow-model and --allow-gpu")

@@ -144,8 +144,18 @@ def launch_config(root, workspace, *, writable, model, effort, protected=()):
         paths[str(Path(path).resolve())] = "read"
     from research_loop.codex import _toml
 
-    argv[-3:-3] = ["--config", "permissions.research.filesystem=" + _toml(paths)]
-    effective.update(filesystem=paths, web_search=False, native_multi_agent=False)
+    argv[-3:-3] = [
+        "--config",
+        "permissions.research.filesystem=" + _toml(paths),
+        "--config",
+        "project_doc_max_bytes=0",
+    ]
+    effective.update(
+        filesystem=paths,
+        web_search=False,
+        native_multi_agent=False,
+        project_doc_max_bytes=0,
+    )
     return replace(config, launch_args_override=tuple(argv)), effective
 
 

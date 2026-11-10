@@ -272,6 +272,8 @@ def test_frozen_config_disables_search_and_protects_inputs(tmp_path, monkeypatch
     )
     args = config.launch_args_override
     assert 'web_search="disabled"' in args
+    assert "project_doc_max_bytes=0" in args
+    assert effective["project_doc_max_bytes"] == 0
     assert 'web_search="live"' not in args
     assert "features.multi_agent=false" in args
     assert "features.multi_agent_v2=false" in args

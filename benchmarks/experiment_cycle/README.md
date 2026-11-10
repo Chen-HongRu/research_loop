@@ -30,6 +30,11 @@ checker. Plan and Evaluate are read-only; Prepare may write candidate code but
 fixed inputs and host handoffs remain read-only. Prepare may compile the script
 but must leave the substantive experiment to Execute.
 
+The specialist prompt is supplied explicitly; `project_doc_max_bytes=0` prevents
+ambient AGENTS.md discovery from changing the benchmark prompt or failing on
+ancestor permissions. Keep live output directories outside a Git checkout to
+avoid unrelated workspace-routing discovery.
+
 Each run creates a new output directory; an existing one is never overwritten.
 `report.json` and `report.md` show all four stages, token traffic, wall time,
 correctness and source coverage. `tasks.json` identifies the exact model histories;
@@ -86,16 +91,22 @@ The ten interventions share one task and development split; they are development
 cases, not ten independent benchmarks or official MLE-Bench leaderboard results.
 The architecture-only AST check freezes data, loss, training and evaluation code.
 Each arm runs from scratch for one epoch, seed 0, batch 128, Adam lr .001, four
-CPU threads, RGB 32×32 inputs, on one configured GPU. Negative AUC deltas are valid
+CPU threads, RGB 32×32 inputs, on one assigned GPU per cycle. Negative AUC deltas are valid
 results; the checker verifies the signed delta and matching interpretation.
 
-Keep deployment configuration, source snapshots, datasets, hidden labels and
-runtime artifacts outside Git. The operator-owned deployment JSON contains
+Keep deployment configuration, source snapshots, datasets, labels and runtime
+artifacts outside Git. The operator-owned deployment JSON contains
 `starting_source`, `data_metadata` (relative to that JSON), and `remote` with
-`ssh_host`, `project_root`, `data_root`, `controller_root`, `python`, `gpu_uuid`.
+`ssh_host`, `project_root`, `data_root`, `controller_root`, `python`, and either
+`gpu_uuid` or a nonempty `gpu_uuids` list. The ten fixed cases are assigned to
+the list in round-robin order: three GPUs receive four, three and three cases.
+
 The remote project also needs `evidence/benchmark-collection/config.json` with
-those execution paths plus `baseline_script`, `grade_script`, `codex_bin`,
-`gpu_index`, and a shared `gpu_lock`; `bwrap_bin` defaults to `/usr/bin/bwrap`. These private paths are never strategy fields.
+`data_root`, `controller_root`, `python`, `baseline_script`, and `grade_script`.
+For multiple GPUs, its operator-owned `gpu_profiles` maps each allowed UUID to
+an object containing only `gpu_index` and an absolute `gpu_lock` path. A legacy
+single-GPU `gpu_uuid`, `gpu_index`, and optional `gpu_lock` are also supported.
+These private paths and GPU identities are never strategy fields.
 
 ```sh
 # Creates ten case directories and collection.json; no model/GPU work.
@@ -111,30 +122,38 @@ uv run python -m benchmarks.experiment_cycle.collection run /path/to/private/cas
 ```
 
 Run these commands from the repository root. The local controller needs the
-pinned authenticated Codex runtime; the AutoDL executor needs the bubblewrap with permitted Linux namespaces, SSH access and the prepared task's Python/data/grader environment.
-Running the controller locally avoids copying its model credentials to AutoDL.
-`prepare` does not authenticate or start models. Do not launch `run` merely to
-check setup. No baseline is started by installing or preparing these files.
+pinned authenticated Codex runtime and SSH access; the remote executor needs the
+prepared task's Python, data and grader environment. `prepare` does not start
+models or training.
 
-Preflight first tests a CPU-only bubblewrap namespace. An unavailable sandbox
-blocks before model calls, with no unrestricted fallback. The fixed GPU executor
-uses bubblewrap directly, with explicit selected-device binds, read-only runtime/
-data/code mounts, a private writable output, hidden-controller masking and no
-network. This avoids the pinned CLI's unsupported exact writable device roots.
-GPU preflight then requires the exact configured GPU UUID, no reported compute process,
-less than 100 MiB used and at least 8192 MiB free. It exits 75 when unavailable,
-before model dispatch. The worker checks again under the shared lock before
-training. This lock coordinates cooperating launchers; it cannot reserve the GPU
-against unrelated jobs. Training uses the selected UUID, a 25% PyTorch allocator
-fraction, serial arms and a 600-second limit per arm. Actual GPU sandbox/training
-compatibility must still be verified by the first authorized run on an idle card.
+Preflight checks every distinct host and assigned GPU before output creation or
+model dispatch. Each cycle checks again before starting, and the worker checks
+under its GPU lock before training. A GPU must match the configured UUID and
+index, report no compute process, use less than 100 MiB and have at least
+8192 MiB free. The lock coordinates cooperating launchers; it cannot reserve a
+GPU against unrelated jobs. Each worker selects its assigned UUID, uses a 25%
+PyTorch allocator fraction and executes the control and candidate serially with
+a 600-second limit per arm.
 
-A failed or incomplete cycle stops collection with its measured cost retained;
-there is no automatic retry, queue, GPU polling or silent sample replacement.
-`collection-status.json` reports accepted complete cycles and attempted reports.
-If SSH loses its receipt, reconcile the recorded `remote-operation.json` operation
-ID using the remote worker's `status` action and durable logs before any retry.
-Unknown cleanup is recorded as uncertain, not successful completion.
+The remote worker runs the fixed Python command directly; its receipt records
+`execution_mode: direct`. The architecture AST check restricts candidate changes,
+but remote execution has no operating-system filesystem or network sandbox and
+does not establish hidden-label isolation. Local specialist sandbox permissions
+remain separate from the remote execution environment.
+
+One collection worker runs per host/GPU pair, with at most one cycle on each
+GPU. A failed, blocked or incomplete cycle prevents queued cycles from starting;
+already-running cycles settle. There is no automatic retry, GPU polling or silent
+sample replacement. `collection-status.json` retains attempted reports and
+recorded costs, and distinguishes the sum of cycle wall times from batch wall
+time. If SSH loses its receipt, reconcile the recorded `remote-operation.json`
+operation ID using the remote worker's `status` action and durable logs before
+any retry. Unknown cleanup is recorded as uncertain, not successful completion.
+
+A real remote execution-only paired smoke completed both arms (8.18 seconds for
+the baseline and 7.73 seconds for the candidate) and produced scores. This
+checks that execution path only; it does not validate a complete collection or
+establish research benefit.
 
 ## Research Loop optimization entry
 

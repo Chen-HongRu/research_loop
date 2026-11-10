@@ -123,10 +123,22 @@ def write_record(path, value):
     temporary.replace(path)
 
 
-def operator_config(project):
+def operator_config(project, gpu_uuid=None):
     config = json.loads(
         (project / "evidence/benchmark-collection/config.json").read_text()
     )
+    if gpu_uuid is not None:
+        profiles = config.get("gpu_profiles", {})
+        if gpu_uuid in profiles:
+            profile = profiles[gpu_uuid]
+            if not isinstance(profile, dict) or set(profile) != {
+                "gpu_index",
+                "gpu_lock",
+            }:
+                raise ValueError("invalid operator GPU profile")
+            config.update(profile, gpu_uuid=gpu_uuid)
+        elif gpu_uuid != config.get("gpu_uuid"):
+            raise ValueError("GPU is not in the operator allowlist")
     for key in (
         "gpu_uuid",
         "gpu_index",
@@ -135,7 +147,6 @@ def operator_config(project):
         "python",
         "baseline_script",
         "grade_script",
-        "codex_bin",
     ):
         if key not in config:
             raise ValueError(f"missing operator setting {key}")
@@ -145,52 +156,20 @@ def operator_config(project):
         "python",
         "baseline_script",
         "grade_script",
-        "codex_bin",
     ):
         if not Path(config[key]).is_absolute() or not Path(config[key]).exists():
             raise ValueError(f"operator path unavailable: {key}")
     if type(config["gpu_index"]) is not int or config["gpu_index"] < 0:
         raise ValueError("invalid GPU index")
+    if (
+        config.get("gpu_lock") is not None
+        and not Path(config["gpu_lock"]).is_absolute()
+    ):
+        raise ValueError("GPU lock must be an absolute path")
     return config
 
 
 def preflight(config):
-    try:
-        subprocess.run(
-            [
-                config.get("bwrap_bin", "/usr/bin/bwrap"),
-                "--unshare-net",
-                "--ro-bind",
-                "/usr",
-                "/usr",
-                "--symlink",
-                "usr/bin",
-                "/bin",
-                "--symlink",
-                "usr/lib",
-                "/lib",
-                "--symlink",
-                "usr/lib64",
-                "/lib64",
-                "--proc",
-                "/proc",
-                "--dev",
-                "/dev",
-                "--",
-                "/bin/true",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        detail = getattr(error, "stderr", None) or str(error)
-        return {
-            "ready": False,
-            "reason": "executor sandbox unavailable; no job started: "
-            + detail.strip()[-1000:],
-        }
     query = subprocess.run(
         [
             "nvidia-smi",
@@ -237,80 +216,35 @@ def preflight(config):
     }
 
 
-def sandbox_command(
-    config, code_dir, writable_dir, source, output, sandbox_home, prefixes
-):
-    # Use bubblewrap directly: the pinned Codex CLI treats exact writable
-    # device nodes as directory roots and cannot construct this GPU profile.
+def execution_command(config, code_dir, writable_dir, source, output):
+    """Direct operator-authorized execution; no filesystem/network sandbox."""
     argv = [
-        config.get("bwrap_bin", "/usr/bin/bwrap"),
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-net",
-        "--unshare-pid",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
+        config["python"],
+        "-I",
+        str(code_dir / "launch.py"),
+        str(source),
+        "--data",
+        config["data_root"],
+        "--output",
+        str(output),
+        "--epochs",
+        "1",
+        "--seed",
+        "0",
+        "--device",
+        "cuda:0",
+        "--model",
+        "tiny-cnn",
+        "--batch-size",
+        "128",
+        "--lr",
+        "0.001",
+        "--threads",
+        "4",
     ]
-    for path in ("/usr", "/bin", "/lib", "/lib64", "/sys"):
-        if Path(path).exists():
-            argv.extend(["--ro-bind", path, path])
-    for path in (
-        "/etc/ld.so.cache",
-        "/etc/localtime",
-        "/etc/passwd",
-        "/etc/group",
-        "/etc/nsswitch.conf",
-    ):
-        if Path(path).exists():
-            argv.extend(["--ro-bind", path, path])
-    for path in dict.fromkeys([config["data_root"], str(code_dir), *prefixes]):
-        argv.extend(["--ro-bind", str(path), str(path)])
-    argv.extend(["--bind", str(writable_dir), str(writable_dir)])
-    # A controller nested under a broad runtime read grant is still masked.
-    argv.extend(["--tmpfs", config["controller_root"]])
-    for name in (
-        f"/dev/nvidia{config['gpu_index']}",
-        "/dev/nvidiactl",
-        "/dev/nvidia-uvm",
-        "/dev/nvidia-uvm-tools",
-    ):
-        if Path(name).exists():
-            argv.extend(["--dev-bind", name, name])
-    argv.extend(
-        [
-            "--chdir",
-            str(code_dir),
-            "--",
-            config["python"],
-            "-I",
-            str(code_dir / "launch.py"),
-            str(source),
-            "--data",
-            config["data_root"],
-            "--output",
-            str(output),
-            "--epochs",
-            "1",
-            "--seed",
-            "0",
-            "--device",
-            "cuda:0",
-            "--model",
-            "tiny-cnn",
-            "--batch-size",
-            "128",
-            "--lr",
-            "0.001",
-            "--threads",
-            "4",
-        ]
-    )
     environment = {
         "PATH": os.defpath,
         "HOME": str(writable_dir),
-        "CODEX_HOME": str(sandbox_home),
         "TMPDIR": str(writable_dir),
         "CUDA_VISIBLE_DEVICES": config["gpu_uuid"],
         "OMP_NUM_THREADS": "4",
@@ -320,8 +254,12 @@ def sandbox_command(
     return argv, environment
 
 
-def run_operation(project, identity, request):
-    config = operator_config(project)
+def run_operation(project, identity, request, gpu_uuid=None):
+    config = (
+        operator_config(project, gpu_uuid)
+        if gpu_uuid is not None
+        else operator_config(project)
+    )
     ready = preflight(config)
     if not ready["ready"]:
         raise RuntimeError(ready["reason"])
@@ -340,26 +278,18 @@ def run_operation(project, identity, request):
         )
     )
     active = None
-    receipt = {"exit_code": 1, "gpu_uuid": config["gpu_uuid"], "operation_id": identity}
+    receipt = {
+        "exit_code": 1,
+        "gpu_uuid": config["gpu_uuid"],
+        "operation_id": identity,
+        "execution_mode": "direct",
+    }
     try:
         with lock_path.open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             ready = preflight(config)
             if not ready["ready"]:
                 raise RuntimeError(ready["reason"])
-            observation = subprocess.run(
-                [
-                    config["python"],
-                    "-I",
-                    "-c",
-                    "import sys,json;print(json.dumps([sys.prefix,sys.base_prefix]))",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            prefixes = json.loads(observation.stdout)
             for name, text in (("baseline", baseline), ("candidate", source)):
                 code = root / f"{name}-code"
                 code.mkdir()
@@ -371,10 +301,8 @@ def run_operation(project, identity, request):
                 writable = root / f"{name}-output-root"
                 writable.mkdir()
                 output = writable / "result"
-                home = root / f"{name}-sandbox-home"
-                home.mkdir(mode=0o700)
-                argv, environment = sandbox_command(
-                    config, code, writable, script, output, home, prefixes
+                argv, environment = execution_command(
+                    config, code, writable, script, output
                 )
                 begun = time.monotonic()
                 with (root / f"{name}.log").open("wb") as log:
@@ -470,6 +398,7 @@ def main():
     parser.add_argument("action", choices=("preflight", "run", "status"))
     parser.add_argument("operation_id", nargs="?")
     parser.add_argument("--allow-gpu", action="store_true")
+    parser.add_argument("--gpu-uuid", help="Select an operator-allowlisted GPU")
     args = parser.parse_args()
 
     def interrupted(signum, frame):
@@ -480,7 +409,7 @@ def main():
             signal.signal(name, interrupted)
     try:
         if args.action == "preflight":
-            result = preflight(operator_config(args.project))
+            result = preflight(operator_config(args.project, args.gpu_uuid))
         else:
             if not args.operation_id or not re.fullmatch(
                 r"[A-Za-z0-9_-]{1,80}", args.operation_id
@@ -496,7 +425,7 @@ def main():
                 if not args.allow_gpu:
                     raise ValueError("run requires --allow-gpu")
                 result = run_operation(
-                    args.project, args.operation_id, json.load(sys.stdin)
+                    args.project, args.operation_id, json.load(sys.stdin), args.gpu_uuid
                 )
         print(json.dumps(result))
         if (args.action == "preflight" and not result["ready"]) or (

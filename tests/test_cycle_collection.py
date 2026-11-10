@@ -70,3 +70,83 @@ def test_occupied_card_stops_before_model_or_output(tmp_path, monkeypatch):
     }
     assert calls == ["preflight"]
     assert not output.exists()
+
+
+def test_parallel_workers_stop_after_failure_and_retain_costs(tmp_path, monkeypatch):
+    path = deployment(tmp_path)
+    config = json.loads(path.read_text())
+    config["remote"]["gpu_uuids"] = ["GPU-0", "GPU-2", "GPU-5"]
+    path.write_text(json.dumps(config))
+    collection.prepare(path, tmp_path / "cases")
+    _, cases = collection.load_collection(tmp_path / "cases")
+    assert [case["remote"]["gpu_uuid"] for case in cases] == [
+        "GPU-0",
+        "GPU-2",
+        "GPU-5",
+        "GPU-0",
+        "GPU-2",
+        "GPU-5",
+        "GPU-0",
+        "GPU-2",
+        "GPU-5",
+        "GPU-0",
+    ]
+    running = set()
+    started = []
+    all_started = asyncio.Event()
+
+    async def ready(*args, **kwargs):
+        return {"ready": True}
+
+    async def runner(path, output, **kwargs):
+        case = collection.cactus_case.load_case(path)
+        gpu = case["remote"]["gpu_uuid"]
+        assert gpu not in running
+        running.add(gpu)
+        started.append(gpu)
+        if len(started) == 3:
+            all_started.set()
+        await all_started.wait()
+        if gpu != "GPU-0":
+            await asyncio.sleep(0.01)
+        running.remove(gpu)
+        return {
+            "status": "failed" if gpu == "GPU-0" else "completed",
+            "correctness": {"status": "pass"},
+            "usage": {"coverage": {"complete": True}, "total": {"total_tokens": 7}},
+            "wall_seconds": 2,
+        }
+
+    monkeypatch.setattr(collection, "remote", ready)
+    monkeypatch.setattr(collection, "run", runner)
+    result = asyncio.run(collection.collect(tmp_path / "cases", tmp_path / "runs"))
+    assert len(started) == 3
+    assert result["status"] == "needs-attention"
+    assert result["cycles_completed"] == 2
+    assert result["recorded_tokens"] == 21
+    assert result["cycle_wall_seconds"] == 6
+    assert result["batch_wall_seconds"] >= 0
+    assert {a["gpu_uuid"] for a in result["attempts"]} == set(started)
+    assert json.loads((tmp_path / "runs/collection-status.json").read_text()) == result
+
+
+def test_exception_retains_written_report_costs(tmp_path, monkeypatch):
+    collection.prepare(deployment(tmp_path), tmp_path / "cases")
+
+    async def ready(*args, **kwargs):
+        return {"ready": True}
+
+    async def runner(path, output, **kwargs):
+        output.mkdir()
+        (output / "report.json").write_text(
+            json.dumps({"usage": {"total": {"total_tokens": 13}}, "wall_seconds": 4})
+        )
+        raise RuntimeError("post-report failure")
+
+    monkeypatch.setattr(collection, "remote", ready)
+    monkeypatch.setattr(collection, "run", runner)
+    result = asyncio.run(collection.collect(tmp_path / "cases", tmp_path / "runs"))
+    assert result["status"] == "needs-attention"
+    assert result["recorded_tokens"] == 13
+    assert result["cycle_wall_seconds"] == 4
+    assert len(result["attempts"]) == 1

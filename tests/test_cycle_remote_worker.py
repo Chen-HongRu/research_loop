@@ -53,8 +53,8 @@ def test_busy_preflight_is_read_only_and_not_ready(monkeypatch):
     assert "no job started" in result["reason"]
 
 
-def test_sandbox_has_no_hidden_controller_permission(tmp_path):
-    from benchmarks.experiment_cycle.remote_worker import sandbox_command
+def test_direct_execution_keeps_fixed_command_and_selected_gpu(tmp_path):
+    from benchmarks.experiment_cycle.remote_worker import execution_command
 
     config = {
         "data_root": "/path/to/public/data",
@@ -64,41 +64,18 @@ def test_sandbox_has_no_hidden_controller_permission(tmp_path):
         "python": "/path/to/python",
         "codex_bin": "/path/to/codex",
     }
-    argv, env = sandbox_command(
+    argv, env = execution_command(
         config,
         tmp_path / "code",
         tmp_path / "write",
         tmp_path / "code/train.py",
         tmp_path / "write/result",
-        tmp_path / "home",
-        ["/path/to/python-prefix"],
     )
-    assert "--unshare-net" in argv
-    assert "--tmpfs" in argv
-    assert argv[argv.index("--tmpfs") + 1] == config["controller_root"]
-    # Tests do not depend on local GPU device files existing.
-    assert "/dev/nvidia1" not in argv
-    assert ["--ro-bind", "/path/to/public/data", "/path/to/public/data"] == argv[
-        argv.index("/path/to/public/data") - 1 : argv.index("/path/to/public/data") + 2
-    ]
+    assert argv[0] == config["python"]
+    assert "bwrap" not in argv
+    assert argv[argv.index("--epochs") + 1] == "1"
+    assert config["controller_root"] not in argv
     assert env["CUDA_VISIBLE_DEVICES"] == "GPU-example"
-
-
-def test_unavailable_sandbox_blocks_before_gpu_query(monkeypatch):
-    import subprocess
-    from benchmarks.experiment_cycle import remote_worker
-
-    calls = []
-
-    def denied(argv, **kwargs):
-        calls.append(argv)
-        raise subprocess.CalledProcessError(1, argv, stderr="namespace denied")
-
-    monkeypatch.setattr(remote_worker.subprocess, "run", denied)
-    result = remote_worker.preflight({})
-    assert result["ready"] is False
-    assert "sandbox unavailable" in result["reason"]
-    assert len(calls) == 1
 
 
 def test_failed_cleanup_remains_uncertain(tmp_path, monkeypatch):
@@ -117,7 +94,7 @@ def test_failed_cleanup_remains_uncertain(tmp_path, monkeypatch):
     }
     monkeypatch.setattr(worker, "operator_config", lambda project: config)
     monkeypatch.setattr(worker, "preflight", lambda config: {"ready": True})
-    monkeypatch.setattr(worker, "sandbox_command", lambda *args: (["fake"], {}))
+    monkeypatch.setattr(worker, "execution_command", lambda *args: (["fake"], {}))
     monkeypatch.setattr(
         worker.subprocess,
         "run",
@@ -146,3 +123,41 @@ def test_failed_cleanup_remains_uncertain(tmp_path, monkeypatch):
         (tmp_path / "evidence/benchmark-baseline/cleanup-test/state.json").read_text()
     )
     assert state["status"] == "uncertain"
+
+
+def test_gpu_selection_is_operator_allowlisted(tmp_path):
+    import json
+    from benchmarks.experiment_cycle.remote_worker import operator_config
+
+    path = tmp_path / "evidence/benchmark-collection/config.json"
+    path.parent.mkdir(parents=True)
+    config = {
+        key: str(tmp_path)
+        for key in (
+            "data_root",
+            "controller_root",
+            "python",
+            "baseline_script",
+            "grade_script",
+            "codex_bin",
+        )
+    }
+    config.update(
+        gpu_uuid="GPU-original",
+        gpu_index=0,
+        gpu_profiles={
+            "GPU-second": {"gpu_index": 2, "gpu_lock": str(tmp_path / "gpu-2.lock")}
+        },
+    )
+    path.write_text(json.dumps(config))
+    assert operator_config(tmp_path)["gpu_index"] == 0
+    selected = operator_config(tmp_path, "GPU-second")
+    assert selected["gpu_uuid"] == "GPU-second"
+    assert selected["gpu_index"] == 2
+    assert selected["data_root"] == str(tmp_path)
+    with pytest.raises(ValueError, match="allowlist"):
+        operator_config(tmp_path, "GPU-unapproved")
+    config["gpu_profiles"]["GPU-second"]["grade_script"] = "/different/grader"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="profile"):
+        operator_config(tmp_path, "GPU-second")
