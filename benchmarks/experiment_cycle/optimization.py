@@ -550,6 +550,9 @@ def make_native_factory(study):
             if path.startswith(":")
             or not any(Path(path).is_relative_to(root) for root in roots)
         }
+        # The controller maps TMPDIR to writable Study/work/tmp. Keeping the
+        # generic :tmpdir deny masks that allowed scratch directory on Linux.
+        paths.pop(":tmpdir", None)
         paths.update({str(root): "deny" for root in roots})
         paths[str(seed)] = "read"
         args[index] = (

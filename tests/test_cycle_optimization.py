@@ -43,6 +43,8 @@ def test_initialize_and_native_tool(tmp_path, monkeypatch):
         optimization, "Native", lambda config, journal, tools: (config, tools)
     )
     paths = {
+        ":tmpdir": "deny",
+        ":slash_tmp": "deny",
         str(CASE.parent): "read",
         str(CASE.parent / "nested"): "write",
         str(support): "read",
@@ -77,6 +79,8 @@ def test_initialize_and_native_tool(tmp_path, monkeypatch):
         if not path.startswith(":")
     )
     assert effective[str(project)] == "read"
+    assert ":tmpdir" not in effective
+    assert effective[":slash_tmp"] == "deny"
     assert tools[0] == "existing" and tools[1].name == "evaluate_candidate"
 
 

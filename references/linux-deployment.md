@@ -44,7 +44,9 @@ before any command starts. The parent deny remains authoritative. The read-only
 seed project lives outside that parent: Linux cannot make a child readable through
 a denied ancestor. An older deployment must relocate its seed directory and update
 the Study configuration project path before resuming; retain the identical seed
-contents and all evaluation records. Verify allowed goal/candidate reads and denied
+contents and all evaluation records. The optimizer removes the generic `:tmpdir`
+deny because its shell TMPDIR is already the writable Study/work/tmp; root and
+external /tmp access remain denied. Verify allowed goal/candidate reads and denied
 private-case/native reads with CPU-only commands before resuming model work.
 
 Resume the original Study explicitly with `run STUDY --continue` after confirming
