@@ -77,6 +77,29 @@ STOP at that boundary. The committed pointer permits recovery if root status was
 not written after publication. Newer unfinished work is preserved. Publication
 and iteration records do not guarantee recovery from arbitrary crashes.
 
+## Execution environment
+
+An optional initialization-time environment JSON selects an existing local
+Python interpreter and declares an optional resource interpreter/package map.
+Local paths are normalized relative to that file without resolving away the
+virtualenv interpreter symlink. The normalized settings are copied into Study
+configuration. Missing settings retain the controller interpreter default.
+
+Inspection and iteration admission observe local executable, Python version,
+prefixes and installed distribution metadata using the selected interpreter's
+standard library. They do not import numerical libraries or access resource
+hosts. The coordinator and fresh role contexts receive the same snapshot;
+resource declarations are explicitly unverified and are separate from resource
+configuration, authorization and physical receipts. The selected interpreter
+and prefixes are readable through the native permission profile, with protected
+credentials/control paths still denied. The isolated shell prioritizes its bin
+directory, identifies a virtualenv when applicable and disables user-site imports.
+
+This is environment selection and disclosure, not dependency installation,
+environment repair, scientific validation or a resource grant. Device debugging
+uses the existing authorized resource tools and budget. Running deployments are
+not modified or restarted by initialization or a repository update.
+
 ## Resource and permission boundaries
 
 | Boundary | Protected condition |

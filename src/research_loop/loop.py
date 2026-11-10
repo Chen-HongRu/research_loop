@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .codex import Native, configuration
-from . import human_input
+from . import environment, human_input
 from .instructions import RESULT_SCHEMA, instructions
 from .state import Journal, Knowledge, PublicationStopped, now, write_json, writer
 
@@ -94,6 +94,7 @@ def initialize(
     goal,
     *,
     resource_file=None,
+    environment_file=None,
     model="gpt-6.1-sol",
     effort="medium",
     provider=None,
@@ -113,6 +114,9 @@ def initialize(
         "effort": effort,
         "provider": provider,
         "delegation": delegation,
+        "environment": environment.read_config(environment_file)
+        if environment_file
+        else None,
         "resource_file": str(resource_file.resolve(strict=True))
         if resource_file
         else None,
@@ -157,10 +161,18 @@ def inspect(root):
     status = root / "status.json"
     state = json.loads(status.read_text()) if status.exists() else {}
     mode = delegation_mode(config, state)
+    resource_status = adapter.status() if adapter else None
+    tools = [tool.descriptor() for tool in adapter.tools()] if adapter else []
+    snapshot = environment.observe(
+        config.get("environment"),
+        resource_config=config.get("resource"),
+        resource_status=resource_status,
+        tools=tools,
+    )
     return {
         "config": config,
         "delegation": mode,
-        "instructions": instructions(mode),
+        "instructions": instructions(mode, snapshot),
         "output_schema": RESULT_SCHEMA,
         "input": {
             "goal_file": str(root / "goal.md"),
@@ -169,12 +181,22 @@ def inspect(root):
             "knowledge_draft": str(root / "knowledge/draft"),
             "published_knowledge_root": str(root / "knowledge/current"),
             "published_knowledge_index_file": str(root / "knowledge/current/index.md"),
-            "resource": adapter.status() if adapter else None,
+            "resource": resource_status,
+            "execution_environment": snapshot,
             "human_request_file": str(root / "inputs/human.md"),
         },
-        "tools": [tool.descriptor() for tool in adapter.tools()] if adapter else [],
+        "tools": tools,
         "permissions": {
-            "read": [config["project"], str(root)],
+            "read": list(
+                dict.fromkeys(
+                    [
+                        config["project"],
+                        str(root),
+                        snapshot["local"]["prefix"],
+                        snapshot["local"]["base_prefix"],
+                    ]
+                )
+            ),
             "write": [str(root / "work"), str(root / "knowledge/draft")],
             "shell_network": False,
             "external_tools": "lead-only",
@@ -247,7 +269,9 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
                 else "native"
             )
         call["delegation"] = mode
-        call["instructions"] = instructions(mode)
+        call["instructions"] = instructions(
+            mode, call["input"]["execution_environment"]
+        )
         adapter = resource(config, root)
         knowledge = Knowledge(root)
         baseline = knowledge.prepare()
@@ -259,6 +283,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
             config["effort"],
             provider=config.get("provider"),
             delegation=mode,
+            execution_environment=call["input"]["execution_environment"],
         )
         effective["delegation"] = mode
         call["effective_native_permissions"] = effective
@@ -287,6 +312,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
             on_started=started,
             delegation=mode,
             roles_path=root / "roles.json",
+            environment=call["input"]["execution_environment"],
         )
         if result.get("study_action") not in {"continue", "stop"} or not isinstance(
             result.get("stop_reason"), str
@@ -482,6 +508,9 @@ def main():
     init.add_argument("--project", type=Path, required=True)
     init.add_argument("--goal", type=Path, required=True)
     init.add_argument("--resource", type=Path)
+    init.add_argument(
+        "--environment", type=Path, help="Fixed preprovisioned Python environment JSON"
+    )
     init.add_argument("--model")
     init.add_argument("--effort", default="medium")
     init.add_argument("--provider", help="OpenAI-compatible provider name")
@@ -559,6 +588,7 @@ def main():
                     args.project,
                     args.goal,
                     resource_file=args.resource,
+                    environment_file=args.environment,
                     model=args.model or DEFAULT_MODEL,
                     effort=args.effort,
                     provider=provider_config(args),

@@ -115,11 +115,13 @@ class HostDelegation:
         roles_path=None,
         on_thread=None,
         max_active=MAX_ACTIVE,
+        environment=None,
     ):
         self.client = client
         self.journal = journal
         self.model = model
         self.effort = effort
+        self.environment = environment
         self.roles_path = Path(roles_path) if roles_path else None
         self.on_thread = on_thread
         self.max_active = max_active
@@ -272,7 +274,9 @@ class HostDelegation:
                     {
                         "model": self.model,
                         "allowProviderModelFallback": False,
-                        "developerInstructions": role_instructions(task.role),
+                        "developerInstructions": role_instructions(
+                            task.role, self.environment
+                        ),
                         "permissions": "research",
                         "approvalPolicy": "never",
                         "config": {"model_reasoning_effort": self.effort},

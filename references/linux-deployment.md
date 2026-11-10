@@ -11,6 +11,14 @@ resource ledgers can refer to them. Copy current source edits as well as tracked
 files; rebuild environments instead of copying platform-specific virtualenvs.
 Canonical datasets and checkpoints can remain on the existing experiment backend.
 
+If the Study has an explicit execution environment, provision its configured
+interpreter at the corresponding Linux path before continuation. `inspect`
+reports observed local Python/package metadata and separately labeled,
+unverified resource-environment declarations. These declarations do not probe
+the cluster or replace an authorized GPU/debug smoke. See
+[execution environments](operations.md#execution-environments). Updating main
+does not update a pinned release or restart an already running Study.
+
 Copy private files with ownership matching the remote service user. Host root access does not prove that a user-namespace sandbox can traverse files owned by another UID. Preserve restrictive modes instead of widening permissions.
 
 The writer lock is host-local. Stop and unregister the original supervisor before
