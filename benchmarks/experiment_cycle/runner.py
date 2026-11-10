@@ -72,6 +72,8 @@ SCHEMAS = {
 GUARD = """Execute only the supplied stage of this predefined experiment. The host owns
 execution, scoring, schemas, accounting and permissions. Never change the case,
 input data, hidden checker, stage order or measurement. No nested delegation.
+Follow stage_instructions for the CURRENT turn and stage. Earlier stage-specific
+restrictions apply only to their own turns, not to a later host-selected stage.
 """
 
 
@@ -173,28 +175,78 @@ def launch_config(root, workspace, *, writable, model, effort, protected=()):
 
 
 class NativeAgent:
-    """One fresh runtime/context per task, without installing delegation tools."""
+    """Host-owned Native transport; named contexts can resume across calls."""
 
     def __init__(self, policy=None):
         self.policy = policy or load_policy()
+        self.contexts = {}
+        self.verified = set()
 
-    async def __call__(self, stage, case, workspace, root, identity, model, effort):
-        writable = [root / "work"]
-        if stage == "prepare":
+    async def __call__(
+        self,
+        stage,
+        case,
+        workspace,
+        root,
+        identity,
+        model,
+        effort,
+        *,
+        role=None,
+        context=None,
+        common=None,
+        instructions=None,
+        handoff=None,
+        message=False,
+    ):
+        state = None
+        runtime_root = root
+        if context is not None:
+            state = self.contexts.setdefault(
+                context,
+                {
+                    "root": workspace.parent / "contexts" / context,
+                    "thread_id": None,
+                    "history_path": None,
+                    "end_bytes": 0,
+                },
+            )
+            runtime_root = state["root"]
+            runtime_root.mkdir(parents=True, exist_ok=True)
+        writable = [runtime_root / "work", root / "work"]
+        if stage == "prepare" and not message:
             writable.append(workspace)
         config, effective = launch_config(
-            root, workspace, writable=writable, model=model, effort=effort
+            runtime_root, workspace, writable=writable, model=model, effort=effort
         )
         write_json(root / "effective.json", effective)
         journal = Journal(root / "events.jsonl")
         native = Native(config, journal)
+        prior_thread = state["thread_id"] if state else None
+        start_bytes = state["end_bytes"] if state else 0
+        history_path = None
+
+        def started(tid, _path=None):
+            if prior_thread and tid != prior_thread:
+                raise RuntimeError("Native changed the requested context identity")
+            identity(tid, None)
+            if state is not None:
+                state["thread_id"] = tid
+
         try:
             async with asyncio.timeout(case["limits"]["stage_seconds"]):
                 await native.open()
-                await native.verify(model, effort)
+                if (model, effort) not in self.verified:
+                    await native.verify(model, effort)
+                    self.verified.add((model, effort))
                 payload = {
                     "case_id": case["case_id"],
                     "stage": stage,
+                    "role": role or stage,
+                    "stage_instructions": instructions
+                    if instructions is not None
+                    else self.policy["stages"][stage]["instructions"],
+                    "delivery_kind": "message" if message else "delivery",
                     "task": case["task_text"],
                     "workspace": str(workspace),
                     "artifacts": str(workspace / ".cycle"),
@@ -204,17 +256,23 @@ class NativeAgent:
                     ],
                     "result_file": case["result_file"],
                 }
-                if self.policy["stages"][stage]["context_mode"] == "inline":
+                if handoff is not None:
+                    payload["handoff"] = handoff
+                elif (
+                    common is None
+                    and self.policy["stages"][stage]["context_mode"] == "inline"
+                ):
                     payload["control_artifacts"] = inline_context(workspace, stage)
                 result = await native.run(
-                    GUARD
-                    + self.policy["common"]
-                    + self.policy["stages"][stage]["instructions"],
+                    GUARD + (common if common is not None else self.policy["common"]),
                     payload,
-                    output_schema(stage, case),
+                    schema({"message": TEXT})
+                    if message
+                    else output_schema(stage, case),
                     model=model,
                     effort=effort,
-                    on_started=lambda tid: identity(tid, None),
+                    thread_id=prior_thread,
+                    on_started=started,
                 )
                 if native.children:
                     raise ValueError("Specialist attempted nested delegation")
@@ -232,18 +290,43 @@ class NativeAgent:
                         f"{operation.__name__}: {type(error).__name__}: {error}"
                     )
             try:
-                for message in cleanup_errors:
-                    journal.emit("benchmark.cleanup.error", message=message)
+                for text in cleanup_errors:
+                    journal.emit("benchmark.cleanup.error", message=text)
             finally:
                 journal.close()
-            # Settlement emits authoritative history paths even on failed turns.
             for line in (root / "events.jsonl").read_text().splitlines():
                 row = json.loads(line)
                 if (
                     row.get("event") == "codex.history.reference"
                     and row.get("thread_id") == native.thread_id
                 ):
-                    identity(native.thread_id, row.get("path"))
+                    history_path = row.get("path")
+            if history_path:
+                if state is None:
+                    identity(
+                        native.thread_id,
+                        history_path,
+                        settlement_complete=not cleanup_errors,
+                    )
+                else:
+                    changed = (
+                        state["history_path"] is not None
+                        and Path(state["history_path"]).resolve()
+                        != Path(history_path).resolve()
+                    )
+                    end_bytes = Path(history_path).stat().st_size
+                    identity(
+                        native.thread_id,
+                        history_path,
+                        history_start_bytes=-1 if changed else start_bytes,
+                        history_end_bytes=end_bytes,
+                        settlement_complete=not cleanup_errors and not changed,
+                    )
+                    state.update(history_path=history_path, end_bytes=end_bytes)
+                    if changed:
+                        cleanup_errors.append(
+                            "Context history path changed; byte-window attribution is invalid"
+                        )
             if cleanup_errors and not primary_failure:
                 raise RuntimeError("; ".join(cleanup_errors))
 
@@ -330,11 +413,19 @@ async def run(
     effort=EFFORT,
     measurement_kind="native",
     strategy=None,
+    orchestration=None,
     case_loader=None,
     case_checker=None,
 ):
     begin = monotonic()
-    policy = load_policy(strategy)
+    from .orchestration_program import load_orchestration
+    from .orchestration_runtime import Cycle
+
+    if strategy is not None:
+        raise ValueError(
+            "JSON strategies are historical; use --orchestration with Python code"
+        )
+    program = load_orchestration(orchestration)
     case = (case_loader or load_case)(case_path)
     output = Path(output).resolve()
     validate_output_directory(case, output)
@@ -344,98 +435,16 @@ async def run(
     dossier = workspace / ".cycle"
     dossier.mkdir()
     command = [sys.executable if arg == "{python}" else arg for arg in case["command"]]
-    write_json(output / "strategy.json", policy)
-    agent = agent or NativeAgent(policy)
+    (output / "orchestration.py").write_text(program.source)
+    agent = agent or NativeAgent()
     executor = executor or execute
-    roster = []
-    records = []
-    failure = None
-    evaluation = None
+    cycle = Cycle(
+        case, workspace, output, command, agent, executor, model, effort, program.common
+    )
+    await cycle.run(program)
+    roster, records, failure = cycle.roster, cycle.records, cycle.failure
+    evaluation = cycle.deliveries.get("evaluate")
     attempt = str(uuid4())
-    for stage in STAGES:
-        if failure:
-            records.append(
-                {
-                    "stage": stage,
-                    "status": "not-run",
-                    "wall_seconds": 0,
-                    "started_at": None,
-                    "ended_at": None,
-                }
-            )
-            continue
-        root = output / stage
-        root.mkdir()
-        stamp = monotonic()
-        record = {
-            "stage": stage,
-            "status": "running",
-            "started_at": utc(),
-            "wall_seconds": None,
-        }
-        records.append(record)
-        row = None
-        if stage != "execute":
-            row = {
-                "stage": stage,
-                "thread_id": None,
-                "history_path": None,
-                "invoked": True,
-            }
-            roster.append(row)
-        write_json(
-            output / "tasks.json",
-            {"case_id": case["case_id"], "attempt_id": attempt, "tasks": roster},
-        )
-
-        def identity(tid, path, row=row):
-            row.update(thread_id=tid, history_path=path or row["history_path"])
-            write_json(
-                output / "tasks.json",
-                {"case_id": case["case_id"], "attempt_id": attempt, "tasks": roster},
-            )
-
-        try:
-            if stage == "execute":
-                script = workspace / case["command"][1]
-                metadata = script.stat()
-                execution_identity = {
-                    "command": command,
-                    "candidate_path": str(script),
-                    "candidate_size": metadata.st_size,
-                    "candidate_mtime_ns": metadata.st_mtime_ns,
-                    "case_id": case["case_id"],
-                    "source": case["source"],
-                }
-                write_json(root / "dispatch.json", execution_identity)
-                delivery = await executor(case, workspace, root, command, model, effort)
-                delivery.update(execution_identity)
-                write_json(root / "receipt.json", delivery)
-                if delivery["exit_code"] != 0:
-                    raise ValueError(f"Experiment exited {delivery['exit_code']}")
-                if not (workspace / case["result_file"]).is_file():
-                    raise ValueError("Experiment produced no result")
-            else:
-                delivery = await agent(
-                    stage, case, workspace, root, identity, model, effort
-                )
-                verify_delivery(
-                    stage, delivery, workspace, command, case["result_file"]
-                )
-                if stage == "evaluate":
-                    evaluation = delivery
-            write_json(dossier / f"{stage}.json", delivery)
-            record.update(status="completed", artifact=str(dossier / f"{stage}.json"))
-        except Exception as error:
-            failure = f"{type(error).__name__}: {error}"
-            record.update(status="failed", error=failure)
-        finally:
-            record.update(ended_at=utc(), wall_seconds=monotonic() - stamp)
-            write_json(
-                output / "tasks.json",
-                {"case_id": case["case_id"], "attempt_id": attempt, "tasks": roster},
-            )
-            write_json(output / "stages.json", records)
     try:
         correctness = (
             (case_checker or check)(case, workspace, evaluation)
@@ -467,8 +476,10 @@ async def run(
             "effort": effort,
             "topology": "direct-specialists",
             "device": case["device"],
-            "strategy": "strategy.json",
+            "orchestration": "orchestration.py",
         },
+        "phase_protocol_pass": cycle.phase_protocol_pass,
+        "calls": cycle.calls,
         "status": "failed" if failure else "completed",
         "error": failure,
         "stages": records,
@@ -497,7 +508,7 @@ async def run(
         )
     lines += [
         "",
-        f"Coordinator: absent. Total recorded tokens: {usage['total']['total_tokens']}. Cycle wall seconds: {wall:.3f}.",
+        f"Coordinator present: {usage['coordinator']['present']}. Total recorded tokens: {usage['total']['total_tokens']}. Cycle wall seconds: {wall:.3f}.",
         "",
         "Recorded totals are partial when coverage is incomplete; fixture tokens are synthetic.",
     ]

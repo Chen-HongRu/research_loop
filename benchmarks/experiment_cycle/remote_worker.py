@@ -17,6 +17,11 @@ import subprocess
 import sys
 import time
 
+if __package__:
+    from .interventions import verify_intervention
+else:
+    from interventions import verify_intervention
+
 # Only numerical layer construction is admitted; no user-supplied callables.
 _LAYERS = frozenset(
     {
@@ -266,6 +271,8 @@ def run_operation(project, identity, request, gpu_uuid=None):
     source = request.get("candidate_source")
     baseline = Path(config["baseline_script"]).read_text()
     validate_candidate(baseline, source)
+    intervention_id = request.get("intervention_id")
+    verify_intervention(baseline, source, intervention_id)
     root = project / "evidence/benchmark-baseline" / identity
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
     config_copy = dict(config)
@@ -283,6 +290,8 @@ def run_operation(project, identity, request, gpu_uuid=None):
         "gpu_uuid": config["gpu_uuid"],
         "operation_id": identity,
         "execution_mode": "direct",
+        "intervention_id": intervention_id,
+        "intervention_verified": True,
     }
     try:
         with lock_path.open("a") as lock:

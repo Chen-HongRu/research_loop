@@ -1,4 +1,4 @@
-"""Receipt-only accounting for the explicit coordinator-free task roster.
+"""Receipt-only accounting for the explicit task roster.
 
 Sums are measured partial sums when coverage is incomplete, never estimates of
 missing consumption, billing, or wasted tokens. Roster order owns duplicate IDs.
@@ -31,47 +31,95 @@ def _add(bucket, usage):
 def _validate_roster(roster):
     if not isinstance(roster, list):
         raise ValueError("roster must be a list")
-    stages, threads, paths = set(), set(), set()
     for row in roster:
         if not isinstance(row, dict):
             raise ValueError("roster rows must be objects")
-        stage = row.get("stage")
-        if stage not in ("plan", "prepare", "evaluate") or stage in stages:
-            raise ValueError("roster stages must be unique specialist stages")
-        stages.add(stage)
+        if row.get("stage") not in STAGES:
+            raise ValueError("roster stage must be a recognized stage")
         if type(row.get("invoked")) is not bool:
             raise ValueError("roster invoked must be a boolean")
-        for key, seen in (("thread_id", threads), ("history_path", paths)):
+        for key in ("thread_id", "history_path", "role", "context", "call_id"):
             value = row.get(key)
-            if value is None:
-                continue
-            if not isinstance(value, str) or not value:
+            if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"roster {key} must be a nonempty string or None")
-            identity = str(Path(value).resolve()) if key == "history_path" else value
-            if identity in seen:
-                raise ValueError(f"roster {key} must be unique")
-            seen.add(identity)
+
+
+def _window(row):
+    start, end = row.get("history_start_bytes"), row.get("history_end_bytes")
+    if start is None and end is None:
+        return None
+    if type(start) is not int or type(end) is not int or start < 0 or end < start:
+        return False
+    return (start, end)
+
+
+def _ambiguous_rows(roster):
+    bad = set()
+    for i, row in enumerate(roster):
+        if not row["invoked"]:
+            continue
+        window = _window(row)
+        if window is False:
+            bad.add(i)
+        for j in range(i):
+            other = roster[j]
+            if not other["invoked"]:
+                continue
+            same_path = (
+                row.get("history_path")
+                and other.get("history_path")
+                and (
+                    Path(row["history_path"]).resolve()
+                    == Path(other["history_path"]).resolve()
+                )
+            )
+            same_thread = row.get("thread_id") and row.get("thread_id") == other.get(
+                "thread_id"
+            )
+            if not (same_path or same_thread):
+                continue
+            other_window = _window(other)
+            if (
+                not same_path
+                or window is None
+                or other_window is None
+                or window is False
+                or other_window is False
+                or max(window[0], other_window[0]) < min(window[1], other_window[1])
+            ):
+                bad.update((i, j))
+    return bad
 
 
 def summarize_usage(roster: list[dict]) -> dict:
-    """Read each explicit history once and charge all receipts to its owner stage.
+    """Charge receipts within each optional half-open byte window to its stage.
 
     Only newline-terminated JSONL records are published. Session identity must match
     the roster before any receipt is accepted. Missing/invalid/truncated evidence is
     reported in coverage; cumulative counters and task outcome never supply usage.
-    Uninvoked rows are not read. A duplicate valid receipt establishes evidence for
+    Windowed histories read the first session metadata line for identity and require
+    newline-aligned bounds. Uninvoked rows are not read. A duplicate valid receipt establishes evidence for
     its task but contributes tokens only once across the complete roster.
     """
     _validate_roster(roster)
     total = zero_usage()
     by_stage = {stage: zero_usage() for stage in STAGES}
+    by_role, by_context = {}, {}
+    coordinator_usage = zero_usage()
+    coordinator_present = any(row.get("role") == "coordinator" for row in roster)
     issues, tasks, seen = [], [], set()
     histories_read = 0
 
-    for row in roster:
+    ambiguous = _ambiguous_rows(roster)
+    for row_index, row in enumerate(roster):
         stage, thread_id = row["stage"], row.get("thread_id")
+        role, context = row.get("role") or stage, row.get("context")
+        by_role.setdefault(role, zero_usage())
+        if context is not None:
+            by_context.setdefault(context, zero_usage())
         task = {
             "stage": stage,
+            "role": role,
             "thread_id": thread_id,
             "invoked": row["invoked"],
             "measurable": not row["invoked"],
@@ -80,6 +128,15 @@ def summarize_usage(roster: list[dict]) -> dict:
             "duplicate_responses": 0,
             "issues": [],
         }
+        for key in (
+            "call_id",
+            "context",
+            "history_start_bytes",
+            "history_end_bytes",
+            "settlement_complete",
+        ):
+            if key in row:
+                task[key] = row[key]
         tasks.append(task)
 
         def issue(code, line=None):
@@ -91,6 +148,14 @@ def summarize_usage(roster: list[dict]) -> dict:
 
         if not row["invoked"]:
             continue
+        if "settlement_complete" in row:
+            if type(row["settlement_complete"]) is not bool:
+                issue("invalid_settlement_evidence")
+            elif not row["settlement_complete"]:
+                issue("unsettled_runtime")
+        if row_index in ambiguous:
+            issue("invalid_history_window")
+            continue
         if thread_id is None:
             issue("missing_thread_id")
         path = row.get("history_path")
@@ -101,9 +166,54 @@ def summarize_usage(roster: list[dict]) -> dict:
         try:
             with Path(path).open("rb") as stream:
                 histories_read += 1
-                for line_number, raw in enumerate(stream, 1):
+                window = _window(row)
+                if window is not None:
+                    start, end = window
+                    stream.seek(0, 2)
+                    if end > stream.tell():
+                        issue("invalid_history_window")
+                        continue
+                    if end:
+                        stream.seek(end - 1)
+                        if stream.read(1) != b"\n":
+                            issue("invalid_history_window")
+                            continue
+                    if start:
+                        stream.seek(start - 1)
+                        if stream.read(1) != b"\n":
+                            issue("invalid_history_window")
+                            continue
+                        stream.seek(0)
+                        try:
+                            meta = json.loads(stream.readline())
+                        except (ValueError, UnicodeDecodeError):
+                            meta = None
+                        if (
+                            isinstance(meta, dict)
+                            and meta.get("type") == "session_meta"
+                        ):
+                            payload = meta.get("payload")
+                            identities.append(
+                                payload.get("id") if isinstance(payload, dict) else None
+                            )
+                    stream.seek(start)
+                line_number = 0
+                while window is None or stream.tell() < end:
+                    line_number += 1
+                    raw = (
+                        stream.readline()
+                        if window is None
+                        else stream.readline(end - stream.tell())
+                    )
+                    if not raw:
+                        break
                     if not raw.endswith(b"\n"):
-                        issue("truncated_history", line_number)
+                        issue(
+                            "truncated_history"
+                            if window is None
+                            else "invalid_history_window",
+                            line_number,
+                        )
                         break
                     try:
                         record = json.loads(raw)
@@ -152,6 +262,11 @@ def summarize_usage(roster: list[dict]) -> dict:
                 task["valid_receipts"] += 1
                 _add(total, usage)
                 _add(by_stage[stage], usage)
+                _add(by_role[role], usage)
+                if context is not None:
+                    _add(by_context[context], usage)
+                if row.get("role") == "coordinator":
+                    _add(coordinator_usage, usage)
         task["measurable"] = task["valid_receipts"] > 0
         if not task["measurable"]:
             issue("missing_usage_receipts")
@@ -159,6 +274,8 @@ def summarize_usage(roster: list[dict]) -> dict:
     return {
         "total": total,
         "by_stage": by_stage,
+        "by_role": by_role,
+        "by_context": by_context,
         "coverage": {
             "authority": AUTHORITY,
             "complete": not issues,
@@ -172,6 +289,14 @@ def summarize_usage(roster: list[dict]) -> dict:
             ),
             "duplicate_responses": sum(task["duplicate_responses"] for task in tasks),
         },
-        "coordinator": {"present": False, "model_calls": 0},
+        "coordinator": (
+            {
+                "present": True,
+                "model_calls": coordinator_usage["responses"],
+                "usage": coordinator_usage,
+            }
+            if coordinator_present
+            else {"present": False, "model_calls": 0}
+        ),
         "unassigned": zero_usage(),
     }

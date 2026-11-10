@@ -17,8 +17,9 @@ def load_case(path: str | Path) -> dict:
         raise ValueError("manifest must not traverse symlinks")
     manifest = manifest.resolve(strict=True)
     root = manifest.parent
+    raw_case = _json(manifest)
     case = _keys(
-        _json(manifest),
+        raw_case,
         {
             "version",
             "case_type",
@@ -31,7 +32,8 @@ def load_case(path: str | Path) -> dict:
             "device",
             "limits",
             "remote",
-        },
+        }
+        | ({"intervention_id"} if "intervention_id" in raw_case else set()),
         "case",
     ).copy()
     if (
@@ -41,6 +43,11 @@ def load_case(path: str | Path) -> dict:
     ):
         raise ValueError("unsupported case version or type")
     _text(case["case_id"], "case_id")
+    if "intervention_id" in case and (
+        type(case["intervention_id"]) is not int
+        or not 1 <= case["intervention_id"] <= 10
+    ):
+        raise ValueError("intervention_id must be an integer from 1 to 10")
     source = _keys(case["source"], {"kind", "reference"}, "source")
     if source[
         "kind"
@@ -139,6 +146,11 @@ def check(case: dict, workspace: str | Path, evaluation: dict | None) -> dict:
             or receipt.get("gpu_uuid") != case["remote"]["gpu_uuid"]
         ):
             raise ValueError("missing or unsuccessful execution or GPU receipt")
+        if "intervention_id" in case and (
+            receipt.get("intervention_id") != case["intervention_id"]
+            or receipt.get("intervention_verified") is not True
+        ):
+            raise ValueError("missing verified intended intervention")
         scores = []
         for name in ("baseline", "candidate"):
             item = receipt.get(name)

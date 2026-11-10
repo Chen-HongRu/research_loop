@@ -112,6 +112,7 @@ def test_parallel_workers_stop_after_failure_and_retain_costs(tmp_path, monkeypa
         running.remove(gpu)
         return {
             "status": "failed" if gpu == "GPU-0" else "completed",
+            "phase_protocol_pass": True,
             "correctness": {"status": "pass"},
             "usage": {"coverage": {"complete": True}, "total": {"total_tokens": 7}},
             "wall_seconds": 2,
@@ -190,10 +191,11 @@ def test_carry_verified_cycle_retains_cost_without_rerun(tmp_path, monkeypatch):
     case = collection.load_collection(tmp_path / "cases")[1][0]
     prior = tmp_path / "prior"
     prior.mkdir()
-    (prior / "strategy.json").write_text(json.dumps(collection.load_policy()))
+    (prior / "orchestration.py").write_text(collection.load_orchestration().source)
     report = {
         "case_id": case["case_id"],
         "status": "completed",
+        "phase_protocol_pass": True,
         "correctness": {"status": "pass"},
         "configuration": {"model": collection.MODEL},
         "stages": [

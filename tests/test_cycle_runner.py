@@ -20,7 +20,9 @@ class FixtureAgent:
         self.fail = fail
         self.premature = premature
 
-    async def __call__(self, stage, case, workspace, root, identity, model, effort):
+    async def __call__(
+        self, stage, case, workspace, root, identity, model, effort, **kwargs
+    ):
         self.called.append(stage)
         history = root / "history.jsonl"
         tid = "fixture-" + stage
@@ -213,7 +215,9 @@ def test_reusing_output_does_not_overwrite_evidence(tmp_path):
 
 def test_missing_usage_is_not_zero_measured(tmp_path):
     class NoUsage(FixtureAgent):
-        async def __call__(self, stage, case, workspace, root, identity, model, effort):
+        async def __call__(
+            self, stage, case, workspace, root, identity, model, effort, **kwargs
+        ):
             result = await super().__call__(
                 stage, case, workspace, root, identity, model, effort
             )
@@ -343,7 +347,7 @@ def test_native_failure_settles_and_retains_actual_history(tmp_path, monkeypatch
     monkeypatch.setattr(runner, "Native", FailedNative)
     row = {"stage": "plan", "invoked": True, "thread_id": None, "history_path": None}
 
-    def identity(tid, path):
+    def identity(tid, path, **metadata):
         row.update(thread_id=tid, history_path=path or row["history_path"])
 
     with pytest.raises(RuntimeError, match="original native turn failed"):
@@ -387,3 +391,101 @@ def test_executor_candidate_receipt_survives_host_identity(tmp_path):
     assert report["correctness"]["status"] == "pass"
     assert receipt["candidate"] == {"exit_code": 0, "score": 0.8}
     assert receipt["candidate_path"].endswith("experiment.py")
+
+
+def test_native_context_switch_keeps_phase_in_current_turn(tmp_path, monkeypatch):
+    from benchmarks.experiment_cycle import runner
+    from benchmarks.experiment_cycle.case import load_case, build_workspace
+
+    case = load_case(EXAMPLE)
+    workspace = tmp_path / "workspace"
+    build_workspace(case, workspace)
+    monkeypatch.setattr(runner, "launch_config", lambda *a, **k: (None, {}))
+    history = tmp_path / "shared-history.jsonl"
+    seen = []
+    windows = []
+
+    class ContextNative:
+        def __init__(self, config, journal):
+            self.journal = journal
+            self.thread_id = None
+            self.children = set()
+
+        async def open(self):
+            pass
+
+        async def verify(self, *args):
+            pass
+
+        async def run(self, instructions, payload, schema, **kwargs):
+            seen.append((instructions, payload, kwargs["thread_id"]))
+            self.thread_id = kwargs["thread_id"] or "shared-context"
+            kwargs["on_started"](self.thread_id)
+            if not history.exists():
+                history.write_text(
+                    json.dumps(
+                        {"type": "session_meta", "payload": {"id": self.thread_id}}
+                    )
+                    + "\n"
+                )
+            with history.open("a") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "type": "token_usage_record",
+                            "payload": {
+                                "response_id": str(len(seen)),
+                                "usage": {"input_tokens": 10, "output_tokens": 2},
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            self.journal.emit(
+                "codex.history.reference", thread_id=self.thread_id, path=str(history)
+            )
+            return {}
+
+        async def stop(self):
+            pass
+
+        async def settle(self):
+            pass
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(runner, "Native", ContextNative)
+
+    def identity(tid, path, **metadata):
+        if path:
+            windows.append(metadata)
+
+    async def invoke():
+        agent = runner.NativeAgent()
+        for stage, instructions in (
+            ("plan", "PLAN ONLY"),
+            ("prepare", "IMPLEMENT NOW"),
+        ):
+            root = tmp_path / stage
+            root.mkdir()
+            await agent(
+                stage,
+                case,
+                workspace,
+                root,
+                identity,
+                "gpt-6.1-terra",
+                "medium",
+                context="shared",
+                common="COMMON",
+                instructions=instructions,
+            )
+
+    asyncio.run(invoke())
+    assert seen[0][0] == seen[1][0]
+    assert "PLAN ONLY" not in seen[0][0]
+    assert [x[1]["stage_instructions"] for x in seen] == ["PLAN ONLY", "IMPLEMENT NOW"]
+    assert [x[2] for x in seen] == [None, "shared-context"]
+    assert windows[0]["history_end_bytes"] == windows[1]["history_start_bytes"]
+    assert all(x["settlement_complete"] for x in windows)

@@ -189,13 +189,68 @@ def test_session_identity_required_before_charging_receipts(tmp_path, identity):
     }
 
 
-@pytest.mark.parametrize("key", ["stage", "thread_id", "history_path"])
-def test_duplicate_roster_entries_are_rejected(tmp_path, key):
+def test_shared_history_windows_attribute_calls_and_deduplicate(tmp_path):
+    path = tmp_path / "shared.jsonl"
+    chunks = [
+        [
+            {"type": "session_meta", "payload": {"id": "shared"}},
+            receipt("plan"),
+            {"type": "compacted"},
+        ],
+        [receipt("failed"), receipt("plan")],
+        [receipt("eval")],
+    ]
+    positions = [0]
+    with path.open("wb") as stream:
+        for chunk in chunks:
+            for event in chunk:
+                stream.write(json.dumps(event).encode() + b"\n")
+            positions.append(stream.tell())
+    roster = [
+        {
+            "stage": stage,
+            "thread_id": "shared",
+            "history_path": str(path),
+            "invoked": True,
+            "history_start_bytes": positions[i],
+            "history_end_bytes": positions[i + 1],
+            "outcome": "failed" if i == 1 else "ok",
+        }
+        for i, stage in enumerate(("plan", "prepare", "evaluate"))
+    ]
+    result = summarize_usage(roster)
+    assert result["coverage"]["complete"]
+    assert result["coverage"]["duplicate_responses"] == 1
+    assert result["total"]["total_tokens"] == 39
+    assert [
+        result["by_stage"][stage]["responses"]
+        for stage in ("plan", "prepare", "evaluate")
+    ] == [1, 1, 1]
+
+
+@pytest.mark.parametrize(
+    "kind", ["overlap", "whole", "partial", "past_end", "negative"]
+)
+def test_invalid_shared_windows_are_reported(tmp_path, kind):
     first = task(tmp_path, "plan", [receipt("one")])
-    second = task(tmp_path, "prepare", [receipt("two")])
-    second[key] = first[key]
-    with pytest.raises(ValueError, match="unique"):
-        summarize_usage([first, second])
+    size = Path(first["history_path"]).stat().st_size
+    first.update(history_start_bytes=0, history_end_bytes=size)
+    second = dict(
+        first, stage="prepare", history_start_bytes=size, history_end_bytes=size
+    )
+    if kind == "overlap":
+        second["history_start_bytes"] = 0
+    elif kind == "whole":
+        del second["history_start_bytes"], second["history_end_bytes"]
+    elif kind == "partial":
+        second["history_start_bytes"] = size - 1
+    elif kind == "past_end":
+        second["history_end_bytes"] = size + 1
+    else:
+        second["history_start_bytes"] = -1
+    result = summarize_usage([first, second])
+    assert not result["coverage"]["complete"]
+    assert "invalid_history_window" in codes(result)
 
 
 def test_uninvoked_task_not_read_and_explicit_zero_receipt_is_measured(tmp_path):
@@ -217,3 +272,59 @@ def test_empty_buckets_are_independent():
     assert result["total"] == zero_usage()
     assert result["unassigned"] == zero_usage()
     assert result["by_stage"]["plan"] == zero_usage()
+
+
+def test_roles_contexts_and_coordinator_reconcile_unique_responses(tmp_path):
+    plan = task(tmp_path, "plan", [receipt("shared"), receipt("planning")])
+    assistant = task(tmp_path, "prepare", [receipt("shared"), receipt("assistant")])
+    assistant.update(
+        stage="plan", role="assistant", context="shared-context", call_id="c2"
+    )
+    plan.update(role="coordinator", context="shared-context", call_id="c1")
+    result = summarize_usage([plan, assistant])
+    assert result["coverage"]["complete"]
+    assert result["total"]["responses"] == 3
+    assert result["by_stage"]["plan"]["responses"] == 3
+    assert result["by_role"]["coordinator"]["responses"] == 2
+    assert result["by_role"]["assistant"]["responses"] == 1
+    assert result["by_context"]["shared-context"] == result["total"]
+    assert result["coordinator"] == {
+        "present": True,
+        "model_calls": 2,
+        "usage": result["by_role"]["coordinator"],
+    }
+    assert result["coverage"]["tasks"][1]["call_id"] == "c2"
+    assert result["coverage"]["tasks"][1]["context"] == "shared-context"
+
+
+def test_legacy_role_defaults_to_stage_and_windows_are_traced(tmp_path):
+    row = task(tmp_path, "plan", [receipt("one")])
+    row.update(
+        history_start_bytes=0,
+        history_end_bytes=Path(row["history_path"]).stat().st_size,
+    )
+    result = summarize_usage([row])
+    assert result["by_role"]["plan"] == result["total"]
+    assert result["by_context"] == {}
+    assert result["coverage"]["tasks"][0]["role"] == "plan"
+    assert (
+        result["coverage"]["tasks"][0]["history_end_bytes"] == row["history_end_bytes"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("settlement", "expected_issue"),
+    [(False, "unsettled_runtime"), ("yes", "invalid_settlement_evidence")],
+)
+def test_unsettled_or_invalid_settlement_preserves_observed_usage(
+    tmp_path, settlement, expected_issue
+):
+    row = task(tmp_path, "plan", [receipt("observed")])
+    row["settlement_complete"] = settlement
+    result = summarize_usage([row])
+    assert result["total"]["responses"] == 1
+    assert result["total"]["total_tokens"] == 13
+    assert result["coverage"]["measurable"]
+    assert not result["coverage"]["complete"]
+    assert codes(result) == {expected_issue}
+    assert result["coverage"]["tasks"][0]["settlement_complete"] == settlement

@@ -142,3 +142,16 @@ def test_case_and_output_path_isolation(setup_case):
     (workspace / "metrics.json").unlink()
     (workspace / "metrics.json").symlink_to(case["task"])
     assert check(case, workspace, evaluation)["status"] == "not-evaluable"
+
+
+def test_explicit_intervention_requires_verified_receipt(setup_case):
+    case, workspace, _ = setup_case
+    case["intervention_id"] = 1
+    receipt, evaluation = evidence(workspace)
+    assert check(case, workspace, evaluation)["status"] == "not-evaluable"
+    receipt.update(intervention_id=1, intervention_verified=True)
+    (workspace / ".cycle/execute.json").write_text(json.dumps(receipt))
+    assert check(case, workspace, evaluation)["status"] == "pass"
+    receipt["intervention_id"] = 2
+    (workspace / ".cycle/execute.json").write_text(json.dumps(receipt))
+    assert check(case, workspace, evaluation)["status"] == "not-evaluable"

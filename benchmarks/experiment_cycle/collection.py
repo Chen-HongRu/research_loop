@@ -11,7 +11,7 @@ from uuid import uuid4
 from research_loop.state import write_json
 from . import cactus_case
 from .accounting import summarize_usage
-from .policy import load_policy
+from .orchestration_program import load_orchestration
 from .runner import run
 
 MODEL = "gpt-6.1-terra"
@@ -91,7 +91,13 @@ class RemoteExecutor:
         source = (workspace / "train.py").read_text()
         async with asyncio.timeout(case["limits"]["execute_seconds"]):
             receipt = await remote(
-                case["remote"], "run", identity, {"candidate_source": source}
+                case["remote"],
+                "run",
+                identity,
+                {
+                    "candidate_source": source,
+                    "intervention_id": case.get("intervention_id"),
+                },
             )
         write_json(
             root / "remote-operation.json",
@@ -162,6 +168,7 @@ full MLE-bench result, an independent task, or a generalization claim.
             "version": 1,
             "case_type": "cactus-dev",
             "case_id": f"cactus-architecture-{index:02d}",
+            "intervention_id": index,
             "source": {
                 "kind": "mle-bench-lite-development",
                 "reference": "aerial-cactus-identification; pinned official grader 507f92e; prepared mirror 01a3db85; additional project dev split seed 0",
@@ -223,7 +230,7 @@ async def preflight(cases):
     return list(zip(configs, checks))
 
 
-async def collect(dataset, output, strategy=None, completed_reports=()):
+async def collect(dataset, output, orchestration=None, completed_reports=()):
     case_paths, cases = load_collection(dataset)
     carried = {}
     for path in completed_reports:
@@ -240,7 +247,9 @@ async def collect(dataset, output, strategy=None, completed_reports=()):
             or {stage["stage"] for stage in report["stages"]}
             != {"plan", "prepare", "execute", "evaluate"}
             or any(stage["status"] != "completed" for stage in report["stages"])
-            or load_policy(path.parent / "strategy.json") != load_policy(strategy)
+            or report.get("phase_protocol_pass") is not True
+            or load_orchestration(path.parent / "orchestration.py").source
+            != load_orchestration(orchestration).source
         ):
             raise ValueError("completed report does not match this collection")
         carried[identity] = (path, report)
@@ -316,7 +325,7 @@ async def collect(dataset, output, strategy=None, completed_reports=()):
                         case_paths[index],
                         output / f"cycle-{index + 1:02d}",
                         model=MODEL,
-                        strategy=strategy,
+                        orchestration=orchestration,
                         executor=RemoteExecutor(),
                         case_loader=cactus_case.load_case,
                         case_checker=cactus_case.check,
@@ -326,6 +335,7 @@ async def collect(dataset, output, strategy=None, completed_reports=()):
                         report["status"] == "completed"
                         and report["correctness"]["status"] == "pass"
                         and report["usage"]["coverage"]["complete"]
+                        and report.get("phase_protocol_pass") is True
                     )
                     attempt["accepted"] = complete
                     summary["cycles_completed"] += int(complete)
@@ -393,7 +403,7 @@ def main():
     launch = sub.add_parser("run", help="Run only when the fixed GPU is idle")
     launch.add_argument("dataset", type=Path)
     launch.add_argument("--output", type=Path, required=True)
-    launch.add_argument("--strategy", type=Path)
+    launch.add_argument("--orchestration", type=Path)
     launch.add_argument("--allow-model", action="store_true")
     launch.add_argument("--allow-gpu", action="store_true")
     launch.add_argument(
@@ -421,7 +431,9 @@ def main():
             if not (args.allow_model and args.allow_gpu):
                 parser.error("run requires --allow-model and --allow-gpu")
             result = asyncio.run(
-                collect(args.dataset, args.output, args.strategy, args.completed_report)
+                collect(
+                    args.dataset, args.output, args.orchestration, args.completed_report
+                )
             )
         print(json.dumps(result, indent=2))
         if (

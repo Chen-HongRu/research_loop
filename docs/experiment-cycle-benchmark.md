@@ -1,171 +1,88 @@
-# Minimal experiment-cycle benchmark
+# Experiment-cycle benchmark
 
-Status: approved for implementation in this task: after accepting the coordinator-free design, the user requested implementation. The implementation and its evidence are described in `benchmarks/experiment_cycle/README.md`.
-Source baseline: Research Loop `8ff7ad34a4f76f76f303a64a48f9f017c8797d45`,
-Codex `0.167.0`.
+The benchmark measures a bounded experiment through Plan → Prepare → Execute →
+Evaluate and an independent host correctness check. A case freezes its task,
+starting workspace, data roles, permitted change, device, budgets, execution and
+checker. The host transfers artifacts, validates deliveries and executes the
+prepared command; it does not invent hypotheses or reinterpret results. Private
+inputs and runtime evidence stay outside Git. The supplied numeric CPU sample is
+synthetic and does not establish general research benefit.
 
-## Unit and execution
+## Orchestration contract
 
-One case is one predefined experimental question. A deterministic benchmark
-runner directly invokes three specialist tasks and executes the prepared command:
+`benchmarks/experiment_cycle/orchestration.py` is the editable candidate. It
+contains a nonempty `COMMON` string and `async def orchestrate(team)`. The host
+exposes `await team.call(phase, role=..., context=..., instructions=...,
+handoff=...)`, `await team.message(...)` with the same arguments and a message
+result, and `await team.execute()`. Candidates can reuse role and context names,
+pass JSON handoffs, and use conditionals and unrolled feedback. The restricted
+Python language excludes imports, loops, extra functions, arbitrary attributes and
+unawaited calls. Instructions are limited to 16 KiB. The host enforces at most
+eight model calls and the phase order; `phase_protocol_pass` is a required gate.
 
-    case -> Plan Agent -> Prepare Agent -> local process -> Evaluate Agent
-                                                        -> host correctness check
+The default uses three fresh specialist contexts and no coordinator. A candidate
+can use a coordinator role, whose calls are charged like all others. Reused Native
+contexts receive a stable phase-neutral developer guard and common instructions;
+the current role and stage instructions arrive in each turn. All model
+calls use `gpt-6.1-terra` at medium effort in the collection and optimization
+study. Model, cases, GPU allocation, execution, receipt accounting and correctness
+remain fixed operator controls. `--orchestration FILE` selects a candidate for the
+runner and collection. `--strategy` is historical and rejected; the old JSON
+source and loader remain for historical evidence.
 
-There is no coordinator Agent. The runner transfers artifact references, checks
-delivery shape, starts and waits for processes, records usage/time, and produces
-the report. Scientific design belongs to Plan; implementation belongs to Prepare;
-interpretation belongs to Evaluate. The runner does not choose new hypotheses,
-reinterpret results, design repairs or rewrite the experiment goal.
-
-Use one fresh context per specialist task with `gpt-6.1-terra` and medium reasoning. The earlier live synthetic
-run used Sol; it does not validate the new Cactus execution path.
-Each task has a fresh Native runtime instance, settled and closed before the next
-stage. Reuse current role responsibilities through benchmark-specific assignments
-that identify the runner as executor; omit coordinator delegation policy and
-nested delegation. Work products, not chats, connect stages.
-
-This is a simplified architecture using the current pinned runtime, not the
-current autonomous coordinator topology. It does not establish that open-ended
-research can dispense with scientific coordination. A future coordinator
-comparison uses the same case, deliverables, checker, resources and accounting;
-the measurement unit requires neither topology. No general adapter framework
-is needed for this first baseline.
-
-## Case contract
-
-Start with one recoverable historical experiment executable locally under its
-original device/data protocol. Prefer a genuine CPU case. Keep private cases
-and runtime evidence outside tracked source files.
-
-| Material | Required contents |
-| --- | --- |
-| Metadata | Case ID, source reference, input revision, device, budgets and stopping conditions |
-| Task | Question, allowed changes, data roles, objectives, deliverables and permitted claim scope |
-| Starting workspace | Pre-plan code/configuration and explicit minimal original inputs |
-| Prior sources | Frozen material available before the target experiment |
-| Host-only checker | Independent deterministic checks, evaluation inputs/answers as appropriate, and reference evidence |
-
-Agents cannot read the target experiment's historical plan, patch, results,
-conclusions, transcripts or future Git history. Disable live retrieval and shell
-network access for all tasks; verify effective configuration. Missing recoverable
-starting conditions make a case ineligible. Do not replace a GPU experiment with
-a CPU toy while claiming the same task. Intake/startup does not scan or hash
-dataset/checkpoint contents.
-
-Historical results are evidence, not ground truth or a required action sequence.
-Local specialist permissions keep the checker outside their read access. Remote
-Cactus candidate execution runs directly without an OS filesystem or network
-sandbox, so hidden-label isolation is not established there. The first case is
-development data; repeated optimization on it is not held-out evidence.
-
-## Stage contract
-
-| Stage | Owner and input | Output |
+| Phase | Responsibility | Required delivery |
 | --- | --- | --- |
-| Plan | Plan Agent reads the question and prior evidence | Hypothesis, matched control, permitted change, evaluation rule and outcome interpretations |
-| Prepare | Prepare Agent reads plan and starting code | Candidate/configuration, bounded smoke evidence, command and output schema |
-| Execute | Runner starts the prepared process | Candidate/config/input identity, command status, timing, logs and measurement outputs |
-| Evaluate | Evaluate Agent reads plan and execution artifacts | Structured conclusion, metric deltas, evidence and limitations |
+| Plan | Design the bounded experiment | Hypothesis, matched control, permitted change, evaluation rule and outcome interpretations |
+| Prepare | Implement the plan without running the substantive experiment | Candidate, bounded smoke evidence and command |
+| Execute | Host executes the prepared command once | Execution receipt and actual outputs |
+| Evaluate | Interpret the plan and execution evidence | Structured conclusion, metrics, exact artifact references and limitations |
 
-Freeze the allowed smoke before replay. Prepare cannot execute the substantive
-experiment under a smoke label. Capture the actual experiment command and outputs.
-Cross-stage substantive work is a phase-protocol violation, not a valid stage-cost
-decomposition. All work settles before the next stage starts.
+A failed delivery, command or protocol stops the attempt and retains recorded
+costs. Missing evidence is not-evaluable; negative or inconclusive findings can
+be correct. The checker independently recomputes checkable metrics against the
+frozen case contract. It does not certify arbitrary scientific claims.
 
-The first runner performs one forward pass. A failed delivery, command or stage
-stops the attempt and retains its costs; later stages are not-run. It does not
-ask a coordinator to invent recovery. Within-task implementation work stays in
-that task's bounded assignment. A later repair policy must be specified and
-charge every attempt rather than silently retry.
+## Accounting and evaluation
 
-## Token accounting
+The host records every model call in an explicit roster. Receipts, including
+compaction and failed work, are attributed by phase, role and context. Shared
+context histories use non-overlapping byte windows; response IDs are deduplicated.
+Missing or ambiguous receipts are coverage gaps, not measured zero. Total token
+traffic is input plus output, without adding cached input or reasoning twice.
+Stage wall time includes model scheduling and tools; cycle wall time includes
+runner and checker overhead. Concurrent evaluation reports batch wall time
+separately from summed cycle time.
 
-The host records case_id, attempt_id, stage and task/thread identity before each
-invocation. This explicit roster is authoritative: a coordinator thread, native
-parent link or role-name inference is not required. Existing Study collectors
-expect a lead and cannot be reused unchanged as this benchmark's team selector.
-Reuse `token_usage.accept_record` against the roster's actual histories instead
-of creating a new usage authority.
+In the three-evaluation Research Loop pilot, the host evaluates the unmodified
+seed first and saves `baseline.json`. A failed baseline stops the study; after a
+passing baseline the outer loop can evaluate at most two improvements to
+`work/orchestration.py`. Cases run
+in parallel by assigned GPU, with one cycle at a time per GPU. All configured
+cases must pass correctness, complete usage coverage and phase protocol before a
+candidate can be compared. Failed and partial attempts retain recorded costs;
+outer-loop optimization costs are separate. The operator privately configures
+the authorized GPUs, indices 0 and 2, including their UUIDs and paths.
 
-Attribute all receipts in a specialist task to its stage, including recorded
-compactions and failed work. Deduplicate response IDs across the attempt. Report
-input, cached input, uncached input, output and reasoning. Total traffic is input
-plus output; cached input and reasoning are not added a second time.
+The collection contains ten fixed architecture interventions on one Cactus
+development task, not ten independent benchmarks or held-out evidence. Its
+architecture check freezes data, loss, training and evaluation code. New cases
+include an `intervention_id` from 1 to 10. Before training, the remote worker
+normalizes the layer constructors and requires the exact assigned intervention;
+the checker requires its ID and verification in the receipt. Optimization rejects
+old case packs lacking IDs; new packs are generated separately without rewriting
+existing private cases. Remote
+candidate execution is direct and has no OS filesystem or network sandbox; the
+architecture check does not establish hidden-label isolation. The detailed
+commands, resource conditions and continuation rules are in the [benchmark
+guide](../benchmarks/experiment_cycle/README.md).
 
-    cycle_tokens = sum(stage_tokens) + boundary_tokens + unassigned_tokens
+A real shared-context smoke implemented the assigned GELU change and passed all
+four phases, correctness and receipt coverage. This one case does not establish
+general research benefit. An earlier shared-context smoke passed metrics despite
+a no-op and is ineligible under the new intervention gate.
 
-Buckets are disjoint and reconcile per raw token field against attempt receipts.
-Missing/invalid receipts and ambiguous associations remain coverage conditions,
-not zero consumption. The direct-role roster proves that no coordinator was
-invoked: report coordinator as absent, with zero model calls. This differs from
-a coordinator with unmeasured usage.
-
-The Execute process and deterministic runner/checker make no model calls. Any
-future auxiliary model call must enter the same roster and totals.
-
-## Time accounting and report
-
-Use host monotonic durations and UTC timestamps for trace joins. Stage timing
-starts before task/process startup and ends after completion and settlement.
-Attempt timing covers startup through final accounting/checking; final report serialization is excluded:
-
-    cycle_wall = sum(stage_wall) + runner_and_check_overhead_wall
-
-Report four stage rows with tokens, wall time, model-call count, outcome and
-artifacts. Show runner/checker overhead and unassigned usage separately. Include
-whole-cycle totals, correctness and coverage. Execute normally has zero model
-tokens but nonzero process time. Runner time is not model consumption. Agent
-wall time includes tools and model scheduling, not just inference. Concurrent
-collection reports batch wall time separately from the sum of cycle wall times.
-
-## Correctness and acceptance
-
-Freeze the checker before replay. Verify allowed inputs/data roles, matched
-control, actual execution and required metrics. Independently recompute checkable
-metrics from execution-bound evidence. Compare discrete values exactly and
-floating values with case-declared tolerances.
-
-Evaluate returns supported, contradicted or insufficient evidence, with metric
-deltas and permitted claim scope. Check this against the case rule. Negative or
-inconclusive findings can be correct; process success or model agreement alone
-cannot establish correctness. Missing required evidence is not-evaluable, never
-pass. Open-ended uncheckable claims remain unverified.
-
-Before model execution, deterministic fixtures must demonstrate token/time
-conservation, duplicate/late/missing receipt treatment, failed-stage accounting,
-and checker acceptance of a valid reference versus rejection of a wrong candidate.
-Then replay one eligible historical case with actual specialist calls and local
-execution. Preserve failed attempts in comparisons. One case/run is a feasibility
-baseline, not a general efficiency claim; old live-run costs are not a matched
-causal baseline.
-
-Keep the small runner/report under `benchmarks/`; reuse Native, artifact handoffs
-and receipt logic. Do not change production scheduling or introduce a scheduler
-database, model-driven monitoring or plugin framework. Historical input recovery,
-case correctness rules and resource limits must be verified before each historical replay. The supplied synthetic case checks only the bounded development task.
-
-## Current implementation boundary
-
-The editable orchestration is `benchmarks/experiment_cycle/strategy.json`. The
-runner, accounting, case adapters, executor and correctness checks are fixed
-operator code. The collection and Research Loop optimization entry points and
-interpretation limits are specified in [the benchmark guide](../benchmarks/experiment_cycle/README.md).
-The collection comprises ten fixed architecture experiment cycles on one Cactus
-development task, assigned round-robin to configured GPUs. Each cycle uses its
-assigned GPU; concurrent cycles have a separate batch makespan. The remote worker
-executes directly without an OS filesystem or network sandbox. The architecture
-AST check freezes the permitted scientific changes, but does not establish
-remote hidden-label isolation.
-
-The operator can explicitly carry completed reports into a continuation. The
-operator must confirm the same fixed case and inputs, since case IDs alone do not
-establish content identity. Carried cycles retain their recorded tokens and cycle
-wall times; the continuation's batch wall time covers only its current invocation.
-The execution receipt keeps `candidate_path` for the local source path and
-`candidate` for the remote candidate result.
-
-A real remote execution-only paired smoke completed both arms and produced scores.
-It does not establish that the full collection completed or that the approach
-provides a general research benefit. Earlier synthetic results retain their
-original scope and do not validate this Cactus execution path.
+Historical results retain their original scope. A prior remote execution-only
+paired smoke completed both arms and produced scores; it did not validate a full
+collection or general research benefit. The historical ten-case baseline used the
+earlier metrics-only harness. Although the default prompt is unchanged, it does not validate
+this engine, which requires a fresh baseline.

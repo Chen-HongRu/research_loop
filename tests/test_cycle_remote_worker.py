@@ -94,6 +94,7 @@ def test_failed_cleanup_remains_uncertain(tmp_path, monkeypatch):
     }
     monkeypatch.setattr(worker, "operator_config", lambda project: config)
     monkeypatch.setattr(worker, "preflight", lambda config: {"ready": True})
+    monkeypatch.setattr(worker, "verify_intervention", lambda *args: None)
     monkeypatch.setattr(worker, "execution_command", lambda *args: (["fake"], {}))
     monkeypatch.setattr(
         worker.subprocess,

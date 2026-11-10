@@ -6,11 +6,11 @@ From the repository root, validate the sample without a model call:
 uv run python -m benchmarks.experiment_cycle inspect benchmarks/experiment_cycle/example/case.json
 ```
 
-Run the three specialist tasks and one sandboxed local process:
+Run the default three specialist calls and one sandboxed local process:
 
 ```sh
 uv run python -m benchmarks.experiment_cycle run benchmarks/experiment_cycle/example/case.json \
-  --output /path/to/private-cycle-run --allow-model
+  --output /path/to/private-cycle-run --orchestration /path/to/orchestration.py --allow-model
 ```
 
 `--allow-model` explicitly enables the bounded subscription calls. The pinned
@@ -22,9 +22,13 @@ No GPU or remote compute is used. Do not run inside a sandbox that cannot start
 the pinned CLI's filesystem sandbox; failure remains recorded, with no fallback
 to unrestricted execution.
 
-The deterministic flow is Plan → Prepare → Execute → Evaluate. Three fresh model
-contexts hand off files without a coordinator, nested agents, live search or
-shell network. Execute calls the prepared command under the same pinned Codex
+The fixed phase order is Plan → Prepare → Execute → Evaluate. The default uses
+three fresh specialist contexts and no coordinator. Editable orchestration can
+reuse contexts and add bounded feedback calls; nested agents, live search and
+shell network remain disabled. A reused Native context receives a stable,
+phase-neutral developer guard and common instructions; the current role and stage
+instructions are supplied in each turn, so earlier stage restrictions do not govern
+a later phase. Execute calls the prepared command under the same pinned Codex
 permissions machinery. It receives the candidate workspace, not the private
 checker. Plan and Evaluate are read-only; Prepare may write candidate code but
 fixed inputs and host handoffs remain read-only. Prepare may compile the script
@@ -41,14 +45,16 @@ correctness and source coverage. `tasks.json` identifies the exact model histori
 `stages.json` records stage outcomes. Native histories and command logs remain
 private under that output. Tokens include recorded compaction and failed work,
 with response IDs deduplicated across the explicit roster. Missing receipts are
-coverage gaps rather than measured zero. Coordinator is explicitly absent.
+coverage gaps rather than measured zero. Calls are attributed by phase, role and
+context, including byte windows for shared histories. A coordinator role, if used,
+is charged; the default has none.
 Stage time includes model scheduling, tools and settlement; it is not inference
 time. Cycle time also includes workspace preparation, accounting and checking;
 the final report serialization is outside the measured interval.
 
 A failed stage stops the attempt and keeps its cost; later stages are not-run.
-The CLI exits nonzero on stage failure, incorrect/not-evaluable output, or
-incomplete usage coverage. A successful process exit alone never passes the
+The CLI exits nonzero on stage failure, incorrect/not-evaluable output,
+incomplete usage coverage, or a failed `phase_protocol_pass` gate. A successful process exit alone never passes the
 independent checker. Evaluation evidence entries are exact workspace-relative filenames, not explanatory sentences; the native output schema constrains them to the supplied artifact paths. Malformed references remain not-evaluable and are never silently repaired. The sample checker recomputes paired control/candidate MSE
 from prediction rows and frozen targets and verifies the restricted conclusion.
 It does not certify arbitrary scientific claims or computation provenance.
@@ -64,7 +70,7 @@ This is a development benchmark; tuning on it does not establish held-out gains.
 Deterministic verification (no model calls):
 
 ```sh
-uv run python -m pytest tests/test_cycle_accounting.py tests/test_cycle_case.py tests/test_cycle_runner.py
+uv run python -m pytest tests/test_cycle_orchestration_program.py tests/test_cycle_orchestration_runtime.py tests/test_cycle_accounting.py tests/test_cycle_case.py tests/test_cycle_runner.py
 ```
 
 These tests use scripted specialists and explicitly synthetic token receipts;
@@ -75,12 +81,21 @@ acceptance checks allowed execution plus oracle-read denial.
 
 ## Editable orchestration and frozen measurement
 
-`strategy.json` is the only optimization target. It contains common/stage
-instructions and each stage's `paths` or `inline` handoff mode. The host validates
-its exact schema and snapshots it into every run. Use `--strategy FILE` to compare
-a candidate. Model, budgets, fixed stage guards, filesystem permissions, command
-execution, samples, usage accounting and correctness rules are outside this file.
-`policy.py` loads data only; a strategy cannot import Python or replace a checker.
+`orchestration.py` is the single editable target. It defines a nonempty `COMMON`
+string and `async def orchestrate(team)`. Pass a candidate with `--orchestration FILE`; the host validates and snapshots
+its source. The available asynchronous
+operations are `team.call(phase, role=..., context=..., instructions=...,
+handoff=...)`, `team.message(...)` with the same arguments (returning a message),
+and `team.execute()`. Calls may reuse role or context names, pass JSON handoffs,
+and use conditional branches and unrolled feedback. The host enforces the fixed
+phase order and an eight-model-call cap; instructions are limited to 16 KiB.
+The restricted language disallows imports, loops, extra functions, arbitrary
+attributes, and unawaited calls. See the default file for the complete flow.
+
+The model (`gpt-6.1-terra`, medium for the collection and optimizer), cases,
+GPU assignment, executor, receipts and correctness checker are fixed outside the
+candidate. `--strategy` is historical and rejected; the old JSON source and loader
+remain only for historical evidence.
 
 ## Ten Cactus development cycles (prepare first)
 
@@ -90,6 +105,12 @@ Prepare → paired control/candidate Execute → Evaluate with `gpt-6.1-terra`.
 The ten interventions share one task and development split; they are development
 cases, not ten independent benchmarks or official MLE-Bench leaderboard results.
 The architecture-only AST check freezes data, loss, training and evaluation code.
+Each newly prepared case records an `intervention_id` from 1 to 10. Before training,
+the remote worker normalizes the constructor layer sequence and verifies that it
+implements exactly the assigned intervention; the receipt carries the ID and
+verification result, which the Cactus checker requires for these cases. Old case
+packs without IDs are rejected by optimization: prepare a separate new pack and
+leave existing private cases unchanged.
 Each arm runs from scratch for one epoch, seed 0, batch 128, Adam lr .001, four
 CPU threads, RGB 32×32 inputs, on one assigned GPU per cycle. Negative AUC deltas are valid
 results; the checker verifies the signed delta and matching interpretation.
@@ -106,7 +127,9 @@ The remote project also needs `evidence/benchmark-collection/config.json` with
 For multiple GPUs, its operator-owned `gpu_profiles` maps each allowed UUID to
 an object containing only `gpu_index` and an absolute `gpu_lock` path. A legacy
 single-GPU `gpu_uuid`, `gpu_index`, and optional `gpu_lock` are also supported.
-These private paths and GPU identities are never strategy fields.
+These private paths and GPU identities are operator configuration, not candidate fields.
+For the authorized two-GPU pilot, the operator privately configures GPU indices 0
+and 2 and their UUIDs; no actual paths or UUIDs belong in Git.
 
 ```sh
 # Creates ten case directories and collection.json; no model/GPU work.
@@ -118,7 +141,8 @@ uv run python -m benchmarks.experiment_cycle.collection preflight /path/to/priva
 
 # Later, from an authenticated controller with SSH access to the executor:
 uv run python -m benchmarks.experiment_cycle.collection run /path/to/private/cases \
-  --output /path/to/private/baseline-01 --allow-model --allow-gpu
+  --output /path/to/private/baseline-01 --orchestration /path/to/orchestration.py \
+  --allow-model --allow-gpu
 ```
 
 Run these commands from the repository root. The local controller needs the
@@ -162,13 +186,18 @@ uv run python -m benchmarks.experiment_cycle.collection run /path/to/private/cas
 The operator must select reports from the same fixed case and inputs; the
 collection matches case IDs but does not establish content identity. Each report
 must show a completed cycle, passing correctness, complete usage coverage, the
-configured model, all four completed stages and the same strategy snapshot.
+configured model, all four completed stages, a passing phase protocol and the same orchestration snapshot.
 Carried cycles are not rerun. Their recorded tokens and cycle wall times enter the
 aggregate; `batch_wall_seconds` measures only the current invocation, as stated
 by `batch_wall_scope`. Retain original reports and supporting evidence when using
 an independently rechecked report. The execution receipt uses `candidate_path`
 for the local candidate source path and `candidate` for the remote candidate
 result, preserving both.
+
+A real shared-context smoke implemented the assigned GELU intervention and passed
+all four phases, correctness and receipt coverage. It covers one case and does
+not establish general research benefit. An earlier shared-context smoke passed
+metrics but made no intervention; it is ineligible under the new gate.
 
 A real remote execution-only paired smoke completed both arms (8.18 seconds for
 the baseline and 7.73 seconds for the candidate) and produced scores. This
@@ -182,24 +211,29 @@ Configure a Study without model calls (repeat `--case` for all frozen cases):
 ```sh
 uv run python -m benchmarks.experiment_cycle.optimization init \
   --case /path/to/private/cases/cycle-01/case.json \
-  --study /path/to/private/strategy-study --max-evaluations 3
+  --study /path/to/private/orchestration-study --max-evaluations 3
 
 # Later; GPU cases also require --allow-gpu:
 uv run python -m benchmarks.experiment_cycle.optimization run \
-  /path/to/private/strategy-study --allow-model --allow-gpu
+  /path/to/private/orchestration-study --allow-model --allow-gpu
 ```
 
 The existing Research Loop runs the optimizer with Terra and host delegation.
-Only `work/strategy.json` is the candidate. Its lead receives a no-argument
+Only `work/orchestration.py` is the candidate. Its lead receives a no-argument
 `evaluate_candidate` tool; fixed operator configuration selects cases, execution
 and checker. Every dispatched candidate evaluation is charged before execution,
 including failures; resource-blocked checks do not charge the evaluation budget.
-Each evaluation replays every configured case. Compare only candidates with
-correctness pass and complete token coverage, minimizing recorded cycle tokens
-first and cycle wall time second. The loop's own optimization cost is separate
+For the three-evaluation pilot, `run` first evaluates the unmodified seed on the
+host and saves `baseline.json`. It stops if the baseline fails; only after it
+passes can the outer Research Loop evaluate up to two candidate improvements. The evaluator runs cases in parallel by assigned
+GPU, serializing cases on each GPU. All cases must pass correctness, usage coverage
+and phase protocol; failures retain recorded costs. Compare passing candidates by
+recorded cycle tokens first and batch wall time second. The loop's own optimization cost is separate
 from the measured inner cycles and must be included when assessing net benefit.
 Evaluation outputs stay private outside the Study; only aggregate gates/totals
-are returned. Repeated optimization on these cases is development evidence.
+are returned. Repeated optimization on these cases is development evidence. Historical ten-case
+results were metrics-only under the earlier harness and do not validate this engine; the default
+prompt is unchanged, but this harness requires a fresh baseline.
 
 Verify without models or GPUs:
 
