@@ -68,7 +68,21 @@ sample count, all input/cache/output usage, result artifacts and source coverage
 also inspect coordinator costs so work moved out of a child is not mistaken for
 savings. Existing threads crossing the boundary are mixed, and unfinished tasks
 are pending rather than completed observations. Whole-task costs and delivery
-latency matter more than response averages alone. Different live research tasks
+latency matter more than response averages alone. `metrics compare` groups by
+role, not scientific stage: use task identities and artifacts to match stages,
+and task `started_at`/`completed_at` in `latest.json` for delivery latency. Keep
+input (including cached input), cached input, uncached input and output separate;
+do not add cached input to input again. Include lead usage over the same window.
+
+For a review-policy change, use existing coordination records to identify the
+decision (bounded execution, formal execution or interpretation), frozen contract,
+accepted baseline, delta and completion condition. From review artifacts count
+substantive repair/evidence cycles and repeated reviews without a material delta;
+record time to reviewable artifacts, dispatch-ready work, executed evidence and
+accepted interpretation. These rework and evidence milestones require artifact
+inspection; the collector does not automatically classify them. Compare savings
+with delivered evidence and remaining blockers so deferred work or a narrower
+claim is not mistaken for equal scientific progress. Different live research tasks
 provide descriptive evidence, not a causal A/B result. Missing comparable samples
 remain missing; no extra scientific computation is required just to fill a table.
 

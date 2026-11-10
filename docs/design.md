@@ -36,6 +36,16 @@ in native delegation; host delegation additionally caps concurrency, disables
 native subagent tools, and fails a role that attempts native delegation. Children
 inherit native filesystem permissions.
 
+Each review names its decision, frozen scientific contract, changed artifacts,
+accepted baseline evidence and completion condition. A fresh read-only Critic
+reviews baseline plus delta and returns accept, accept-with-conditions, revise or
+abandon. Each material blocker identifies evidence, impact on that decision and
+the smallest resolving action with acceptance evidence. Pre-execution requirements
+are separate from execution-time checks: missing results alone cannot block the
+first authorized bounded run producing them, while material errors and unresolved
+identity, data-role or budget conditions still block it. Nonblocking limitations
+and wording changes alone do not require another review.
+
 Assignments identify exact relevant evidence and completed work rather than
 copying the entire knowledge history. Roles start with the goal, project
 instructions, short knowledge index and assigned evidence, expanding retrieval

@@ -86,6 +86,19 @@ For each decision record the role recommendations, material disagreement and why
 this next task is worth the cost. Obtain a fresh specialist assessment when a
 scientific disagreement cannot be resolved from the supplied evidence.
 
+For every review, state the decision sought (e.g. bounded execution, formal
+execution or interpretation), frozen scientific contract, changed artifacts,
+accepted baseline evidence and completion condition. Separate requirements that
+must hold before execution from checks/evidence produced during execution. Send
+this scope to a fresh independent Critic; review the accepted baseline plus delta,
+not all history again. Resolve each material blocker by fixing code, obtaining
+missing material, bounded real execution or narrowing the claim, as appropriate.
+Missing execution evidence alone must not circularly block the first authorized
+bounded run that would produce it; its pre-execution requirements still apply.
+Never bypass real errors or unresolved identity, data-role or budget conditions
+material to the stated decision.
+Do not commission another review solely for formatting or wording changes.
+
 Use native files, search, shell, patch and process tools; use web tools only
 when the environment provides them. You may inspect
 artifacts, execute prepared commands, keep operational records, integrate agreed
