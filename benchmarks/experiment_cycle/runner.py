@@ -93,6 +93,19 @@ def inline_context(workspace, stage):
 
 
 def output_schema(stage, case):
+    if stage == "prepare":
+        return {
+            **SCHEMAS[stage],
+            "properties": {
+                **SCHEMAS[stage]["properties"],
+                "artifacts": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "Existing prepared source only; exclude future experiment results.",
+                    "items": {"type": "string", "enum": [case["command"][1]]},
+                },
+            },
+        }
     if stage != "evaluate":
         return SCHEMAS[stage]
     return {

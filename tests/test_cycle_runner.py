@@ -356,3 +356,13 @@ def test_native_failure_settles_and_retains_actual_history(tmp_path, monkeypatch
     measured = runner.summarize_usage([row])
     assert measured["total"]["total_tokens"] == 220
     assert measured["coverage"]["complete"]
+
+
+def test_prepare_schema_excludes_future_results():
+    from benchmarks.experiment_cycle.runner import output_schema
+
+    schema = output_schema(
+        "prepare", {"command": ["{python}", "train.py"], "result_file": "metrics.json"}
+    )
+    assert schema["properties"]["artifacts"]["items"]["enum"] == ["train.py"]
+    assert schema["properties"]["artifacts"]["minItems"] == 1
