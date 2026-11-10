@@ -48,7 +48,7 @@ To switch among running and historical Studies, repeat `--study RUN_A --study RU
 
 The overview includes a chronological research timeline from `iterations/NNNNNN/status.json` and `result.json`: reported summaries, goal judgments, next steps, limitations and evidence references. Status-only rounds are marked as having no result. Legacy root results appear only when there are no archived rounds. This is a projection of saved reports, not an independently verified scientific conclusion or a generated synthesis. It does not reconstruct experiments that were never recorded in those reports. Optional historical curves remain separate background material.
 
-The repository supports only the pinned native Codex runtime. The Python host, Slurm resource adapter and read-only dashboard use that runtime. The synthetic goal in [examples/goal.md](examples/goal.md) demonstrates its research contract.
+The repository supports only the pinned native Codex runtime. The Python host, Slurm resource adapter and read-only dashboard use that runtime. The synthetic goal in [examples/goal.md](examples/goal.md) demonstrates its research contract. The opt-in [Router candidate and prefix replay](docs/router-replay.md) measures routing separately without changing a running Lead.
 
 Run `uv run research-loop efficiency RUN` for an offline JSON audit of recorded
 token usage, delegate activity, waiting, resource calls and settled allocations.
