@@ -150,3 +150,36 @@ def test_exception_retains_written_report_costs(tmp_path, monkeypatch):
     assert result["recorded_tokens"] == 13
     assert result["cycle_wall_seconds"] == 4
     assert len(result["attempts"]) == 1
+
+
+def test_remote_command_parses_optional_gpu_and_operation(tmp_path, monkeypatch):
+    import shlex
+    import subprocess
+    import sys
+
+    commands = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, data):
+            return b"{}", b""
+
+    async def start(*args, **kwargs):
+        commands.append(shlex.split(args[-1]))
+        return Process()
+
+    monkeypatch.setattr(collection.asyncio, "create_subprocess_exec", start)
+    config = {
+        "python": sys.executable,
+        "project_root": str(Path(__file__).resolve().parents[1]),
+        "ssh_host": "example-host",
+        "gpu_uuid": "GPU-example",
+    }
+    asyncio.run(collection.remote(config, "status", "not-an-operation"))
+    argv = commands[0]
+    argv[argv.index("--project") + 1] = str(tmp_path)
+    result = subprocess.run(argv, capture_output=True, text=True)
+    # Missing status is an application JSON error, not argparse's exit 2.
+    assert result.returncode == 1
+    assert "FileNotFoundError" in json.loads(result.stdout)["error"]

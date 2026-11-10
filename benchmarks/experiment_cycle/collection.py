@@ -34,9 +34,9 @@ async def remote(remote_config, action, identity=None, request=None):
         remote_config["project_root"] + "/benchmarks/experiment_cycle/remote_worker.py",
         "--project",
         remote_config["project_root"],
-        action,
         "--gpu-uuid",
         remote_config["gpu_uuid"],
+        action,
     ]
     if identity:
         command.append(identity)
@@ -64,7 +64,9 @@ async def remote(remote_config, action, identity=None, request=None):
         raise
     if not stdout.strip():
         raise RuntimeError(
-            f"remote transport returned no receipt (exit {process.returncode}); reconcile original operation before retry"
+            f"remote transport returned no receipt (exit {process.returncode}); "
+            f"{stderr.decode(errors='replace')[-1000:]}; "
+            "reconcile original operation before retry"
         )
     value = json.loads(stdout)
     if not isinstance(value, dict):
