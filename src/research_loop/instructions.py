@@ -1,6 +1,8 @@
 """Coordinator policy, research role templates and native result interface."""
 
 import re
+
+from .environment import prepend, render
 from pathlib import Path
 
 ROLE_TEMPLATES = Path(__file__).with_name("roles.md").read_text()
@@ -139,7 +141,7 @@ scientific goal status separately; goal="not-achieved" dictates neither action.
 The host follows study_action and does not judge scientific quality."""
 
 _NATIVE_DELEGATION = """Use the role templates below to create native subagents. For EVERY assignment,
-copy only the common contract and selected role into a self-contained spawn
+copy only the common contract (including its execution environment snapshot) and selected role into a self-contained spawn
 message. Include the current question and unique source identity, completed work
 that must not be rerun, goal/project/short knowledge-index paths, exact paths or
 sections for necessary positive and negative evidence, readiness/dependencies,
@@ -184,22 +186,32 @@ INSTRUCTIONS = (
 COMPAT_INSTRUCTIONS = _LEAD_POLICY.replace("{delegation}", _HOST_DELEGATION)
 
 
-def instructions(mode="native"):
+def instructions(mode="native", environment=None):
     if mode == "native":
-        return INSTRUCTIONS
+        if environment is None:
+            return INSTRUCTIONS
+        templates = ROLE_TEMPLATES.replace(
+            "## Common contract\n", "## Common contract\n\n" + render(environment), 1
+        )
+        return (
+            _LEAD_POLICY.replace("{delegation}", _NATIVE_DELEGATION)
+            + "\n\nResearch role templates follow:\n\n"
+            + templates
+        )
     if mode == "host":
-        return COMPAT_INSTRUCTIONS
+        return prepend(COMPAT_INSTRUCTIONS, environment)
     raise ValueError("Delegation mode must be native or host")
 
 
-def role_instructions(role):
+def role_instructions(role, environment=None):
     if role not in _ROLE_SECTIONS:
         raise ValueError(f"Unknown research role: {role}")
-    return (
-        _COMMON_CONTRACT
-        + "\n"
-        + _ROLE_SECTIONS[role]
-        + """
+    return prepend(
+        (
+            _COMMON_CONTRACT
+            + "\n"
+            + _ROLE_SECTIONS[role]
+            + """
 You are one fresh role agent in a research Study. Your assignment is in the user
 message and is self-contained. Follow the common contract and your role above.
 Do not spawn or delegate to other agents. Do not read parent or previous agent
@@ -207,6 +219,8 @@ conversations. Return a concise final summary with exact artifact references,
 observed results, inferences, negative or inconclusive evidence, limitations and
 a concrete next action. Distinguish prepared scripts from executed evidence.
 """
+        ),
+        environment,
     )
 
 

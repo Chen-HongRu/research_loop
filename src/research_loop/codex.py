@@ -14,6 +14,10 @@ from openai_codex.client import CodexClient, CodexConfig
 from openai_codex.models import UnknownNotification
 from pydantic import BaseModel, RootModel
 
+from .environment import (
+    prepend as environment_instructions,
+    render as render_environment,
+)
 from .delegation import DELEGATE_TOOL, WAIT_TOOL, HostDelegation
 
 
@@ -116,7 +120,14 @@ def model_catalog(
 
 
 def configuration(
-    root, project, writable, model, effort, provider=None, delegation="native"
+    root,
+    project,
+    writable,
+    model,
+    effort,
+    provider=None,
+    delegation="native",
+    execution_environment=None,
 ):
     home = root / "native"
     home.mkdir(mode=0o700, exist_ok=True)
@@ -127,6 +138,15 @@ def configuration(
             raise RuntimeError("Sign in to the official Codex CLI with ChatGPT first")
         if not (home / "auth.json").exists():
             (home / "auth.json").symlink_to(auth)
+    local = (
+        execution_environment["local"]
+        if execution_environment
+        else {
+            "executable": sys.executable,
+            "prefix": sys.prefix,
+            "base_prefix": sys.base_prefix,
+        }
+    )
     paths = {
         ":root": "deny",
         ":minimal": "read",
@@ -136,12 +156,12 @@ def configuration(
     for path in (
         project,
         root,
-        Path(sys.prefix),
-        Path(sys.base_prefix),
+        Path(local["prefix"]),
+        Path(local["base_prefix"]),
         Path(bundled_codex_path()).parent.parent,
     ):
         paths[str(path.resolve())] = "read"
-    base = Path(sys.base_prefix).absolute()
+    base = Path(local["base_prefix"]).absolute()
     if base.is_symlink() and base.parent not in {Path(base.anchor), Path.home()}:
         paths[str(base.parent)] = "read"
     for path in writable:
@@ -155,11 +175,14 @@ def configuration(
     for path in (Path.home() / ".codex", Path.home() / ".ssh", home):
         paths[str(path.resolve())] = "deny"
     shell_env = {
-        "PATH": str(Path(sys.executable).parent) + ":" + os.defpath,
+        "PATH": str(Path(local["executable"]).parent) + ":" + os.defpath,
         "HOME": str(root / "work"),
         "TMPDIR": str(root / "work/tmp"),
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
     }
+    if local["prefix"] != local["base_prefix"]:
+        shell_env["VIRTUAL_ENV"] = local["prefix"]
     common = [
         "mcp_servers={}",
         "features.multi_agent_v2_dynamic_tools=false",
@@ -176,6 +199,11 @@ def configuration(
         "model=" + json.dumps(model),
         "model_reasoning_effort=" + json.dumps(effort),
     ]
+    if execution_environment is not None:
+        common.append(
+            "developer_instructions="
+            + json.dumps(render_environment(execution_environment))
+        )
     environment = {
         "HOME": str(Path.home()),
         "CODEX_HOME": str(home),
@@ -435,7 +463,7 @@ class Native:
                 "The exact configured model/reasoning effort is unavailable"
             )
 
-    def install_delegation(self, model, effort, roles_path=None):
+    def install_delegation(self, model, effort, roles_path=None, environment=None):
         if self.delegator is not None:
             return
         self.delegator = HostDelegation(
@@ -445,6 +473,7 @@ class Native:
             effort=effort,
             roles_path=roles_path,
             on_thread=self._add_child,
+            environment=environment,
         )
 
         async def delegate(arguments):
@@ -476,11 +505,15 @@ class Native:
         on_started=None,
         delegation="native",
         roles_path=None,
+        environment=None,
     ):
+        if environment is None and isinstance(payload, dict):
+            environment = payload.get("execution_environment")
+        instructions = environment_instructions(instructions, environment)
         if self.stopping:
             raise RuntimeError("Stop requested before model admission")
         if delegation == "host":
-            self.install_delegation(model, effort, roles_path)
+            self.install_delegation(model, effort, roles_path, environment)
         definition = {
             "model": model,
             "allowProviderModelFallback": False,

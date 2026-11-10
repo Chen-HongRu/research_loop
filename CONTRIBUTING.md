@@ -20,6 +20,20 @@ RESEARCH_MODEL_TEST=1 uv run pytest tests/test_native_integration.py::test_nativ
 
 These flags do not authorize a research loop or remote compute.
 
+The environment smoke uses a separate, standard-library-only virtualenv with a
+synthetic distribution marker. It checks unqualified Python execution and
+environment context in a coordinator and one fresh role for each delegation
+mode; resource metadata is synthetic and no cluster or GPU is contacted:
+
+```sh
+RESEARCH_ENVIRONMENT_MODEL_TEST=1 uv run pytest tests/test_environment_integration.py
+```
+
+It defaults to `gpt-6.1-terra` / medium; `RESEARCH_ENVIRONMENT_MODEL` may select an
+explicitly authorized available model. The flag permits only those bounded
+subscription model calls, not a research experiment or remote compute. Keep
+model traces and temporary environment inventories private.
+
 Keep private goals, raw Agent transcripts, deployment/SSH details, credentials,
 data and checkpoints outside commits. Use synthetic fixtures in tests and demos.
 Preserve prior evidence and other contributors' changes. A pull request should
