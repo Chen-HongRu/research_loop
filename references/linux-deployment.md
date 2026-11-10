@@ -36,7 +36,9 @@ mounts or relocate Native state merely to implement a stricter read allowlist.
 Existing private-state symlinks may remain in place; they are ordinary readable
 paths under this policy. Verify a project read, work/tmp writes and rejection of
 writes outside the configured roots with synthetic CPU-only commands. The CLI
-still requires Linux namespace support for its standard sandbox.
+still requires Linux namespace support for its standard sandbox. The pinned
+standalone `codex sandbox` command requires a named profile; the local benchmark
+executor maps the ordinary read/write roots into that profile, without deny mounts.
 
 The experiment-cycle adapter uses the same ordinary policy. Frozen cases,
 execution, scoring and accounting remain host-controlled, but the sandbox does

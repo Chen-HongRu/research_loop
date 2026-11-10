@@ -318,6 +318,38 @@ class NativeAgent:
                 raise RuntimeError("; ".join(cleanup_errors))
 
 
+def execution_command(config, effective, workspace, command):
+    # The pinned CLI's standalone sandbox requires a named profile. Map the
+    # ordinary workspace-write policy without adding any deny mounts.
+    from research_loop.codex import _toml
+
+    original = list(config.launch_args_override[:-3])
+    argv = []
+    index = 0
+    while index < len(original):
+        if original[index] == "--config" and original[index + 1].startswith(
+            ("sandbox_mode=", "sandbox_workspace_write.")
+        ):
+            index += 2
+            continue
+        argv.append(original[index])
+        index += 1
+    return [
+        *argv,
+        "--config",
+        "permissions.execution.filesystem=" + _toml(effective["filesystem"]),
+        "--config",
+        "permissions.execution.network.enabled=false",
+        "sandbox",
+        "--permission-profile",
+        "execution",
+        "--cd",
+        str(workspace),
+        "--",
+        *command,
+    ]
+
+
 async def execute(case, workspace, root, command, model, effort):
     """Run the candidate inside the pinned CLI filesystem/network sandbox."""
     config, effective = launch_config(
@@ -327,14 +359,7 @@ async def execute(case, workspace, root, command, model, effort):
         model=model,
         effort=effort,
     )
-    argv = list(config.launch_args_override[:-3])
-    argv += [
-        "sandbox",
-        "--cd",
-        str(workspace),
-        "--",
-        *command,
-    ]
+    argv = execution_command(config, effective, workspace, command)
     write_json(root / "effective.json", effective)
     with (root / "command.log").open("wb") as log:
         process = await asyncio.create_subprocess_exec(

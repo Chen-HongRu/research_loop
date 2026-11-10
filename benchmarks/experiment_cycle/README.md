@@ -29,7 +29,9 @@ shell network remain disabled. A reused Native context receives a stable,
 phase-neutral developer guard and common instructions; the current role and stage
 instructions are supplied in each turn, so earlier stage restrictions do not govern
 a later phase. Execute calls the prepared command under the same pinned Codex
-permissions machinery. It receives the candidate workspace, not the private
+permissions machinery. The pinned standalone sandbox command requires a named
+profile, so Execute maps the same ordinary read/write roots into one simple
+profile, with no deny mounts. It receives the candidate workspace, not the private
 checker as a tool input. All local calls use the ordinary Codex workspace-write
 sandbox, without private-root deny mounts or per-file read exceptions. Plan and
 Evaluate receive no workspace write root; Prepare receives the candidate workspace.
