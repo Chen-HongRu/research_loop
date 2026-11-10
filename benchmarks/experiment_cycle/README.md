@@ -30,8 +30,12 @@ phase-neutral developer guard and common instructions; the current role and stag
 instructions are supplied in each turn, so earlier stage restrictions do not govern
 a later phase. Execute calls the prepared command under the same pinned Codex
 permissions machinery. It receives the candidate workspace, not the private
-checker. Plan and Evaluate are read-only; Prepare may write candidate code but
-fixed inputs and host handoffs remain read-only. Prepare may compile the script
+checker as a tool input. All local calls use the ordinary Codex workspace-write
+sandbox, without private-root deny mounts or per-file read exceptions. Plan and
+Evaluate receive no workspace write root; Prepare receives the candidate workspace.
+Keeping fixed inputs and host handoffs unchanged is a task instruction; the
+sandbox does not hide other local files or enforce per-file immutability inside
+a writable workspace. Prepare may compile the script
 but must leave the substantive experiment to Execute.
 
 The specialist prompt is supplied explicitly; `project_doc_max_bytes=0` prevents
@@ -236,10 +240,9 @@ GPU, serializing cases on each GPU. All cases must pass correctness, usage cover
 and phase protocol; failures retain recorded costs. Compare passing candidates by
 recorded cycle tokens first and batch wall time second. The loop's own optimization cost is separate
 from the measured inner cycles and must be included when assessing net benefit.
-The read-only seed project and private evaluator root are separate sibling
-directories, so Linux can mount them without a read exception under a denied parent.
-Evaluation outputs stay private outside the Study; only aggregate gates/totals
-are returned. Repeated optimization on these cases is development evidence. Historical ten-case
+The seed project and evaluator root are separate sibling directories.
+Evaluation outputs stay outside the Study and the tool returns aggregate gates/totals;
+ordinary workspace-write permits local reads, so this is not hidden-answer isolation. Repeated optimization on these cases is development evidence. Historical ten-case
 results were metrics-only under the earlier harness and do not validate this engine; the default
 prompt is unchanged, but this harness requires a fresh baseline.
 

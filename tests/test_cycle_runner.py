@@ -281,8 +281,8 @@ def test_frozen_config_disables_search_and_protects_inputs(tmp_path, monkeypatch
     assert 'web_search="live"' not in args
     assert "features.multi_agent=false" in args
     assert "features.multi_agent_v2=false" in args
-    assert effective["filesystem"][str(workspace / "inputs.json")] == "read"
-    assert effective["filesystem"][str(workspace / ".cycle")] == "read"
+    assert effective["sandbox_mode"] == "workspace-write"
+    assert not any(arg.startswith("permissions.") for arg in args)
 
 
 def test_native_failure_settles_and_retains_actual_history(tmp_path, monkeypatch):

@@ -86,3 +86,11 @@ paired smoke completed both arms and produced scores; it did not validate a full
 collection or general research benefit. The historical ten-case baseline used the
 earlier metrics-only harness. Although the default prompt is unchanged, it does not validate
 this engine, which requires a fresh baseline.
+
+Local agents and local command execution use the ordinary Codex workspace-write
+sandbox, without custom deny mounts. The host still selects frozen cases, executes
+the fixed backend, checks results and records usage. Local file reads are broadly
+allowed; task instructions, rather than per-file sandbox rules, prohibit changing
+fixed inputs. This configuration does not provide hidden-answer isolation. Preserve
+permission metadata on older runs; an access-policy change is an execution-environment
+change, not measured evidence of an orchestration improvement.

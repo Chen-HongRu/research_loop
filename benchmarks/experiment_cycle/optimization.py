@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
-import tomllib
 from time import monotonic
 
 from research_loop import loop
@@ -513,57 +512,7 @@ def make_native_factory(study):
     )
 
     def factory(config, journal, tools):
-        support = Path(evaluator.config["support"]).resolve()
-        seed = Path(
-            json.loads((Path(study) / "config.json").read_text())["project"]
-        ).resolve()
-        if seed.is_relative_to(support) or support.is_relative_to(seed):
-            raise ValueError(
-                "read-only seed project must be outside private evaluator root"
-            )
-        roots = [Path(root).resolve() for root in evaluator.config["source_case_roots"]]
-        roots += [Path(case).resolve().parent for case in evaluator.config["cases"]]
-        if any(
-            seed.is_relative_to(root) or root.is_relative_to(seed) for root in roots
-        ):
-            raise ValueError("case directories and seed must be disjoint")
-        roots.append(support)
-        # A denied parent already hides all frozen cases. Redundant child deny
-        # mounts require mkdir under the read-only parent on Linux bubblewrap.
-        roots = [
-            root
-            for root in dict.fromkeys(roots)
-            if not any(
-                root != parent and root.is_relative_to(parent) for parent in roots
-            )
-        ]
         args = list(config.launch_args_override or ())
-        prefix = "permissions.research.filesystem="
-        indices = [i for i, arg in enumerate(args) if arg.startswith(prefix)]
-        if len(indices) != 1:
-            raise ValueError("native filesystem permissions are missing or ambiguous")
-        index = indices[0]
-        paths = tomllib.loads("paths=" + args[index][len(prefix) :])["paths"]
-        paths = {
-            path: permission
-            for path, permission in paths.items()
-            if path.startswith(":")
-            or not any(Path(path).is_relative_to(root) for root in roots)
-        }
-        # The controller maps TMPDIR to writable Study/work/tmp. Keeping the
-        # generic :tmpdir deny masks that allowed scratch directory on Linux.
-        paths.pop(":tmpdir", None)
-        paths.update({str(root): "deny" for root in roots})
-        paths[str(seed)] = "read"
-        args[index] = (
-            prefix
-            + "{"
-            + ",".join(
-                json.dumps(path) + "=" + json.dumps(permission)
-                for path, permission in paths.items()
-            )
-            + "}"
-        )
         args = [
             arg.replace('web_search="live"', 'web_search="disabled"') for arg in args
         ]

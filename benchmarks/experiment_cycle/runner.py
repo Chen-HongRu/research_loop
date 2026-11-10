@@ -145,28 +145,15 @@ def output_schema(stage, case):
     }
 
 
-def launch_config(root, workspace, *, writable, model, effort, protected=()):
+def launch_config(root, workspace, *, writable, model, effort):
     (root / "work/tmp").mkdir(parents=True, exist_ok=True)
     config, effective = configuration(
         root, workspace, writable, model, effort, delegation="host"
     )
     argv = list(config.launch_args_override)
     argv = [item.replace('web_search="live"', 'web_search="disabled"') for item in argv]
-    paths = dict(effective["filesystem"])
-    for name in ("inputs", "data", "inputs.json", ".cycle"):
-        paths[str((workspace / name).resolve())] = "read"
-    for path in protected:
-        paths[str(Path(path).resolve())] = "read"
-    from research_loop.codex import _toml
-
-    argv[-3:-3] = [
-        "--config",
-        "permissions.research.filesystem=" + _toml(paths),
-        "--config",
-        "project_doc_max_bytes=0",
-    ]
+    argv[-3:-3] = ["--config", "project_doc_max_bytes=0"]
     effective.update(
-        filesystem=paths,
         web_search=False,
         native_multi_agent=False,
         project_doc_max_bytes=0,
@@ -339,13 +326,10 @@ async def execute(case, workspace, root, command, model, effort):
         writable=[root / "work", workspace],
         model=model,
         effort=effort,
-        protected=[workspace / case["command"][1]],
     )
     argv = list(config.launch_args_override[:-3])
     argv += [
         "sandbox",
-        "--permission-profile",
-        "research",
         "--cd",
         str(workspace),
         "--",

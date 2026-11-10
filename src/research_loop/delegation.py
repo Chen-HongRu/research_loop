@@ -277,7 +277,7 @@ class HostDelegation:
                         "developerInstructions": role_instructions(
                             task.role, self.environment
                         ),
-                        "permissions": "research",
+                        "sandbox": "workspace-write",
                         "approvalPolicy": "never",
                         "config": {"model_reasoning_effort": self.effort},
                         "dynamicTools": [],

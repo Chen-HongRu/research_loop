@@ -29,25 +29,22 @@ its lock coherently after shutdown. Never run `init` or reset the ledger. Exclud
 `native/auth.json`: the remote runtime recreates it against the remote user's
 existing login. Do not transfer credentials through source archives or logs.
 
-With the pinned Linux sandbox, denying native state beneath a read-only Study
-mount can fail during Bubblewrap setup. Use a private native-state directory
-outside the Study read root and link `STUDY/native` to it before configuration.
-The existing configuration resolves that link and keeps the physical directory
-denied; no permission widening is needed. Verify project/work access and denied
-native/control access with synthetic files, plus one native delegation smoke.
-This storage layout is deployment configuration, not a second runtime.
+Use the pinned CLI's standard `workspace-write` sandbox. The agent cwd is
+Study/work; work/draft roots and normal temporary directories are writable, local
+files are readable, and direct shell network is disabled. Do not add custom deny
+mounts or relocate Native state merely to implement a stricter read allowlist.
+Existing private-state symlinks may remain in place; they are ordinary readable
+paths under this policy. Verify a project read, work/tmp writes and rejection of
+writes outside the configured roots with synthetic CPU-only commands. The CLI
+still requires Linux namespace support for its standard sandbox.
 
-The experiment-cycle optimizer also removes redundant child deny masks beneath
-an already denied private support directory. Keeping both masks can make
-Bubblewrap try to create a child mount target inside a read-only parent and fail
-before any command starts. The parent deny remains authoritative. The read-only
-seed project lives outside that parent: Linux cannot make a child readable through
-a denied ancestor. An older deployment must relocate its seed directory and update
-the Study configuration project path before resuming; retain the identical seed
-contents and all evaluation records. The optimizer removes the generic `:tmpdir`
-deny because its shell TMPDIR is already the writable Study/work/tmp; root and
-external /tmp access remain denied. Verify allowed goal/candidate reads and denied
-private-case/native reads with CPU-only commands before resuming model work.
+The experiment-cycle adapter uses the same ordinary policy. Frozen cases,
+execution, scoring and accounting remain host-controlled, but the sandbox does
+not hide their local files. Plan/Evaluate read-only behavior and immutable
+workspace inputs are task instructions rather than per-file OS mounts. Do not
+claim hidden-answer isolation or compare a mixed-policy run as an unchanged
+execution environment. Retain prior receipts with their original permission
+metadata when updating a deployment.
 
 Resume the original Study explicitly with `run STUDY --continue` after confirming
 there is one controller owner. Use a supervised service, retain original records

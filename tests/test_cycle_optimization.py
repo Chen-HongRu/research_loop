@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -42,57 +41,16 @@ def test_initialize_and_native_tool(tmp_path, monkeypatch):
     monkeypatch.setattr(
         optimization, "Native", lambda config, journal, tools: (config, tools)
     )
-    paths = {
-        ":tmpdir": "deny",
-        ":slash_tmp": "deny",
-        str(CASE.parent): "read",
-        str(CASE.parent / "nested"): "write",
-        str(support): "read",
-    }
-    permission = (
-        "permissions.research.filesystem="
-        + "{"
-        + ",".join(json.dumps(k) + "=" + json.dumps(v) for k, v in paths.items())
-        + "}"
+    native_config = CodexConfig(
+        launch_args_override=("--config", 'sandbox_mode="workspace-write"')
     )
-    native_config = CodexConfig(launch_args_override=("--config", permission))
     wrapped = optimization.make_native_factory(study)(native_config, None, ["existing"])
     result, tools = wrapped.native
-    effective = tomllib.loads(
-        "paths="
-        + next(
-            arg
-            for arg in result.launch_args_override
-            if arg.startswith("permissions.research.filesystem=")
-        ).split("=", 1)[1]
-    )["paths"]
-    assert effective[str(CASE.parent)] == "deny"
-    assert str(CASE.parent / "nested") not in effective
-    assert effective[str(support)] == "deny"
-    # Linux bubblewrap cannot materialize redundant child masks beneath
-    # an already read-only deny mount. The parent mask protects frozen cases.
+    assert 'sandbox_mode="workspace-write"' in result.launch_args_override
     assert not any(
-        permission == "deny"
-        and Path(path) != support
-        and Path(path).is_relative_to(support)
-        for path, permission in effective.items()
-        if not path.startswith(":")
+        arg.startswith("permissions.") for arg in result.launch_args_override
     )
-    assert effective[str(project)] == "read"
-    assert ":tmpdir" not in effective
-    assert effective[":slash_tmp"] == "deny"
     assert tools[0] == "existing" and tools[1].name == "evaluate_candidate"
-
-
-def test_native_rejects_seed_under_denied_support(tmp_path):
-    study = tmp_path / "study"
-    optimization.initialize(study, [CASE], 2)
-    evaluator = json.loads((study / "evaluator.json").read_text())
-    config = json.loads((study / "config.json").read_text())
-    config["project"] = str(Path(evaluator["support"]) / "seed")
-    (study / "config.json").write_text(json.dumps(config))
-    with pytest.raises(ValueError, match="seed project must be outside"):
-        optimization.make_native_factory(study)(CodexConfig(), None, [])
 
 
 def test_budget_precharged_and_invalid_candidate_never_dispatches(
