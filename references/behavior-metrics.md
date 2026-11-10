@@ -24,6 +24,15 @@ to resume; use a fresh output directory for each phase and for this collector
 rather than the ordinary metrics collector. SIGINT/SIGTERM stop between polls.
 No automatic event-to-agent monitoring is installed.
 
+The read-only dashboard can display aggregate observations from an already
+collected phase through `RUN/metrics/behavior/latest.json`. Keep the behavior
+phase inside the directory resolved by `RUN/metrics`; an operator may link
+`behavior` to that phase. Use a separate phase from the ordinary collector's
+`current` output. The resources/metrics page shows availability, measurement
+window and coverage without launching a collector. A missing or invalid file
+does not become a zero measurement. Individual tool payloads and private traces
+are not exposed by this aggregate projection.
+
 ## Data contract
 
 `latest.json` contains a cumulative phase snapshot. `samples.jsonl` journals phase

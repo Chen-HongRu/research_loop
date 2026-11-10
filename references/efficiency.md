@@ -90,6 +90,14 @@ comparison through an operator-maintained `RUN/metrics` link to that directory,
 with `current` pointing to the active phase. Preserve the dashboard's existing
 authentication, loopback binding and reverse-proxy access controls.
 
+The dashboard's resources/metrics page exposes the snapshot's schema version,
+token authority and measurement window. Version 1 and unversioned records remain
+historical/unknown accounting rather than being relabeled as version 2. Missing
+measurements remain unavailable; displaying a phase does not start a collector.
+Optional behavior observations use a separate `behavior` link inside that same
+metrics directory, pointing to a behavior phase there; see
+[behavior observations](behavior-metrics.md).
+
 Compare completed, unmixed tasks of the same role and research stage. Retain the
 sample count, all input/cache/output usage, result artifacts and source coverage;
 also inspect coordinator costs so work moved out of a child is not mistaken for
