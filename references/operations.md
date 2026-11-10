@@ -13,6 +13,67 @@ uv run research-loop stop RUN
 
 Omit `--resource FILE` when remote resources are not authorized. Resource JSON specifies `host`, `partition`, `remote_root`, `ledger_path`, `gpu_seconds_total`, and `job_seconds`; `account`, `cpus`, `memory`, and `grace_seconds` are optional. Initialization freezes the parsed configuration and resolves `ledger_path` relative to the source configuration file. The shared ledger and its lock must be outside the agent-writable work and draft directories.
 
+## Execution environments
+
+Provision the environment once, outside the research loop, using `uv`. Then
+select its existing interpreter when initializing the Study:
+
+```sh
+uv run research-loop init RUN --project PROJECT --goal GOAL \
+  --environment environment.json
+uv run research-loop inspect RUN
+```
+
+The configuration accepts only these fields:
+
+```json
+{
+  "python": "/path/to/local-venv/bin/python",
+  "resource": {
+    "python": "/path/to/resource-venv/bin/python",
+    "packages": {"example-library": "1.2.3"}
+  }
+}
+```
+
+`python` is required. A relative local interpreter path is resolved against the
+environment JSON file's directory, preserving a virtualenv's interpreter
+symlink. The optional `resource` section describes a remote environment;
+its interpreter must be an absolute POSIX path, and `packages` may be omitted.
+Do not put credentials, arbitrary environment variables or installation commands
+in this file. Initialization copies the normalized configuration into
+`RUN/config.json`; later edits to the source JSON do not update that Study.
+The repository's [example](../examples/environment.json) selects the checkout's
+existing `.venv` after `uv sync --locked`.
+
+`inspect` and iteration admission observe local interpreter/version/prefix and
+installed distribution names/versions with Python's standard-library metadata.
+They do not import numerical libraries, load models, inspect datasets or probe
+CUDA. The same snapshot is supplied to the coordinator and fresh role agents.
+The shell PATH prioritizes the selected interpreter's bin directory; virtualenv
+identity is explicit and user-site packages are disabled. Use that Python for
+tests instead of creating another environment or selecting system Python.
+Package inventory is an observation, not a lockfile or an import/GPU test. The
+loop never installs or synchronizes dependencies automatically; use `uv` to
+maintain the chosen environment outside the agent's read-only environment mount.
+
+Resource interpreter/package information is **declared and unverified**. The
+feature does not connect to the resource host or establish that those packages
+import there. It also displays the actual configured partition, resource-tool
+names and budget snapshot when resources are configured. With the goal's
+authorization and remaining budget, the coordinator may use the exposed resource
+tools for real device/debug tests and experiments, including a configured
+`debug` partition. Specialists return prepared commands and findings to the
+coordinator; they do not bypass the resource adapter. Missing CUDA on the
+coordinator is not evidence that an authorized resource test cannot run.
+
+No environment file is required for old or new Studies: the default remains the
+controller's current Python environment. Adding this feature does not rewrite
+old configuration, restart controllers, change ledgers or deploy code to running
+hosts. When moving a configured Study, provision the corresponding interpreter
+on the new host and inspect it before explicit continuation; do not copy a
+platform-specific virtualenv.
+
 ## Human experiments
 
 Submit a UTF-8 question, hypothesis or experiment design to an initialized Study:
