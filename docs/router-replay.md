@@ -84,3 +84,51 @@ its fingerprint is part of the immutable candidate definition.
 ```sh
 uv run pytest tests/test_router.py tests/test_router_packets.py tests/test_router_replay.py
 ```
+
+## Same-budget state trial
+
+`router_state.enrich_packet` projects only the already delivered evidence prefix.
+Explicit task/operation observations come from whitelisted JSON return envelopes;
+prose and plans remain attributed quotations. Missing tasks, readiness and review
+obligations remain unknown. The projection preserves source IDs and supporting
+entity/status excerpts, with omissions reported. The entire Router input stays
+within 12,000 characters, including up to 4,000 characters of projected state.
+It does not read final role maps, later results, actions or assessor judgments.
+
+The bounded development trial fixes one prior regression and one seeded
+both-correct control from each of six completed rounds before inference. It uses
+cached v1 recommendations and fresh state-enriched v2 recommendations with the
+unchanged Router policy/model/schema. Both are anonymously regraded under the
+same clarified contract: host coordination is a recommendation, and independent
+review is required before consequential claims rather than at every parallel
+dispatch. A conflicting frozen blind label makes both recommendations unknown.
+
+```sh
+uv run python -m benchmarks.router_state_trial /path/to/private-replay \
+  --output /path/to/new-state-trial --bootstrap /path/to/private-bootstrap.json \
+  --deadline "${TRIAL_DEADLINE:?Set a bounded authorized ISO-8601 deadline}" \
+  --allow-model
+```
+
+The trial makes at most 24 fresh inference attempts, with no automatic retry or
+experiment execution. Preserve the same verified proxy/TLS/locale environment
+when launching under a supervisor. `selected-cases.json`, `trial.json`, calls,
+progress and the report remain private. Fresh Router and grading costs are
+separate from cached v1 consumption, including failures and missing receipts.
+These are stratified development cases; their scores cannot estimate population
+accuracy or be compared directly with the previous full-sample percentages.
+
+If the native platform's fixed instructions/catalog change, the old bootstrap
+must reject the call. Preserve that attempt and calibrate the new platform only
+with controlled synthetic input. Do not relax the audit using research responses.
+`--fresh-v1 --limit 6` instead fixes one case per source round, alternating the
+original regression/control strata (three each), and generates both versions
+fresh before anonymous grading. This mode permits at most 18 fresh calls, splits
+fresh v1/v2/grade costs, and keeps cached predictions for provenance only. Both
+versions must match the same newly calibrated bootstrap. Count calibration and
+failed attempts separately against the enclosing authorization; a new output
+directory does not reset that budget or extend its deadline.
+
+```sh
+uv run pytest tests/test_router_state.py tests/test_router_state_trial.py
+```
