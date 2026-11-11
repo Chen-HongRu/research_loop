@@ -230,6 +230,13 @@ def test_default_research_workflow_completes_and_installs_scientific_knowledge(
                     stop_basis="goal-satisfied",
                 )
             assert role == "critic"
+            if "verdict" in schema["properties"]:
+                return {
+                    "summary": "Review complete",
+                    "verdict": "accept",
+                    "reason": "Evidence supports the bounded result",
+                    "artifacts": [],
+                }
             return base
 
     monkeypatch.setattr(group_router, "configuration", lambda *a, **k: (None, {}))

@@ -16,7 +16,14 @@ def _schema(properties):
 _TEXT = {"type": "string"}
 _STRINGS = {"type": "array", "items": _TEXT}
 _BASE = {"summary": _TEXT, "help": _TEXT, "artifacts": _STRINGS}
-_CRITIC = _schema(_BASE)
+_CRITIC = _schema(
+    {
+        "summary": _TEXT,
+        "verdict": {"type": "string", "enum": ["accept", "revise"]},
+        "reason": {"type": "string", "minLength": 1},
+        "artifacts": _STRINGS,
+    }
+)
 
 
 def _write(ctx, name, content):
@@ -70,7 +77,7 @@ def _revise(ctx, payload):
     critique = stages.get("critique")
     if (
         critique
-        and critique["help"]
+        and critique["verdict"] == "revise"
         and payload.get("feedback_refs")
         and attempts["critique"] != ctx.round
     ):
@@ -93,7 +100,7 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
     record = stages.get(name)
     retry = (
         record
-        and record["help"]
+        and (record["verdict"] == "revise" if name == "critique" else record["help"])
         and payload.get("feedback_refs")
         and attempts[name] != ctx.round
     )
@@ -105,6 +112,10 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
         stages[name] = record
         ctx.save_state()
         _json(ctx, f"reports/history/{ctx.round:06d}-{name}.json", record)
+    if name == "critique":
+        _validate(record, schema)
+        if not record["reason"].strip():
+            raise ValueError("Synthesis Critic requires a nonempty reason")
     _json(ctx, f"reports/{name}.json", record)
     return record
 
@@ -365,7 +376,11 @@ async def run(ctx, payload):
         "Respect a user scope explicitly limited to a single task. Stay read-only. "
         "Return artifacts only for this Run's own work files; admitted input "
         "references are evidence citations in your assessment, not new outputs. "
-        "Return bounded help for unjustified claims/disposition or missing evidence. "
+        "Return verdict='accept' when the candidate is supported and ready, with "
+        "a nonempty reason explaining acceptance and evidence reviewed. Acceptance "
+        "explanation is not an assistance request. Return verdict='revise' for "
+        "unjustified claims/disposition or missing evidence, with a nonempty reason "
+        "specifying the bounded correction or evidence needed. "
         "New feedback can resolve the blocked review without redoing completed work.",
         {
             **sources,
@@ -374,7 +389,7 @@ async def run(ctx, payload):
         },
         _CRITIC,
     )
-    if review["help"]:
-        return _finish(ctx, payload, review["summary"], review["help"], extra)
+    if review["verdict"] == "revise":
+        return _finish(ctx, payload, review["summary"], review["reason"], extra)
     extra.append(_json(ctx, "study-result.json", result))
     return _finish(ctx, payload, result["summary"], extra=extra)

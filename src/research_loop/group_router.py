@@ -132,7 +132,7 @@ class GroupCoordinator:
     """Native-like lifecycle adapter used by the existing Study publication path."""
 
     def __init__(self, root, config, journal, adapter=None, *, native_factory=Native):
-        self.root = Path(root)
+        self.root = Path(root).resolve()
         self.config, self.journal, self.adapter = config, journal, adapter
         self.native_factory = native_factory
         self.definitions = [GroupDefinition.from_json(d) for d in config["groups"]]
@@ -224,7 +224,14 @@ class GroupCoordinator:
             "references": sorted(references),
         }
         ref_ids = {path: f"f{index}" for index, path in enumerate(sorted(references))}
-        value["references"] = {ref_ids[path]: path for path in sorted(references)}
+        value["references"] = {
+            ref_ids[path]: (
+                Path(path).relative_to(self.root).as_posix()
+                if Path(path).is_relative_to(self.root)
+                else path
+            )
+            for path in sorted(references)
+        }
         value["goal_ref"] = ref_ids[value["goal_ref"]]
         value["request_ref"] = ref_ids[value["request_ref"]]
         for row in value["runs"]:
@@ -547,10 +554,12 @@ class GroupCoordinator:
                 raise RuntimeError("Router escalation: " + decision["reason"])
         raise RuntimeError("STOP recorded during Group coordination")
 
-    @staticmethod
-    def resolve_ref(ref, packet):
+    def resolve_ref(self, ref, packet):
         references = packet.get("references", {})
-        return references.get(ref, ref) if isinstance(references, dict) else ref
+        if isinstance(references, dict) and ref in references:
+            path = Path(references[ref])
+            return str(path if path.is_absolute() else self.root / path)
+        return ref
 
     def save_routing_state(self):
         write_json(

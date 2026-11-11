@@ -167,3 +167,101 @@ def test_router_may_close_settled_failure_but_not_uncertain_effects():
     packet["runs"][0]["status"] = "needs-reconciliation"
     with pytest.raises(ValueError, match="returned"):
         group_router.validate_decision(decision("close", run_id="r"), packet)
+
+
+def test_packet_reference_paths_round_trip_without_changing_ids(tmp_path):
+    from types import SimpleNamespace
+
+    root = tmp_path / "study"
+    root.mkdir()
+    (root / "goal.md").write_text("synthetic scope")
+    artifact = str(root / "group-runs/run/exports/000001/report.json")
+    outside = str(tmp_path / "outside.json")
+    coordinator = group_router.GroupCoordinator(root, {"groups": []}, None)
+    coordinator.runtime = SimpleNamespace(
+        observe=lambda: {
+            "runs": [
+                {
+                    "run_id": "run",
+                    "group_id": "test",
+                    "status": "returned",
+                    "task_ref": str(root / "goal.md"),
+                    "output": {
+                        "summary": "done",
+                        "completion": "completed",
+                        "help": "",
+                        "unfinished": [],
+                        "artifacts": [artifact, outside],
+                    },
+                }
+            ]
+        }
+    )
+    packet = coordinator.packet({"iteration": 1})
+    original = sorted(
+        {
+            str(root / "goal.md"),
+            str(root / "call.json"),
+            str(root / "knowledge/current/index.md"),
+            artifact,
+            outside,
+        }
+    )
+    assert list(packet["references"]) == [f"f{index}" for index in range(len(original))]
+    for index, full_path in enumerate(original):
+        ref_id = f"f{index}"
+        assert coordinator.resolve_ref(ref_id, packet) == full_path
+        displayed = packet["references"][ref_id]
+        assert displayed == (
+            full_path.removeprefix(str(root) + "/")
+            if full_path.startswith(str(root) + "/")
+            else full_path
+        )
+    assert [
+        coordinator.resolve_ref(ref, packet)
+        for ref in packet["runs"][0]["output"]["artifacts"]
+    ] == [artifact, outside]
+    assert coordinator.resolve_ref(artifact, packet) == artifact
+    assert (
+        coordinator.resolve_ref("relative-already-full-ref.json", packet)
+        == "relative-already-full-ref.json"
+    )
+    assert coordinator.resolve_ref("", packet) == ""
+
+
+def test_packet_size_is_independent_of_study_root_prefix_length(tmp_path):
+    from types import SimpleNamespace
+
+    def packet_at(root):
+        root.mkdir(parents=True)
+        (root / "goal.md").write_text("same scientific task")
+        coordinator = group_router.GroupCoordinator(root, {"groups": []}, None)
+        coordinator.runtime = SimpleNamespace(
+            observe=lambda: {
+                "runs": [
+                    {
+                        "run_id": "run",
+                        "group_id": "test",
+                        "status": "returned",
+                        "task_ref": str(root / "goal.md"),
+                        "output": {
+                            "summary": "same result",
+                            "completion": "completed",
+                            "help": "",
+                            "unfinished": [],
+                            "artifacts": [
+                                str(root / "group-runs/run/exports/000001/report.json")
+                            ],
+                        },
+                    }
+                ]
+            }
+        )
+        return coordinator.packet({"iteration": 1})
+
+    short = packet_at(tmp_path / "short")
+    long = packet_at(tmp_path / ("long-study-prefix-" * 12) / ("nested-" * 25))
+    assert long == short
+    assert len(json.dumps(long, ensure_ascii=False)) == len(
+        json.dumps(short, ensure_ascii=False)
+    )

@@ -36,7 +36,7 @@ The reference workflow programs are in [`group_programs`](../src/research_loop/g
 
 - **Direction** uses Scout for autonomous exploration and Proposer to select a question and its scientific constraints. An explicit human experiment skips Scout.
 - **Experiment** uses H11 Plan and Prepare in one context, host execution, and independent Critic Evaluate including analysis of the individual experiment. It returns reports or assistance requests, not a Study result.
-- **Synthesis** uses Analyst and a fresh Critic to integrate evidence across experiments, maintain scientific knowledge and author the strict Study result and knowledge manifest.
+- **Synthesis** uses Analyst and a fresh Critic to integrate evidence across experiments, maintain scientific knowledge and author the strict Study result and knowledge manifest. Its Critic returns an explicit `accept` or `revise` verdict and a reason; only `revise` creates an assistance request.
 - **Diagnosis** handles out-of-scope faults and produces a diagnosis, patch or report in its own workspace.
 
 The H11 common and three phase instructions retain the text from the evaluated source; Group boundaries, permissions and schemas are a new integration. Published scientific files carry the frontier and positive and negative results across rounds, rather than relying on Lead conversation history. Assistance feedback retries a blocked stage and retains completed execution. A known nonzero execution requires a separate diagnosis or repair task.
@@ -51,7 +51,7 @@ uv run research-loop run /path/to/study
 
 Pass `--groups /path/to/groups.json` to replace the reference catalog, or `--coordinator lead` for the legacy coordinator. `examples/groups/exp.json` points to the actual package program and demonstrates only the experiment Group; it does not produce a complete Study result. Model calls and remote compute require separate authorization.
 
-Router packets contain up to 4,000 characters of the exact current request plus its full file reference and a truncation flag. The capability catalog and current Run state must fit the 12,000-character packet limit; the `references` object maps each reference ID to its path once, and actions use IDs resolved by the host. Excess is rejected rather than silently losing task state. Historical closed Runs remain on disk; selected scientific knowledge is published without embedding the full Run history into every routing call.
+Router packets contain up to 4,000 characters of the exact current request plus its full file reference and a truncation flag. The capability catalog and current Run state must fit the 12,000-character packet limit; the `references` object maps each reference ID to a Study-relative path (or an absolute external path) once; the runtime resolves IDs back to absolute paths, and actions use IDs resolved by the host. Excess is rejected rather than silently losing task state. Historical closed Runs remain on disk; selected scientific knowledge is published without embedding the full Run history into every routing call.
 
 ## Evidence and limits
 

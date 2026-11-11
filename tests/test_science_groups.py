@@ -97,6 +97,17 @@ def base(summary="authored assessment", help_text=""):
     return {"summary": summary, "help": help_text, "artifacts": []}
 
 
+def synthesis_review(
+    verdict="accept", reason="The cumulative evidence supports this disposition."
+):
+    return {
+        "summary": "Independent synthesis review",
+        "verdict": verdict,
+        "reason": reason,
+        "artifacts": [],
+    }
+
+
 def proposal(*, consequential=True):
     task = {
         "question": "Does intervention A discriminate H1 from H2?",
@@ -306,7 +317,7 @@ def test_synthesis_delivers_dynamic_human_result_and_every_manifest_source(tmp_p
     runtime, task, calls = setup(
         tmp_path,
         "synthesis",
-        [("analyst", authored), ("critic", base())],
+        [("analyst", authored), ("critic", synthesis_review())],
         request=request,
     )
 
@@ -337,6 +348,33 @@ def test_synthesis_delivers_dynamic_human_result_and_every_manifest_source(tmp_p
     assert "No-useful-action stop requires" in calls[-1][2]
 
 
+def test_synthesis_accept_explanation_does_not_request_assistance(tmp_path):
+    reason = "No revision or further computation is needed. Evidence reviewed: the supplied completed experiment."
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [
+            ("analyst", synthesis()),
+            ("critic", synthesis_review("accept", reason)),
+        ],
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("synthesis", task, []))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert row["output"]["completion"] == "completed"
+    assert row["output"]["help"] == ""
+    assert row["output"]["unfinished"] == []
+    assert artifact(row, "study-result.json").is_file()
+    review = json.loads(artifact(row, "critique.json").read_text())
+    assert review["verdict"] == "accept"
+    assert review["reason"] == reason
+    assert "help" not in review
+    assert [call[0] for call in calls] == ["analyst", "critic"]
+
+
 def test_synthesis_keeps_admitted_citations_without_exporting_them_again(tmp_path):
     evidence = write(tmp_path / "admitted-evidence.json", {"observed": "synthetic"})
     feedback = write(tmp_path / "admitted-feedback.json", {"correction": "synthetic"})
@@ -351,7 +389,7 @@ def test_synthesis_keeps_admitted_citations_without_exporting_them_again(tmp_pat
 
     def critique(ctx, payload):
         return {
-            **base(),
+            **synthesis_review(),
             "artifacts": [
                 str(ctx.work / "reports/study-result-candidate.json"),
                 evidence,
@@ -399,7 +437,7 @@ def test_synthesis_rejects_unknown_external_artifact_with_field_location(tmp_pat
 
     def critique(ctx, payload):
         return {
-            **base(),
+            **synthesis_review(),
             "artifacts": [
                 str(ctx.work / "reports/study-result-candidate.json"),
                 str(unknown),
@@ -519,7 +557,10 @@ def test_no_useful_action_stop_requires_direction_frontier_evidence(
     responses = [("analyst", authored)]
     if with_direction:
         responses.append(
-            ("critic", base("The Direction evidence supports Study stop."))
+            (
+                "critic",
+                synthesis_review(reason="The Direction evidence supports Study stop."),
+            )
         )
     runtime, task, _ = setup(tmp_path, "synthesis", responses)
 
@@ -556,12 +597,18 @@ def test_synthesis_feedback_corrects_real_result_and_knowledge_without_compute(
             ("analyst", wrong),
             (
                 "critic",
-                base(
-                    help_text="Claim conflicts with the negative observation; revise it."
+                synthesis_review(
+                    "revise",
+                    "Claim conflicts with the negative observation; revise it.",
                 ),
             ),
             ("analyst", revised),
-            ("critic", base("Direction evidence supports the continuing action.")),
+            (
+                "critic",
+                synthesis_review(
+                    reason="Direction evidence supports the continuing action."
+                ),
+            ),
         ],
     )
     feedback = write(tmp_path / "direction-evidence.json", {"direction": "test H2"})
@@ -570,6 +617,10 @@ def test_synthesis_feedback_corrects_real_result_and_knowledge_without_compute(
         run_id = await runtime.start("synthesis", task, [])
         first = await boundary(runtime, run_id)
         assert first["output"]["completion"] == "blocked"
+        assert (
+            first["output"]["help"]
+            == "Claim conflicts with the negative observation; revise it."
+        )
         old_export = artifact(first, "current.md")
         assert not any(
             Path(ref).name == "study-result.json"
