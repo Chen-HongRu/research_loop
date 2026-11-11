@@ -149,4 +149,13 @@ def test_assistance_hold_resume_and_human_request_publication(tmp_path, monkeypa
     ]
     assert len(records) == 2 and all(r["status"] == "closed" for r in records)
     assert sorted(r["round"] for r in records) == [1, 2]
-    assert len(list((root / "knowledge/current/groups").glob("*/*/*"))) == 2
+    published = list((root / "knowledge/current/groups").glob("*/*/*"))
+    assert {path.name for path in published} == {
+        "question.txt",
+        "answer.txt",
+        "result.json",
+    }
+    assert (
+        next(path for path in published if path.name == "question.txt").read_text()
+        == "Return the integer 42."
+    )

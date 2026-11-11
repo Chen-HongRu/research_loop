@@ -20,6 +20,8 @@ from .environment import (
 )
 from .delegation import DELEGATE_TOOL, WAIT_TOOL, HostDelegation
 
+_INTERRUPT_TIMEOUT = 5.0
+
 
 @dataclass(frozen=True)
 class Tool:
@@ -757,9 +759,19 @@ class Native:
         if self.delegator is not None:
             await asyncio.to_thread(self.delegator.stop)
         if self.thread_id and self.turn_id and self.active and not self.closed:
-            await asyncio.to_thread(
-                self.client.turn_interrupt, self.thread_id, self.turn_id
-            )
+            try:
+                async with asyncio.timeout(_INTERRUPT_TIMEOUT):
+                    await asyncio.to_thread(
+                        self.client.turn_interrupt, self.thread_id, self.turn_id
+                    )
+            except TimeoutError as error:
+                # Cancelling to_thread does not stop its worker. Closing our
+                # transport releases the SDK's pending response waiters.
+                await self.close()
+                raise RuntimeError(
+                    "Native interrupt timed out; app-server closed; "
+                    "execution outcome requires reconciliation"
+                ) from error
 
     async def close(self):
         if not self.closed:

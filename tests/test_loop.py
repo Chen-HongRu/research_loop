@@ -94,6 +94,54 @@ def test_failed_turn_preserves_thread_draft_and_no_publication(tmp_path, monkeyp
     assert not (root / "result.json").exists()
 
 
+def test_failure_is_durable_before_native_cleanup_finishes(tmp_path, monkeypatch):
+    root = prepare(tmp_path)
+    monkeypatch.setattr(loop, "configuration", lambda *args, **kwargs: (None, {}))
+
+    async def scenario():
+        cleanup_entered = asyncio.Event()
+        release_cleanup = asyncio.Event()
+
+        class Broken:
+            def __init__(self, *args):
+                pass
+
+            async def open(self):
+                pass
+
+            async def verify(self, *args, **kwargs):
+                pass
+
+            async def run(self, *args, **kwargs):
+                kwargs["on_started"]("synthetic-thread")
+                raise RuntimeError("synthetic boundary failure")
+
+            async def stop(self):
+                cleanup_entered.set()
+                await release_cleanup.wait()
+
+            async def settle(self):
+                pass
+
+            async def close(self):
+                pass
+
+        pending = asyncio.create_task(loop.run(root, native_factory=Broken))
+        try:
+            await asyncio.wait_for(cleanup_entered.wait(), 1)
+            for path in (root / "status.json", root / "iterations/000001/status.json"):
+                status = json.loads(path.read_text())
+                assert status["status"] == "failed"
+                assert status["error"]["message"] == "synthetic boundary failure"
+            assert not pending.done()
+        finally:
+            release_cleanup.set()
+            with pytest.raises(RuntimeError, match="synthetic boundary failure"):
+                await asyncio.wait_for(pending, 1)
+
+    asyncio.run(scenario())
+
+
 def test_resource_identity_is_frozen_relative_to_source_file(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

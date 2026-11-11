@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+import signal
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -602,6 +603,41 @@ def test_stop_settles_real_local_process_without_new_admission(context):
                 "printf unexpected", operation_id="new", backend="local"
             )
         journal.close()
+
+    asyncio.run(check())
+
+
+def test_native_stop_error_still_terminates_owned_local_process(context, monkeypatch):
+    failure = RuntimeError("Native interrupt outcome requires reconciliation")
+
+    class FailedNative:
+        async def stop(self):
+            raise failure
+
+    class OwnedProcess:
+        pid = 12345
+        returncode = None
+
+    signals = []
+    monkeypatch.setattr(
+        "research_loop.group_agents.os.killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    async def check():
+        service, journal = services(context)
+        service.active.add(FailedNative())
+        service.processes.add(OwnedProcess())
+        try:
+            with pytest.raises(
+                RuntimeError, match="requires reconciliation"
+            ) as outcome:
+                await service.stop()
+            assert outcome.value is failure
+            assert service.stopping
+            assert signals == [(OwnedProcess.pid, signal.SIGTERM)]
+        finally:
+            journal.close()
 
     asyncio.run(check())
 

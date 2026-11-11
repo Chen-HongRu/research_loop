@@ -98,7 +98,12 @@ class GroupContext:
         self.work = self.root / "work"
         self.round = record["round"]
         self.definition = definition
-        self.previous_output = copy.deepcopy(record.get("output"))
+        previous = self.root / "rounds" / f"{self.round - 1:06d}" / "output.json"
+        self.previous_output = (
+            json.loads(previous.read_text())
+            if self.round > 1
+            else copy.deepcopy(record.get("output"))
+        )
         path = self.root / "state.json"
         self.state = json.loads(path.read_text()) if path.exists() else {}
         self.services = None
@@ -251,6 +256,7 @@ class GroupRuntime:
         )
         record.update(
             status="running",
+            output=None,
             round=record["round"] + 1,
             updated_at=now(),
             feedback_refs=payload["feedback_refs"],

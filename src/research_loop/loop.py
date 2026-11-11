@@ -411,6 +411,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
             status="stopped" if (root / "STOP").exists() else "failed",
             error={"type": type(error).__name__, "message": str(error)},
         )
+        record_status(root, state)
         journal.emit("run.error", iteration=state["iteration"], error=state["error"])
         raise
     finally:

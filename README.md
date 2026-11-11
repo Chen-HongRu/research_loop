@@ -14,7 +14,7 @@ uv run research-loop status RUN
 uv run research-loop stop RUN
 ```
 
-New Studies use the reference Group catalog by default. Pass `--groups /path/to/groups.json` to replace it, or `--coordinator lead` to select the legacy Lead path. Existing Study configuration is unchanged; host/native delegation is separate from Group coordination. See the [Router Group contract and usage](docs/router-groups.md).
+New Studies use the reference Group catalog by default. Engine acceptance remains pending; see the validation status in the Group contract. Pass `--groups /path/to/groups.json` to replace it, or `--coordinator lead` to select the legacy Lead path. Existing Study configuration is unchanged; host/native delegation is separate from Group coordination. See the [Router Group contract and usage](docs/router-groups.md).
 
 Each iteration settles native work and authorized resources, publishes an independent knowledge snapshot, and follows the explicit `study_action` supplied by the Lead or a Group-authored result: `continue` starts the next iteration (resuming the same Lead thread only in Lead mode); `stop` ends the Study with a `stop_reason`. Scientific goal status is reported separately. Completing one diagnostic does not complete the Study. Results and status are retained under `iterations/NNNNNN/`; root records show the latest iteration. Failed work, UNKNOWN resources and STOP halt continuation and retain drafts.
 

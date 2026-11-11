@@ -498,3 +498,47 @@ def test_unknown_effects_never_publish_diagnostic_or_allow_close(tmp_path):
         await runtime.close_runtime()
 
     asyncio.run(scenario())
+
+
+def test_resume_clears_active_boundary_and_keeps_prior_exports_discoverable(tmp_path):
+    from research_loop.group_router import GroupCoordinator
+
+    async def scenario():
+        study = tmp_path / "study"
+        runtime = GroupRuntime(study, [definition(tmp_path)])
+        goal = study / "goal.md"
+        goal.write_text("synthetic task")
+        run_id = await runtime.start("synthesis", goal, [])
+        first = await runtime.wait()
+        old_artifact = first["output"]["artifacts"][0]
+        old_metadata = runtime.root / run_id / "rounds/000001/output.json"
+        runtime.hold(run_id)
+        await runtime.resume(run_id, [old_artifact])
+        active = runtime.observe(run_id)
+        assert active["status"] == "running"
+        assert active["output"] is None
+        assert (
+            json.loads((runtime.root / run_id / "run.json").read_text())["output"]
+            is None
+        )
+        assert json.loads(old_metadata.read_text()) == first["output"]
+        coordinator = GroupCoordinator(study, {"groups": []}, None)
+        coordinator.runtime = runtime
+        packet = coordinator.packet({"iteration": 1})
+        row = packet["runs"][0]
+        assert row["output"] == {}
+        assert [
+            coordinator.resolve_ref(ref, packet) for ref in row["prior_artifacts"]
+        ] == [old_artifact]
+        with pytest.raises(RuntimeError, match="boundary"):
+            runtime.hold(run_id)
+        second = await runtime.wait()
+        assert second["status"] == "returned"
+        assert second["output"]["summary"] == "round 2"
+        report = json.loads(Path(second["output"]["artifacts"][0]).read_text())
+        assert report["previous"] == first["output"]
+        runtime.hold(run_id)
+        assert runtime.observe(run_id)["status"] == "held"
+        await runtime.close_runtime()
+
+    asyncio.run(scenario())

@@ -24,7 +24,9 @@ Groups own internal orchestration. Never intervene in a running Run. At a return
 boundary, close a fulfilled task or hold it while routing its assistance request.
 Resume only a held Run, with references to the assistance artifacts. Reuse completed
 work; do not launch the same task twice. Refer only to supplied file-reference IDs and run IDs. The references table maps
-file IDs to exact paths; forward IDs without copying file contents.
+file IDs to exact paths; forward IDs without copying file contents. A Run's
+prior_artifacts lists immutable exports from earlier rounds: include those IDs in
+input_refs when original evidence is needed; do not repeat completed computation.
 A Group specializes by problem scope; do not widen it to absorb unrelated failures.
 For autonomous direction selection, route independent exploration and design to
 an appropriate Group before implementation. An explicit human experiment has
@@ -191,9 +193,29 @@ class GroupCoordinator:
                 raise RuntimeError(f"Group Run {run_id} requires diagnosis: {status}")
             if status == "closed" and run_id not in self.admitted:
                 continue
-            boundary = row.get("output", row.get("boundary")) or {}
+            boundary = (
+                {}
+                if status == "running"
+                else row.get("output", row.get("boundary")) or {}
+            )
             if isinstance(boundary, dict):
                 references.update(boundary.get("artifacts", []))
+            prior_artifacts = []
+            for number in range(1, row.get("round", 1)):
+                metadata = (
+                    self.root
+                    / "group-runs"
+                    / run_id
+                    / "rounds"
+                    / f"{number:06d}"
+                    / "output.json"
+                )
+                if metadata.is_file():
+                    prior_artifacts.extend(
+                        json.loads(metadata.read_text())["artifacts"]
+                    )
+            prior_artifacts = list(dict.fromkeys(prior_artifacts))
+            references.update(prior_artifacts)
             if row.get("task_ref"):
                 references.add(row["task_ref"])
             runs.append(
@@ -203,6 +225,7 @@ class GroupCoordinator:
                     "status": status,
                     "task_ref": row.get("task_ref"),
                     "output": boundary,
+                    "prior_artifacts": prior_artifacts,
                 }
             )
         text = request["text"] if request else (self.root / "goal.md").read_text()
@@ -235,14 +258,16 @@ class GroupCoordinator:
         value["goal_ref"] = ref_ids[value["goal_ref"]]
         value["request_ref"] = ref_ids[value["request_ref"]]
         for row in value["runs"]:
+            row["prior_artifacts"] = [ref_ids[path] for path in row["prior_artifacts"]]
             if row["task_ref"]:
                 row["task_ref"] = ref_ids[row["task_ref"]]
-            row["output"] = {
-                **row["output"],
-                "artifacts": [
-                    ref_ids[path] for path in row["output"].get("artifacts", [])
-                ],
-            }
+            if row["status"] != "running":
+                row["output"] = {
+                    **row["output"],
+                    "artifacts": [
+                        ref_ids[path] for path in row["output"].get("artifacts", [])
+                    ],
+                }
         if self.config.get("workflow") == "research-v1":
             value["workflow"] = {
                 "initial": "Select the next question with direction, respecting the admitted human request.",
@@ -407,7 +432,10 @@ class GroupCoordinator:
         for row in packet["runs"]:
             if row["id"] not in self.admitted:
                 continue
-            for ref in row["output"].get("artifacts", []):
+            refs = dict.fromkeys(
+                [*row["output"].get("artifacts", []), *row.get("prior_artifacts", [])]
+            )
+            for ref in refs:
                 source = Path(self.resolve_ref(ref, packet))
                 relative = (
                     Path("groups")

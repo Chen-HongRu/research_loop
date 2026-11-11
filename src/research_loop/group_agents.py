@@ -545,11 +545,13 @@ class NativeGroupServices:
 
     async def stop(self):
         self.stopping = True
-        for native in tuple(self.active):
-            await native.stop()
-        for process in tuple(self.processes):
-            if process.returncode is None:
-                os.killpg(process.pid, signal.SIGTERM)
+        try:
+            for native in tuple(self.active):
+                await native.stop()
+        finally:
+            for process in tuple(self.processes):
+                if process.returncode is None:
+                    os.killpg(process.pid, signal.SIGTERM)
 
     async def settle(self):
         await asyncio.sleep(0)

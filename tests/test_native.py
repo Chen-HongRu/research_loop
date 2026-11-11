@@ -242,6 +242,51 @@ def test_stop_during_turn_start_interrupts_the_acknowledged_turn(tmp_path):
     asyncio.run(check())
 
 
+def test_interrupt_timeout_closes_transport_and_releases_rpc_worker(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("research_loop.codex._INTERRUPT_TIMEOUT", 0.02)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    class BlockedInterruptClient(Client):
+        def turn_interrupt(self, thread_id, turn_id):
+            self.calls.append(("turn/interrupt", thread_id))
+            entered.set()
+            try:
+                release.wait()
+                raise RuntimeError("Synthetic transport closed")
+            finally:
+                finished.set()
+
+        def close(self):
+            super().close()
+            release.set()
+
+    async def check():
+        journal = Journal(tmp_path / "events")
+        native = Native(None, journal, client_factory=BlockedInterruptClient)
+        await native.open()
+        native.thread_id, native.turn_id, native.active = "lead", "turn", True
+        try:
+            with pytest.raises(
+                RuntimeError, match="execution outcome requires reconciliation"
+            ) as outcome:
+                await asyncio.wait_for(native.stop(), 1)
+            assert isinstance(outcome.value.__cause__, TimeoutError)
+            assert entered.is_set()
+            assert native.client.closed == 1
+            assert await asyncio.to_thread(finished.wait, 1)
+            assert native.active and not native.settled
+            assert native.closed
+            assert native.client.calls == [("turn/interrupt", "lead")]
+        finally:
+            release.set()
+            await native.close()
+            journal.close()
+
+    asyncio.run(check())
+
+
 def test_active_child_is_not_reported_settled(tmp_path):
     async def check():
         class ActiveClient(Client):
