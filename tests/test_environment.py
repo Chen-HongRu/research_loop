@@ -139,7 +139,7 @@ def test_init_copies_control_config_and_inspect_observes_once(
     assert snapshot["resource"]["configured"] is False
     assert snapshot["resource"]["status"] == "undeclared-unverified"
     assert snapshot["resource"]["tools"] == []
-    assert snapshot["local"]["prefix"] in call["permissions"]["read"]
+    assert call["permissions"]["read"] == [":root"]
     assert environment.render(snapshot) in call["instructions"]
     assert not (root / "events.jsonl").exists()
 
@@ -190,9 +190,11 @@ def test_configuration_executes_selected_python_and_protects_credentials(
         check=True,
     )
     assert result.stdout.strip() == snapshot["local"]["prefix"]
-    assert effective["filesystem"][snapshot["local"]["prefix"]] == "read"
-    assert effective["filesystem"][str(owner / ".codex")] == "deny"
-    assert effective["filesystem"][str(owner / ".ssh")] == "deny"
+    assert effective["filesystem"][":root"] == "read"
+    assert effective["filesystem"][":tmpdir"] == "write"
+    assert effective["sandbox_mode"] == "workspace-write"
+    assert config.cwd == str(root / "work")
+    assert "deny" not in effective["filesystem"].values()
     global_instructions = next(
         x.split("=", 1)[1] for x in args if x.startswith("developer_instructions=")
     )

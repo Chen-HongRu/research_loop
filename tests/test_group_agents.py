@@ -660,7 +660,7 @@ def test_shared_resource_lock_covers_dispatch_through_terminal(context):
 
 
 @pytest.mark.parametrize("project_is_study", [False, True])
-def test_nested_study_permissions_deny_other_runs_allow_work_and_admitted_file(
+def test_group_workspace_uses_ordinary_reads_and_separate_write_roots(
     tmp_path, monkeypatch, project_is_study
 ):
     home = tmp_path / "home"
@@ -674,37 +674,28 @@ def test_nested_study_permissions_deny_other_runs_allow_work_and_admitted_file(
     runtime.mkdir(parents=True)
     work.mkdir()
     admitted = study / "group-runs/other/exports/000001/report.json"
-    _, effective = configuration(
+    config, effective = configuration(
         runtime,
         project,
         [work],
         "gpt-6.1-sol",
         "medium",
         delegation="none",
-        denied_roots=[study],
         readable_roots=[admitted],
     )
-    paths = effective["filesystem"]
-
-    def permission(path):
-        matches = [
-            (len(root.parts), value)
-            for name, value in paths.items()
-            if not name.startswith(":")
-            and (root := Path(name))
-            and path.is_relative_to(root)
-        ]
-        return max(matches)[1]
-
-    assert (
-        permission(study / "group-runs/other/native-runtime/native/history.jsonl")
-        == "deny"
-    )
-    assert permission(study / "events.jsonl") == "deny"
-    assert permission(study / "state.json") == "deny"
-    assert permission(work / "implementation.py") == "write"
-    assert permission(admitted) == "read"
-    assert permission(runtime / "native/auth.json") == "deny"
+    assert effective["filesystem"] == {
+        ":root": "read",
+        ":slash_tmp": "write",
+        ":tmpdir": "write",
+        str(runtime / "work"): "write",
+        str(work): "write",
+    }
+    assert config.cwd == str(runtime / "work")
+    assert effective["sandbox_mode"] == "workspace-write"
+    with pytest.raises(ValueError, match="does not support denied_roots"):
+        configuration(
+            runtime, project, [work], "gpt-6.1-sol", "medium", denied_roots=[study]
+        )
 
 
 def test_instruction_snapshot_survives_template_update_on_resume(context, monkeypatch):

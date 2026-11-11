@@ -29,13 +29,14 @@ its lock coherently after shutdown. Never run `init` or reset the ledger. Exclud
 `native/auth.json`: the remote runtime recreates it against the remote user's
 existing login. Do not transfer credentials through source archives or logs.
 
-With the pinned Linux sandbox, denying native state beneath a read-only Study
-mount can fail during Bubblewrap setup. Use a private native-state directory
-outside the Study read root and link `STUDY/native` to it before configuration.
-The existing configuration resolves that link and keeps the physical directory
-denied; no permission widening is needed. Verify project/work access and denied
-native/control access with synthetic files, plus one native delegation smoke.
-This storage layout is deployment configuration, not a second runtime.
+The runtime uses ordinary Codex workspace-write: default filesystem reads, writes
+only in explicit work/scratch roots and temporary directories, and shell network
+disabled. Do not add custom deny overlays or move native state behind deny mounts;
+these fail during Bubblewrap setup on the pinned Linux runtime. Group contexts
+and selected evidence are separated by the task contract; this mode does not hide
+other host-readable files. Keep Study/control state outside writable work roots.
+Verify project reads, work/temporary writes and rejection of project writes with
+synthetic files before a bounded model smoke.
 
 Resume the original Study explicitly with `run STUDY --continue` after confirming
 there is one controller owner. Use a supervised service, retain original records

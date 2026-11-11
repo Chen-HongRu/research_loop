@@ -179,9 +179,7 @@ def test_h11_exact_prompts_roles_threads_cwd_and_real_command(experiment):
             args[1] == Path(ctx.services.config["project"])
             for args, _ in configurations
         )
-        assert all(
-            kwargs["denied_roots"] == [ctx.study_root] for _, kwargs in configurations
-        )
+        assert all(not kwargs.get("denied_roots") for _, kwargs in configurations)
         assert ctx.services.study_context["input"]["published_knowledge_root"] == str(
             (ctx.study_root / "knowledge/current").resolve()
         )

@@ -102,8 +102,9 @@ class NativeGroupServices:
                 *admitted.get("feedback_refs", []),
             ]
         ]
-        # Admit the scientific request and one published knowledge version, never
-        # the study's mutable draft, coordinator state or another Run's history.
+        # Pin scientific evidence scope and one published knowledge version.
+        # Ordinary workspace-write does not hide other host-readable files; the
+        # guard governs conversation isolation and use of unrelated evidence.
         call_path = self.study_root / "call.json"
         if "native_study_context" not in ctx.state:
             call = json.loads(call_path.read_text()) if call_path.is_file() else {}
@@ -213,7 +214,6 @@ class NativeGroupServices:
                 provider=self.config.get("provider"),
                 delegation="none",
                 readable_roots=self.readable,
-                denied_roots=[self.study_root],
                 execution_environment=self.config.get("execution_environment"),
             )
             if cwd is not None:

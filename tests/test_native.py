@@ -320,7 +320,7 @@ def test_exact_model_has_no_fallback(tmp_path):
     asyncio.run(check())
 
 
-def test_native_configuration_isolates_secrets_and_enables_delegation(
+def test_native_configuration_uses_ordinary_workspace_without_forwarding_keys(
     tmp_path, monkeypatch
 ):
     home = tmp_path / "owner"
@@ -337,7 +337,13 @@ def test_native_configuration_isolates_secrets_and_enables_delegation(
     assert "features.multi_agent=true" in args
     assert "features.multi_agent_v2_dynamic_tools=false" in args
     assert not any("SYNTHETIC_NOT_A_CREDENTIAL" in value for value in args)
-    assert effective["filesystem"][str((home / ".codex").resolve())] == "deny"
+    assert effective["filesystem"][":root"] == "read"
+    assert effective["filesystem"][":slash_tmp"] == "write"
+    assert effective["filesystem"][":tmpdir"] == "write"
+    assert effective["sandbox_mode"] == "workspace-write"
+    assert config.cwd == str(root / "work")
+    assert 'sandbox_mode="workspace-write"' in args
+    assert "deny" not in effective["filesystem"].values()
     assert effective["filesystem"][str((root / "work").resolve())] == "write"
 
 
@@ -547,3 +553,53 @@ def test_supplied_catalog_must_match_the_delegation_mode(tmp_path, monkeypatch):
         provider=settings,
         delegation="host",
     )
+
+
+@pytest.mark.parametrize("delegation", ["native", "host", "none"])
+@pytest.mark.parametrize("resume", [False, True])
+def test_native_start_and_resume_use_workspace_sandbox_and_explicit_cwd(
+    tmp_path, delegation, resume
+):
+    from openai_codex.client import CodexConfig
+
+    class LeafClient(Client):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.notifications = iter(
+                [
+                    (
+                        "item/completed",
+                        {
+                            "item": {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": json.dumps(RESULT),
+                            }
+                        },
+                    ),
+                    ("turn/completed", {"turn": {"status": "completed"}}),
+                ]
+            )
+
+    async def check():
+        cwd = str(tmp_path / "work")
+        journal = Journal(tmp_path / "events")
+        native = Native(CodexConfig(cwd=cwd), journal, client_factory=LeafClient)
+        await native.open()
+        result = await native.run(
+            "policy",
+            {},
+            RESULT_SCHEMA,
+            model="gpt-6.1-sol",
+            effort="medium",
+            delegation=delegation,
+            thread_id="existing" if resume else None,
+        )
+        assert result == RESULT
+        assert native.client.definition["sandbox"] == "workspace-write"
+        assert native.client.definition["cwd"] == cwd
+        assert "permissions" not in native.client.definition
+        await native.close()
+        journal.close()
+
+    asyncio.run(check())

@@ -246,17 +246,17 @@ def inspect(root):
         },
         "tools": [] if config.get("coordinator") == "router" else tools,
         "permissions": {
-            "read": list(
-                dict.fromkeys(
-                    [
-                        config["project"],
-                        str(root),
-                        snapshot["local"]["prefix"],
-                        snapshot["local"]["base_prefix"],
-                    ]
-                )
-            ),
-            "write": [str(root / "work"), str(root / "knowledge/draft")],
+            "sandbox_mode": "workspace-write",
+            "read": [":root"],
+            "write": (
+                []
+                if config.get("coordinator") == "router"
+                else [str(root / "work"), str(root / "knowledge/draft")]
+            )
+            + [":slash_tmp", ":tmpdir"],
+            "group_writable_roots": "per-Run work and native scratch"
+            if config.get("coordinator") == "router"
+            else None,
             "shell_network": False,
             "external_tools": "runtime-only"
             if config.get("coordinator") == "router"

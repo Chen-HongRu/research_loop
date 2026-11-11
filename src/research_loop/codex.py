@@ -136,6 +136,10 @@ def configuration(
         raise ValueError("Delegation mode must be native, host or none")
     if not allow_tools and delegation != "none":
         raise ValueError("Tool-free transport requires delegation=none")
+    if denied_roots:
+        raise ValueError(
+            "Ordinary workspace-write does not support denied_roots overlays"
+        )
     home = root / "native"
     home.mkdir(mode=0o700, exist_ok=True)
     home.chmod(0o700)
@@ -154,38 +158,15 @@ def configuration(
             "base_prefix": sys.base_prefix,
         }
     )
-    paths = {
-        ":root": "deny",
-        ":minimal": "read",
-        ":slash_tmp": "deny",
-        ":tmpdir": "deny",
-    }
-    for path in (
-        project,
-        Path(local["prefix"]),
-        Path(local["base_prefix"]),
-        Path(bundled_codex_path()).parent.parent,
-    ):
-        paths[str(path.resolve())] = "read"
-    base = Path(local["base_prefix"]).absolute()
-    if base.is_symlink() and base.parent not in {Path(base.anchor), Path.home()}:
-        paths[str(base.parent)] = "read"
-    # Protected study/control trees override broad project reads. Explicit
-    # runtime roots and admitted artifact files remain available below them.
-    for path in denied_roots:
-        paths[str(path.resolve())] = "deny"
-    for path in (root, *readable_roots):
-        paths[str(path.resolve())] = "read"
-    for path in writable:
-        paths[str(path.resolve())] = "write"
-        for name in (".git", ".codex", ".agents", ".aws"):
-            paths[str(path.resolve() / name)] = "read"
-    # User requests and admitted snapshots stay read-only for lead and children,
-    # including when a Study is nested within an otherwise writable directory.
-    for path in (root / "inputs", root / "iterations"):
-        paths[str(path.resolve())] = "read"
-    for path in (Path.home() / ".codex", Path.home() / ".ssh", home):
-        paths[str(path.resolve())] = "deny"
+    # Ordinary workspace-write permits host reads, writes to the supplied work
+    # roots and temporary directories, and no custom deny mount overlays.
+    shell_root = root / "work"
+    (shell_root / "tmp").mkdir(parents=True, exist_ok=True)
+    writable_roots = list(
+        dict.fromkeys(str(path.resolve()) for path in [shell_root, *writable])
+    )
+    paths = {":root": "read", ":slash_tmp": "write", ":tmpdir": "write"}
+    paths.update({path: "write" for path in writable_roots})
     shell_env = {
         "PATH": str(Path(local["executable"]).parent) + ":" + os.defpath,
         "HOME": str(root / "work"),
@@ -208,6 +189,9 @@ def configuration(
         "permissions.research.filesystem=" + _toml(paths),
         "permissions.research.network.enabled=false",
         'default_permissions="research"',
+        'sandbox_mode="workspace-write"',
+        "sandbox_workspace_write.writable_roots=" + json.dumps(writable_roots),
+        "sandbox_workspace_write.network_access=false",
         "model=" + json.dumps(model),
         "model_reasoning_effort=" + json.dumps(effort),
     ]
@@ -236,6 +220,8 @@ def configuration(
         "model": model,
         "effort": effort,
         "filesystem": paths,
+        "sandbox_mode": "workspace-write",
+        "cwd": str(shell_root),
         "network": False,
         "native_multi_agent": delegation == "native",
         "allow_tools": allow_tools,
@@ -397,7 +383,9 @@ def configuration(
     for item in overrides:
         command.extend(["--config", item])
     command.extend(["app-server", "--listen", "stdio://"])
-    return CodexConfig(cwd=str(project), launch_args_override=tuple(command)), effective
+    return CodexConfig(
+        cwd=str(shell_root), launch_args_override=tuple(command)
+    ), effective
 
 
 class Native:
@@ -604,23 +592,21 @@ class Native:
             "model": model,
             "allowProviderModelFallback": False,
             "developerInstructions": instructions,
-            "permissions": "research",
+            "sandbox": "workspace-write",
+            "cwd": self.cwd,
             "approvalPolicy": "never",
             "config": {"model_reasoning_effort": effort},
             "dynamicTools": [tool.descriptor() for tool in self.tools.values()],
         }
-        if delegation == "none" and self.cwd:
-            definition["cwd"] = self.cwd
         if thread_id:
             resume_options = {
                 "model": model,
-                "permissions": "research",
+                "sandbox": "workspace-write",
+                "cwd": self.cwd,
                 "approvalPolicy": "never",
                 "excludeTurns": True,
                 "developerInstructions": instructions,
             }
-            if delegation == "none" and self.cwd:
-                resume_options["cwd"] = self.cwd
             result = await asyncio.to_thread(
                 self.client.thread_resume,
                 thread_id,
