@@ -128,6 +128,10 @@ fresh v1/v2/grade costs, and keeps cached predictions for provenance only. Both
 versions must match the same newly calibrated bootstrap. Count calibration and
 failed attempts separately against the enclosing authorization; a new output
 directory does not reset that budget or extend its deadline.
+Interactive and supervised callers can receive different native setup content;
+perform the controlled calibration in the same caller environment as the trial.
+Keep the resulting manifests separate rather than treating a mismatch as a nonce
+or learning allowed setup messages from an experimental response.
 
 ```sh
 uv run pytest tests/test_router_state.py tests/test_router_state_trial.py
