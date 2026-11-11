@@ -403,6 +403,7 @@ def configuration(
 class Native:
     def __init__(self, config, journal, tools=(), *, client_factory=CodexClient):
         self.journal = journal
+        self.cwd = config.cwd if config is not None else None
         self.tools = {tool.name: tool for tool in tools}
         self.client = client_factory(config=config, approval_handler=self._request)
         self.delegator = None
@@ -608,17 +609,22 @@ class Native:
             "config": {"model_reasoning_effort": effort},
             "dynamicTools": [tool.descriptor() for tool in self.tools.values()],
         }
+        if delegation == "none" and self.cwd:
+            definition["cwd"] = self.cwd
         if thread_id:
+            resume_options = {
+                "model": model,
+                "permissions": "research",
+                "approvalPolicy": "never",
+                "excludeTurns": True,
+                "developerInstructions": instructions,
+            }
+            if delegation == "none" and self.cwd:
+                resume_options["cwd"] = self.cwd
             result = await asyncio.to_thread(
                 self.client.thread_resume,
                 thread_id,
-                {
-                    "model": model,
-                    "permissions": "research",
-                    "approvalPolicy": "never",
-                    "excludeTurns": True,
-                    "developerInstructions": instructions,
-                },
+                resume_options,
             )
         else:
             result = await asyncio.to_thread(self.client.thread_start, definition)

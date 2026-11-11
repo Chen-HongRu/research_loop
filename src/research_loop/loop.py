@@ -108,7 +108,7 @@ def initialize(
     effort="medium",
     provider=None,
     delegation=None,
-    coordinator="lead",
+    coordinator="router",
     groups_file=None,
 ):
     project, goal = project.resolve(strict=True), goal.resolve(strict=True)
@@ -123,12 +123,20 @@ def initialize(
     definitions = []
     if coordinator == "router":
         if groups_file is None:
-            raise ValueError("Router coordination requires --groups CATALOG")
-        from .group_router import catalog
+            from .workflow import definitions as reference_workflow
 
-        definitions = catalog(groups_file)
+            definitions = reference_workflow(resource=resource_file is not None)
+        else:
+            from .group_router import catalog
+
+            definitions = catalog(groups_file)
     elif groups_file is not None:
         raise ValueError("--groups requires --coordinator router")
+    result_authors = [
+        d.id for d in definitions if d.settings.get("produces_study_result")
+    ]
+    if len(result_authors) > 1:
+        raise ValueError("Only one Group may author the Study result")
     config = {
         "version": 1,
         "project": str(project),
@@ -176,6 +184,10 @@ def initialize(
             record["program"] = str(source)
             records.append(record)
         config["groups"] = records
+        if result_authors:
+            config["study_result_group"] = result_authors[0]
+        if groups_file is None:
+            config["workflow"] = "research-v1"
     write_json(root / "config.json", config)
     Knowledge(root).prepare()
     write_json(
@@ -534,7 +546,7 @@ def main():
     )
     init.add_argument("--model")
     init.add_argument("--effort", default="medium")
-    init.add_argument("--coordinator", choices=("lead", "router"), default="lead")
+    init.add_argument("--coordinator", choices=("lead", "router"), default="router")
     init.add_argument(
         "--groups", type=Path, help="Versioned Group catalog for Router coordination"
     )

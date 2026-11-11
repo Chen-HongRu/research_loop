@@ -1,6 +1,24 @@
-"""Role attribution from already-read Study metadata; no file I/O or caching."""
+"""Native session discovery and role attribution from recorded Study metadata."""
 
 from dataclasses import dataclass
+from pathlib import Path
+
+
+def session_paths(root, sessions_dir=None):
+    """Discover only native session trees, never other Study JSONL artifacts."""
+    root = Path(root)
+    directories = (
+        [Path(sessions_dir)]
+        if sessions_dir is not None
+        else [
+            root / "native/sessions",
+            *root.glob("groups/router/*/native/sessions"),
+            *root.glob("group-runs/*/native-runtime/native/sessions"),
+        ]
+    )
+    return sorted(
+        {path for directory in directories for path in directory.rglob("*.jsonl")}
+    )
 
 
 @dataclass(frozen=True)
@@ -40,7 +58,7 @@ def resolve(lead, metadata, host_roles):
         host = host_roles.get(tid)
         host = host if isinstance(host, dict) else {}
         task = host.get("task") or row["task"].rsplit("/", 1)[-1]
-        if tid == lead:
+        if tid == lead and host.get("role") != "router":
             role, role_source = "lead", "lead"
         elif host.get("role"):
             role, role_source = host["role"], "host-role-record"

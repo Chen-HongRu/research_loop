@@ -10,7 +10,7 @@ uv run research-loop metrics watch /path/to/study \
 
 The output directory must be outside the Study. The collector discovers native
 sessions, reads existing trace history once to establish identities and counters,
-then reads only appended complete JSONL records. Its default interval is five
+then reads only appended complete JSONL records. Default discovery includes the legacy `native/sessions/`, Router `groups/router/*/native/sessions/`, and Group `group-runs/*/native-runtime/native/sessions/` trees. An explicit `--sessions-dir` selects only that trace root. Every Router and Group specialist is attributed through `roles.json`. Its default interval is five
 seconds. `--interval`, `--sessions-dir` and `--ledger-path` select the interval or
 operator-supplied snapshot sources. `--once --until TIMESTAMP` makes a fixed-window
 measurement. All timestamps require a timezone; intervals are start-inclusive and
@@ -20,7 +20,7 @@ Run this command under the host's existing process supervisor. The collector is
 deterministic and has no model, network, GPU or resource-tool calls. It never
 changes the Study, training inputs, checkpoints, authorization or research
 controller. SIGTERM stops collection. Restart with the same output, phase,
-sources and start time to continue from its checkpoint; a second writer is
+sources and start time to continue from its checkpoint. Default discovery now records its source as automatic; pre-migration checkpoints using the legacy default directory require a fresh output directory. A second writer is
 rejected. Use a new directory for a new phase. Keep all outputs private.
 
 Each output directory contains `latest.json`, cumulative `samples.jsonl` and a

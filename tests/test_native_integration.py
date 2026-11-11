@@ -20,7 +20,7 @@ def workspace(tmp_path):
     goal = tmp_path / "goal.md"
     goal.write_text("Synthetic runtime verification only; no remote or GPU.")
     root = tmp_path / "run"
-    initialize(root, project, goal)
+    initialize(root, project, goal, coordinator="lead")
     config, _ = configuration(
         root,
         project,

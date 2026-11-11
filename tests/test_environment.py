@@ -122,7 +122,7 @@ def test_init_copies_control_config_and_inspect_observes_once(
     goal.write_text("Synthetic fixed interpreter inspection; no remote/model calls.")
     source = settings(tmp_path, selected_python)
     root = tmp_path / "study"
-    loop.initialize(root, project, goal, environment_file=source)
+    loop.initialize(root, project, goal, environment_file=source, coordinator="lead")
     source.write_text(json.dumps({"python": "/changed/after/initialization"}))
     observed = []
     observe = environment.observe

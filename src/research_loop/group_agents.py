@@ -7,6 +7,7 @@ import os
 import re
 import signal
 import shlex
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from .codex import Native, configuration
@@ -101,6 +102,32 @@ class NativeGroupServices:
                 *admitted.get("feedback_refs", []),
             ]
         ]
+        # Admit the scientific request and one published knowledge version, never
+        # the study's mutable draft, coordinator state or another Run's history.
+        call_path = self.study_root / "call.json"
+        if "native_study_context" not in ctx.state:
+            call = json.loads(call_path.read_text()) if call_path.is_file() else {}
+            study_input = dict(call.get("input", {}))
+            published = self.study_root / "knowledge/current"
+            if published.is_dir():
+                snapshot = published.resolve()
+                study_input["published_knowledge_root"] = str(snapshot)
+                study_input["published_knowledge_index_file"] = str(
+                    snapshot / "index.md"
+                )
+            ctx.state["native_study_context"] = {
+                "input": study_input,
+                "output_schema": call.get("output_schema", {}),
+            }
+            ctx.save_state()
+        self.study_context = ctx.state["native_study_context"]
+        for field in (
+            "goal_file",
+            "published_knowledge_root",
+        ):
+            ref = self.study_context["input"].get(field)
+            if ref and Path(ref).exists():
+                self.readable.append(Path(ref))
 
     def _admit(self):
         if self.closed or self.stopping or (self.study_root / "STOP").exists():
@@ -123,14 +150,45 @@ class NativeGroupServices:
             document.setdefault("version", 1)
             write_json(path, document)
 
-    async def call(self, role, context, instructions, payload, schema):
+    async def call(
+        self,
+        role,
+        context,
+        instructions,
+        payload,
+        schema,
+        *,
+        common=None,
+        include_role_template=True,
+        cwd=None,
+    ):
         self.pending_calls += 1
         try:
-            return await self._call(role, context, instructions, payload, schema)
+            return await self._call(
+                role,
+                context,
+                instructions,
+                payload,
+                schema,
+                common=common,
+                include_role_template=include_role_template,
+                cwd=cwd,
+            )
         finally:
             self.pending_calls -= 1
 
-    async def _call(self, role, context, instructions, payload, schema):
+    async def _call(
+        self,
+        role,
+        context,
+        instructions,
+        payload,
+        schema,
+        *,
+        common,
+        include_role_template,
+        cwd,
+    ):
         self._admit()
         role = role.lower()
         if role not in self.role_sections or not CONTEXT_NAME.fullmatch(context):
@@ -158,6 +216,14 @@ class NativeGroupServices:
                 denied_roots=[self.study_root],
                 execution_environment=self.config.get("execution_environment"),
             )
+            if cwd is not None:
+                directory = Path(cwd).resolve(strict=True)
+                if not directory.is_relative_to(self.ctx.work.resolve()):
+                    raise ValueError(
+                        "Specialist cwd must be inside its own work directory"
+                    )
+                native_config = replace(native_config, cwd=str(directory))
+                effective["cwd"] = str(directory)
             native = self.native_factory(
                 native_config, _RunJournal(self.raw_journal, self.ctx.run_id, context)
             )
@@ -180,20 +246,21 @@ class NativeGroupServices:
                     provider=self.config.get("provider"),
                 )
                 self._admit()
+                assignment = {
+                    "role": role,
+                    "instructions": instructions,
+                    "assignment": payload,
+                    "study_context": self.study_context,
+                    "work": str(self.ctx.work),
+                    "execution_work": self.execution_work,
+                    "group_run_id": self.ctx.run_id,
+                    "execution_environment": self.config.get("execution_environment"),
+                }
+                if include_role_template:
+                    assignment["role_template"] = self.role_sections[role]
                 result = await native.run(
-                    self.guard,
-                    {
-                        "role": role,
-                        "role_template": self.role_sections[role],
-                        "instructions": instructions,
-                        "assignment": payload,
-                        "work": str(self.ctx.work),
-                        "execution_work": self.execution_work,
-                        "group_run_id": self.ctx.run_id,
-                        "execution_environment": self.config.get(
-                            "execution_environment"
-                        ),
-                    },
+                    self.guard if common is None else common + "\n" + self.guard,
+                    assignment,
                     schema,
                     model=self.config["model"],
                     effort=self.config["effort"],

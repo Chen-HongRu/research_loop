@@ -1,10 +1,11 @@
 """Boundary-only routing of independently versioned Group Runs."""
 
 import asyncio
+import fcntl
 import json
 import shutil
 from uuid import uuid4
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .codex import Native, configuration
 from .groups import GroupDefinition, GroupRuntime
@@ -22,8 +23,16 @@ Unknown execution outcomes require operator reconciliation, never redispatch.
 Groups own internal orchestration. Never intervene in a running Run. At a returned
 boundary, close a fulfilled task or hold it while routing its assistance request.
 Resume only a held Run, with references to the assistance artifacts. Reuse completed
-work; do not launch the same task twice. Refer only to supplied paths and run IDs.
+work; do not launch the same task twice. Refer only to supplied file-reference IDs and run IDs. The references table maps
+file IDs to exact paths; forward IDs without copying file contents.
 A Group specializes by problem scope; do not widen it to absorb unrelated failures.
+For autonomous direction selection, route independent exploration and design to
+an appropriate Group before implementation. An explicit human experiment has
+priority over autonomous alternatives. Reuse completed work and the current
+comparison plan. Scientific ambiguity goes to the Group that owns experimental
+design; results and cross-experiment conclusions go to the appropriate analysis
+or synthesis capability. Independent review is required for consequential claims,
+not mechanically at every parallel dispatch. Never guess missing facts or permissions.
 Use wait if work is running and no independent task is ready. Runtime waits for
 an execution event without repeatedly calling you. If nothing can advance, escalate
 with the missing capability or input. Finish a round only using a Group-authored
@@ -214,6 +223,26 @@ class GroupCoordinator:
             "runs": runs,
             "references": sorted(references),
         }
+        ref_ids = {path: f"f{index}" for index, path in enumerate(sorted(references))}
+        value["references"] = {ref_ids[path]: path for path in sorted(references)}
+        value["goal_ref"] = ref_ids[value["goal_ref"]]
+        value["request_ref"] = ref_ids[value["request_ref"]]
+        for row in value["runs"]:
+            if row["task_ref"]:
+                row["task_ref"] = ref_ids[row["task_ref"]]
+            row["output"] = {
+                **row["output"],
+                "artifacts": [
+                    ref_ids[path] for path in row["output"].get("artifacts", [])
+                ],
+            }
+        if self.config.get("workflow") == "research-v1":
+            value["workflow"] = {
+                "initial": "Select the next question with direction, respecting the admitted human request.",
+                "experiment": "Give experiment-task.json to exp; do not repeat completed experiments.",
+                "conclusion": "Give actual experimental reports and direction evidence to synthesis; only synthesis authors the Study result and scientific knowledge.",
+                "assistance": "Hold the waiting Run and route out-of-scope faults to the relevant capability, then resume with the produced references.",
+            }
         if len(json.dumps(value, ensure_ascii=False)) > 12000:
             raise ValueError(
                 "Router packet exceeds 12000 characters; reduce catalog or boundary summaries"
@@ -240,6 +269,31 @@ class GroupCoordinator:
         )
         native = self.native_factory(config, self.journal, [])
         self.native = native
+        router_thread = None
+
+        def record_router(status):
+            if router_thread is None:
+                return
+            path = self.root / "roles.json"
+            with path.with_suffix(".lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                document = (
+                    json.loads(path.read_text()) if path.exists() else {"version": 1}
+                )
+                document.setdefault("threads", {})[router_thread] = {
+                    "role": "router",
+                    "task": f"router/{directory.name}",
+                    "status": status,
+                }
+                write_json(path, document)
+
+        def started(thread_id):
+            nonlocal router_thread
+            router_thread = thread_id
+            record_router("running")
+            if on_started:
+                on_started(thread_id)
+
         try:
             await native.open()
             await native.verify(
@@ -257,10 +311,11 @@ class GroupCoordinator:
                 effort=self.config["effort"],
                 delegation="none",
                 allow_tools=False,
-                on_started=on_started,
+                on_started=started,
             )
             validate_decision(decision, packet)
             write_json(directory / "decision.json", decision)
+            record_router("completed")
             return decision
         finally:
             await native.stop()
@@ -272,11 +327,45 @@ class GroupCoordinator:
         if any(row["status"] != "closed" for row in packet["runs"]):
             raise ValueError("All Group Runs must be closed before finishing a round")
         allowed = set()
+        author = None
         for row in packet["runs"]:
             if row["id"] in self.admitted:
-                allowed.update(row["output"].get("artifacts", []))
+                exports = [
+                    self.resolve_ref(ref, packet)
+                    for ref in row["output"].get("artifacts", [])
+                ]
+                allowed.update(exports)
+                if path in exports:
+                    author = row
+        if self.config.get("study_result_group") and (
+            author is None or author["group_id"] != self.config["study_result_group"]
+        ):
+            raise ValueError(
+                "Study result must be authored by the configured synthesis Group"
+            )
         if path not in allowed:
             raise ValueError("Study result must be a current-round Group artifact")
+        if self.config.get("workflow") == "research-v1":
+            output = author["output"]
+            if (
+                output.get("completion") != "completed"
+                or output.get("help")
+                or output.get("unfinished")
+            ):
+                raise ValueError("Blocked synthesis cannot publish a Study result")
+            run = self.runtime.observe(author["id"])
+            directory = (
+                self.root
+                / "group-runs"
+                / author["id"]
+                / "rounds"
+                / f"{run['round']:06d}"
+            )
+            mapping = json.loads((directory / "artifacts.json").read_text())
+            if mapping.get("study-result.json") != path:
+                raise ValueError(
+                    "Only the reviewed final study-result.json may be published"
+                )
         result = json.loads(Path(path).read_text())
         schema = self.result_schema
         if not isinstance(result, dict) or set(result) != set(schema["required"]):
@@ -292,6 +381,16 @@ class GroupCoordinator:
             if "enum" in spec and result.get(key) not in spec["enum"]:
                 raise ValueError(f"Invalid Study result {key}")
         self.publish_artifacts(packet)
+        self.install_knowledge(
+            author, required=self.config.get("workflow") == "research-v1"
+        )
+        index = self.root / "knowledge/draft/index.md"
+        link = "[Group artifact index](group-artifacts.md)"
+        if (
+            index.parent / "group-artifacts.md"
+        ).exists() and link not in index.read_text():
+            with index.open("a") as stream:
+                stream.write("\n\n" + link + "\n")
         return result
 
     def publish_artifacts(self, packet):
@@ -302,16 +401,73 @@ class GroupCoordinator:
             if row["id"] not in self.admitted:
                 continue
             for ref in row["output"].get("artifacts", []):
-                source = Path(ref)
-                relative = Path("groups") / row["id"] / source.parent.name / source.name
+                source = Path(self.resolve_ref(ref, packet))
+                relative = (
+                    Path("groups")
+                    / row["id"]
+                    / source.relative_to(
+                        self.root / "group-runs" / row["id"] / "exports"
+                    )
+                )
                 target = draft / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
                 additions.append(f"- [{source.name}]({relative.as_posix()})")
         if additions:
-            index = draft / "index.md"
+            index = draft / "group-artifacts.md"
             with index.open("a") as stream:
                 stream.write("\n\n## Group artifacts\n\n" + "\n".join(additions) + "\n")
+
+    def install_knowledge(self, author, *, required):
+        if author is None:
+            return
+        run = self.runtime.observe(author["id"])
+        directory = (
+            self.root / "group-runs" / author["id"] / "rounds" / f"{run['round']:06d}"
+        )
+        mapping_path = directory / "artifacts.json"
+        sources = json.loads(mapping_path.read_text()) if mapping_path.exists() else {}
+        manifest_ref = sources.get("knowledge-manifest.json")
+        if manifest_ref is None:
+            if required:
+                raise ValueError("Synthesis must export knowledge-manifest.json")
+            return
+        manifest = json.loads(Path(manifest_ref).read_text())
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != {"files"}
+            or not isinstance(manifest["files"], list)
+        ):
+            raise ValueError("Invalid scientific knowledge manifest")
+        targets = set()
+        copies = []
+        for entry in manifest["files"]:
+            if not isinstance(entry, dict) or set(entry) != {"source", "target"}:
+                raise ValueError("Knowledge entries require source and target")
+            target = PurePosixPath(entry["target"])
+            if (
+                target.is_absolute()
+                or not target.parts
+                or any(part in {".", ".."} for part in target.parts)
+            ):
+                raise ValueError("Knowledge targets must stay within the draft")
+            if target.parts[0] in {"groups", "group-artifacts.md"}:
+                raise ValueError(
+                    "Knowledge targets may not replace published Group artifacts"
+                )
+            if target.as_posix() in targets or entry["source"] not in sources:
+                raise ValueError(
+                    "Knowledge files must be distinct and explicitly exported"
+                )
+            targets.add(target.as_posix())
+            copies.append(
+                (Path(sources[entry["source"]]), self.root / "knowledge/draft" / target)
+            )
+        if "index.md" not in targets:
+            raise ValueError("Scientific knowledge requires an authored index.md")
+        for source, target in copies:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
 
     async def run(self, instructions, payload, schema, *, on_started=None, **kwargs):
         self.result_schema = schema
@@ -335,6 +491,14 @@ class GroupCoordinator:
         while not self.stopping:
             packet = self.packet(payload)
             decision = await self.decide(packet, on_started)
+            decision = {
+                **decision,
+                "task_ref": self.resolve_ref(decision["task_ref"], packet),
+                "result_ref": self.resolve_ref(decision["result_ref"], packet),
+                "input_refs": [
+                    self.resolve_ref(ref, packet) for ref in decision["input_refs"]
+                ],
+            }
             action = decision["action"]
             self.journal.emit(
                 "group.routing", iteration=self.iteration, decision=decision
@@ -382,6 +546,11 @@ class GroupCoordinator:
             else:
                 raise RuntimeError("Router escalation: " + decision["reason"])
         raise RuntimeError("STOP recorded during Group coordination")
+
+    @staticmethod
+    def resolve_ref(ref, packet):
+        references = packet.get("references", {})
+        return references.get(ref, ref) if isinstance(references, dict) else ref
 
     def save_routing_state(self):
         write_json(

@@ -71,6 +71,7 @@ def test_real_model_sees_fixed_environment_in_fresh_role(tmp_path, mode):
         model=model,
         delegation=mode,
         environment_file=env_file,
+        coordinator="lead",
     )
     packet = inspect(root)
     environment = packet["input"]["execution_environment"]

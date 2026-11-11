@@ -184,9 +184,9 @@ class GroupRuntime:
                 raise ValueError("Group input references must be files")
             if path.is_relative_to(self.root):
                 relative = path.relative_to(self.root)
-                if len(relative.parts) != 4 or relative.parts[1] != "exports":
+                if len(relative.parts) < 4 or relative.parts[1] != "exports":
                     raise ValueError("Cross-Run inputs must be exported artifacts")
-                run_id, _, round_id, _ = relative.parts
+                run_id, _, round_id = relative.parts[:3]
                 metadata = self.root / run_id / "rounds" / round_id / "output.json"
                 if (
                     not metadata.is_file()
@@ -407,8 +407,10 @@ class GroupRuntime:
         destination = ctx.root / "exports" / f"{ctx.round:06d}"
         destination.mkdir()
         delivered = []
+        source_map = {}
         for index, source in enumerate(sources):
-            target = destination / f"{index:03d}-{source.name}"
+            target = destination / source.relative_to(ctx.work)
+            target.parent.mkdir(parents=True, exist_ok=True)
             with source.open("rb") as stream, target.open("xb") as out:
                 data = stream.read(_MAX_ARTIFACT + 1)
                 if len(data) > _MAX_ARTIFACT:
@@ -416,7 +418,11 @@ class GroupRuntime:
                 out.write(data)
             target.chmod(0o444)
             delivered.append(str(target))
+            source_map[source.relative_to(ctx.work).as_posix()] = str(target)
         output = {**output, "artifacts": delivered}
+        write_json(
+            ctx.root / "rounds" / f"{ctx.round:06d}" / "artifacts.json", source_map
+        )
         write_json(ctx.root / "rounds" / f"{ctx.round:06d}" / "output.json", output)
         destination.chmod(0o555)
         return output

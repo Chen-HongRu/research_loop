@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from time import perf_counter
 
-from .identity import resolve
+from .identity import resolve, session_paths
 from .token_usage import AUTHORITY, TOKEN_KEYS, accept_record, cumulative_counts
 
 WAIT_TOOLS = {"wait", "wait_agent", "sleep"}
@@ -161,7 +161,7 @@ def report(
         at = reader.at(row, "events", "at")
         if at is None:
             continue
-        if row.get("event") == "lead.input" and row.get("thread_id") == lead:
+        if row.get("event") == "lead.input":
             starts.append(at)
         if row.get("event") == "resource.tool":
             events.append((at, row))
@@ -175,10 +175,7 @@ def report(
     def inside(at):
         return at is not None and start is not None and start <= at < end
 
-    directory = (
-        Path(sessions_dir) if sessions_dir is not None else root / "native" / "sessions"
-    )
-    paths = sorted(directory.rglob("*.jsonl")) if directory.is_dir() else []
+    paths = session_paths(root, sessions_dir)
     if not paths:
         reader.problem("sessions", "missing")
     sessions = {}

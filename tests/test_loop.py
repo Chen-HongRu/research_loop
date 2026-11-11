@@ -18,7 +18,7 @@ def prepare(tmp_path):
     goal = tmp_path / "goal.md"
     goal.write_text("Synthetic CPU only; no model or remote work.")
     root = tmp_path / "run"
-    loop.initialize(root, project, goal)
+    loop.initialize(root, project, goal, coordinator="lead")
     return root
 
 
@@ -110,7 +110,7 @@ def test_resource_identity_is_frozen_relative_to_source_file(tmp_path):
     }
     config_file.write_text(json.dumps(settings))
     root = tmp_path / "run"
-    loop.initialize(root, project, goal, resource_file=config_file)
+    loop.initialize(root, project, goal, resource_file=config_file, coordinator="lead")
     settings["host"] = "changed.invalid"
     settings["ledger_path"] = "replacement-budget.json"
     config_file.write_text(json.dumps(settings))
@@ -144,7 +144,7 @@ def test_ledger_is_never_placed_in_agent_writable_work(tmp_path):
         )
     )
     with pytest.raises(ValueError, match="outside agent-writable"):
-        loop.initialize(root, project, goal, resource_file=config)
+        loop.initialize(root, project, goal, resource_file=config, coordinator="lead")
     assert not root.exists()
 
 
@@ -623,6 +623,7 @@ def test_provider_initialization_records_metadata_not_the_secret(tmp_path, monke
         goal,
         model="synthetic-model",
         provider=settings,
+        coordinator="lead",
     )
     config = json.loads((root / "config.json").read_text())
     assert config["provider"] == settings
@@ -666,7 +667,7 @@ def test_legacy_provider_runs_use_one_delegation_mode_for_inspect_and_run(tmp_pa
     goal = tmp_path / "goal.md"
     goal.write_text("Synthetic.")
     root = tmp_path / "run"
-    loop.initialize(root, project, goal, model="synthetic-model")
+    loop.initialize(root, project, goal, model="synthetic-model", coordinator="lead")
     config = json.loads((root / "config.json").read_text())
     config.pop("delegation")
     config["provider"] = {"name": "synthetic"}

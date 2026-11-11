@@ -1,5 +1,7 @@
 """Identity facts and their use by the two existing statistics readers."""
 
+import json
+
 import pytest
 
 from research_loop.efficiency import report
@@ -70,6 +72,12 @@ def test_explicit_role_precedence_prefix_only_and_duplicate_identity():
     assert len(identities) == 5
 
 
+def test_explicit_router_role_overrides_current_coordinator():
+    identities = resolve("router", [metadata("router")], {"router": {"role": "router"}})
+    assert identities["router"].role == "router"
+    assert identities["router"].role_source == "host-role-record"
+
+
 def prepare(tmp_path):
     root = tmp_path / "study"
     write(root / "status.json", {"thread_id": "lead"})
@@ -79,6 +87,156 @@ def prepare(tmp_path):
         root / "events.jsonl", {"at": START, "event": "lead.input", "thread_id": "lead"}
     )
     return root
+
+
+def router_study(tmp_path):
+    root = prepare(tmp_path)
+    write(root / "status.json", {"thread_id": "router-two"})
+    (root / "events.jsonl").unlink()
+    append(
+        root / "events.jsonl",
+        {"at": START, "event": "lead.input", "thread_id": "router-one"},
+        {
+            "at": "2026-01-01T00:02:00Z",
+            "event": "lead.input",
+            "thread_id": "router-two",
+        },
+    )
+    session(root, "legacy", events=[record("legacy")])
+    for name in ("one", "two"):
+        # Separate parentless runtimes are joined only through host role records.
+        session(
+            root / f"groups/router/{name}",
+            f"router-{name}",
+            events=[record("router-shared-response")],
+        )
+        session(
+            root / f"group-runs/{name}/native-runtime",
+            f"group-{name}",
+            events=[record(f"group-{name}")],
+        )
+    session(root / "groups/router/one", "unrelated", events=[record("unrelated")])
+    write(
+        root / "roles.json",
+        {
+            "threads": {
+                "legacy": {"role": "scout"},
+                "router-one": {"role": "router"},
+                "router-two": {"role": "router"},
+                "group-one": {"role": "experimenter"},
+                "group-two": {"role": "analyst"},
+                "missing-history": {"role": "critic"},
+            }
+        },
+    )
+    # Raw artifacts and adjacent Router files must never be read as sessions.
+    for path in (
+        root / "artifacts/raw.jsonl",
+        root / "groups/router/one/packet.jsonl",
+        root / "group-runs/one/events.jsonl",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not a session\n")
+    return root
+
+
+@pytest.mark.parametrize("reader", ["offline", "incremental"])
+def test_router_group_default_discovery_and_global_receipt_dedup(tmp_path, reader):
+    root = router_study(tmp_path)
+    if reader == "offline":
+        result = report(root, until=END)
+        assert result["window"]["since"] == "2026-01-01T00:01:00+00:00"
+    else:
+        with collector(root) as c:
+            result = c.poll(END)
+            assert c.poll(END)["llm"]["total"] == result["llm"]["total"]
+    assert result["coverage"]["session_files_discovered"] == 6
+    assert result["coverage"]["selected_threads"] == 5
+    assert result["coverage"]["excluded_session_threads"] == 1
+    assert result["llm"]["total"]["responses"] == 4
+    assert {
+        key: result["llm"]["total"][key]
+        for key in (
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        )
+    } == {
+        "input_tokens": 400,
+        "cached_input_tokens": 320,
+        "output_tokens": 40,
+        "reasoning_output_tokens": 16,
+    }
+    tasks = {task["thread_id"]: task for task in result["llm"]["by_task"]}
+    assert {tid: task["role"] for tid, task in tasks.items()} == {
+        "legacy": "scout",
+        "router-one": "router",
+        "router-two": "router",
+        "group-one": "experimenter",
+        "group-two": "analyst",
+    }
+    assert "lead" not in result["llm"]["by_role"]
+    router = result["llm"]["by_role"]["router"]
+    assert (router if reader == "offline" else router["usage"])["input_tokens"] == 100
+
+
+@pytest.mark.parametrize("reader", ["offline", "incremental"])
+def test_explicit_sessions_root_does_not_add_router_group_roots(tmp_path, reader):
+    root = router_study(tmp_path)
+    directory = root / "native/sessions"
+    if reader == "offline":
+        result = report(root, until=END, sessions_dir=directory)
+    else:
+        with collector(root, sessions_dir=directory) as c:
+            result = c.poll(END)
+    assert result["coverage"]["session_files_discovered"] == 1
+    assert result["coverage"]["selected_threads"] == 1
+    assert result["llm"]["total"]["input_tokens"] == 100
+
+
+def test_incremental_discovers_new_runtimes_and_accepts_router_rotation(tmp_path):
+    root = router_study(tmp_path)
+    write(root / "status.json", {"thread_id": "router-one"})
+    with collector(root) as c:
+        first = c.poll(END)
+        offsets = {path: value["offset"] for path, value in c.state["offsets"].items()}
+        write(root / "status.json", {"thread_id": "router-two"})
+        session(
+            root / "group-runs/new/native-runtime",
+            "new-group",
+            events=[record("new-group")],
+        )
+        write(
+            root / "roles.json",
+            {
+                "threads": {
+                    **json.loads((root / "roles.json").read_text())["threads"],
+                    "new-group": {"role": "critic"},
+                }
+            },
+        )
+        second = c.poll(END)
+        assert second["llm"]["total"]["input_tokens"] == 500
+        assert second["coverage"]["selected_threads"] == 6
+        assert first["llm"]["total"]["input_tokens"] == 400
+        assert all(
+            c.state["offsets"][path]["offset"] == n for path, n in offsets.items()
+        )
+
+
+def test_incremental_refreshes_current_router_role_and_rejects_legacy_rotation(
+    tmp_path,
+):
+    root = prepare(tmp_path)
+    session(root, events=[record("lead")])
+    with collector(root) as c:
+        assert c.poll(END)["llm"]["by_task"][0]["role"] == "lead"
+        write(root / "roles.json", {"threads": {"lead": {"role": "router"}}})
+        assert c.poll(END)["llm"]["by_task"][0]["role"] == "router"
+        write(root / "status.json", {"thread_id": "unmapped-coordinator"})
+        with pytest.raises(ValueError, match="Study lead changed"):
+            c.poll(END)
 
 
 @pytest.mark.parametrize("reader", ["offline", "incremental"])

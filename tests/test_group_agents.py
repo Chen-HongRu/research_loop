@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from research_loop.codex import Native, Tool, configuration
+from openai_codex.client import CodexConfig
 from research_loop.group_agents import GROUP_GUARD, NativeGroupServices
 from research_loop.state import Journal
 
@@ -19,6 +20,7 @@ class FakeNative:
     outputs = []
 
     def __init__(self, config, journal):
+        self.config = config
         self.calls = []
         self.lifecycle = []
         self.thread_id = None
@@ -51,7 +53,7 @@ def context(tmp_path, monkeypatch):
     FakeNative.instances, FakeNative.outputs = [], []
     monkeypatch.setattr(
         "research_loop.group_agents.configuration",
-        lambda *a, **kw: (None, {"delegation": kw["delegation"]}),
+        lambda *a, **kw: (CodexConfig(), {"delegation": kw["delegation"]}),
     )
     root = tmp_path / "groups/run-1"
     work = root / "work"
@@ -230,7 +232,7 @@ def test_resource_command_polls_same_tool_instance_until_terminal(context):
 
 
 def test_exp_adapter_small_cpu_path_and_resumed_phases(context):
-    path = Path(__file__).parents[1] / "examples/groups/exp.py"
+    path = Path(__file__).parents[1] / "src/research_loop/group_programs/exp.py"
     spec = importlib.util.spec_from_file_location("exp_group_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -241,24 +243,33 @@ def test_exp_adapter_small_cpu_path_and_resumed_phases(context):
         "execution_backend": "local",
         "critic": True,
     }
+    scientific_plan = context.work / "scientific-plan.md"
+    scientific_plan.write_text(
+        "One bounded synthetic CPU experiment; preserve the supplied task."
+    )
     FakeNative.outputs = [
+        {
+            "summary": "planned",
+            "help": "",
+            "artifacts": [str(scientific_plan)],
+            "command": "",
+            "plan_artifact": str(scientific_plan),
+        },
         {
             "summary": "prepared",
             "help": "",
             "artifacts": [],
-            "command": f"{sys.executable} -c 'print(6*7)'",
+            "command": f'{sys.executable} -c \'from pathlib import Path; Path("result.json").write_text("42")\'',
+            "result_file": "result.json",
         },
         {
             "summary": "Observed 42; synthetic CPU evidence only",
             "help": "",
             "artifacts": [],
             "command": "",
-        },
-        {
-            "summary": "bounded synthetic check",
-            "help": "",
-            "artifacts": [],
-            "command": "",
+            "claim": "The synthetic command wrote 42.",
+            "evidence": ["result.json"],
+            "limitations": ["Synthetic CPU check only"],
         },
     ]
 
@@ -374,7 +385,7 @@ def test_tool_free_native_rejects_activity_and_dynamic_callback(context):
     asyncio.run(check())
 
 
-def test_real_runtime_exp_hold_feedback_resumes_only_blocked_analysis(
+def test_real_runtime_exp_hold_feedback_resumes_only_blocked_evaluate(
     tmp_path, monkeypatch
 ):
     from research_loop.groups import GroupDefinition, GroupRuntime
@@ -383,10 +394,18 @@ def test_real_runtime_exp_hold_feedback_resumes_only_blocked_analysis(
         [],
         [
             {
+                "summary": "planned",
+                "help": "",
+                "artifacts": ["scientific-plan.md"],
+                "command": "",
+                "plan_artifact": "scientific-plan.md",
+            },
+            {
                 "summary": "prepared",
                 "help": "",
                 "artifacts": [],
                 "command": f'{sys.executable} -c \'from pathlib import Path; p=Path("dispatches"); p.write_text(p.read_text()+"once" if p.exists() else "once")\'',
+                "result_file": "dispatches",
             },
             {
                 "summary": "need interpretation input",
@@ -395,21 +414,18 @@ def test_real_runtime_exp_hold_feedback_resumes_only_blocked_analysis(
                 "command": "",
             },
             {
-                "summary": "Analysis completed using approved feedback",
+                "summary": "Evaluation completed using approved feedback",
                 "help": "",
                 "artifacts": [],
                 "command": "",
-            },
-            {
-                "summary": "Bounded review completed",
-                "help": "",
-                "artifacts": [],
-                "command": "",
+                "claim": "The synthetic command ran once.",
+                "evidence": ["dispatches"],
+                "limitations": ["Synthetic CPU check only"],
             },
         ],
     )
     monkeypatch.setattr(
-        "research_loop.group_agents.configuration", lambda *a, **kw: (None, {})
+        "research_loop.group_agents.configuration", lambda *a, **kw: (CodexConfig(), {})
     )
     plan = tmp_path / "plan.md"
     plan.write_text(
@@ -421,12 +437,15 @@ def test_real_runtime_exp_hold_feedback_resumes_only_blocked_analysis(
         "exp",
         "1",
         "synthetic",
-        Path(__file__).parents[1] / "examples/groups/exp.py",
+        Path(__file__).parents[1] / "src/research_loop/group_programs/exp.py",
         {"execution_backend": "local"},
     )
     journal = Journal(tmp_path / "events")
 
     def factory(ctx):
+        (ctx.work / "scientific-plan.md").write_text(
+            "One bounded synthetic CPU command."
+        )
         return NativeGroupServices(
             ctx,
             {
@@ -444,7 +463,7 @@ def test_real_runtime_exp_hold_feedback_resumes_only_blocked_analysis(
         first = await runtime.wait()
         assert first["status"] == "returned", first
         assert first["output"]["help"]
-        assert len(FakeNative.instances) == 2
+        assert len(FakeNative.instances) == 3
         runtime.hold(run_id)
         await runtime.resume(run_id, [str(feedback)])
         second = await runtime.wait()
@@ -452,12 +471,20 @@ def test_real_runtime_exp_hold_feedback_resumes_only_blocked_analysis(
         assert second["output"]["completion"] == "completed"
         assert (runtime.root / run_id / "work/dispatches").read_text() == "once"
         assert len(FakeNative.instances) == 4
-        assert FakeNative.instances[2].calls[0][1]["assignment"]["feedback_refs"] == [
+        assert FakeNative.instances[3].calls[0][1]["assignment"]["feedback_refs"] == [
             str(feedback)
         ]
+        assert FakeNative.instances[0].thread_id == FakeNative.instances[1].thread_id
         assert FakeNative.instances[1].thread_id != FakeNative.instances[2].thread_id
-        assert len(second["output"]["artifacts"]) == 5
-        assert any("analysis.json" in item for item in second["output"]["artifacts"])
+        assert FakeNative.instances[2].thread_id == FakeNative.instances[3].thread_id
+        assert len(second["output"]["artifacts"]) == 7
+        raw = next(
+            Path(ref)
+            for ref in second["output"]["artifacts"]
+            if Path(ref).name == "dispatches"
+        )
+        assert raw.read_text() == "once"
+        assert any("evaluate.json" in item for item in second["output"]["artifacts"])
         runtime.close(run_id)
         await runtime.close_runtime()
 
@@ -706,7 +733,7 @@ def test_instruction_snapshot_survives_template_update_on_resume(context, monkey
 def test_exp_failed_execution_exports_explicit_code_and_directs_separate_repair(
     context,
 ):
-    path = Path(__file__).parents[1] / "examples/groups/exp.py"
+    path = Path(__file__).parents[1] / "src/research_loop/group_programs/exp.py"
     spec = importlib.util.spec_from_file_location("failed_exp_group_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -714,13 +741,25 @@ def test_exp_failed_execution_exports_explicit_code_and_directs_separate_repair(
     plan.write_text("Synthetic known-failure receipt; never retry automatically.")
     code = context.work / "implementation.py"
     code.write_text("raise SystemExit(3)\n")
+    scientific_plan = context.work / "scientific-plan.md"
+    scientific_plan.write_text(
+        "One bounded synthetic CPU experiment; preserve the supplied task."
+    )
     FakeNative.outputs = [
+        {
+            "summary": "planned",
+            "help": "",
+            "artifacts": [str(scientific_plan)],
+            "command": "",
+            "plan_artifact": str(scientific_plan),
+        },
         {
             "summary": "prepared",
             "help": "",
             "artifacts": [str(code)],
             "command": f"{sys.executable} implementation.py",
-        }
+            "result_file": "unused.json",
+        },
     ]
     context.definition.settings = {"execution_backend": "local"}
 
@@ -737,7 +776,7 @@ def test_exp_failed_execution_exports_explicit_code_and_directs_separate_repair(
             )
             == output
         )
-        assert len(FakeNative.instances) == 1
+        assert len(FakeNative.instances) == 2
         await service.close()
         journal.close()
 
