@@ -154,6 +154,24 @@ def supervise(study, hours):
                         reason=state.get("error") or state.get("cleanup_error"),
                     )
                     return window
+                if code == 0 and state.get("status") == "completed":
+                    result_path = study / "result.json"
+                    result = (
+                        json.loads(result_path.read_text())
+                        if result_path.exists()
+                        else {}
+                    )
+                    request = result.get("human_request", {})
+                    if request.get("status") == "blocked" or (
+                        result.get("study_action") == "stop"
+                        and result.get("goal") != "achieved"
+                    ):
+                        update(
+                            "blocked",
+                            exit_code=code,
+                            reason=request.get("reason") or result.get("stop_reason"),
+                        )
+                        return window
                 # A finished lead iteration is not the end of the user's window.
                 # The next admission keeps its thread, reviewed knowledge and costs.
                 update("continuing", exit_code=code)

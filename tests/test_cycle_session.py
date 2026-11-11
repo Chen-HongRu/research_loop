@@ -13,6 +13,9 @@ def fixture(tmp_path, monkeypatch):
     study.mkdir()
     (study / "evaluator.json").write_text(json.dumps({"max_evaluations": None}))
     (study / "status.json").write_text(json.dumps({"status": "completed"}))
+    (study / "result.json").write_text(
+        json.dumps({"goal": "achieved", "study_action": "stop"})
+    )
     (study / "evaluation-ledger.json").write_text(json.dumps({"charged": 7}))
     clock = SimpleNamespace(now=1000)
     monkeypatch.setattr(session.time, "time", lambda: clock.now)
@@ -153,3 +156,39 @@ def test_real_owned_cpu_process_settles_at_window_end(tmp_path, monkeypatch):
     assert result["status"] == "completed"
     assert len(children) == 1 and children[0].returncode == 0
     assert (study / "STOP").exists()
+
+
+@pytest.mark.parametrize(
+    "goal,human_outcome",
+    [
+        ("not-achieved", None),
+        ("achieved", {"status": "blocked", "reason": "upstream timeout"}),
+        ("not-achieved", {"status": "blocked", "reason": "upstream timeout"}),
+    ],
+)
+def test_blocked_human_request_does_not_spin_successful_process(
+    tmp_path, monkeypatch, goal, human_outcome
+):
+    study, clock = fixture(tmp_path, monkeypatch)
+    (study / "result.json").write_text(
+        json.dumps(
+            {
+                "goal": goal,
+                "study_action": "stop",
+                "stop_reason": "host reconciliation required",
+                **({"human_request": human_outcome} if human_outcome else {}),
+            }
+        )
+    )
+    starts = []
+
+    def start(*args, **kwargs):
+        starts.append(1)
+        return SimpleNamespace(pid=999, returncode=0, poll=lambda: 0)
+
+    monkeypatch.setattr(session.subprocess, "Popen", start)
+    result = session.supervise(study, 4 / 3600)
+    assert result["status"] == "blocked"
+    assert len(starts) == 1
+    assert clock.now == 1000
+    assert json.loads((study / "evaluation-ledger.json").read_text()) == {"charged": 7}

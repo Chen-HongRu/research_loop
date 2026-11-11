@@ -263,7 +263,9 @@ uv run python -m benchmarks.experiment_cycle.session \
 The Study's `evaluator.json` must have `max_evaluations: null`; changing that field
 never resets `evaluation-ledger.json`. Run one supervisor only. It records the
 start/deadline in `run-window.json` and keeps that deadline across a process restart.
-Normal lead completion is continued until the deadline. Resource reconciliation
+A successful goal completion can continue until the deadline. Explicit blocked
+requests or stop decisions with a not-achieved/unknown goal halt for diagnosis,
+even when the controller process exits zero. Resource reconciliation
 and availability waiting are deterministic and make no model calls. Unexpected
 controller faults remain blocked for diagnosis; they are not retried blindly.
 New operator STOP requests are never cleared by automatic continuation. At the
