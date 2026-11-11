@@ -147,33 +147,15 @@ def configuration(
             "base_prefix": sys.base_prefix,
         }
     )
-    paths = {
-        ":root": "deny",
-        ":minimal": "read",
-        ":slash_tmp": "deny",
-        ":tmpdir": "deny",
-    }
-    for path in (
-        project,
-        root,
-        Path(local["prefix"]),
-        Path(local["base_prefix"]),
-        Path(bundled_codex_path()).parent.parent,
-    ):
-        paths[str(path.resolve())] = "read"
-    base = Path(local["base_prefix"]).absolute()
-    if base.is_symlink() and base.parent not in {Path(base.anchor), Path.home()}:
-        paths[str(base.parent)] = "read"
-    for path in writable:
-        paths[str(path.resolve())] = "write"
-        for name in (".git", ".codex", ".agents", ".aws"):
-            paths[str(path.resolve() / name)] = "read"
-    # User requests and admitted snapshots stay read-only for lead and children,
-    # including when a Study is nested within an otherwise writable directory.
-    for path in (root / "inputs", root / "iterations"):
-        paths[str(path.resolve())] = "read"
-    for path in (Path.home() / ".codex", Path.home() / ".ssh", home):
-        paths[str(path.resolve())] = "deny"
+    # Use the CLI's ordinary workspace-write policy, with the agent scratch
+    # directory as cwd rather than implicitly granting writes to the project.
+    shell_root = root / "work"
+    shell_root.mkdir(parents=True, exist_ok=True)
+    writable_roots = list(
+        dict.fromkeys(str(path.resolve()) for path in [shell_root, *writable])
+    )
+    paths = {":root": "read", ":slash_tmp": "write", ":tmpdir": "write"}
+    paths.update({path: "write" for path in writable_roots})
     shell_env = {
         "PATH": str(Path(local["executable"]).parent) + ":" + os.defpath,
         "HOME": str(root / "work"),
@@ -193,9 +175,9 @@ def configuration(
         "allow_login_shell=false",
         'shell_environment_policy.inherit="none"',
         "shell_environment_policy.set=" + _toml(shell_env),
-        "permissions.research.filesystem=" + _toml(paths),
-        "permissions.research.network.enabled=false",
-        'default_permissions="research"',
+        'sandbox_mode="workspace-write"',
+        "sandbox_workspace_write.writable_roots=" + json.dumps(writable_roots),
+        "sandbox_workspace_write.network_access=false",
         "model=" + json.dumps(model),
         "model_reasoning_effort=" + json.dumps(effort),
     ]
@@ -224,6 +206,7 @@ def configuration(
         "model": model,
         "effort": effort,
         "filesystem": paths,
+        "sandbox_mode": "workspace-write",
         "network": False,
         "native_multi_agent": True,
         "child_dynamic_tools": False,
@@ -327,12 +310,15 @@ def configuration(
     for item in overrides:
         command.extend(["--config", item])
     command.extend(["app-server", "--listen", "stdio://"])
-    return CodexConfig(cwd=str(project), launch_args_override=tuple(command)), effective
+    return CodexConfig(
+        cwd=str(shell_root), launch_args_override=tuple(command)
+    ), effective
 
 
 class Native:
     def __init__(self, config, journal, tools=(), *, client_factory=CodexClient):
         self.journal = journal
+        self.cwd = config.cwd if config else None
         self.tools = {tool.name: tool for tool in tools}
         self.client = client_factory(config=config, approval_handler=self._request)
         self.delegator = None
@@ -518,7 +504,8 @@ class Native:
             "model": model,
             "allowProviderModelFallback": False,
             "developerInstructions": instructions,
-            "permissions": "research",
+            "sandbox": "workspace-write",
+            "cwd": self.cwd,
             "approvalPolicy": "never",
             "config": {"model_reasoning_effort": effort},
             "dynamicTools": [tool.descriptor() for tool in self.tools.values()],
@@ -529,7 +516,8 @@ class Native:
                 thread_id,
                 {
                     "model": model,
-                    "permissions": "research",
+                    "sandbox": "workspace-write",
+                    "cwd": self.cwd,
                     "approvalPolicy": "never",
                     "excludeTurns": True,
                     "developerInstructions": instructions,

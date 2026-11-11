@@ -99,8 +99,9 @@ standard library. They do not import numerical libraries or access resource
 hosts. The coordinator and fresh role contexts receive the same snapshot;
 resource declarations are explicitly unverified and are separate from resource
 configuration, authorization and physical receipts. The selected interpreter
-and prefixes are readable through the native permission profile, with protected
-credentials/control paths still denied. The isolated shell prioritizes its bin
+and prefixes are readable under the standard Codex `workspace-write` sandbox.
+The agent cwd is its work directory; additional work/draft roots are writable.
+There are no custom credential/control-path deny mounts. The isolated shell prioritizes its bin
 directory, identifies a virtualenv when applicable and disables user-site imports.
 
 This is environment selection and disclosure, not dependency installation,
@@ -112,7 +113,7 @@ not modified or restarted by initialization or a repository update.
 
 | Boundary | Protected condition |
 | --- | --- |
-| Native authentication, exact model and permissions | Use the configured authentication (ChatGPT subscription by default, or an explicit OpenAI-compatible provider), model, delegation mode and effort without implicit provider fallback; prevent agent access to protected paths. Prompts cannot enforce filesystem isolation. |
+| Native authentication, exact model and permissions | Use the configured authentication (ChatGPT subscription by default, or an explicit OpenAI-compatible provider), model, delegation mode and effort without implicit provider fallback; use the ordinary workspace-write sandbox with shell network disabled. Local reads are not isolated from credentials or benchmark answers. |
 | Host-delegated roles | Start every role in a new thread with a plain assignment; reject native delegation from a role, cap concurrency, and retain unfinished tasks before publication. |
 | Shared resource ledger and lock | Reserve and settle the original authorization across allocations. A prompt cannot atomically reserve shared budget. |
 | Original operation identity, UNKNOWN and STOP | Reconcile uncertain effects without duplicate dispatch; prevent new research dispatch after STOP. Physical receipts establish job state. |
@@ -144,8 +145,8 @@ The user authors `inputs/human.md` directly or through a separately authorized
 Codex session. The operator `experiment` and `edit-experiment` commands share
 `inputs/human.lock` with admission and acknowledgement. Direct editing during
 execution must use this lock; arbitrary unlocked editor writes are not coordinated.
-Research lead and specialist permissions keep inputs and iteration snapshots
-read-only. Only the controller consumes requests.
+Research lead and specialist workspace-write roots are work/draft directories;
+inputs and iteration snapshots outside those roots stay read-only. Only the controller consumes requests.
 
 At iteration admission, a nonempty UTF-8 request is read once, identified by its
 file revision and text, archived under the iteration and supplied as

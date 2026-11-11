@@ -190,9 +190,8 @@ def test_configuration_executes_selected_python_and_protects_credentials(
         check=True,
     )
     assert result.stdout.strip() == snapshot["local"]["prefix"]
-    assert effective["filesystem"][snapshot["local"]["prefix"]] == "read"
-    assert effective["filesystem"][str(owner / ".codex")] == "deny"
-    assert effective["filesystem"][str(owner / ".ssh")] == "deny"
+    assert effective["sandbox_mode"] == "workspace-write"
+    assert effective["filesystem"][":root"] == "read"
     global_instructions = next(
         x.split("=", 1)[1] for x in args if x.startswith("developer_instructions=")
     )

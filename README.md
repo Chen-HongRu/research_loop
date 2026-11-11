@@ -14,6 +14,12 @@ uv run research-loop status RUN
 uv run research-loop stop RUN
 ```
 
+Agents use the pinned Codex CLI's standard `workspace-write` sandbox: local files
+are readable, agent work/draft directories and temporary files are writable, and
+shell network access is disabled. The host does not install custom deny mounts or
+hide local benchmark answers and credentials. Use an account/workspace appropriate
+for the agent's ordinary read access.
+
 Each iteration settles native work and authorized resources, publishes an independent knowledge snapshot, and follows the lead's explicit `study_action`: `continue` starts the next iteration in the same thread; `stop` ends the Study with a `stop_reason`. Scientific goal status is reported separately. Completing one diagnostic does not complete the Study. Results and status are retained under `iterations/NNNNNN/`; root records show the latest iteration. Failed work, UNKNOWN resources and STOP halt continuation and retain drafts.
 
 To prioritize your own experiment, run `uv run research-loop experiment RUN --file experiment.md` or ask a separately user-authorized Codex session to inject it with that command. The next iteration reads `RUN/inputs/human.md` before autonomous planning, within the existing goal and authorization. The controller clears the admitted request only after execution, analysis and successful publication; failures and blocked work retain it. Use `uv run research-loop edit-experiment RUN` to edit safely while the loop runs. See [human experiments](references/operations.md#human-experiments) for editing, restart and completion semantics.
@@ -75,6 +81,9 @@ metrics compare BASELINE_DIR OPTIMIZED_DIR`; see [continuous measurements](refer
 
 For child-agent waiting, explicit dependency-ready receipts and visible tool-output
 sizes, use the separate [behavior collector](references/behavior-metrics.md).
+
+For a bounded coordinator-free experiment-cycle benchmark, see [the benchmark guide](benchmarks/experiment_cycle/README.md). It measures planning, preparation, execution and evaluation separately using an explicit task roster. The editable orchestration is `orchestration.py`; the guide also documents a prepare-only ten-cycle Cactus collection and the Research Loop optimization entry, with optional wall-clock supervision
+and no default evaluation-count budget. Its supplied CPU sample is synthetic; it is not a recovered historical experiment or evidence of general research benefit.
 
 ## Development
 

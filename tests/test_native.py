@@ -175,6 +175,32 @@ def test_native_schema_delegation_history_and_no_host_science_gate(tmp_path):
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("thread_id", [None, "existing-project-thread"])
+def test_standard_sandbox_explicit_cwd_on_start_and_resume(tmp_path, thread_id):
+    from openai_codex.client import CodexConfig
+
+    async def check():
+        journal = Journal(tmp_path / "events")
+        cwd = str(tmp_path / "work")
+        native = Native(CodexConfig(cwd=cwd), journal, client_factory=Client)
+        await native.open()
+        await native.run(
+            "test",
+            {},
+            RESULT_SCHEMA,
+            model="gpt-6.1-sol",
+            effort="medium",
+            thread_id=thread_id,
+        )
+        assert native.client.definition["cwd"] == cwd
+        assert native.client.definition["sandbox"] == "workspace-write"
+        assert "permissions" not in native.client.definition
+        await native.close()
+        journal.close()
+
+    asyncio.run(check())
+
+
 def test_experimental_notification_keeps_factual_delegate_history(tmp_path):
     async def check():
         class ExperimentalClient(Client):
@@ -320,7 +346,7 @@ def test_exact_model_has_no_fallback(tmp_path):
     asyncio.run(check())
 
 
-def test_native_configuration_isolates_secrets_and_enables_delegation(
+def test_native_configuration_uses_standard_workspace_and_enables_delegation(
     tmp_path, monkeypatch
 ):
     home = tmp_path / "owner"
@@ -337,7 +363,11 @@ def test_native_configuration_isolates_secrets_and_enables_delegation(
     assert "features.multi_agent=true" in args
     assert "features.multi_agent_v2_dynamic_tools=false" in args
     assert not any("SYNTHETIC_NOT_A_CREDENTIAL" in value for value in args)
-    assert effective["filesystem"][str((home / ".codex").resolve())] == "deny"
+    assert effective["sandbox_mode"] == "workspace-write"
+    assert effective["filesystem"][":root"] == "read"
+    assert 'sandbox_mode="workspace-write"' in args
+    assert not any(arg.startswith("permissions.") for arg in args)
+    assert config.cwd == str(root / "work")
     assert effective["filesystem"][str((root / "work").resolve())] == "write"
 
 

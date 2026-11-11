@@ -301,8 +301,9 @@ def test_request_permissions_are_read_only_in_both_modes(tmp_path, monkeypatch, 
         provider=provider(tmp_path, monkeypatch),
         delegation=mode,
     )
-    assert effective["filesystem"][str(root / "inputs")] == "read"
-    assert effective["filesystem"][str(root / "iterations")] == "read"
+    assert effective["filesystem"][":root"] == "read"
+    assert str(root / "inputs") not in effective["filesystem"]
+    assert str(root / "iterations") not in effective["filesystem"]
     assert effective["filesystem"][str(root / "work")] == "write"
 
 

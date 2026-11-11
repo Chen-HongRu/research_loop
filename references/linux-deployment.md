@@ -29,13 +29,24 @@ its lock coherently after shutdown. Never run `init` or reset the ledger. Exclud
 `native/auth.json`: the remote runtime recreates it against the remote user's
 existing login. Do not transfer credentials through source archives or logs.
 
-With the pinned Linux sandbox, denying native state beneath a read-only Study
-mount can fail during Bubblewrap setup. Use a private native-state directory
-outside the Study read root and link `STUDY/native` to it before configuration.
-The existing configuration resolves that link and keeps the physical directory
-denied; no permission widening is needed. Verify project/work access and denied
-native/control access with synthetic files, plus one native delegation smoke.
-This storage layout is deployment configuration, not a second runtime.
+Use the pinned CLI's standard `workspace-write` sandbox. The agent cwd is
+Study/work; work/draft roots and normal temporary directories are writable, local
+files are readable, and direct shell network is disabled. Do not add custom deny
+mounts or relocate Native state merely to implement a stricter read allowlist.
+Existing private-state symlinks may remain in place; they are ordinary readable
+paths under this policy. Verify a project read, work/tmp writes and rejection of
+writes outside the configured roots with synthetic CPU-only commands. The CLI
+still requires Linux namespace support for its standard sandbox. The pinned
+standalone `codex sandbox` command requires a named profile; the local benchmark
+executor maps the ordinary read/write roots into that profile, without deny mounts.
+
+The experiment-cycle adapter uses the same ordinary policy. Frozen cases,
+execution, scoring and accounting remain host-controlled, but the sandbox does
+not hide their local files. Plan/Evaluate read-only behavior and immutable
+workspace inputs are task instructions rather than per-file OS mounts. Do not
+claim hidden-answer isolation or compare a mixed-policy run as an unchanged
+execution environment. Retain prior receipts with their original permission
+metadata when updating a deployment.
 
 Resume the original Study explicitly with `run STUDY --continue` after confirming
 there is one controller owner. Use a supervised service, retain original records
@@ -53,3 +64,14 @@ or `--studies-dir STUDIES` for immediate-child discovery. Existing single-Study
 commands remain valid. Every discovered Study is readable to dashboard visitors;
 choose the directory and access control accordingly. This changes only the
 read-only view, and does not start or resume a research controller.
+
+For an explicitly authorized time window, use the experiment-cycle session entry
+with `--hours 10 --allow-model --allow-gpu` under one durable service. Set the
+operator evaluation cap to null without resetting the ledger. Preserve its
+run-window.json across restarts; the original deadline does not move. Automatic
+continuation preserves new STOP requests. The deadline closes admission and
+initiates cleanup; unknown remote state must remain needs-reconciliation. SSH
+receipt loss is reconciled by the worker's atomic operation-identity fence before
+any fresh dispatch. Deploy the matching worker and permit its fixed `reconcile`
+action in an operator SSH gateway before starting this entry. No automatic agent
+wakeup or failure diagnosis is implied by a running systemd service.

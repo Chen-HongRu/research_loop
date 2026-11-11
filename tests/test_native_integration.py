@@ -119,7 +119,7 @@ def test_pinned_native_handshake_without_model(tmp_path):
                         {
                             "model": "gpt-6.1-sol",
                             "allowProviderModelFallback": False,
-                            "permissions": "research",
+                            "sandbox": "workspace-write",
                             "approvalPolicy": "never",
                             "dynamicTools": [],
                         },
