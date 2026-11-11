@@ -32,6 +32,8 @@ Use scientific artifacts rather than other agents' chats. A context can retain
 its own earlier implementation phases. Analyst and Critic use separate contexts.
 Separate observations, inference, negative evidence and limitations. Return the
 requested schema with exact artifact paths; a prepared command is not execution.
+List only newly produced files under this Run's work in artifacts. Cite supplied
+input files through evidence fields; they are existing references, not new outputs.
 """
 
 

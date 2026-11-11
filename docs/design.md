@@ -147,7 +147,7 @@ The user authors `inputs/human.md` directly or through a separately authorized
 Codex session. The operator `experiment` and `edit-experiment` commands share
 `inputs/human.lock` with admission and acknowledgement. Direct editing during
 execution must use this lock; arbitrary unlocked editor writes are not coordinated.
-Research Lead and specialist write roots exclude inputs and iteration snapshots in the supported layout. Do not place the Study inside an agent-writable ancestor: ordinary workspace-write does not add protective deny overlays. Only the controller consumes requests.
+Research Lead and specialist write roots exclude inputs and iteration snapshots in the supported layout. Do not place the Study inside an agent-writable ancestor or system temporary directory: ordinary workspace-write does not add protective deny overlays. Only the controller consumes requests.
 
 At iteration admission, a nonempty UTF-8 request is read once, identified by its
 file revision and text, archived under the iteration and supplied as

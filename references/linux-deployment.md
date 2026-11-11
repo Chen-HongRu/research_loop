@@ -34,7 +34,7 @@ only in explicit work/scratch roots and temporary directories, and shell network
 disabled. Do not add custom deny overlays or move native state behind deny mounts;
 these fail during Bubblewrap setup on the pinned Linux runtime. Group contexts
 and selected evidence are separated by the task contract; this mode does not hide
-other host-readable files. Keep Study/control state outside writable work roots.
+other host-readable files. Keep Study/control state and read-only inputs outside writable work roots and system temporary directories.
 Verify project reads, work/temporary writes and rejection of project writes with
 synthetic files before a bounded model smoke.
 

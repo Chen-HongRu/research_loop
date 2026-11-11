@@ -109,16 +109,27 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
     return record
 
 
-def _finish(ctx, summary, help_text="", extra=()):
+def _finish(ctx, payload, summary, help_text="", extra=()):
     artifacts = list(extra)
+    admitted = {
+        payload.get("task_ref"),
+        *payload.get("input_refs", []),
+        *payload.get("feedback_refs", []),
+    }
     for name, record in ctx.state.get("synthesis_stages", {}).items():
         artifacts.append(str(ctx.work / f"reports/{name}.json"))
-        for ref in record.get("artifacts", []):
+        for index, ref in enumerate(record.get("artifacts", [])):
             path = Path(ref)
             if not path.is_absolute():
                 path = ctx.work / path
+            if str(path) in admitted:
+                # Input citations stay in the role report; they are not new outputs.
+                continue
             if not path.is_relative_to(ctx.work) or ".." in path.parts:
-                raise ValueError("Synthesis artifacts must be inside this Run's work")
+                raise ValueError(
+                    f"Synthesis {name}.artifacts[{index}] is neither ownwork nor "
+                    f"an explicitly admitted input: {ref}"
+                )
             artifacts.append(str(path))
     return {
         "summary": summary,
@@ -203,6 +214,7 @@ async def run(ctx, payload):
     if "output_schema" not in study:
         return _finish(
             ctx,
+            payload,
             "Study result contract unavailable",
             "Supply study_context.output_schema",
         )
@@ -270,6 +282,9 @@ async def run(ctx, payload):
         "Python installs these files verbatim, never fills in scientific content. "
         "Return help with study_result='' if required evidence lies outside scope, "
         "rather than fabricating result fields. Do not read raw agent chats. "
+        "Return artifacts only for new files inside this Run's work; admitted input "
+        "paths are evidence citations, not new outputs. Use study_result.evidence, "
+        "execution_refs, analysis_refs and direction_refs for those citations. "
         "When revision is supplied, revise your prior candidate and knowledge text "
         "using the rejected critique and new feedback. Preserve completed experiment "
         "identities and execution; scientific correction must not rerun compute.",
@@ -277,7 +292,7 @@ async def run(ctx, payload):
         analysis_schema,
     )
     if analysis["help"]:
-        return _finish(ctx, analysis["summary"], analysis["help"])
+        return _finish(ctx, payload, analysis["summary"], analysis["help"])
     result = analysis["study_result"]
     _validate(result, result_schema)
     _completed_request_evidence(result, analysis, sources)
@@ -348,6 +363,8 @@ async def run(ctx, payload):
         "finished experiment does not imply Study stop. Check human_request identity "
         "and successful actual execution plus independent analysis before completed. "
         "Respect a user scope explicitly limited to a single task. Stay read-only. "
+        "Return artifacts only for this Run's own work files; admitted input "
+        "references are evidence citations in your assessment, not new outputs. "
         "Return bounded help for unjustified claims/disposition or missing evidence. "
         "New feedback can resolve the blocked review without redoing completed work.",
         {
@@ -358,6 +375,6 @@ async def run(ctx, payload):
         _CRITIC,
     )
     if review["help"]:
-        return _finish(ctx, review["summary"], review["help"], extra)
+        return _finish(ctx, payload, review["summary"], review["help"], extra)
     extra.append(_json(ctx, "study-result.json", result))
-    return _finish(ctx, result["summary"], extra=extra)
+    return _finish(ctx, payload, result["summary"], extra=extra)

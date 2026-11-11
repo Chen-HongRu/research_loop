@@ -337,6 +337,90 @@ def test_synthesis_delivers_dynamic_human_result_and_every_manifest_source(tmp_p
     assert "No-useful-action stop requires" in calls[-1][2]
 
 
+def test_synthesis_keeps_admitted_citations_without_exporting_them_again(tmp_path):
+    evidence = write(tmp_path / "admitted-evidence.json", {"observed": "synthetic"})
+    feedback = write(tmp_path / "admitted-feedback.json", {"correction": "synthetic"})
+
+    def analyze(ctx, payload):
+        report = ctx.work / "new-analysis.md"
+        report.write_text("New cumulative assessment.\n")
+        return {
+            **synthesis(),
+            "artifacts": [str(report), payload["task_ref"], evidence, feedback],
+        }
+
+    def critique(ctx, payload):
+        return {
+            **base(),
+            "artifacts": [
+                str(ctx.work / "reports/study-result-candidate.json"),
+                evidence,
+                feedback,
+            ],
+        }
+
+    runtime, task, _ = setup(
+        tmp_path,
+        "synthesis",
+        [
+            ("analyst", synthesis(help_text="Need the bounded feedback artifact.")),
+            ("analyst", analyze),
+            ("critic", critique),
+        ],
+    )
+
+    async def scenario():
+        run_id = await runtime.start("synthesis", task, [evidence])
+        first = await boundary(runtime, run_id)
+        assert first["output"]["completion"] == "blocked"
+        runtime.hold(run_id)
+        await runtime.resume(run_id, [feedback])
+        return await boundary(runtime, run_id)
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert row["output"]["completion"] == "completed"
+    assert (
+        artifact(row, "new-analysis.md").read_text() == "New cumulative assessment.\n"
+    )
+    exported_names = {Path(ref).name for ref in row["output"]["artifacts"]}
+    assert not exported_names.intersection(
+        {Path(task).name, Path(evidence).name, Path(feedback).name}
+    )
+    analyst_report = json.loads(artifact(row, "analysis.json").read_text())
+    critique_report = json.loads(artifact(row, "critique.json").read_text())
+    assert analyst_report["artifacts"][1:] == [task, evidence, feedback]
+    assert critique_report["artifacts"][1:] == [evidence, feedback]
+
+
+def test_synthesis_rejects_unknown_external_artifact_with_field_location(tmp_path):
+    unknown = tmp_path / "unadmitted-evidence.md"
+    unknown.write_text("Unadmitted content must never appear in diagnostic output.\n")
+
+    def critique(ctx, payload):
+        return {
+            **base(),
+            "artifacts": [
+                str(ctx.work / "reports/study-result-candidate.json"),
+                str(unknown),
+            ],
+        }
+
+    runtime, task, _ = setup(
+        tmp_path, "synthesis", [("analyst", synthesis()), ("critic", critique)]
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("synthesis", task, []))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "failed"
+    assert "critique.artifacts[1]" in row["error"]
+    assert "neither ownwork nor an explicitly admitted input" in row["error"]
+    assert str(unknown) in row["error"]
+    assert unknown.read_text().strip() not in row["error"]
+
+
 @pytest.mark.parametrize(
     "receipt",
     [
