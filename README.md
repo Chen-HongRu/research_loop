@@ -1,6 +1,6 @@
 # Research Loop
 
-Research Loop runs an evidence-driven investigation with one main Codex agent coordinating native role agents: Scout, Proposer, Experimenter, Analyst and Critic. The lead manages dependencies, efficiency, resources and summaries; the roles conduct scientific proposal, execution, analysis and critique. Each role invocation starts in a fresh independent Codex context. The Python host starts the lead, records events and manages authorized remote resources.
+By default, Research Loop runs an evidence-driven investigation with one main Codex agent coordinating native role agents: Scout, Proposer, Experimenter, Analyst and Critic. The lead manages dependencies, efficiency, resources and summaries; the roles conduct scientific proposal, execution, analysis and critique. Each role invocation starts in a fresh independent Codex context. The Python host starts the lead, records events and manages authorized remote resources.
 
 Python 3.12, [uv](https://docs.astral.sh/uv/) and a Codex ChatGPT subscription are required. The runtime pins Codex 0.167.0 and uses `gpt-6.1-sol` with medium reasoning. From the repository root:
 
@@ -14,7 +14,9 @@ uv run research-loop status RUN
 uv run research-loop stop RUN
 ```
 
-Each iteration settles native work and authorized resources, publishes an independent knowledge snapshot, and follows the lead's explicit `study_action`: `continue` starts the next iteration in the same thread; `stop` ends the Study with a `stop_reason`. Scientific goal status is reported separately. Completing one diagnostic does not complete the Study. Results and status are retained under `iterations/NNNNNN/`; root records show the latest iteration. Failed work, UNKNOWN resources and STOP halt continuation and retain drafts.
+For Group-based coordination, opt in at initialization with `--coordinator router --groups /path/to/groups.json`. The catalog describes versioned Groups; each task gets an independent Group Run. The default remains the lead coordinator, and host/native delegation is a separate choice. See the [Router Group contract and usage](docs/router-groups.md).
+
+Each iteration settles native work and authorized resources, publishes an independent knowledge snapshot, and follows the explicit `study_action` supplied by the Lead or a Group-authored result: `continue` starts the next iteration (resuming the same Lead thread in default mode); `stop` ends the Study with a `stop_reason`. Scientific goal status is reported separately. Completing one diagnostic does not complete the Study. Results and status are retained under `iterations/NNNNNN/`; root records show the latest iteration. Failed work, UNKNOWN resources and STOP halt continuation and retain drafts.
 
 To prioritize your own experiment, run `uv run research-loop experiment RUN --file experiment.md` or ask a separately user-authorized Codex session to inject it with that command. The next iteration reads `RUN/inputs/human.md` before autonomous planning, within the existing goal and authorization. The controller clears the admitted request only after execution, analysis and successful publication; failures and blocked work retain it. Use `uv run research-loop edit-experiment RUN` to edit safely while the loop runs. See [human experiments](references/operations.md#human-experiments) for editing, restart and completion semantics.
 

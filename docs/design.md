@@ -1,11 +1,16 @@
 # Runtime design
 
-The application uses the official pinned Codex SDK and CLI. A Study has one
-coordinator thread, native specialist threads, an optional resource adapter and
-versioned research documents. The reusable package is independent of the research
+The application uses the official pinned Codex SDK and CLI. A Study has a Python
+controller, specialist threads, an optional resource adapter and versioned research
+documents. The default mode uses one persistent Lead thread; Router mode uses
+fresh, tool-free routing contexts and independent Group Runs. The reusable package is independent of the research
 algorithm, dataset and metric.
 
-## Research team
+## Router Groups
+
+An opt-in Router coordinates versioned, problem-scoped Groups through independent Group Runs. It routes prompts and artifact references; Groups produce the scientific result, and Python validates and publishes it through the existing settlement path. The default lead and its host/native delegation remain separate from this mode. See the [Router Group contract](router-groups.md) for interfaces, isolation, handoff and recovery boundaries.
+
+## Default Lead research team
 
 [`instructions.py`](../src/research_loop/instructions.py) defines the coordinator
 policy and final result schema. It includes the common contract and five role

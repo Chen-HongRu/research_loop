@@ -13,6 +13,10 @@ uv run research-loop stop RUN
 
 Omit `--resource FILE` when remote resources are not authorized. Resource JSON specifies `host`, `partition`, `remote_root`, `ledger_path`, `gpu_seconds_total`, and `job_seconds`; `account`, `cpus`, `memory`, and `grace_seconds` are optional. Initialization freezes the parsed configuration and resolves `ledger_path` relative to the source configuration file. The shared ledger and its lock must be outside the agent-writable work and draft directories.
 
+## Router Groups
+
+To opt in when creating a Study, pass `--coordinator router --groups /path/to/groups.json` to `init`. The default coordinator is `lead`. Inspect the Study before running it; the catalog and program interface, Group Run boundaries, and crash reconciliation are described in the [Router Group contract](../docs/router-groups.md). Host/native delegation is separate from Group coordination. Model and remote execution require explicit authorization.
+
 ## Read-only dashboard
 
 Run `uv run python -m research_loop.dashboard.server --study RUN --port 8768`

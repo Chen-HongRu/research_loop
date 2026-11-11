@@ -1,0 +1,12 @@
+[
+  {
+    "id": "exp",
+    "version": "1",
+    "description": "Implement and execute one supplied scientific plan, then independently analyze it.",
+    "program": "exp.py",
+    "settings": {
+      "execution_backend": "resource",
+      "critic": true
+    }
+  }
+]

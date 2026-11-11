@@ -108,6 +108,8 @@ def initialize(
     effort="medium",
     provider=None,
     delegation=None,
+    coordinator="lead",
+    groups_file=None,
 ):
     project, goal = project.resolve(strict=True), goal.resolve(strict=True)
     if not project.is_dir() or not goal.is_file():
@@ -116,6 +118,17 @@ def initialize(
         delegation = "host" if provider else "native"
     if delegation not in {"native", "host"}:
         raise ValueError("Delegation mode must be native or host")
+    if coordinator not in {"lead", "router"}:
+        raise ValueError("Coordinator must be lead or router")
+    definitions = []
+    if coordinator == "router":
+        if groups_file is None:
+            raise ValueError("Router coordination requires --groups CATALOG")
+        from .group_router import catalog
+
+        definitions = catalog(groups_file)
+    elif groups_file is not None:
+        raise ValueError("--groups requires --coordinator router")
     config = {
         "version": 1,
         "project": str(project),
@@ -123,6 +136,7 @@ def initialize(
         "effort": effort,
         "provider": provider,
         "delegation": delegation,
+        "coordinator": coordinator,
         "environment": environment.read_config(environment_file)
         if environment_file
         else None,
@@ -143,6 +157,25 @@ def initialize(
     root.mkdir(mode=0o700, parents=False, exist_ok=False)
     (root / "work/tmp").mkdir(parents=True)
     (root / "goal.md").write_text(goal_text)
+    if definitions:
+        import shutil
+        from .group_router import definition_record
+
+        programs = root / "groups/programs"
+        programs.mkdir(parents=True)
+        records = []
+        for definition in definitions:
+            if (
+                definition.program.suffix != ".py"
+                or definition.program.stat().st_size > 1024 * 1024
+            ):
+                raise ValueError("Group program must be a small Python source file")
+            source = programs / (definition.id + ".py")
+            shutil.copyfile(definition.program, source)
+            record = definition_record(definition)
+            record["program"] = str(source)
+            records.append(record)
+        config["groups"] = records
     write_json(root / "config.json", config)
     Knowledge(root).prepare()
     write_json(
@@ -178,10 +211,15 @@ def inspect(root):
         resource_status=resource_status,
         tools=tools,
     )
+    policy = instructions(mode, snapshot)
+    if config.get("coordinator") == "router":
+        from .group_router import POLICY
+
+        policy = POLICY
     return {
         "config": config,
         "delegation": mode,
-        "instructions": instructions(mode, snapshot),
+        "instructions": policy,
         "output_schema": RESULT_SCHEMA,
         "input": {
             "goal_file": str(root / "goal.md"),
@@ -194,7 +232,7 @@ def inspect(root):
             "execution_environment": snapshot,
             "human_request_file": str(root / "inputs/human.md"),
         },
-        "tools": tools,
+        "tools": [] if config.get("coordinator") == "router" else tools,
         "permissions": {
             "read": list(
                 dict.fromkeys(
@@ -208,7 +246,9 @@ def inspect(root):
             ),
             "write": [str(root / "work"), str(root / "knowledge/draft")],
             "shell_network": False,
-            "external_tools": "lead-only",
+            "external_tools": "runtime-only"
+            if config.get("coordinator") == "router"
+            else "lead-only",
         },
     }
 
@@ -273,25 +313,39 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
         adapter = resource(config, root)
         knowledge = Knowledge(root)
         baseline = knowledge.prepare()
-        native_config, effective = configuration(
-            root,
-            Path(config["project"]),
-            [root / "work", knowledge.draft],
-            config["model"],
-            config["effort"],
-            provider=config.get("provider"),
-            delegation=mode,
-            execution_environment=call["input"]["execution_environment"],
-        )
-        effective["delegation"] = mode
-        call["effective_native_permissions"] = effective
+        if config.get("coordinator") == "router":
+            from .group_router import GroupCoordinator, POLICY
+
+            call["instructions"] = POLICY
+            call["delegation"] = "none"
+            call["effective_native_permissions"] = {
+                "coordinator": "router",
+                "router_tools": False,
+                "resource_dispatch": "runtime-only",
+            }
+            native = GroupCoordinator(
+                root, config, journal, adapter, native_factory=native_factory
+            )
+        else:
+            native_config, effective = configuration(
+                root,
+                Path(config["project"]),
+                [root / "work", knowledge.draft],
+                config["model"],
+                config["effort"],
+                provider=config.get("provider"),
+                delegation=mode,
+                execution_environment=call["input"]["execution_environment"],
+            )
+            effective["delegation"] = mode
+            call["effective_native_permissions"] = effective
+            native = native_factory(
+                native_config, journal, adapter.tools() if adapter else []
+            )
         call["input"].update(
             iteration=state["iteration"], previous_iteration_result=previous_result
         )
         write_json(root / "call.json", call)
-        native = native_factory(
-            native_config, journal, adapter.tools() if adapter else []
-        )
         await native.open()
         watch = asyncio.create_task(observe_stop())
         await native.verify(
@@ -480,6 +534,10 @@ def main():
     )
     init.add_argument("--model")
     init.add_argument("--effort", default="medium")
+    init.add_argument("--coordinator", choices=("lead", "router"), default="lead")
+    init.add_argument(
+        "--groups", type=Path, help="Versioned Group catalog for Router coordination"
+    )
     init.add_argument("--provider", help="OpenAI-compatible provider name")
     init.add_argument(
         "--provider-base-url", help="Provider Responses API root, for example /v1"
@@ -560,6 +618,8 @@ def main():
                     effort=args.effort,
                     provider=provider_config(args),
                     delegation=args.delegation,
+                    coordinator=args.coordinator,
+                    groups_file=args.groups,
                 )
             elif args.command == "inspect":
                 result = inspect(root)

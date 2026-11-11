@@ -128,7 +128,14 @@ def configuration(
     provider=None,
     delegation="native",
     execution_environment=None,
+    allow_tools=True,
+    readable_roots=(),
+    denied_roots=(),
 ):
+    if delegation not in {"native", "host", "none"}:
+        raise ValueError("Delegation mode must be native, host or none")
+    if not allow_tools and delegation != "none":
+        raise ValueError("Tool-free transport requires delegation=none")
     home = root / "native"
     home.mkdir(mode=0o700, exist_ok=True)
     home.chmod(0o700)
@@ -155,7 +162,6 @@ def configuration(
     }
     for path in (
         project,
-        root,
         Path(local["prefix"]),
         Path(local["base_prefix"]),
         Path(bundled_codex_path()).parent.parent,
@@ -164,6 +170,12 @@ def configuration(
     base = Path(local["base_prefix"]).absolute()
     if base.is_symlink() and base.parent not in {Path(base.anchor), Path.home()}:
         paths[str(base.parent)] = "read"
+    # Protected study/control trees override broad project reads. Explicit
+    # runtime roots and admitted artifact files remain available below them.
+    for path in denied_roots:
+        paths[str(path.resolve())] = "deny"
+    for path in (root, *readable_roots):
+        paths[str(path.resolve())] = "read"
     for path in writable:
         paths[str(path.resolve())] = "write"
         for name in (".git", ".codex", ".agents", ".aws"):
@@ -225,12 +237,13 @@ def configuration(
         "effort": effort,
         "filesystem": paths,
         "network": False,
-        "native_multi_agent": True,
+        "native_multi_agent": delegation == "native",
+        "allow_tools": allow_tools,
         "child_dynamic_tools": False,
     }
     if provider is None:
         overrides = ['forced_login_method="chatgpt"']
-        if delegation == "host":
+        if delegation != "native":
             overrides.extend(
                 ["features.multi_agent=false", "features.multi_agent_v2=false"]
             )
@@ -247,7 +260,9 @@ def configuration(
                 f"The provider API key environment variable {key_env} is unset"
             )
         name = provider["name"]
-        catalog_version = None if delegation == "host" else PROVIDER_MULTI_AGENT_VERSION
+        catalog_version = (
+            None if delegation != "native" else PROVIDER_MULTI_AGENT_VERSION
+        )
         catalog = provider.get("model_catalog")
         if catalog is None:
             catalog = home / "models.json"
@@ -277,7 +292,7 @@ def configuration(
                     "The provider model catalog does not declare the configured model"
                 )
             if entry.get("multi_agent_version") != catalog_version:
-                if delegation == "host":
+                if delegation != "native":
                     raise RuntimeError(
                         "Host delegation requires a model catalog without "
                         "multi_agent_version so native subagent tools stay disabled"
@@ -294,7 +309,7 @@ def configuration(
         environment[key_env] = key
         overrides = [
             "features.multi_agent=false"
-            if delegation == "host"
+            if delegation != "native"
             else "features.multi_agent=true",
             "features.multi_agent_v2=false",
             *common,
@@ -317,6 +332,61 @@ def configuration(
             model_catalog=str(catalog),
             web_search=False,
         )
+    if not allow_tools:
+        # Pinned CLI registers apply_patch from model metadata independently of
+        # shell feature flags. Remove that capability before any turn starts.
+        restricted = (
+            json.loads(Path(effective["model_catalog"]).read_text())
+            if effective.get("model_catalog")
+            else model_catalog(model, effort, 131072, multi_agent_version=None)
+        )
+        for entry in restricted["models"]:
+            entry.update(
+                apply_patch_tool_type=None,
+                shell_type="disabled",
+                multi_agent_version=None,
+                experimental_supported_tools=[],
+                supports_search_tool=False,
+                tool_mode=None,
+            )
+        restricted_path = home / "tool-free-models.json"
+        restricted_path.write_text(json.dumps(restricted, indent=2))
+        restricted_path.chmod(0o600)
+        overrides.append("model_catalog_json=" + json.dumps(str(restricted_path)))
+        effective["model_catalog"] = str(restricted_path)
+        overrides.extend(
+            [
+                'tool_mode="direct"',
+                "update_plan_enabled=false",
+                "experimental_request_user_input_enabled=false",
+                'web_search="disabled"',
+                "project_doc_max_bytes=0",
+                *[
+                    f"features.{feature}=false"
+                    for feature in (
+                        "shell_tool",
+                        "unified_exec",
+                        "code_mode_host",
+                        "computer_use",
+                        "browser_use",
+                        "view_image",
+                        "multi_agent",
+                        "multi_agent_v2",
+                        "plugins",
+                        "apps",
+                        "hooks",
+                        "sleep_tool",
+                        "token_budget",
+                        "current_time_reminder",
+                        "request_permissions_tool",
+                        "deferred_executor",
+                        "send_message_to_user_async",
+                        "tool_suggest",
+                    )
+                ],
+            ]
+        )
+        effective["web_search"] = False
     effective["delegation"] = delegation
     command = [
         "/usr/bin/env",
@@ -345,6 +415,9 @@ class Native:
         self.active = False
         self.settled = False
         self.closed = False
+        self.allow_tools = True
+        self.delegation_mode = "native"
+        self.tool_violation = None
 
     def _add_child(self, thread_id):
         with self.children_lock:
@@ -414,6 +487,9 @@ class Native:
         name = params.get("tool")
         success = False
         try:
+            if not self.allow_tools:
+                self.tool_violation = "Tool activity is forbidden for this context"
+                raise ValueError(self.tool_violation)
             if self.stopping or params.get("threadId") != self.thread_id:
                 raise ValueError(
                     "External resource tools are registered for the lead thread only"
@@ -506,7 +582,16 @@ class Native:
         delegation="native",
         roles_path=None,
         environment=None,
+        allow_tools=True,
     ):
+        if delegation not in {"native", "host", "none"}:
+            raise ValueError("Delegation mode must be native, host or none")
+        if not allow_tools and (delegation != "none" or self.tools):
+            raise ValueError(
+                "Tool-free context requires no delegation or dynamic tools"
+            )
+        self.allow_tools = allow_tools
+        self.delegation_mode = delegation
         if environment is None and isinstance(payload, dict):
             environment = payload.get("execution_environment")
         instructions = environment_instructions(instructions, environment)
@@ -574,6 +659,41 @@ class Native:
             data = plain(notification.payload)
             self.journal.emit("codex.event", method=method, data=data)
             item = data.get("item", {})
+            kind = item.get("type", "")
+            delegation_item = kind in {"collabAgentToolCall", "subAgentActivity"}
+            tool_item = (
+                (
+                    bool(item)
+                    and kind
+                    not in {
+                        "agentMessage",
+                        "reasoning",
+                        "userMessage",
+                        "contextCompaction",
+                    }
+                )
+                or kind
+                in {
+                    "commandExecution",
+                    "fileChange",
+                    "mcpToolCall",
+                    "dynamicToolCall",
+                    "webSearch",
+                    "imageView",
+                    "imageGeneration",
+                    "browserToolCall",
+                    "computerToolCall",
+                    "function_call",
+                    "custom_tool_call",
+                }
+                or delegation_item
+                or "tool" in kind.lower()
+            )
+            if (not allow_tools and tool_item) or (
+                delegation == "none" and delegation_item
+            ):
+                self.tool_violation = "Forbidden tool or delegation activity observed"
+                await self.stop()
             if item.get("type") == "collabAgentToolCall":
                 self._add_children(item.get("receiverThreadIds", []))
             if item.get("type") == "subAgentActivity":
@@ -587,6 +707,8 @@ class Native:
             if method == "turn/completed":
                 self.active = False
                 turn = data["turn"]
+                if self.tool_violation:
+                    raise RuntimeError(self.tool_violation)
                 if turn["status"] != "completed":
                     raise RuntimeError(
                         f"Native turn ended: {turn['status']}; {turn.get('error')}"
