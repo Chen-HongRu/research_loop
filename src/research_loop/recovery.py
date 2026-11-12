@@ -14,17 +14,18 @@ from .codex import Tool, configuration
 from .group_agents import NativeGroupServices, _RunJournal
 from .group_router import GroupCoordinator
 from .group_programs.synthesis import (
-    AUTHOR_INSTRUCTIONS,
     RECOVERY_INSTRUCTIONS,
     REVIEW_INSTRUCTIONS,
     _CRITIC,
     bind_recovery_analysis,
+    recovery_author_schema,
     validate_analysis,
 )
 from .groups import GroupRuntime
 from .state import now, write_json
 
-_MAX_PACKET = 24000
+_MAX_PACKET = 64000
+_MAX_REPORT_BYTES = 64 * 1024
 _REPORT_FIELDS = (
     "execution_ref",
     "evaluation_ref",
@@ -33,6 +34,19 @@ _REPORT_FIELDS = (
     "metrics_ref",
     "report_ref",
 )
+
+
+def _legacy_recovery_author_schema(schema, result_schema):
+    """Recognize the two pinned recovery Author contracts, never infer from prose."""
+    current = recovery_author_schema(result_schema)
+    if schema == current:
+        return False
+    legacy = deepcopy(current)
+    del legacy["properties"]["status"]
+    legacy["required"].remove("status")
+    if schema == legacy:
+        return True
+    raise ValueError("Unsupported recovery Author schema")
 
 
 def evidence_packet(manifest_path):
@@ -56,7 +70,7 @@ def evidence_packet(manifest_path):
             raise ValueError(
                 "Recovery report must belong to the frozen evidence bundle"
             )
-        if not path.is_file() or path.stat().st_size > 32 * 1024:
+        if not path.is_file() or path.stat().st_size > _MAX_REPORT_BYTES:
             raise ValueError("Recovery supports only small report files")
         content = path.read_text()
         files.append(
@@ -123,10 +137,21 @@ class LeadRecoveryServices(NativeGroupServices):
             raise ValueError(
                 "Recovery Lead supports authorship and independent Critic only"
             )
-        return await self._author(context, payload, schema)
+        return await self._author(context, instructions, payload, schema)
 
-    async def _author(self, context, sources, schema):
+    async def _author(self, context, instructions, sources, schema):
         self._admit()
+        legacy = _legacy_recovery_author_schema(
+            schema, self.study_context["output_schema"]
+        )
+        if not legacy:
+            sources = {
+                **sources,
+                "review_protocol": {
+                    **sources["review_protocol"],
+                    "review_step": "through_review_candidate_tool",
+                },
+            }
         if self.ctx.state.get("lead_author_status") in {"running", "unknown"}:
             raise RuntimeError("Prior Lead call requires reconciliation")
         config, _ = configuration(
@@ -142,8 +167,18 @@ class LeadRecoveryServices(NativeGroupServices):
         )
 
         async def review(candidate):
-            canonical = bind_recovery_analysis(candidate, sources)
-            validate_analysis(canonical, self.study_context["output_schema"], sources)
+            canonical = bind_recovery_analysis(
+                candidate, sources, legacy_recovery=legacy
+            )
+            ready = not canonical["help"] if legacy else canonical["status"] == "ready"
+            if not ready:
+                raise ValueError("Only a ready unreviewed candidate can request review")
+            validate_analysis(
+                canonical,
+                self.study_context["output_schema"],
+                sources,
+                legacy_recovery=legacy,
+            )
             if self.ctx.state.get("lead_accepted_candidate") == canonical:
                 return {
                     "review": self.ctx.state["lead_review"],
@@ -223,13 +258,26 @@ class LeadRecoveryServices(NativeGroupServices):
                 "shared_input", None
             )
             result = await native.run(
-                "You are the Lead for this recovery-only Study. Author its outcome and knowledge, "
-                "then call review_candidate with your complete candidate. That tool invokes an "
-                "independent Critic using the same frozen evidence. You must obtain verdict=accept "
-                "and return exactly accepted_candidate, including every field. No files, commands, "
-                "experiments or other tools are available. Never claim independent review without its receipt.\n"
-                + AUTHOR_INSTRUCTIONS
-                + RECOVERY_INSTRUCTIONS,
+                (
+                    "You are the Lead for this recovery-only Study. Author its outcome and knowledge, "
+                    "then call review_candidate with your complete candidate. That tool invokes an "
+                    "independent Critic using the same frozen evidence. Obtain verdict=accept and "
+                    "return exactly accepted_candidate, including every field. If upstream evidence "
+                    "is missing, return help under the supplied legacy schema without requesting review. "
+                    "No files, commands, experiments or other tools are available. "
+                    "Never claim independent review without its receipt.\n"
+                    if legacy
+                    else "You are the Lead for this recovery-only Study. Author its outcome and knowledge, "
+                    "then submit your ready UNREVIEWED candidate through review_candidate. "
+                    "For this tool-enabled Lead, review_protocol selects that host review tool "
+                    "instead of the leaf Author's return-then-review handoff. The tool invokes an "
+                    "independent Critic using the same frozen evidence. For a ready candidate, "
+                    "obtain verdict=accept and return exactly accepted_candidate, including every field. "
+                    "For genuinely missing upstream evidence or authorization, return status=blocked "
+                    "with meaningful help; do not request review or claim publication. No files, commands, "
+                    "experiments or other tools are available. Never claim independent review without its receipt.\n"
+                )
+                + instructions,
                 {
                     **model_sources,
                     "recovery_evidence": self.study_context["input"]["shared_input"],
@@ -242,10 +290,11 @@ class LeadRecoveryServices(NativeGroupServices):
                 allow_builtin_tools=False,
                 max_output_chars=12000,
             )
-            result = bind_recovery_analysis(result, sources)
+            result = bind_recovery_analysis(result, sources, legacy_recovery=legacy)
             call.update(status="completed", result=deepcopy(result))
             self.ctx.state["lead_author_status"] = "completed"
-            if result != self.ctx.state.get("lead_accepted_candidate"):
+            ready = not result["help"] if legacy else result["status"] == "ready"
+            if ready and result != self.ctx.state.get("lead_accepted_candidate"):
                 raise ValueError(
                     "Lead must return the exact independently accepted candidate"
                 )

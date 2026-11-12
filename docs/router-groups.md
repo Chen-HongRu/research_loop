@@ -34,15 +34,43 @@ In the reference `research-v1` workflow, the Router chooses start, resume, or es
 
 The reference workflow programs are in [`group_programs`](../src/research_loop/group_programs):
 
-- **Direction** uses Scout for autonomous exploration and Proposer to select a question and its scientific constraints. An explicit human experiment skips Scout. Direction version 2 receives `frontier_ref` and `experiment_task_ref` for actual JSON files authored in its own work directory; Python validates and publishes those files without filling scientific fields. Its independent Critic returns `accept` or `revise` with a nonempty reason. Only `revise` requests assistance; an acceptance explanation never holds the Run.
+- **Direction** uses Scout for autonomous exploration and Proposer to select a question and its scientific constraints. An explicit human experiment skips Scout. Direction version 3 receives `frontier_ref` and `experiment_task_ref` for actual JSON files authored in its own work directory; Python validates and publishes those files without filling scientific fields. Its independent Critic returns `accept` or `revise` with a nonempty reason. Only `revise` requests assistance; an acceptance explanation never holds the Run.
 - **Experiment** uses H11 Plan and Prepare in one context, host execution, and independent Critic Evaluate including analysis of the individual experiment. It returns reports or assistance requests, not a Study result.
-- **Synthesis** uses Analyst and a fresh Critic to integrate evidence across experiments, maintain scientific knowledge and author the strict Study result and knowledge manifest. Its Critic returns an explicit `accept` or `revise` verdict and a reason; only `revise` creates an assistance request.
+- **Synthesis** uses Analyst and a fresh Critic to integrate evidence across experiments, maintain scientific knowledge and author the strict Study result and knowledge manifest. The Analyst first returns an **unreviewed candidate** with `status=ready`; the host then invokes the independent Critic, and publishes the result only after `accept`. Ready means the candidate can be reviewed, not that it has passed review. Missing this downstream review is expected at the Author stage and is not an external blocker. Genuine missing upstream evidence, inputs, authorization or corrections require `status=blocked` with meaningful help. The Critic returns an explicit `accept` or `revise` verdict and a reason; `revise` requests bounded correction.
 
-Synthesis version 5 constrains its primary receipt slots to the exact admitted
+Synthesis version 7 constrains its primary receipt slots to the exact admitted
 `execution.json` and `evaluate.json` references when supplied by the reference
 workflow. Auxiliary runner/log/result reports remain supporting evidence. The
 host still validates receipt contents before request completion.
 - **Diagnosis** handles out-of-scope faults and produces a diagnosis, patch or report in its own workspace.
+
+The default internal stage schemas require `status: "ready" | "blocked"` for
+Direction Scout/Proposer, Experiment Plan/Prepare/Evaluate, Synthesis Analyst and
+Diagnosis author/reviewer. Status controls advancement and feedback retries.
+`ready` may retain informational text in `help`; that text stays in the exported
+stage report and does not request assistance. `blocked` requires meaningful
+`help` describing the missing input, authorization or correction. The host does
+not parse the prose to decide readiness. Missing required artifacts, invalid
+references, failed execution and unknown execution effects retain their existing
+blocking or reconciliation behavior. Direction and Synthesis Critic verdicts
+remain `accept`/`revise`. The public Group output and Study result schemas are
+unchanged.
+
+These schemas are pinned by Direction 3, Experiment h11-3, Synthesis 7 and
+Diagnosis 2 in new default Studies. Existing Studies retain their copied programs
+and versions; updating the package does not upgrade them. The fixed publication
+recovery profile also uses Synthesis 7, including explicit Author status and the
+candidate → independent review → publication order, while retaining its
+publication-only task and fixed scientific criterion. Existing Synthesis 5 and 6
+Studies remain pinned. Ordinary and recovery
+Synthesis accept ready evaluation receipts with informational help; existing
+status-less receipts still require empty help. Publication recovery reads both
+the strict historical receipt shape and current default Exp receipts, retaining
+original assessments and provenance; blocked assessments remain ineligible.
+The shared Lead recovery driver also recognizes the historical status-less
+Author schema used by pinned Synthesis 5/6 programs. It retains those callers'
+instructions, help gating and exact independently accepted candidate without
+adding status fields. New Synthesis 7 Authors require explicit status.
 
 The H11 common and three phase instructions retain the text from the evaluated source; Group boundaries, permissions and schemas are a new integration. Published scientific files carry the frontier and positive and negative results across rounds, rather than relying on Lead conversation history. Assistance feedback retries a blocked stage and retains completed execution. A known nonzero execution requires a separate diagnosis or repair task.
 
@@ -65,7 +93,13 @@ uv run research-loop run /path/to/recovery-study
 
 The recovery profile uses only Synthesis and freezes the explicitly published small evidence files into the new Study. Its explicit CLI intent lets Python dispatch directly to that Group without a Router model decision. Normal routing still chooses among specialist Groups. Recovery checks the original independent evaluation and settled execution receipts before use; missing or inconsistent authority stops recovery. It does not rerun the experiment or provide command execution or built-in tools. `--coordinator lead` selects the completion-matched Lead recovery path; both paths require independent review of the authored candidate and the existing publication gates. Recovery cannot be combined with `--groups` or `--resource`. Model calls still require authorization.
 
-Recovery Authors return scientific text and disposition through a compact schema. Python binds the fixed receipt references and a labeled provenance footer without changing authored conclusions or limitations. The independent Critic reviews the complete bound candidate. Lead publication additionally requires its final candidate to match the independently accepted candidate exactly after the same binding.
+Recovery Authors return scientific text, disposition and explicit `ready`/`blocked` status through a compact schema. A ready Author may include informational help; Python binds the fixed receipt references and a labeled provenance footer, then sends the unreviewed candidate to the independent Critic without changing authored conclusions or limitations. Publication requires acceptance. The tool-enabled Lead submits its ready candidate through `review_candidate`, which invokes the host's independent Critic; its final ready candidate must match the independently accepted candidate exactly after the same binding. Neither path asks the Author to supply a prior review verdict or reruns the experiment.
+
+The inline recovery evidence packet accepts only the explicitly named frozen
+small reports: at most 64 KiB per file and 64,000 serialized characters in total.
+Reports exceeding either bound are rejected before model calls. Original reports
+and receipts are preserved; the host does not truncate or summarize them to fit.
+The tool-free Author receives this inline packet and does not read external paths.
 
 Router output is limited to 12,000 streamed characters per call. Recovery authors use the same stream limit and recovery Critics use 4,000 characters. These limits interrupt excessive output even before token usage arrives; character counts are not billing token counts. Scientific text is bounded to 2,400 characters per recovery document and 3,200 including the host provenance footer. Output interruption retains uncertainty until native settlement and blocks publication. Streamed output without an authoritative usage receipt is reported as missing cost coverage.
 

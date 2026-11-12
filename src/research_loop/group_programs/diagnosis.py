@@ -9,12 +9,24 @@ _SCHEMA = {
     "type": "object",
     "properties": {
         "summary": _TEXT,
+        "status": {
+            "type": "string",
+            "enum": ["ready", "blocked"],
+            "description": "Use ready when the stage can advance, even with informational help. Use blocked for missing inputs, authorization or required correction and explain it in help.",
+        },
         "help": _TEXT,
         "artifacts": {"type": "array", "items": _TEXT},
         "diagnosis": _TEXT,
         "review_required": {"type": "boolean"},
     },
-    "required": ["summary", "help", "artifacts", "diagnosis", "review_required"],
+    "required": [
+        "summary",
+        "status",
+        "help",
+        "artifacts",
+        "diagnosis",
+        "review_required",
+    ],
     "additionalProperties": False,
 }
 
@@ -25,7 +37,7 @@ async def run(ctx, payload):
     critique = stages.get("critique")
     if (
         critique
-        and critique["help"]
+        and critique["status"] == "blocked"
         and payload.get("feedback_refs")
         and rounds["critique"] != ctx.round
     ):
@@ -53,7 +65,7 @@ async def run(ctx, payload):
         record = stages.get(name)
         retry = (
             record
-            and record["help"]
+            and record["status"] == "blocked"
             and payload.get("feedback_refs")
             and rounds[name] != ctx.round
         )
@@ -67,6 +79,14 @@ async def run(ctx, payload):
             history = ctx.work / "reports/history" / f"{ctx.round:06d}-{name}.json"
             history.parent.mkdir(parents=True, exist_ok=True)
             history.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+        if (
+            record.get("status") not in {"ready", "blocked"}
+            or not isinstance(record.get("help"), str)
+            or (record["status"] == "blocked" and not record["help"].strip())
+        ):
+            raise ValueError(
+                "Diagnosis stage requires ready/blocked status and blocked help"
+            )
         path = ctx.work / "reports" / f"{name}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
@@ -104,12 +124,13 @@ async def run(ctx, payload):
         "the original Run, controller/runtime, canonical inputs/checkpoints, or "
         "execute/restart the experiment; preserve operation identity and reconcile "
         "unknown effects. Do not expand authorization or bypass host resource tools. "
-        "Scientific design/evidence disputes need help from Direction, not a "
+        "Scientific design/evidence disputes require status=blocked and meaningful help from Direction, not a "
         "diagnostic replacement experiment. Set review_required=true when the fix "
         "could affect the scientific contract, permissions, recovery or shared "
         "state; request external maintenance for a controller defect. When revision "
         "is supplied, correct your prior diagnosis/patch based on the rejected "
-        "critique and feedback, within this same scope. Do not rerun experiments.",
+        "critique and feedback, within this same scope. Return status=ready when the "
+        "diagnosis can advance, even with informational help. Do not rerun experiments.",
         sources,
     )
     (ctx.work / "diagnosis.md").write_text(diagnosis["diagnosis"], encoding="utf-8")
@@ -118,7 +139,7 @@ async def run(ctx, payload):
     )
     candidate.parent.mkdir(parents=True, exist_ok=True)
     candidate.write_text(diagnosis["diagnosis"], encoding="utf-8")
-    if diagnosis["help"]:
+    if diagnosis["status"] == "blocked":
         return finish(diagnosis["summary"], diagnosis["help"])
     if not diagnosis["diagnosis"].strip():
         raise ValueError("Diagnosis requires an authored report")
@@ -131,14 +152,15 @@ async def run(ctx, payload):
             "Stay read-only. Check that the proposal does not alter experiment "
             "meaning, edit original Runs/controller, widen permissions, duplicate "
             "an unknown execution or pretend a diagnostic run completes science. "
-            "Scientific disputes require Direction assistance. Return help for "
-            "unsafe or unsupported repairs; diagnosis can summarize your assessment.",
+            "Scientific disputes require Direction assistance. Return status=blocked "
+            "with meaningful help for unsafe or unsupported repairs; otherwise return "
+            "status=ready even with informational help. Diagnosis can summarize your assessment.",
             {
                 **sources,
                 "diagnosis_ref": str(ctx.work / "diagnosis.md"),
                 "diagnosis_artifacts": diagnosis["artifacts"],
             },
         )
-        if critique["help"]:
+        if critique["status"] == "blocked":
             return finish(critique["summary"], critique["help"])
     return finish(diagnosis["summary"])

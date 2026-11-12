@@ -16,7 +16,16 @@ def _schema(properties):
 
 _TEXT = {"type": "string"}
 _STRINGS = {"type": "array", "items": _TEXT}
-_BASE = {"summary": _TEXT, "help": _TEXT, "artifacts": _STRINGS}
+_BASE = {
+    "summary": _TEXT,
+    "status": {
+        "type": "string",
+        "enum": ["ready", "blocked"],
+        "description": "Use ready when this stage can advance, even with informational help. Use blocked only for a missing input, authorization or required correction; explain it in help.",
+    },
+    "help": _TEXT,
+    "artifacts": _STRINGS,
+}
 _SCOUT = _schema(_BASE)
 _CRITIC = _schema(
     {
@@ -134,7 +143,11 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
     record = stages.get(name)
     retry = (
         record
-        and (record["verdict"] == "revise" if name == "critique" else record["help"])
+        and (
+            record["verdict"] == "revise"
+            if name == "critique"
+            else record["status"] == "blocked"
+        )
         and payload.get("feedback_refs")
         and attempts[name] != ctx.round
     )
@@ -160,6 +173,14 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
             raise ValueError(
                 "Direction Critic requires an explicit verdict and nonempty reason"
             )
+    elif (
+        record.get("status") not in {"ready", "blocked"}
+        or not isinstance(record.get("help"), str)
+        or (record["status"] == "blocked" and not record["help"].strip())
+    ):
+        raise ValueError(
+            "Direction stage requires ready/blocked status and blocked help"
+        )
     _json(ctx, f"reports/{name}.json", record)
     return record
 
@@ -217,11 +238,12 @@ async def run(ctx, payload):
             "hypothesis IDs and cite inspected evidence, uncertainty and estimated "
             "cost. Write a concise report inside work and return its artifact path. "
             "Do not read chats or pretend recalled literature was retrieved. Return "
-            "help for evidence or authorization missing outside this scope.",
+            "status=blocked and meaningful help for evidence or authorization missing "
+            "outside this scope; otherwise return status=ready, even with informational help.",
             sources,
             _SCOUT,
         )
-        if scout["help"]:
+        if scout["status"] == "blocked":
             return _finish(ctx, scout["summary"], scout["help"])
         sources["scout_report"] = str(ctx.work / "reports/scout.json")
     proposal = await _stage(
@@ -246,7 +268,8 @@ async def run(ctx, payload):
         "data_roles, evaluation, inputs, constraints, completion_criteria. These are "
         "scientific constraints, not a duplicate execution Plan; Exp owns concrete Plan "
         "and Prepare. Include model/loss/masks/time/state/evaluation/resource boundaries "
-        "where relevant. Do not fill scientific gaps with null: return help instead. "
+        "where relevant. Do not fill scientific gaps with null: return status=blocked "
+        "and meaningful help instead. Otherwise return status=ready, even with informational help. "
         "For no-useful-action give concrete Study-wide frontier/evidence reasons, not "
         "merely one failed branch. For no-useful-action or blocked, leave "
         "experiment_task_ref empty. Return file paths in these reference fields, "
@@ -268,10 +291,10 @@ async def run(ctx, payload):
         raise ValueError(
             "Direction non-experiment proposal requires an empty experiment_task_ref"
         )
-    if proposal["help"] or proposal["disposition"] == "blocked":
-        return _finish(
-            ctx, proposal["summary"], proposal["help"] or "Direction remains blocked"
-        )
+    if proposal["disposition"] == "blocked" and proposal["status"] != "blocked":
+        raise ValueError("Direction blocked disposition requires blocked status")
+    if proposal["status"] == "blocked":
+        return _finish(ctx, proposal["summary"], proposal["help"])
     frontier = _authored_json(ctx, proposal["frontier_ref"], "frontier_ref")
     if not isinstance(frontier, dict) or not isinstance(
         frontier.get("hypotheses"), list

@@ -17,7 +17,18 @@ def _schema(properties):
 
 _TEXT = {"type": "string"}
 _STRINGS = {"type": "array", "items": _TEXT}
-_BASE = {"summary": _TEXT, "help": _TEXT, "artifacts": _STRINGS}
+_STATUS = {
+    "type": "string",
+    "enum": ["ready", "blocked"],
+    "description": "ready means the unreviewed candidate is complete enough for the host's next independent Critic review; it does not mean accepted or published. Missing downstream review is expected here. Use blocked only for missing upstream evidence, inputs, authorization or required correction, with meaningful help. Informational help may accompany ready.",
+}
+_BASE = {"summary": _TEXT, "status": _STATUS, "help": _TEXT, "artifacts": _STRINGS}
+REVIEW_PROTOCOL = {
+    "candidate": "unreviewed",
+    "review_owner": "host",
+    "review_step": "after_ready_candidate_return",
+    "publication_requires": "independent_critic_accept",
+}
 _CRITIC = _schema(
     {
         "summary": _TEXT,
@@ -29,6 +40,14 @@ _CRITIC = _schema(
 
 
 AUTHOR_INSTRUCTIONS = (
+    "Author an UNREVIEWED publication candidate. status=ready means your candidate "
+    "is complete enough for the host's NEXT independent Synthesis Critic review; "
+    "it does not mean accepted, reviewed or published. The host obtains that fresh "
+    "review only after receiving your ready candidate, as specified by review_protocol. "
+    "The leaf Author must return the ready candidate without delegating or waiting "
+    "for a Critic verdict. Missing downstream review is expected at this stage, not "
+    "a missing external input. Do not claim that the candidate has passed review. "
+    "The host publishes only after the independent Critic accepts it. "
     "Own what the cumulative evidence supports and the next Study action. Read "
     "the goal, admitted human request, published knowledge index, relevant "
     "positive AND negative history/frontier, direction judgments and new Exp "
@@ -45,7 +64,9 @@ AUTHOR_INSTRUCTIONS = (
     "For continue define the next falsifiable action. A completed human_request "
     "must match its admitted ID and be supported by actual successful execution "
     "AND independent analysis: cite admitted small JSON exit_code=0 receipts in "
-    "execution_refs and independent evaluate JSON receipts (help='') in analysis_refs. Preparation/failure "
+    "execution_refs and independent evaluate JSON receipts in analysis_refs. "
+    "A receipt with status must be ready; informational help is allowed. Existing "
+    "status-less receipts require help=''. Preparation/failure "
     "alone leaves it pending or blocked. Include those references in its evidence. "
     "Use ONLY standardized host execution receipts in execution_refs and independent "
     "evaluation receipts in analysis_refs. When supplied, choose the exact admitted "
@@ -58,7 +79,8 @@ AUTHOR_INSTRUCTIONS = (
     "the existing index references; preserve historical/negative evidence and "
     "limitations. Do not erase prior history or claim it validates new behavior. "
     "Python installs these files verbatim, never fills in scientific content. "
-    "Return help with study_result='' if required evidence lies outside scope, "
+    "Return status=blocked with meaningful help and study_result='' if required "
+    "upstream evidence, inputs, authorization or corrections are missing, "
     "rather than fabricating result fields. Do not read raw agent chats. "
     "Return artifacts only for new files inside this Run's work; admitted input "
     "paths are evidence citations, not new outputs. Use study_result.evidence, "
@@ -189,16 +211,20 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
     stages = ctx.state.setdefault("synthesis_stages", {})
     attempts = ctx.state.setdefault("synthesis_attempts", {})
     record = stages.get(name)
+    packet = assignment.get("recovery_evidence", {})
+    recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"
     retry = (
         record
-        and (record["verdict"] == "revise" if name == "critique" else record["help"])
+        and (
+            record["verdict"] == "revise"
+            if name == "critique"
+            else record["status"] == "blocked"
+        )
         and payload.get("feedback_refs")
         and attempts[name] != ctx.round
     )
     if record is None or retry:
         attempts[name] = ctx.round
-        packet = assignment.get("recovery_evidence", {})
-        recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"
         record = await ctx.services.call(
             role,
             f"synthesis-{name}-{ctx.round}",
@@ -224,8 +250,21 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
         _validate(record, schema)
         if not record["reason"].strip():
             raise ValueError("Synthesis Critic requires a nonempty reason")
+    else:
+        _validate_stage_status(record)
     _json(ctx, f"reports/{name}.json", record)
     return record
+
+
+def _validate_stage_status(record):
+    if (
+        record.get("status") not in ("ready", "blocked")
+        or not isinstance(record.get("help"), str)
+        or (record["status"] == "blocked" and not record["help"].strip())
+    ):
+        raise ValueError(
+            "Synthesis stage requires ready/blocked status and blocked help"
+        )
 
 
 def _finish(ctx, payload, summary, help_text="", extra=()):
@@ -324,11 +363,18 @@ def _completed_request_evidence(result, analysis, sources):
                 "Human completion requires a small independent evaluation receipt"
             )
         evaluation = json.loads(path.read_text())
-        if evaluation.get("help") != "" or not evaluation.get("summary"):
+        # Both ordinary and recovery Synthesis read sealed assessments predating
+        # explicit stage status, as well as current default Exp receipts.
+        ready = (
+            evaluation["status"] == "ready"
+            if "status" in evaluation
+            else evaluation.get("help") == ""
+        )
+        if not ready or not evaluation.get("summary"):
             raise ValueError("Blocked or missing evaluation cannot complete a request")
 
 
-def validate_analysis(analysis, result_schema, sources):
+def validate_analysis(analysis, result_schema, sources, *, legacy_recovery=False):
     """Validate completion and knowledge delivery without scientific judgment."""
     recovery = sources.get("recovery_evidence") or sources.get("study_context", {}).get(
         "input", {}
@@ -337,7 +383,13 @@ def validate_analysis(analysis, result_schema, sources):
         isinstance(recovery, dict) and recovery.get("kind") == "exp-recovery-v1"
     )
     _validate(
-        analysis, analysis_schema(result_schema, recovery=is_recovery, sources=sources)
+        analysis,
+        analysis_schema(
+            result_schema,
+            recovery=is_recovery,
+            sources=sources,
+            legacy_recovery=legacy_recovery,
+        ),
     )
     result = analysis["study_result"]
     _validate(result, result_schema)
@@ -434,7 +486,9 @@ def validate_analysis(analysis, result_schema, sources):
     return result
 
 
-def analysis_schema(result_schema, *, recovery=False, sources=None):
+def analysis_schema(
+    result_schema, *, recovery=False, sources=None, legacy_recovery=False
+):
     """Strict Author result contract shared with the recovery Lead baseline."""
     schema = _schema(
         {
@@ -462,6 +516,12 @@ def analysis_schema(result_schema, *, recovery=False, sources=None):
             },
         }
     )
+
+    if legacy_recovery:
+        if not recovery:
+            raise ValueError("Legacy Author schema is only supported for recovery")
+        del schema["properties"]["status"]
+        schema["required"].remove("status")
 
     if sources and not recovery:
         admitted = dict.fromkeys(
@@ -507,7 +567,7 @@ def recovery_author_schema(result_schema):
     return schema
 
 
-def bind_recovery_analysis(candidate, sources):
+def bind_recovery_analysis(candidate, sources, *, legacy_recovery=False):
     """Bind only deterministic citations/provenance, preserving scientific fields."""
     packet = sources.get("recovery_evidence") or sources["study_context"]["input"].get(
         "shared_input", {}
@@ -537,10 +597,17 @@ def bind_recovery_analysis(candidate, sources):
         if "human_request" in result:
             bind(result["human_request"], "evidence", refs)
     output_schema = sources["study_context"]["output_schema"]
-    _validate(record, analysis_schema(output_schema, recovery=True))
+    _validate(
+        record,
+        analysis_schema(output_schema, recovery=True, legacy_recovery=legacy_recovery),
+    )
+    if not legacy_recovery:
+        _validate_stage_status(record)
     if isinstance(result, dict):
         _validate(result, output_schema)
-    elif result != "" or not record["help"]:
+    elif result != "" or not (
+        record["help"] if legacy_recovery else record["status"] == "blocked"
+    ):
         raise ValueError("Recovery requires an authored Study result or explicit help")
     documents = record["knowledge_files"]
     if documents:
@@ -608,6 +675,7 @@ async def run(ctx, payload):
         "study_context": study,
         "work": str(ctx.work),
         "revision": _revise(ctx, payload),
+        "review_protocol": REVIEW_PROTOCOL,
     }
     packet = study.get("input", {}).get("shared_input", {})
     recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"
@@ -627,7 +695,7 @@ async def run(ctx, payload):
         sources,
         author_schema,
     )
-    if analysis["help"]:
+    if analysis["status"] == "blocked":
         return _finish(ctx, payload, analysis["summary"], analysis["help"])
     validate_analysis(analysis, result_schema, sources)
     result = analysis["study_result"]
