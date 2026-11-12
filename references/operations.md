@@ -74,7 +74,11 @@ existing `.venv` after `uv sync --locked`.
 installed distribution names/versions with Python's standard-library metadata.
 They do not import numerical libraries, load models, inspect datasets or probe
 CUDA. The same snapshot is supplied to the coordinator and fresh role agents.
-The shell PATH prioritizes the selected interpreter's bin directory; virtualenv
+Agent shells and prepared local commands use the same execution overrides. PATH
+prioritizes the selected interpreter's bin directory, followed by automatically
+resolved host `uv`/`rg` directories when available and system command directories.
+Prepared commands clear conflicting `PYTHONHOME` and stale `VIRTUAL_ENV` values;
+virtualenv
 identity is explicit and user-site packages are disabled. Use that Python for
 tests instead of creating another environment or selecting system Python.
 Package inventory is an observation, not a lockfile or an import/GPU test. The

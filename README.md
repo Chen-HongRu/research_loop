@@ -14,6 +14,15 @@ uv run research-loop status RUN
 uv run research-loop stop RUN
 ```
 
+The same checkout configuration works on Linux and macOS: rebuild `.venv` with
+`uv sync --locked` on each machine rather than copying it. Relative interpreter
+declarations are resolved on the current machine when creating a fresh Study.
+To run the real repository regression audit through the complete Group workflow,
+use `uv run --locked python examples/portability/run.py /path/to/new-private-study --run`
+after authorizing its model calls and CPU execution. This runs the actual selected
+test suites once, obtains independent evaluation and publishes its findings. See
+[portable fresh Studies](references/installation.md#linux-and-macos-fresh-studies).
+
 New Studies use the reference Group catalog by default. Bounded engine recovery publication is verified; autonomous Direction and resource/GPU acceptance remain pending. See the validation status in the Group contract. Pass `--groups /path/to/groups.json` to replace it, or `--coordinator lead` to select the legacy Lead path. Existing Study configuration is unchanged; host/native delegation is separate from Group coordination. See the [Router Group contract and usage](docs/router-groups.md). The reference workflow handles Group lifecycle and completion mechanically. For publication recovery from a closed, settled experiment without rerunning it, initialize a new Study with `--recover-exp /path/to/closed-exp-run`; the Group contract describes its evidence and review requirements.
 
 Each iteration settles native work and authorized resources, publishes an independent knowledge snapshot, and follows the explicit `study_action` supplied by the Lead or a Group-authored result: `continue` starts the next iteration (resuming the same Lead thread only in Lead mode); `stop` ends the Study with a `stop_reason`. Scientific goal status is reported separately. Completing one diagnostic does not complete the Study. Results and status are retained under `iterations/NNNNNN/`; root records show the latest iteration. Failed work, UNKNOWN resources and STOP halt continuation and retain drafts.

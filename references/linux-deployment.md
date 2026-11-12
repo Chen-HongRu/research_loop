@@ -1,5 +1,10 @@
 # Moving a Study to a Linux host
 
+For a fresh Study on Linux or macOS, use the unchanged checkout configuration and
+the [portable startup command](installation.md#linux-and-macos-fresh-studies).
+The path-preservation and state-transfer requirements below apply to moving an
+existing Study, not to creating a new Study on a different machine.
+
 Prepare the pinned runtime with Python 3.12 and `uv sync --locked`. Verify the
 remote ChatGPT login, exact model/effort, native sandbox and delegation before
 moving control. The shell/search utilities used by prepared scripts must exist.

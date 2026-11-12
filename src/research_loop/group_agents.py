@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from .codex import Native, configuration
+from .environment import shell_environment
 from .instructions import _ROLE_SECTIONS
 from .state import now, write_json
 
@@ -532,11 +533,20 @@ class NativeGroupServices:
         self._save_execution()
         process = None
         try:
+            overrides = shell_environment(
+                self.config.get("execution_environment"), self.ctx.work
+            )
+            Path(overrides["TMPDIR"]).mkdir(parents=True, exist_ok=True)
+            environment = dict(os.environ)
+            environment.pop("PYTHONHOME", None)
+            environment.pop("VIRTUAL_ENV", None)
+            environment.update(overrides)
             log_path = self.ctx.work / f"command-{len(rows):03d}.log"
             with log_path.open("wb") as log:
                 process = await asyncio.create_subprocess_shell(
                     command,
                     cwd=self.ctx.work,
+                    env=environment,
                     stdout=log,
                     stderr=asyncio.subprocess.STDOUT,
                     start_new_session=True,

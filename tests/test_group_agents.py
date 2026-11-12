@@ -3,14 +3,17 @@
 import asyncio
 import importlib.util
 import json
+import shlex
 import signal
 import sys
+import venv
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from research_loop.codex import Native, Tool, configuration
+from research_loop.environment import observe
 from openai_codex.client import CodexConfig
 from research_loop.group_agents import GROUP_GUARD, NativeGroupServices
 from research_loop.state import Journal
@@ -233,6 +236,75 @@ def test_local_cpu_receipt_is_durable_and_never_repeated(context):
         await service.settle()
         await service.close()
         journal.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("virtualenv", [True, False])
+def test_prepared_local_command_uses_selected_runtime(context, monkeypatch, virtualenv):
+    selected = context.root / "selected runtime"
+    python = selected / "bin/python"
+    if virtualenv:
+        venv.EnvBuilder(with_pip=False, symlinks=True).create(selected)
+        sites = list((selected / "lib").glob("python*/site-packages"))
+        assert len(sites) == 1
+        metadata = sites[0] / "synthetic_marker-7.1.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: synthetic-marker\nVersion: 7.1\n"
+        )
+    else:
+        python.parent.mkdir(parents=True)
+        python.symlink_to(sys._base_executable)
+    snapshot = observe({"python": str(python)})
+    monkeypatch.setenv("PYTHONHOME", str(context.root / "wrong python home"))
+    monkeypatch.setenv("VIRTUAL_ENV", str(context.root / "wrong virtualenv"))
+    monkeypatch.setenv("PYTHONNOUSERSITE", "0")
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "0")
+    monkeypatch.setenv("PREPARED_COMMAND_SETTING", "preserved")
+    script = context.work / "runtime witness.py"
+    script.write_text(
+        "import importlib.metadata, json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path('witness.json').write_text(json.dumps({\n"
+        "'executable': sys.executable, 'prefix': sys.prefix,\n"
+        "'packages': {d.metadata['Name']: d.version "
+        "for d in importlib.metadata.distributions() if d.metadata['Name']},\n"
+        "'environment': {key: os.environ[key] for key in "
+        "('HOME', 'TMPDIR', 'VIRTUAL_ENV', 'PYTHONHOME', 'PYTHONNOUSERSITE', "
+        "'PYTHONDONTWRITEBYTECODE', 'PREPARED_COMMAND_SETTING') "
+        "if key in os.environ},\n"
+        "'tmp_exists': Path(os.environ['TMPDIR']).is_dir()}))\n"
+    )
+
+    async def check():
+        service, journal = services(context)
+        service.config["execution_environment"] = snapshot
+        try:
+            receipt = await service.execute_prepared(
+                "python " + shlex.quote(str(script)), backend="local"
+            )
+            assert receipt["exit_code"] == 0, Path(receipt["log_path"]).read_text()
+            witness = json.loads((context.work / "witness.json").read_text())
+            assert witness["executable"] == str(python)
+            assert witness["prefix"] == snapshot["local"]["prefix"]
+            if virtualenv:
+                assert witness["packages"]["synthetic-marker"] == "7.1"
+            env = witness["environment"]
+            assert "PYTHONHOME" not in env
+            assert env.get("VIRTUAL_ENV") == (
+                snapshot["local"]["prefix"] if virtualenv else None
+            )
+            assert env["HOME"] == str(context.work)
+            assert env["TMPDIR"] == str(context.work / "tmp")
+            assert witness["tmp_exists"]
+            assert env["PYTHONNOUSERSITE"] == "1"
+            assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+            assert env["PREPARED_COMMAND_SETTING"] == "preserved"
+            await service.settle()
+        finally:
+            await service.close()
+            journal.close()
 
     asyncio.run(check())
 

@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import sys
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -17,6 +16,7 @@ from pydantic import BaseModel, RootModel
 from .environment import (
     prepend as environment_instructions,
     render as render_environment,
+    shell_environment,
 )
 from .delegation import DELEGATE_TOOL, WAIT_TOOL, HostDelegation, is_tool_item
 
@@ -156,15 +156,6 @@ def configuration(
             raise RuntimeError("Sign in to the official Codex CLI with ChatGPT first")
         if not (home / "auth.json").exists():
             (home / "auth.json").symlink_to(auth)
-    local = (
-        execution_environment["local"]
-        if execution_environment
-        else {
-            "executable": sys.executable,
-            "prefix": sys.prefix,
-            "base_prefix": sys.base_prefix,
-        }
-    )
     # Ordinary workspace-write permits host reads, writes to the supplied work
     # roots and temporary directories, and no custom deny mount overlays.
     shell_root = root / "work"
@@ -174,15 +165,7 @@ def configuration(
     )
     paths = {":root": "read", ":slash_tmp": "write", ":tmpdir": "write"}
     paths.update({path: "write" for path in writable_roots})
-    shell_env = {
-        "PATH": str(Path(local["executable"]).parent) + ":" + os.defpath,
-        "HOME": str(root / "work"),
-        "TMPDIR": str(root / "work/tmp"),
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONNOUSERSITE": "1",
-    }
-    if local["prefix"] != local["base_prefix"]:
-        shell_env["VIRTUAL_ENV"] = local["prefix"]
+    shell_env = shell_environment(execution_environment, shell_root)
     common = [
         "mcp_servers={}",
         "features.multi_agent_v2_dynamic_tools=false",
