@@ -29,6 +29,7 @@ class Tool:
     description: str
     parameters: dict
     call: Callable[[dict], Awaitable[object]]
+    resource_effect: bool = True
 
     def descriptor(self):
         return {
@@ -505,6 +506,9 @@ class Native:
             tool=name,
             arguments=self._journal_arguments(name, params.get("arguments")),
             success=success,
+            resource_effect=self.tools[name].resource_effect
+            if name in self.tools
+            else True,
             output=self._journal_output(name, output),
         )
         return {
@@ -572,7 +576,11 @@ class Native:
             if spec["name"] in self.tools:
                 raise ValueError(f"Delegation tool name collides with {spec['name']}")
             self.tools[spec["name"]] = Tool(
-                spec["name"], spec["description"], spec["parameters"], call
+                spec["name"],
+                spec["description"],
+                spec["parameters"],
+                call,
+                resource_effect=False,
             )
 
     async def run(

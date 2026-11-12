@@ -193,6 +193,7 @@ class LeadRecoveryServices(NativeGroupServices):
                     "Submit the complete publication candidate for one independent Critic review. Return the exact accepted candidate afterwards.",
                     schema,
                     review,
+                    resource_effect=False,
                 )
             ],
         )

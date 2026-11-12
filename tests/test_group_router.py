@@ -140,6 +140,52 @@ def test_router_rejects_unsupplied_reference_and_running_intervention():
         group_router.validate_decision(decision("hold", run_id="r"), packet)
 
 
+def test_recovery_admission_is_deterministic_and_cannot_route_again(
+    tmp_path, monkeypatch
+):
+    root, _, _ = setup_study(tmp_path)
+    config = {
+        **json.loads((root / "config.json").read_text()),
+        "recovery_bundle": "operator-selected-evidence",
+        "study_result_group": "test",
+    }
+    packet = {
+        "groups": [{"id": "test"}],
+        "runs": [],
+        "goal_ref": "goal",
+        "input_refs": ["evidence"],
+        "references": {"goal": "goal.md", "evidence": "evidence.json"},
+        "allowed_actions": ["start", "escalate"],
+    }
+    monkeypatch.setattr(
+        group_router, "configuration", lambda *args, **kwargs: pytest.fail("No Router")
+    )
+    coordinator = group_router.GroupCoordinator(
+        root,
+        config,
+        None,
+        native_factory=lambda *args, **kwargs: pytest.fail("No model admission"),
+    )
+    started = []
+    admitted = asyncio.run(coordinator.decide(packet, started.append))
+    assert admitted["action"] == "start"
+    assert admitted["group_id"] == "test"
+    assert admitted["task_ref"] == "goal"
+    assert admitted["input_refs"] == ["evidence"]
+    assert coordinator.native is None and started == []
+    coordinator._recovery_started("author")
+    coordinator._recovery_started("critic")
+    assert started == ["author"]
+    for status in ("held", "closed", "failed"):
+        with pytest.raises(RuntimeError, match="fixed publication task"):
+            asyncio.run(
+                coordinator.decide(
+                    {**packet, "runs": [{"id": "existing", "status": status}]},
+                    started.append,
+                )
+            )
+
+
 def test_finish_requires_closed_current_round_result(tmp_path):
     result = tmp_path / "result.json"
     result.write_text(json.dumps({k: "" for k in RESULT_SCHEMA["required"]}))

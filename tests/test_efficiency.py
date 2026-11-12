@@ -255,6 +255,33 @@ def test_streamed_output_without_usage_is_unknown_cost_not_awaiting(study):
     assert result["coverage"]["awaiting_first_usage_threads"] == []
 
 
+def test_nonresource_review_callback_does_not_require_resource_ledger(study):
+    (study / "gpu-budget.json").unlink()
+    session(
+        study / "native/sessions/a.jsonl",
+        "lead",
+        events=[receipt("reviewed", START, 100, output=10)],
+    )
+    with (study / "events.jsonl").open("a") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "at": START,
+                    "event": "resource.tool",
+                    "thread_id": "lead",
+                    "tool": "synthetic_readonly_review",
+                    "resource_effect": False,
+                    "success": True,
+                    "output": {"verdict": "accept"},
+                }
+            )
+            + "\n"
+        )
+    result = report(study, until=END)
+    assert result["coverage"]["complete"]
+    assert "ledger:missing" not in result["coverage"]["issues"]
+
+
 def test_missing_and_invalid_sources_are_visible(tmp_path):
     (tmp_path / "events.jsonl").write_text("not json\n")
     result = report(tmp_path, until=END)

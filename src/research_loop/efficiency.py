@@ -405,7 +405,10 @@ def report(
     failed = Counter()
     empty_polls = 0
     output_bytes = 0
-    for at, event in events:
+    resource_events = [
+        (at, event) for at, event in events if event.get("resource_effect") is not False
+    ]
+    for at, event in resource_events:
         if not inside(at) or event.get("thread_id") != lead:
             continue
         name = event.get("tool", "unknown")
@@ -451,7 +454,7 @@ def report(
     else:
         ledger_path = root / "gpu-budget.json"
     resource_expected = bool(
-        explicit_ledger or resource_config or status.get("resource") or events
+        explicit_ledger or resource_config or status.get("resource") or resource_events
     )
     available = ledger_path.exists()
     ledger = (

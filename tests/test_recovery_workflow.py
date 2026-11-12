@@ -9,7 +9,6 @@ import pytest
 from research_loop import group_router, human_input, loop
 from research_loop.codex import CodexConfig
 from test_exp_recovery import settled_exp as _settled_exp
-from test_group_router import decision
 
 settled_exp = _settled_exp
 
@@ -99,14 +98,7 @@ def test_recovery_publication_uses_same_completion_gate_without_experiment(
             if kwargs.get("on_started"):
                 kwargs["on_started"](thread)
             if "action" in schema["properties"]:
-                calls.append("router")
-                assert payload["allowed_actions"] == ["start", "escalate"]
-                return decision(
-                    "start",
-                    group_id="synthesis",
-                    task_ref=payload["goal_ref"],
-                    input_refs=payload["input_refs"],
-                )
+                raise AssertionError("The fixed recovery profile needs no Router model")
             if "review_candidate" in self.tools:
                 calls.append("lead")
                 assert kwargs["allow_builtin_tools"] is False
@@ -152,9 +144,8 @@ def test_recovery_publication_uses_same_completion_gate_without_experiment(
         assert "human_request" not in state["result"]
     assert (root / "knowledge/current/finding.md").is_file()
     assert (root / "knowledge/current/recovery-evidence/evaluation.json").is_file()
-    assert calls == (
-        ["router", "analyst", "critic"] if mode == "router" else ["lead", "critic"]
-    )
+    assert calls == (["analyst", "critic"] if mode == "router" else ["lead", "critic"])
+    assert state["thread_id"] == thread_ids[0]
     assert len(set(thread_ids)) == len(thread_ids)
     assert len(list((root / "group-runs").glob("*/run.json"))) == 1
     source_record = json.loads((source / "run.json").read_text())

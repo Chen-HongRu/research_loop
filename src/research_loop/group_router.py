@@ -167,6 +167,8 @@ class GroupCoordinator:
         self.result_schema = None
         self.resource_lock = asyncio.Lock()
         self.admitted = set()
+        self._root_on_started = None
+        self._recovery_author_started = False
         refs = config.get("input_refs", [])
         if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs):
             raise ValueError(
@@ -188,11 +190,22 @@ class GroupCoordinator:
                 resource_tools=self.adapter.tools() if self.adapter else (),
                 native_factory=self.native_factory,
                 resource_lock=self.resource_lock,
+                on_started=(
+                    self._recovery_started
+                    if self.config.get("recovery_bundle")
+                    else None
+                ),
             )
 
         self.runtime = GroupRuntime(
             self.root, self.definitions, service_factory=services
         )
+
+    def _recovery_started(self, thread_id):
+        if not self._recovery_author_started:
+            self._recovery_author_started = True
+            if self._root_on_started:
+                self._root_on_started(thread_id)
 
     async def verify(self, *args, **kwargs):
         # Every actually launched isolated Native context verifies the exact model.
@@ -332,6 +345,26 @@ class GroupCoordinator:
         return value
 
     async def decide(self, packet, on_started):
+        if self.config.get("recovery_bundle"):
+            self._root_on_started = on_started
+            if packet["runs"]:
+                raise RuntimeError(
+                    "Recovery could not complete its fixed publication task; "
+                    "operator reconciliation is required"
+                )
+            return validate_decision(
+                {
+                    "action": "start",
+                    "group_id": self.config["study_result_group"],
+                    "run_id": "",
+                    "task_ref": packet["goal_ref"],
+                    "input_refs": packet["input_refs"],
+                    "prompt": "Recover and publish the existing settled experiment; never execute it.",
+                    "result_ref": "",
+                    "reason": "Operator selected the recovery-only Study result Group",
+                },
+                packet,
+            )
         self.counter += 1
         directory = (
             self.root

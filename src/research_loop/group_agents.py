@@ -59,12 +59,14 @@ class NativeGroupServices:
         *,
         native_factory=Native,
         resource_lock=None,
+        on_started=None,
     ):
         self.ctx, self.config = ctx, study_config
         self.journal = _RunJournal(journal, ctx.run_id)
         self.raw_journal = journal
         self.tools = {tool.name: tool for tool in resource_tools}
         self.native_factory = native_factory
+        self.on_started = on_started
         self.active = set()
         self.pending_calls = 0
         self.pending_commands = 0
@@ -246,6 +248,8 @@ class NativeGroupServices:
                 record["thread_id"] = thread_id
                 self.ctx.save_state()
                 self._roles(thread_id, context, role, "running")
+                if self.on_started:
+                    self.on_started(thread_id)
 
             try:
                 await native.open()
