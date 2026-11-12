@@ -539,6 +539,7 @@ class NativeGroupServices:
             Path(overrides["TMPDIR"]).mkdir(parents=True, exist_ok=True)
             environment = dict(os.environ)
             environment.pop("PYTHONHOME", None)
+            environment.pop("PYTHONPATH", None)
             environment.pop("VIRTUAL_ENV", None)
             environment.update(overrides)
             log_path = self.ctx.work / f"command-{len(rows):03d}.log"

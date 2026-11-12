@@ -258,6 +258,7 @@ def test_prepared_local_command_uses_selected_runtime(context, monkeypatch, virt
         python.symlink_to(sys._base_executable)
     snapshot = observe({"python": str(python)})
     monkeypatch.setenv("PYTHONHOME", str(context.root / "wrong python home"))
+    monkeypatch.setenv("PYTHONPATH", str(context.root / "wrong import path"))
     monkeypatch.setenv("VIRTUAL_ENV", str(context.root / "wrong virtualenv"))
     monkeypatch.setenv("PYTHONNOUSERSITE", "0")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "0")
@@ -271,7 +272,7 @@ def test_prepared_local_command_uses_selected_runtime(context, monkeypatch, virt
         "'packages': {d.metadata['Name']: d.version "
         "for d in importlib.metadata.distributions() if d.metadata['Name']},\n"
         "'environment': {key: os.environ[key] for key in "
-        "('HOME', 'TMPDIR', 'VIRTUAL_ENV', 'PYTHONHOME', 'PYTHONNOUSERSITE', "
+        "('HOME', 'TMPDIR', 'VIRTUAL_ENV', 'PYTHONHOME', 'PYTHONPATH', 'PYTHONNOUSERSITE', "
         "'PYTHONDONTWRITEBYTECODE', 'PREPARED_COMMAND_SETTING') "
         "if key in os.environ},\n"
         "'tmp_exists': Path(os.environ['TMPDIR']).is_dir()}))\n"
@@ -292,6 +293,7 @@ def test_prepared_local_command_uses_selected_runtime(context, monkeypatch, virt
                 assert witness["packages"]["synthetic-marker"] == "7.1"
             env = witness["environment"]
             assert "PYTHONHOME" not in env
+            assert "PYTHONPATH" not in env
             assert env.get("VIRTUAL_ENV") == (
                 snapshot["local"]["prefix"] if virtualenv else None
             )

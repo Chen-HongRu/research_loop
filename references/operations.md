@@ -77,7 +77,7 @@ CUDA. The same snapshot is supplied to the coordinator and fresh role agents.
 Agent shells and prepared local commands use the same execution overrides. PATH
 prioritizes the selected interpreter's bin directory, followed by automatically
 resolved host `uv`/`rg` directories when available and system command directories.
-Prepared commands clear conflicting `PYTHONHOME` and stale `VIRTUAL_ENV` values;
+Prepared commands clear conflicting `PYTHONHOME`/`PYTHONPATH` and stale `VIRTUAL_ENV` values;
 virtualenv
 identity is explicit and user-site packages are disabled. Use that Python for
 tests instead of creating another environment or selecting system Python.
