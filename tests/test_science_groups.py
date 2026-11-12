@@ -1279,7 +1279,6 @@ def recovery_candidate(tmp_path):
         "publication_paths": {original: "recovery-evidence/original-evaluation.json"},
     }
     authored = synthesis(request, executions=[execution], analyses=[evaluation])
-    del authored["status"]
     refs = [execution, evaluation, original]
     authored["study_result"].update(
         summary="The settled formal criterion is satisfied.",
@@ -1367,6 +1366,98 @@ def test_recovery_synthesis_has_inline_tool_free_author_and_candidate_review(tmp
         {"source": document["source"], "target": document["target"]}
         for document in authored["knowledge_files"]
     ]
+
+
+def test_recovery_ready_unreviewed_candidate_invokes_critic_before_publication(
+    tmp_path,
+):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    candidate = compact_recovery(authored)
+    candidate.update(
+        status="ready", help="Candidate prepared; independent host review is next."
+    )
+
+    def review(ctx, payload):
+        assert not (ctx.work / "study-result.json").exists()
+        assert (
+            json.loads((ctx.work / "reports/study-result-candidate.json").read_text())
+            == authored["study_result"]
+        )
+        assert payload["analysis_record"]["status"] == "ready"
+        return synthesis_review()
+
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analyst", candidate), ("critic", review)],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("synthesis", task, refs))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert row["output"]["completion"] == "completed"
+    assert [call[0] for call in calls] == ["analyst", "critic"]
+    assert artifact(row, "study-result.json").is_file()
+    assert (
+        json.loads(artifact(row, "analysis.json").read_text())["help"]
+        == candidate["help"]
+    )
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_synthesis_missing_upstream_evidence_blocks_before_candidate_review(
+    tmp_path, recovery
+):
+    help_text = "Supply the missing admitted upstream evidence artifact."
+    if recovery:
+        request, packet, authored, refs = recovery_candidate(tmp_path)
+        candidate = compact_recovery(authored)
+        candidate.update(
+            status="blocked", help=help_text, study_result="", knowledge_files=[]
+        )
+    else:
+        request, packet, refs = None, None, []
+        candidate = synthesis(help_text=help_text)
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analyst", candidate)],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        run_id = await runtime.start("synthesis", task, refs)
+        first = await boundary(runtime, run_id)
+        runtime.hold(run_id)
+        await runtime.resume(run_id, [])
+        final = await boundary(runtime, run_id)
+        assert final["output"]["completion"] == first["output"]["completion"]
+        work = runtime.root / run_id / "work"
+        assert not (work / "study-result.json").exists()
+        assert not (work / "reports/study-result-candidate.json").exists()
+        return final
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert row["output"]["completion"] == "blocked"
+    assert row["output"]["help"] == help_text
+    assert [call[0] for call in calls] == ["analyst"]
+
+
+@pytest.mark.parametrize("help_text", ["", "   "])
+def test_recovery_blocked_author_requires_meaningful_help(tmp_path, help_text):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    candidate = compact_recovery(authored)
+    candidate.update(
+        status="blocked", help=help_text, study_result="", knowledge_files=[]
+    )
+    with pytest.raises(ValueError, match="blocked help"):
+        bind_recovery_analysis(candidate, recovery_sources(request, packet, refs))
 
 
 @pytest.mark.parametrize(
@@ -1556,9 +1647,34 @@ def test_recovery_binder_preserves_science_and_is_idempotent(tmp_path):
     assert len(content) <= 3200
 
 
+def test_legacy_binding_preserves_statusless_record_without_weakening_current_schema(
+    tmp_path,
+):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    candidate = compact_recovery(authored)
+    del candidate["status"]
+    sources = recovery_sources(request, packet, refs)
+    with pytest.raises(ValueError, match="fields do not match"):
+        bind_recovery_analysis(candidate, sources)
+    bound = bind_recovery_analysis(candidate, sources, legacy_recovery=True)
+    assert "status" not in candidate
+    assert "status" not in bound
+    assert bound["help"] == candidate["help"]
+    assert bound["study_result"] == authored["study_result"]
+    assert bind_recovery_analysis(bound, sources, legacy_recovery=True) == bound
+
+
 @pytest.mark.parametrize(
     "field",
-    ["summary", "help", "stop_basis", "knowledge_files", "study_action", "limitations"],
+    [
+        "summary",
+        "status",
+        "help",
+        "stop_basis",
+        "knowledge_files",
+        "study_action",
+        "limitations",
+    ],
 )
 def test_recovery_binder_rejects_missing_scientific_fields(tmp_path, field):
     request, packet, authored, refs = recovery_candidate(tmp_path)

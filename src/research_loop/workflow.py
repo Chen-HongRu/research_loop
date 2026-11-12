@@ -29,7 +29,7 @@ def definitions(*, resource=False, recovery=False):
         ),
         GroupDefinition(
             "synthesis",
-            "6",
+            "7",
             "Integrate completed experimental evidence across the Study. Maintain scientific "
             "knowledge, negative results and uncertainty, obtain independent scrutiny of new "
             "claims, and export study-result.json plus knowledge-manifest.json. Owns the "

@@ -28,7 +28,9 @@ New Studies use the reference Group catalog by default. Bounded recovery publica
 New default Group stages declare `ready` or `blocked` explicitly. Informational
 `help` text on a ready stage is preserved in its report and allows progression;
 blocked stages require a meaningful assistance request. Existing Studies keep
-their pinned programs. See the [stage and version contracts](docs/router-groups.md).
+their pinned programs. Synthesis Authors, including publication recovery, return
+unreviewed candidates ready for host review; independent Critic acceptance is
+required before publication. See the [stage and version contracts](docs/router-groups.md).
 
 Each iteration settles native work and authorized resources, publishes an independent knowledge snapshot, and follows the explicit `study_action` supplied by the Lead or a Group-authored result: `continue` starts the next iteration (resuming the same Lead thread only in Lead mode); `stop` ends the Study with a `stop_reason`. Scientific goal status is reported separately. Completing one diagnostic does not complete the Study. Results and status are retained under `iterations/NNNNNN/`; root records show the latest iteration. Failed work, UNKNOWN resources and STOP halt continuation and retain drafts.
 
