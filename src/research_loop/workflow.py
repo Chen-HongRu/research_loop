@@ -10,7 +10,7 @@ def definitions(*, resource=False, recovery=False):
     groups = [
         GroupDefinition(
             "direction",
-            "1",
+            "2",
             "Select the next worthwhile research question. Read the goal, admitted human "
             "experiment and published knowledge; explore alternatives when autonomous, "
             "maintain the frontier and export experiment-task.json with scientific constraints. "

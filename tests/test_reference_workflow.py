@@ -27,6 +27,7 @@ def test_default_research_workflow_completes_and_installs_scientific_knowledge(
     config = loop.read_config(root)
     assert config["coordinator"] == "router"
     assert config["study_result_group"] == "synthesis"
+    assert next(g for g in config["groups"] if g["id"] == "direction")["version"] == "2"
     assert {g["id"] for g in config["groups"]} == {
         "direction",
         "exp",
@@ -178,11 +179,13 @@ def test_default_research_workflow_completes_and_installs_scientific_knowledge(
                         )
                     ]
                 }
+                (work / "authored-task.json").write_text(json.dumps(task))
+                (work / "authored-frontier.json").write_text(json.dumps(frontier))
                 return dict(
                     base,
                     disposition="experiment",
-                    experiment_task_json=json.dumps(task),
-                    frontier_json=json.dumps(frontier),
+                    experiment_task_ref="authored-task.json",
+                    frontier_ref="authored-frontier.json",
                     consequential_claim=False,
                 )
             if role == "analyst":

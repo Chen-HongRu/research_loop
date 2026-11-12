@@ -35,6 +35,8 @@ The example uses the unchanged `examples/environment.json`. Omit `--run` to
 prepare without model calls; `--run` needs authorization for real model calls
 and one local CPU audit. It does not use network/GPU during the audit or install
 packages inside a Group. Outputs belong in a new private directory outside source.
+Keep both the checkout and Study outside system temporary directories when
+checking the ordinary workspace-write project boundary.
 
 The task and implementation live in [the portability example](../examples/portability/goal.md).
 It tests actual repository behavior; some underlying unit tests use scripted model

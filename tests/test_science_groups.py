@@ -123,6 +123,17 @@ def synthesis_review(
     }
 
 
+def direction_review(
+    verdict="accept", reason="The supplied direction constraints are supported."
+):
+    return {
+        "summary": "Independent direction review",
+        "verdict": verdict,
+        "reason": reason,
+        "artifacts": [],
+    }
+
+
 def proposal(*, consequential=True):
     task = {
         "question": "Does intervention A discriminate H1 from H2?",
@@ -148,13 +159,22 @@ def proposal(*, consequential=True):
             }
         ]
     }
-    return {
-        **base(),
-        "disposition": "experiment",
-        "experiment_task_json": json.dumps(task),
-        "frontier_json": json.dumps(frontier),
-        "consequential_claim": consequential,
-    }
+
+    def author(ctx, payload):
+        return {
+            **base(),
+            "disposition": "experiment",
+            "experiment_task_ref": write(
+                ctx.work / f"authored/{ctx.round}/task.json", task
+            ),
+            "frontier_ref": write(
+                ctx.work / f"authored/{ctx.round}/frontier.json", frontier
+            ),
+            "consequential_claim": consequential,
+        }
+
+    author.task, author.frontier = task, frontier
+    return author
 
 
 def result(request=None):
@@ -207,13 +227,14 @@ def synthesis(request=None, *, executions=(), analyses=(), help_text=""):
 
 def test_direction_authors_real_task_after_independent_exploration(tmp_path):
     authored = proposal()
+    reason = "No scientific revision is needed. Proceed with the supplied bounded experiment."
     runtime, task, calls = setup(
         tmp_path,
         "direction",
         [
             ("scout", base("An independently sourced alternative")),
             ("proposer", authored),
-            ("critic", base("Direction constraints supported")),
+            ("critic", direction_review(reason=reason)),
         ],
     )
 
@@ -224,15 +245,56 @@ def test_direction_authors_real_task_after_independent_exploration(tmp_path):
     assert row["status"] == "returned", row
     assert [call[0] for call in calls] == ["scout", "proposer", "critic"]
     assert calls[0][1] != calls[1][1] != calls[2][1]
-    assert json.loads(artifact(row, "experiment-task.json").read_text()) == json.loads(
-        authored["experiment_task_json"]
+    assert row["output"]["completion"] == "completed"
+    assert row["output"]["help"] == ""
+    assert row["output"]["unfinished"] == []
+    assert (
+        json.loads(artifact(row, "experiment-task.json").read_text()) == authored.task
     )
-    assert json.loads(artifact(row, "frontier.json").read_text()) == json.loads(
-        authored["frontier_json"]
-    )
+    assert json.loads(artifact(row, "frontier.json").read_text()) == authored.frontier
+    critique = json.loads(artifact(row, "critique.json").read_text())
+    assert critique["verdict"] == "accept"
+    assert critique["reason"] == reason
+    assert "help" not in critique
     assert "scientific constraints" in calls[1][2]
     assert "not a duplicate execution Plan" in calls[1][2]
     assert "negative" in calls[0][2]
+
+
+@pytest.mark.parametrize(
+    "task_source", ["frontier.json", "reports/candidates/000001/frontier.json"]
+)
+def test_direction_reads_both_authored_documents_before_publishing(
+    tmp_path, task_source
+):
+    authored = proposal(consequential=False)
+
+    def colliding(ctx, payload):
+        record = authored(ctx, payload)
+        record["experiment_task_ref"] = write(ctx.work / task_source, authored.task)
+        return record
+
+    runtime, task, _ = setup(
+        tmp_path,
+        "direction",
+        [("proposer", colliding)],
+        request={"id": "explicit", "text": "One bounded synthetic experiment."},
+    )
+
+    async def scenario():
+        run_id = await runtime.start("direction", task, [])
+        return run_id, await boundary(runtime, run_id)
+
+    run_id, row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert row["output"]["completion"] == "completed"
+    assert json.loads(artifact(row, "frontier.json").read_text()) == authored.frontier
+    assert (
+        json.loads(artifact(row, "experiment-task.json").read_text()) == authored.task
+    )
+    candidate = tmp_path / "group-runs" / run_id / "work/reports/candidates/000001"
+    assert json.loads((candidate / "frontier.json").read_text()) == authored.frontier
+    assert json.loads((candidate / "experiment-task.json").read_text()) == authored.task
 
 
 @pytest.mark.parametrize("human", [True, False])
@@ -263,21 +325,139 @@ def test_explicit_experiment_does_not_burn_scout_budget(tmp_path, human):
     assert calls[0][3]["explicit_experiment"] is True
 
 
+@pytest.mark.parametrize("field", ["frontier_ref", "experiment_task_ref"])
+@pytest.mark.parametrize(
+    "kind, error",
+    [
+        ("outside", "must be inside ownwork"),
+        ("traversal", "must be inside ownwork"),
+        ("symlink", "may not contain symlinks"),
+        ("symlink-parent", "may not contain symlinks"),
+        ("directory", "regular JSON file"),
+        ("oversized", "at most 1 MiB"),
+        ("missing", "No such file"),
+        ("inline", "No such file"),
+        ("invalid-json", "Expecting"),
+    ],
+)
+def test_direction_rejects_invalid_authored_file_references(
+    tmp_path, field, kind, error
+):
+    authored = proposal(consequential=False)
+    external = tmp_path / "external.json"
+    external.write_text('{"private_external_content": true}')
+
+    def invalid(ctx, payload):
+        record = authored(ctx, payload)
+        candidate = ctx.work / "candidate.json"
+        if kind == "outside":
+            ref = str(external)
+        elif kind == "traversal":
+            ref = "../external.json"
+        elif kind == "symlink":
+            candidate.symlink_to(external)
+            ref = str(candidate)
+        elif kind == "symlink-parent":
+            (ctx.work / "linked").symlink_to(tmp_path, target_is_directory=True)
+            ref = "linked/external.json"
+        elif kind == "directory":
+            candidate.mkdir()
+            ref = str(candidate)
+        elif kind == "oversized":
+            with candidate.open("wb") as stream:
+                stream.truncate(1024 * 1024 + 1)
+            ref = str(candidate)
+        elif kind == "missing":
+            ref = "missing.json"
+        elif kind == "inline":
+            ref = '{"hypotheses": []}'
+        else:
+            candidate.write_text("invalid json")
+            ref = str(candidate)
+        record[field] = ref
+        return record
+
+    runtime, task, calls = setup(
+        tmp_path,
+        "direction",
+        [("proposer", invalid)],
+        request={"id": "explicit", "text": "One bounded synthetic experiment."},
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("direction", task, []))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "failed", row
+    assert error in row["error"]
+    assert "private_external_content" not in row["error"]
+    assert [call[0] for call in calls] == ["proposer"]
+
+
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_direction_critic_requires_nonempty_reason(tmp_path, reason):
+    runtime, task, _ = setup(
+        tmp_path,
+        "direction",
+        [("proposer", proposal()), ("critic", direction_review(reason=reason))],
+        request={"id": "explicit", "text": "One bounded synthetic experiment."},
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("direction", task, []))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "failed", row
+    assert "nonempty reason" in row["error"]
+
+
+def test_direction_no_useful_action_keeps_authored_frontier_without_task(tmp_path):
+    authored = proposal()
+
+    def no_action(ctx, payload):
+        record = authored(ctx, payload)
+        return {**record, "disposition": "no-useful-action", "experiment_task_ref": ""}
+
+    runtime, task, _ = setup(
+        tmp_path,
+        "direction",
+        [("scout", base()), ("proposer", no_action), ("critic", direction_review())],
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("direction", task, []))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert row["output"]["completion"] == "completed"
+    assert json.loads(artifact(row, "frontier.json").read_text()) == authored.frontier
+    assert not any(
+        Path(ref).name == "experiment-task.json" for ref in row["output"]["artifacts"]
+    )
+
+
 def test_direction_feedback_revises_candidate_without_repeating_scout(tmp_path):
     wrong = proposal()
     revised = proposal(consequential=False)
-    revised_task = json.loads(revised["experiment_task_json"])
+    revised_task = revised.task
     revised_task["controls"].append("the missing negative control")
-    revised["experiment_task_json"] = json.dumps(revised_task)
     runtime, task, calls = setup(
         tmp_path,
         "direction",
         [
             ("scout", base()),
             ("proposer", wrong),
-            ("critic", base(help_text="Direction needs the missing negative control.")),
+            (
+                "critic",
+                direction_review(
+                    "revise", "Direction needs the missing negative control."
+                ),
+            ),
             ("proposer", revised),
-            ("critic", base("The supplied control resolves the concern.")),
+            (
+                "critic",
+                direction_review(reason="The supplied control resolves the concern."),
+            ),
         ],
     )
     feedback = write(tmp_path / "control.json", {"control": "negative evidence"})
