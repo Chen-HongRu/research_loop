@@ -92,6 +92,25 @@ DECISION_SCHEMA = {
 }
 
 
+def decision_schema(packet, *, reference=False):
+    """Constrain model pointers to the literal IDs supplied at this boundary."""
+    refs = list(packet["references"])
+    properties = {
+        **_FIELDS,
+        "task_ref": {"type": "string", "enum": ["", *refs]},
+        "result_ref": {"type": "string", "enum": ["", *refs]},
+        "input_refs": {"type": "array", "items": {"type": "string", "enum": refs}},
+        "group_id": {
+            "type": "string",
+            "enum": ["", *[g["id"] for g in packet["groups"]]],
+        },
+        "run_id": {"type": "string", "enum": ["", *[r["id"] for r in packet["runs"]]]},
+    }
+    if reference:
+        properties["action"] = {"type": "string", "enum": packet["allowed_actions"]}
+    return {**DECISION_SCHEMA, "properties": properties}
+
+
 def catalog(path):
     """Read explicit operator definitions; resolve program paths beside the catalog."""
     path = Path(path).resolve(strict=True)
@@ -418,17 +437,11 @@ class GroupCoordinator:
             )
             if self.stopping:
                 raise RuntimeError("STOP before Router admission")
-            schema = DECISION_SCHEMA
+            reference = self.config.get("workflow") == "research-v1"
+            schema = decision_schema(packet, reference=reference)
             policy = POLICY
-            if self.config.get("workflow") == "research-v1":
+            if reference:
                 policy = REFERENCE_POLICY
-                schema = {
-                    **DECISION_SCHEMA,
-                    "properties": {
-                        **_FIELDS,
-                        "action": {"type": "string", "enum": packet["allowed_actions"]},
-                    },
-                }
             decision = await native.run(
                 policy,
                 packet,
@@ -444,6 +457,15 @@ class GroupCoordinator:
             write_json(directory / "decision.json", decision)
             record_router("completed")
             return decision
+        except BaseException:
+            try:
+                record_router(
+                    "unknown" if getattr(native, "active", False) else "failed"
+                )
+            except Exception:
+                # Status publication must not replace the original routing failure.
+                pass
+            raise
         finally:
             await native.stop()
             await native.settle()

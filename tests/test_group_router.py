@@ -37,6 +37,16 @@ def decision(action, **values):
     return result
 
 
+def assert_pointer_choices(schema, packet):
+    fields = schema["properties"]
+    refs = list(packet["references"])
+    assert fields["task_ref"]["enum"] == ["", *refs]
+    assert fields["result_ref"]["enum"] == ["", *refs]
+    assert fields["input_refs"]["items"]["enum"] == refs
+    assert fields["group_id"]["enum"] == ["", *[g["id"] for g in packet["groups"]]]
+    assert fields["run_id"]["enum"] == ["", *[r["id"] for r in packet["runs"]]]
+
+
 def setup_study(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -88,7 +98,11 @@ def test_router_main_loop_publishes_frozen_group_result(tmp_path, monkeypatch):
 
         async def run(self, policy, packet, schema, **kwargs):
             transports.append(kwargs)
-            assert schema == group_router.DECISION_SCHEMA
+            assert_pointer_choices(schema, packet)
+            assert (
+                schema["properties"]["action"]
+                == group_router.DECISION_SCHEMA["properties"]["action"]
+            )
             if not packet["runs"]:
                 return decision("start", group_id="test", task_ref=packet["goal_ref"])
             row = packet["runs"][0]
@@ -138,6 +152,83 @@ def test_router_rejects_unsupplied_reference_and_running_intervention():
         )
     with pytest.raises(ValueError, match="returned"):
         group_router.validate_decision(decision("hold", run_id="r"), packet)
+
+
+@pytest.mark.parametrize("workflow", ["custom", "research-v1"])
+@pytest.mark.parametrize("native_active", [False, True])
+def test_native_router_uses_current_packet_ids_and_still_rejects_unsupplied_paths(
+    tmp_path, monkeypatch, workflow, native_active
+):
+    root, _, _ = setup_study(tmp_path)
+    config = {**loop.read_config(root), "workflow": workflow}
+    response = decision("start", group_id="test", task_ref="f0")
+    captured = []
+
+    class Native:
+        def __init__(self, *args):
+            self.active = native_active
+
+        async def open(self):
+            pass
+
+        async def verify(self, *args, **kwargs):
+            pass
+
+        async def run(self, policy, packet, schema, **kwargs):
+            kwargs["on_started"](f"router-{len(captured) + 1}")
+            assert_pointer_choices(schema, packet)
+            expected_actions = (
+                packet["allowed_actions"]
+                if workflow == "research-v1"
+                else group_router.DECISION_SCHEMA["properties"]["action"]["enum"]
+            )
+            assert schema["properties"]["action"]["enum"] == expected_actions
+            captured.append(schema)
+            return dict(response)
+
+        async def stop(self):
+            pass
+
+        async def settle(self):
+            pass
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(group_router, "configuration", lambda *a, **k: (None, {}))
+    coordinator = group_router.GroupCoordinator(
+        root, config, None, native_factory=Native
+    )
+    coordinator.iteration = 1
+    packet = {
+        "references": {"f0": "goal.md", "f9": "groups/exported-task.json"},
+        "groups": [{"id": "test"}],
+        "runs": [],
+        "allowed_actions": ["start", "escalate"],
+    }
+
+    async def scenario():
+        assert await coordinator.decide(packet, None) == response
+        packet["references"]["f15"] = "groups/new-evidence.json"
+        packet["groups"].append({"id": "new-group"})
+        packet["runs"].append({"id": "new-run", "status": "held"})
+        response.update(group_id="new-group", task_ref="f15", input_refs=["f9"])
+        assert await coordinator.decide(packet, None) == response
+        response["task_ref"] = packet["references"]["f15"]
+        with pytest.raises(ValueError, match="unsupplied artifact"):
+            await coordinator.decide(packet, None)
+
+    asyncio.run(scenario())
+    assert captured[0]["properties"]["run_id"]["enum"] == [""]
+    assert captured[1]["properties"]["run_id"]["enum"] == ["", "new-run"]
+    assert (
+        "groups/new-evidence.json" not in captured[1]["properties"]["task_ref"]["enum"]
+    )
+    assert group_router.DECISION_SCHEMA["properties"]["task_ref"] == {"type": "string"}
+    roles = json.loads((root / "roles.json").read_text())["threads"]
+    assert roles["router-1"]["status"] == "completed"
+    assert roles["router-2"]["status"] == "completed"
+    assert roles["router-3"]["status"] == ("unknown" if native_active else "failed")
 
 
 def test_recovery_admission_is_deterministic_and_cannot_route_again(
@@ -558,6 +649,7 @@ def scripted_reference_router(monkeypatch, choose):
                 for row in packet["runs"]
             )
             assert schema["properties"]["action"]["enum"] == packet["allowed_actions"]
+            assert_pointer_choices(schema, packet)
             assert set(packet["allowed_actions"]) <= {"start", "resume", "escalate"}
             calls.append(packet)
             return choose(packet)
