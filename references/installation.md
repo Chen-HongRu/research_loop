@@ -38,7 +38,10 @@ packages inside a Group. Outputs belong in a new private directory outside sourc
 Keep both the checkout and Study outside system temporary directories when
 checking the ordinary workspace-write project boundary.
 
-The task and implementation live in [the portability example](../examples/portability/goal.md).
+The task lives in [the portability example](../examples/portability/goal.md).
+Its supplied Python audit program owns the exact test invocation, metadata and
+JUnit accounting. Experts plan the audit, prepare its command and independently
+interpret its actual outputs; they do not regenerate mechanical runner code.
 It tests actual repository behavior; some underlying unit tests use scripted model
 responses, while the outer workflow uses real Router/specialist calls. Pass/fail
 results are observations, not proof of general research quality. Each host creates

@@ -35,8 +35,12 @@ temporary files, subprocess outputs and JUnit are observations, not training dat
 
 ## One actual execution
 
-Plan the verification and write a standard-library-only runner in Exp's work.
-Prepare exactly one substantive command. The runner invokes the observed Python
+Plan the verification using the supplied `examples/portability/audit.py` in the
+subject checkout. Its deterministic Python implementation owns metadata, pytest
+invocation, XML counts and report delivery. Do not rewrite, copy or replace it.
+Prepare exactly one command: the observed Python runs that script with
+`--output` set to Exp's work directory. Do not execute it during preparation.
+The supplied program invokes the observed Python
 with `-m pytest -q -p no:cacheprovider`, the exact five files above, JUnit output
 and `--basetemp` both under Exp work, with the project as cwd. Disable bytecode
 writes and inherited `PYTEST_ADDOPTS`. Use a 120-second pytest timeout. Do not run
@@ -51,7 +55,9 @@ Use the recorded Git revision and environment metadata for identity; do not add
 content scans or hashes of source, logs, JUnit or other produced artifacts.
 Keep stdout/stderr in `pytest.log`. A normal completed pytest exit 0 or 1 means
 the audit runner finished; preserve a nonzero pytest exit as a negative finding
-in metrics. Setup/internal errors, missing output or timeout fail the runner.
+in metrics, including test fixture errors recorded in JUnit. Runner/bootstrap
+errors, pytest collection/internal/usage errors (exit 2–5), missing output or
+timeout fail the runner. A successful runner receipt never implies test success.
 
 The host executes the prepared command once. Independent Evaluate reads the
 actual metrics, JUnit and log, checks their agreement and environment identity,
