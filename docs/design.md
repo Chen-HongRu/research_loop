@@ -1,11 +1,15 @@
 # Runtime design
 
-The application uses the official pinned Codex SDK and CLI. A Study has one
-coordinator thread, native specialist threads, an optional resource adapter and
-versioned research documents. The reusable package is independent of the research
+The application uses the official pinned Codex SDK and CLI. A Study has a Python
+controller, specialist threads, an optional resource adapter and versioned research
+documents. The default Router mode uses fresh, tool-free routing contexts and independent Group Runs; the legacy Lead mode uses one persistent Lead thread. The reusable package is independent of the research
 algorithm, dataset and metric.
 
-## Research team
+## Router Groups
+
+The Router coordinates versioned, problem-scoped Groups through independent Group Runs. The reference workflow provides direction, experiment, synthesis and diagnosis capabilities. Synthesis authors the Study result and scientific knowledge manifest; Python validates and installs its explicitly exported files before the existing publication settlement. The legacy Lead and its host/native delegation remain separate from this mode. See the [Router Group contract](router-groups.md) for interfaces, isolation, handoff and recovery boundaries.
+
+## Legacy Lead research team
 
 [`instructions.py`](../src/research_loop/instructions.py) defines the coordinator
 policy and final result schema. It includes the common contract and five role
@@ -48,7 +52,7 @@ retain complete evidence in artifacts and emit concise summaries for coordinatio
 `init` copies the goal and freezes configuration without a model call. It can also
 freeze an explicit OpenAI-compatible provider (name, base URL, API-key environment
 variable, model catalog) and a delegation mode; the run records store only the
-variable name, never the key value. Provider runs default to host delegation:
+variable name, never the key value. In Lead mode, provider runs default to host delegation:
 the lead receives `delegate_task`/`wait_tasks`, and the host runs each role in a
 new plain-message thread with the canonical role contract. Host-mode catalogs
 disable native Codex subagent tools; native spawns remain available as an
@@ -64,8 +68,7 @@ Study action without judging scientific quality. A diagnostic ending does not
 end the Study. Budget is a ceiling, not a requirement to spend it.
 
 One writer lock spans all iterations on a host. Each iteration settles native
-work and resource sessions, publishes its draft, and then either resumes the same
-coordinator thread or completes the Study. Specialist contexts remain fresh.
+work and resource sessions and publishes its draft. Lead mode resumes the same coordinator thread when continuing; Router mode creates fresh routing contexts. Specialist contexts remain isolated.
 `iterations/NNNNNN/` retains status and result; root records show the latest state.
 Failure, STOP, unsettled resources or cleanup errors halt admission and retain the
 draft. Explicit `run --continue` can resume after an operator stop; it does not
@@ -112,13 +115,13 @@ not modified or restarted by initialization or a repository update.
 
 | Boundary | Protected condition |
 | --- | --- |
-| Native authentication, exact model and permissions | Use the configured authentication (ChatGPT subscription by default, or an explicit OpenAI-compatible provider), model, delegation mode and effort without implicit provider fallback; prevent agent access to protected paths. Prompts cannot enforce filesystem isolation. |
+| Native authentication, exact model and permissions | Use the configured authentication (ChatGPT subscription by default, or an explicit OpenAI-compatible provider), model, delegation mode and effort without implicit provider fallback; use ordinary workspace-write with default reads, work/temporary writes and shell network disabled. Read scope and conversation isolation remain task contracts, not OS secrecy. |
 | Host-delegated roles | Start every role in a new thread with a plain assignment; reject native delegation from a role, cap concurrency, and retain unfinished tasks before publication. |
 | Shared resource ledger and lock | Reserve and settle the original authorization across allocations. A prompt cannot atomically reserve shared budget. |
 | Original operation identity, UNKNOWN and STOP | Reconcile uncertain effects without duplicate dispatch; prevent new research dispatch after STOP. Physical receipts establish job state. |
 | Single writer and atomic publication | Prevent concurrent publication and partial knowledge snapshots. The writer lock is host-local, not a cross-host ownership service. |
 
-The Slurm adapter registers five lead-only tools. Children return commands and
+In Lead mode, the Slurm adapter registers five lead-only tools. Children return commands and
 artifact requests to the coordinator:
 
 | Tool | Responsibility |
@@ -144,8 +147,7 @@ The user authors `inputs/human.md` directly or through a separately authorized
 Codex session. The operator `experiment` and `edit-experiment` commands share
 `inputs/human.lock` with admission and acknowledgement. Direct editing during
 execution must use this lock; arbitrary unlocked editor writes are not coordinated.
-Research lead and specialist permissions keep inputs and iteration snapshots
-read-only. Only the controller consumes requests.
+Research Lead and specialist write roots exclude inputs and iteration snapshots in the supported layout. Do not place the Study inside an agent-writable ancestor or system temporary directory: ordinary workspace-write does not add protective deny overlays. Only the controller consumes requests.
 
 At iteration admission, a nonempty UTF-8 request is read once, identified by its
 file revision and text, archived under the iteration and supplied as

@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -18,6 +19,35 @@ print(json.dumps({"executable": sys.executable, "version": sys.version.split()[0
                   "prefix": sys.prefix, "base_prefix": sys.base_prefix,
                   "packages": packages}))
 """
+
+
+def shell_environment(snapshot, work):
+    """Select one Python runtime while retaining available host uv/rg tools."""
+    local = (
+        snapshot["local"]
+        if snapshot
+        else {
+            "executable": sys.executable,
+            "prefix": sys.prefix,
+            "base_prefix": sys.base_prefix,
+        }
+    )
+    paths = [str(Path(local["executable"]).parent)]
+    for tool in ("uv", "rg"):
+        executable = shutil.which(tool)
+        if executable:
+            paths.append(str(Path(executable).absolute().parent))
+    paths.extend(os.defpath.split(os.pathsep))
+    result = {
+        "PATH": os.pathsep.join(dict.fromkeys(paths)),
+        "HOME": str(work),
+        "TMPDIR": str(Path(work) / "tmp"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+    }
+    if local["prefix"] != local["base_prefix"]:
+        result["VIRTUAL_ENV"] = local["prefix"]
+    return result
 
 
 def read_config(path):

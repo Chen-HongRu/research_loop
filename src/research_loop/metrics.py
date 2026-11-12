@@ -11,7 +11,7 @@ import signal
 import threading
 from time import perf_counter, process_time
 
-from .identity import resolve
+from .identity import resolve, session_paths
 from .sample_store import _atomic, publish_pending
 from .token_usage import AUTHORITY, TOKEN_KEYS, accept_record, cumulative_counts
 
@@ -32,7 +32,7 @@ TERMINAL = {
 LIMITATIONS = [
     "Unique token_usage_record response IDs are authoritative, including compaction requests. token_count is a separate cross-check, never added. Input includes cached; output includes reasoning.",
     "Usage belongs to notification time in [since, until), without prorating requests. Startup and first-3/5 refer to the thread's lifetime response order, restricted to the phase window.",
-    "Roles are inferred from task-name prefixes; only session_meta-confirmed descendants of status.thread_id are selected. Tool counts exclude dynamically nested calls.",
+    "Membership uses session metadata plus status.thread_id, mapped host roles and native descendants. Explicit Router roles override coordinator attribution; other roles fall back to task-name prefixes. Tool counts exclude dynamically nested calls.",
     "Background association is a heuristic: visible cat/sed/read_text references to goal.md, knowledge/index.md or AGENTS.md, excluding apply_patch, paired via tool output to the next usage record. Association is not demonstrated waste.",
     "Wait seconds are summed call-to-return intervals for window-started calls returned before cutoff, with overlapping parallel waits. Structured timed_out counts require a JSON boolean.",
     "Allocation seconds are whole settled elapsed time for window-dispatched jobs, not exact window overlap, core utilization or money; cancellation is not automatically a failure.",
@@ -113,11 +113,7 @@ class Collector:
         if self.output == self.root or self.root in self.output.parents:
             raise ValueError("metrics output must be outside the Study")
         self.since = timestamp(since)
-        self.sessions_dir = (
-            Path(sessions_dir).resolve()
-            if sessions_dir
-            else self.root / "native/sessions"
-        )
+        self.sessions_dir = Path(sessions_dir).resolve() if sessions_dir else None
         self.explicit_ledger = Path(ledger_path).resolve() if ledger_path else None
         self.output.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.output, 0o700)
@@ -132,7 +128,7 @@ class Collector:
             "root": str(self.root),
             "since": self.since.isoformat(),
             "phase": phase,
-            "sessions_dir": str(self.sessions_dir),
+            "sessions_dir": str(self.sessions_dir) if self.sessions_dir else None,
             "ledger_path": str(self.explicit_ledger) if self.explicit_ledger else None,
         }
         try:
@@ -275,7 +271,7 @@ class Collector:
 
     def _discover(self, lead):
         try:
-            paths = sorted(self.sessions_dir.rglob("*.jsonl"))
+            paths = session_paths(self.root, self.sessions_dir)
         except OSError:
             paths = []
             self._issue("sessions:unreadable")
@@ -367,7 +363,7 @@ class Collector:
                 tid,
                 task_state(tid, identity.task, parent, initial_role),
             )
-            if tid != lead and explicit_role and task.get("role") != identity.role:
+            if explicit_role and task.get("role") != identity.role:
                 task["role"] = identity.role
             for row, at in self._tail(Path(path), "sessions"):
                 self._source_at(at)
@@ -509,6 +505,7 @@ class Collector:
                 not self._inside(at)
                 or row.get("event") != "resource.tool"
                 or row.get("thread_id") != lead
+                or row.get("resource_effect") is False
             ):
                 continue
             r = self.state["resources"]
@@ -669,7 +666,14 @@ class Collector:
             self._issue("status:missing_thread_id")
             lead = None
         if self.state.get("lead") not in (None, lead):
-            raise ValueError("Study lead changed; start a new phase output")
+            roles = self._json(self.root / "roles.json", "roles", optional=True)
+            threads = roles.get("threads", {})
+            if not isinstance(threads, dict) or not all(
+                isinstance(threads.get(tid), dict)
+                and threads[tid].get("role") == "router"
+                for tid in (self.state["lead"], lead)
+            ):
+                raise ValueError("Study lead changed; start a new phase output")
         self.state["lead"] = lead
         # New task call sets are lazily created by _session.
         self.calls = _CallSets(self.calls)

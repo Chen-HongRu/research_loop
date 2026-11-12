@@ -18,7 +18,7 @@ def prepare(tmp_path):
     goal = tmp_path / "goal.md"
     goal.write_text("Synthetic CPU only; no model or remote work.")
     root = tmp_path / "run"
-    loop.initialize(root, project, goal)
+    loop.initialize(root, project, goal, coordinator="lead")
     return root
 
 
@@ -94,6 +94,54 @@ def test_failed_turn_preserves_thread_draft_and_no_publication(tmp_path, monkeyp
     assert not (root / "result.json").exists()
 
 
+def test_failure_is_durable_before_native_cleanup_finishes(tmp_path, monkeypatch):
+    root = prepare(tmp_path)
+    monkeypatch.setattr(loop, "configuration", lambda *args, **kwargs: (None, {}))
+
+    async def scenario():
+        cleanup_entered = asyncio.Event()
+        release_cleanup = asyncio.Event()
+
+        class Broken:
+            def __init__(self, *args):
+                pass
+
+            async def open(self):
+                pass
+
+            async def verify(self, *args, **kwargs):
+                pass
+
+            async def run(self, *args, **kwargs):
+                kwargs["on_started"]("synthetic-thread")
+                raise RuntimeError("synthetic boundary failure")
+
+            async def stop(self):
+                cleanup_entered.set()
+                await release_cleanup.wait()
+
+            async def settle(self):
+                pass
+
+            async def close(self):
+                pass
+
+        pending = asyncio.create_task(loop.run(root, native_factory=Broken))
+        try:
+            await asyncio.wait_for(cleanup_entered.wait(), 1)
+            for path in (root / "status.json", root / "iterations/000001/status.json"):
+                status = json.loads(path.read_text())
+                assert status["status"] == "failed"
+                assert status["error"]["message"] == "synthetic boundary failure"
+            assert not pending.done()
+        finally:
+            release_cleanup.set()
+            with pytest.raises(RuntimeError, match="synthetic boundary failure"):
+                await asyncio.wait_for(pending, 1)
+
+    asyncio.run(scenario())
+
+
 def test_resource_identity_is_frozen_relative_to_source_file(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -110,7 +158,7 @@ def test_resource_identity_is_frozen_relative_to_source_file(tmp_path):
     }
     config_file.write_text(json.dumps(settings))
     root = tmp_path / "run"
-    loop.initialize(root, project, goal, resource_file=config_file)
+    loop.initialize(root, project, goal, resource_file=config_file, coordinator="lead")
     settings["host"] = "changed.invalid"
     settings["ledger_path"] = "replacement-budget.json"
     config_file.write_text(json.dumps(settings))
@@ -144,7 +192,7 @@ def test_ledger_is_never_placed_in_agent_writable_work(tmp_path):
         )
     )
     with pytest.raises(ValueError, match="outside agent-writable"):
-        loop.initialize(root, project, goal, resource_file=config)
+        loop.initialize(root, project, goal, resource_file=config, coordinator="lead")
     assert not root.exists()
 
 
@@ -623,6 +671,7 @@ def test_provider_initialization_records_metadata_not_the_secret(tmp_path, monke
         goal,
         model="synthetic-model",
         provider=settings,
+        coordinator="lead",
     )
     config = json.loads((root / "config.json").read_text())
     assert config["provider"] == settings
@@ -666,7 +715,7 @@ def test_legacy_provider_runs_use_one_delegation_mode_for_inspect_and_run(tmp_pa
     goal = tmp_path / "goal.md"
     goal.write_text("Synthetic.")
     root = tmp_path / "run"
-    loop.initialize(root, project, goal, model="synthetic-model")
+    loop.initialize(root, project, goal, model="synthetic-model", coordinator="lead")
     config = json.loads((root / "config.json").read_text())
     config.pop("delegation")
     config["provider"] = {"name": "synthetic"}

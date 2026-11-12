@@ -1,5 +1,10 @@
 # Moving a Study to a Linux host
 
+For a fresh Study on Linux or macOS, use the unchanged checkout configuration and
+the [portable startup command](installation.md#linux-and-macos-fresh-studies).
+The path-preservation and state-transfer requirements below apply to moving an
+existing Study, not to creating a new Study on a different machine.
+
 Prepare the pinned runtime with Python 3.12 and `uv sync --locked`. Verify the
 remote ChatGPT login, exact model/effort, native sandbox and delegation before
 moving control. The shell/search utilities used by prepared scripts must exist.
@@ -29,13 +34,14 @@ its lock coherently after shutdown. Never run `init` or reset the ledger. Exclud
 `native/auth.json`: the remote runtime recreates it against the remote user's
 existing login. Do not transfer credentials through source archives or logs.
 
-With the pinned Linux sandbox, denying native state beneath a read-only Study
-mount can fail during Bubblewrap setup. Use a private native-state directory
-outside the Study read root and link `STUDY/native` to it before configuration.
-The existing configuration resolves that link and keeps the physical directory
-denied; no permission widening is needed. Verify project/work access and denied
-native/control access with synthetic files, plus one native delegation smoke.
-This storage layout is deployment configuration, not a second runtime.
+The runtime uses ordinary Codex workspace-write: default filesystem reads, writes
+only in explicit work/scratch roots and temporary directories, and shell network
+disabled. Do not add custom deny overlays or move native state behind deny mounts;
+these fail during Bubblewrap setup on the pinned Linux runtime. Group contexts
+and selected evidence are separated by the task contract; this mode does not hide
+other host-readable files. Keep Study/control state and read-only inputs outside writable work roots and system temporary directories.
+Verify project reads, work/temporary writes and rejection of project writes with
+synthetic files before a bounded model smoke.
 
 Resume the original Study explicitly with `run STUDY --continue` after confirming
 there is one controller owner. Use a supervised service, retain original records

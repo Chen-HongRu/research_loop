@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -122,7 +123,7 @@ def test_init_copies_control_config_and_inspect_observes_once(
     goal.write_text("Synthetic fixed interpreter inspection; no remote/model calls.")
     source = settings(tmp_path, selected_python)
     root = tmp_path / "study"
-    loop.initialize(root, project, goal, environment_file=source)
+    loop.initialize(root, project, goal, environment_file=source, coordinator="lead")
     source.write_text(json.dumps({"python": "/changed/after/initialization"}))
     observed = []
     observe = environment.observe
@@ -139,7 +140,7 @@ def test_init_copies_control_config_and_inspect_observes_once(
     assert snapshot["resource"]["configured"] is False
     assert snapshot["resource"]["status"] == "undeclared-unverified"
     assert snapshot["resource"]["tools"] == []
-    assert snapshot["local"]["prefix"] in call["permissions"]["read"]
+    assert call["permissions"]["read"] == [":root"]
     assert environment.render(snapshot) in call["instructions"]
     assert not (root / "events.jsonl").exists()
 
@@ -161,6 +162,16 @@ def test_configuration_executes_selected_python_and_protects_credentials(
     snapshot = environment.observe(
         environment.read_config(settings(tmp_path, selected_python))
     )
+    tool_dirs = [tmp_path / "host uv tools", tmp_path / "host rg tools"]
+    for directory, name in zip(tool_dirs, ("uv", "rg")):
+        directory.mkdir()
+        executable = directory / name
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+        # Host tool directories must never supersede the selected Python.
+        (directory / "python").symlink_to(sys.executable)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", os.pathsep.join(path.name for path in tool_dirs))
     root = tmp_path / "study"
     root.mkdir()
     config, effective = configuration(
@@ -178,7 +189,12 @@ def test_configuration_executes_selected_python_and_protects_credentials(
         if x.startswith("shell_environment_policy.set=")
     )
     shell = tomllib.loads("value = " + value)["value"]
-    assert shell["PATH"].split(":")[0] == str(selected_python.parent)
+    assert shell["PATH"].split(os.pathsep) == list(
+        dict.fromkeys(
+            [str(selected_python.parent), *map(str, tool_dirs)]
+            + os.defpath.split(os.pathsep)
+        )
+    )
     assert shell["VIRTUAL_ENV"] == str(selected_python.parent.parent)
     assert shell["PYTHONNOUSERSITE"] == "1"
     assert "BOUNDLESS_API_KEY" not in shell and "OPENAI_API_KEY" not in shell
@@ -190,13 +206,25 @@ def test_configuration_executes_selected_python_and_protects_credentials(
         check=True,
     )
     assert result.stdout.strip() == snapshot["local"]["prefix"]
-    assert effective["filesystem"][snapshot["local"]["prefix"]] == "read"
-    assert effective["filesystem"][str(owner / ".codex")] == "deny"
-    assert effective["filesystem"][str(owner / ".ssh")] == "deny"
+    assert effective["filesystem"][":root"] == "read"
+    assert effective["filesystem"][":tmpdir"] == "write"
+    assert effective["sandbox_mode"] == "workspace-write"
+    assert config.cwd == str(root / "work")
+    assert "deny" not in effective["filesystem"].values()
     global_instructions = next(
         x.split("=", 1)[1] for x in args if x.startswith("developer_instructions=")
     )
     assert json.loads(global_instructions) == environment.render(snapshot)
+
+
+def test_shell_environment_omits_unavailable_host_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path / "absent"))
+    shell = environment.shell_environment(None, tmp_path / "work")
+    assert shell["PATH"].split(os.pathsep) == list(
+        dict.fromkeys([str(Path(sys.executable).parent), *os.defpath.split(os.pathsep)])
+    )
+    assert shell["HOME"] == str(tmp_path / "work")
+    assert shell["TMPDIR"] == str(tmp_path / "work/tmp")
 
 
 def test_nonvenv_configuration_does_not_set_virtual_env(tmp_path, monkeypatch):

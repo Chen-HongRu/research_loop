@@ -286,7 +286,10 @@ def test_editor_without_saving_preserves_request_identity(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("mode", ["native", "host"])
-def test_request_permissions_are_read_only_in_both_modes(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("writable_study", [False, True])
+def test_request_permissions_follow_ordinary_writable_roots(
+    tmp_path, monkeypatch, mode, writable_study
+):
     from research_loop.codex import configuration
     from test_native import provider
 
@@ -295,14 +298,20 @@ def test_request_permissions_are_read_only_in_both_modes(tmp_path, monkeypatch, 
     _, effective = configuration(
         root,
         tmp_path,
-        [root / "work", root / "knowledge/draft"],
+        [root / "work", root / "knowledge/draft", *([root] if writable_study else [])],
         "synthetic-model",
         "medium",
         provider=provider(tmp_path, monkeypatch),
         delegation=mode,
     )
-    assert effective["filesystem"][str(root / "inputs")] == "read"
-    assert effective["filesystem"][str(root / "iterations")] == "read"
+    assert effective["filesystem"][":root"] == "read"
+    assert effective["filesystem"][":slash_tmp"] == "write"
+    assert effective["filesystem"][":tmpdir"] == "write"
+    assert str(root / "inputs") not in effective["filesystem"]
+    assert str(root / "iterations") not in effective["filesystem"]
+    assert (str(root) in effective["filesystem"]) == writable_study
+    if writable_study:
+        assert effective["filesystem"][str(root)] == "write"
     assert effective["filesystem"][str(root / "work")] == "write"
 
 
@@ -311,7 +320,9 @@ def test_request_permissions_are_read_only_in_both_modes(tmp_path, monkeypatch, 
     reason="Opt-in native sandbox command without a model call",
 )
 @pytest.mark.parametrize("mode", ["native", "host"])
-def test_native_sandbox_denies_request_write_without_model(tmp_path, monkeypatch, mode):
+def test_native_workspace_reads_request_and_writes_work_and_tmp_without_model(
+    tmp_path, monkeypatch, mode
+):
     from openai_codex.client import CodexClient
     from openai_codex.generated.v2_all import CommandExecResponse
     from research_loop.codex import configuration
@@ -337,12 +348,11 @@ def test_native_sandbox_denies_request_write_without_model(tmp_path, monkeypatch
         delegation=mode,
     )
     script = (
-        "from pathlib import Path\nimport sys\n"
+        "from pathlib import Path\nimport sys, tempfile\n"
         "request=Path(sys.argv[1])\nassert request.read_text()\n"
-        "try:\n request.write_text('forbidden')\n"
-        "except PermissionError:\n print('WRITE_DENIED')\n"
-        "else:\n raise RuntimeError('Request write was allowed')\n"
         "Path(sys.argv[2]).write_text('allowed')\nprint('WORK_WRITE_ALLOWED')\n"
+        "with tempfile.TemporaryDirectory() as folder:\n"
+        " Path(folder, 'probe').write_text('allowed')\nprint('TMP_WRITE_ALLOWED')\n"
     )
     with CodexClient(config) as client:
         client.initialize()
@@ -362,7 +372,7 @@ def test_native_sandbox_denies_request_write_without_model(tmp_path, monkeypatch
             response_model=CommandExecResponse,
         )
     assert response.exit_code == 0, response.stderr
-    assert "WRITE_DENIED" in response.stdout
+    assert "TMP_WRITE_ALLOWED" in response.stdout
     assert "WORK_WRITE_ALLOWED" in response.stdout
     assert human_input.admit(root) == request
 

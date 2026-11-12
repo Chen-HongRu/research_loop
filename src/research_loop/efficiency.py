@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from time import perf_counter
 
-from .identity import resolve
+from .identity import resolve, session_paths
 from .token_usage import AUTHORITY, TOKEN_KEYS, accept_record, cumulative_counts
 
 WAIT_TOOLS = {"wait", "wait_agent", "sleep"}
@@ -157,14 +157,26 @@ def report(
     # First lead.input is the default window start, independent of file order.
     events = []
     starts = []
+    streamed_threads = set()
     for row in reader.rows(root / "events.jsonl", "events"):
         at = reader.at(row, "events", "at")
         if at is None:
             continue
-        if row.get("event") == "lead.input" and row.get("thread_id") == lead:
+        if row.get("event") == "lead.input":
             starts.append(at)
         if row.get("event") == "resource.tool":
             events.append((at, row))
+        data = row.get("data")
+        if (
+            at < end
+            and row.get("event") == "codex.event"
+            and str(row.get("method", "")).endswith("/delta")
+            and isinstance(data, dict)
+            and isinstance(data.get("delta"), str)
+            and data["delta"]
+        ):
+            if isinstance(data.get("threadId"), str):
+                streamed_threads.add(data["threadId"])
     if start is None:
         start = min(starts) if starts else None
         if start is None:
@@ -175,10 +187,7 @@ def report(
     def inside(at):
         return at is not None and start is not None and start <= at < end
 
-    directory = (
-        Path(sessions_dir) if sessions_dir is not None else root / "native" / "sessions"
-    )
-    paths = sorted(directory.rglob("*.jsonl")) if directory.is_dir() else []
+    paths = session_paths(root, sessions_dir)
     if not paths:
         reader.problem("sessions", "missing")
     sessions = {}
@@ -238,7 +247,7 @@ def report(
         seen_calls = set()
         cumulative = _tokens()
         lifetime_responses = 0
-        consumption_evidence = False
+        consumption_evidence = tid in streamed_threads
         token_cutoff_reached = False
         started_at = first_tool_at = completed_at = None
         pending_waits = {}
@@ -396,7 +405,10 @@ def report(
     failed = Counter()
     empty_polls = 0
     output_bytes = 0
-    for at, event in events:
+    resource_events = [
+        (at, event) for at, event in events if event.get("resource_effect") is not False
+    ]
+    for at, event in resource_events:
         if not inside(at) or event.get("thread_id") != lead:
             continue
         name = event.get("tool", "unknown")
@@ -442,7 +454,7 @@ def report(
     else:
         ledger_path = root / "gpu-budget.json"
     resource_expected = bool(
-        explicit_ledger or resource_config or status.get("resource") or events
+        explicit_ledger or resource_config or status.get("resource") or resource_events
     )
     available = ledger_path.exists()
     ledger = (

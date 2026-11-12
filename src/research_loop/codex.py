@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import sys
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -17,8 +16,11 @@ from pydantic import BaseModel, RootModel
 from .environment import (
     prepend as environment_instructions,
     render as render_environment,
+    shell_environment,
 )
-from .delegation import DELEGATE_TOOL, WAIT_TOOL, HostDelegation
+from .delegation import DELEGATE_TOOL, WAIT_TOOL, HostDelegation, is_tool_item
+
+_INTERRUPT_TIMEOUT = 5.0
 
 
 @dataclass(frozen=True)
@@ -27,9 +29,11 @@ class Tool:
     description: str
     parameters: dict
     call: Callable[[dict], Awaitable[object]]
+    resource_effect: bool = True
 
     def descriptor(self):
         return {
+            "type": "function",
             "name": self.name,
             "description": self.description,
             "inputSchema": self.parameters,
@@ -128,7 +132,21 @@ def configuration(
     provider=None,
     delegation="native",
     execution_environment=None,
+    allow_tools=True,
+    allow_builtin_tools=True,
+    readable_roots=(),
+    denied_roots=(),
 ):
+    if delegation not in {"native", "host", "none"}:
+        raise ValueError("Delegation mode must be native, host or none")
+    if not allow_tools and delegation != "none":
+        raise ValueError("Tool-free transport requires delegation=none")
+    if not allow_builtin_tools and delegation == "native":
+        raise ValueError("Disabled built-in tools require delegation=host or none")
+    if denied_roots:
+        raise ValueError(
+            "Ordinary workspace-write does not support denied_roots overlays"
+        )
     home = root / "native"
     home.mkdir(mode=0o700, exist_ok=True)
     home.chmod(0o700)
@@ -138,51 +156,16 @@ def configuration(
             raise RuntimeError("Sign in to the official Codex CLI with ChatGPT first")
         if not (home / "auth.json").exists():
             (home / "auth.json").symlink_to(auth)
-    local = (
-        execution_environment["local"]
-        if execution_environment
-        else {
-            "executable": sys.executable,
-            "prefix": sys.prefix,
-            "base_prefix": sys.base_prefix,
-        }
+    # Ordinary workspace-write permits host reads, writes to the supplied work
+    # roots and temporary directories, and no custom deny mount overlays.
+    shell_root = root / "work"
+    (shell_root / "tmp").mkdir(parents=True, exist_ok=True)
+    writable_roots = list(
+        dict.fromkeys(str(path.resolve()) for path in [shell_root, *writable])
     )
-    paths = {
-        ":root": "deny",
-        ":minimal": "read",
-        ":slash_tmp": "deny",
-        ":tmpdir": "deny",
-    }
-    for path in (
-        project,
-        root,
-        Path(local["prefix"]),
-        Path(local["base_prefix"]),
-        Path(bundled_codex_path()).parent.parent,
-    ):
-        paths[str(path.resolve())] = "read"
-    base = Path(local["base_prefix"]).absolute()
-    if base.is_symlink() and base.parent not in {Path(base.anchor), Path.home()}:
-        paths[str(base.parent)] = "read"
-    for path in writable:
-        paths[str(path.resolve())] = "write"
-        for name in (".git", ".codex", ".agents", ".aws"):
-            paths[str(path.resolve() / name)] = "read"
-    # User requests and admitted snapshots stay read-only for lead and children,
-    # including when a Study is nested within an otherwise writable directory.
-    for path in (root / "inputs", root / "iterations"):
-        paths[str(path.resolve())] = "read"
-    for path in (Path.home() / ".codex", Path.home() / ".ssh", home):
-        paths[str(path.resolve())] = "deny"
-    shell_env = {
-        "PATH": str(Path(local["executable"]).parent) + ":" + os.defpath,
-        "HOME": str(root / "work"),
-        "TMPDIR": str(root / "work/tmp"),
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONNOUSERSITE": "1",
-    }
-    if local["prefix"] != local["base_prefix"]:
-        shell_env["VIRTUAL_ENV"] = local["prefix"]
+    paths = {":root": "read", ":slash_tmp": "write", ":tmpdir": "write"}
+    paths.update({path: "write" for path in writable_roots})
+    shell_env = shell_environment(execution_environment, shell_root)
     common = [
         "mcp_servers={}",
         "features.multi_agent_v2_dynamic_tools=false",
@@ -196,6 +179,9 @@ def configuration(
         "permissions.research.filesystem=" + _toml(paths),
         "permissions.research.network.enabled=false",
         'default_permissions="research"',
+        'sandbox_mode="workspace-write"',
+        "sandbox_workspace_write.writable_roots=" + json.dumps(writable_roots),
+        "sandbox_workspace_write.network_access=false",
         "model=" + json.dumps(model),
         "model_reasoning_effort=" + json.dumps(effort),
     ]
@@ -224,13 +210,17 @@ def configuration(
         "model": model,
         "effort": effort,
         "filesystem": paths,
+        "sandbox_mode": "workspace-write",
+        "cwd": str(shell_root),
         "network": False,
-        "native_multi_agent": True,
+        "native_multi_agent": delegation == "native",
+        "allow_tools": allow_tools,
+        "allow_builtin_tools": allow_tools and allow_builtin_tools,
         "child_dynamic_tools": False,
     }
     if provider is None:
         overrides = ['forced_login_method="chatgpt"']
-        if delegation == "host":
+        if delegation != "native":
             overrides.extend(
                 ["features.multi_agent=false", "features.multi_agent_v2=false"]
             )
@@ -247,7 +237,9 @@ def configuration(
                 f"The provider API key environment variable {key_env} is unset"
             )
         name = provider["name"]
-        catalog_version = None if delegation == "host" else PROVIDER_MULTI_AGENT_VERSION
+        catalog_version = (
+            None if delegation != "native" else PROVIDER_MULTI_AGENT_VERSION
+        )
         catalog = provider.get("model_catalog")
         if catalog is None:
             catalog = home / "models.json"
@@ -277,7 +269,7 @@ def configuration(
                     "The provider model catalog does not declare the configured model"
                 )
             if entry.get("multi_agent_version") != catalog_version:
-                if delegation == "host":
+                if delegation != "native":
                     raise RuntimeError(
                         "Host delegation requires a model catalog without "
                         "multi_agent_version so native subagent tools stay disabled"
@@ -294,7 +286,7 @@ def configuration(
         environment[key_env] = key
         overrides = [
             "features.multi_agent=false"
-            if delegation == "host"
+            if delegation != "native"
             else "features.multi_agent=true",
             "features.multi_agent_v2=false",
             *common,
@@ -317,6 +309,61 @@ def configuration(
             model_catalog=str(catalog),
             web_search=False,
         )
+    if not allow_tools or not allow_builtin_tools:
+        # Pinned CLI registers apply_patch from model metadata independently of
+        # shell feature flags. Remove that capability before any turn starts.
+        restricted = (
+            json.loads(Path(effective["model_catalog"]).read_text())
+            if effective.get("model_catalog")
+            else model_catalog(model, effort, 131072, multi_agent_version=None)
+        )
+        for entry in restricted["models"]:
+            entry.update(
+                apply_patch_tool_type=None,
+                shell_type="disabled",
+                multi_agent_version=None,
+                experimental_supported_tools=[],
+                supports_search_tool=False,
+                tool_mode=None,
+            )
+        restricted_path = home / "tool-free-models.json"
+        restricted_path.write_text(json.dumps(restricted, indent=2))
+        restricted_path.chmod(0o600)
+        overrides.append("model_catalog_json=" + json.dumps(str(restricted_path)))
+        effective["model_catalog"] = str(restricted_path)
+        overrides.extend(
+            [
+                'tool_mode="direct"',
+                "update_plan_enabled=false",
+                "experimental_request_user_input_enabled=false",
+                'web_search="disabled"',
+                "project_doc_max_bytes=0",
+                *[
+                    f"features.{feature}=false"
+                    for feature in (
+                        "shell_tool",
+                        "unified_exec",
+                        "code_mode_host",
+                        "computer_use",
+                        "browser_use",
+                        "view_image",
+                        "multi_agent",
+                        "multi_agent_v2",
+                        "plugins",
+                        "apps",
+                        "hooks",
+                        "sleep_tool",
+                        "token_budget",
+                        "current_time_reminder",
+                        "request_permissions_tool",
+                        "deferred_executor",
+                        "send_message_to_user_async",
+                        "tool_suggest",
+                    )
+                ],
+            ]
+        )
+        effective["web_search"] = False
     effective["delegation"] = delegation
     command = [
         "/usr/bin/env",
@@ -327,12 +374,15 @@ def configuration(
     for item in overrides:
         command.extend(["--config", item])
     command.extend(["app-server", "--listen", "stdio://"])
-    return CodexConfig(cwd=str(project), launch_args_override=tuple(command)), effective
+    return CodexConfig(
+        cwd=str(shell_root), launch_args_override=tuple(command)
+    ), effective
 
 
 class Native:
     def __init__(self, config, journal, tools=(), *, client_factory=CodexClient):
         self.journal = journal
+        self.cwd = config.cwd if config is not None else None
         self.tools = {tool.name: tool for tool in tools}
         self.client = client_factory(config=config, approval_handler=self._request)
         self.delegator = None
@@ -345,6 +395,10 @@ class Native:
         self.active = False
         self.settled = False
         self.closed = False
+        self.allow_tools = True
+        self.allow_builtin_tools = True
+        self.delegation_mode = "native"
+        self.tool_violation = None
 
     def _add_child(self, thread_id):
         with self.children_lock:
@@ -414,6 +468,12 @@ class Native:
         name = params.get("tool")
         success = False
         try:
+            if not self.allow_tools:
+                self.tool_violation = "Tool activity is forbidden for this context"
+                raise ValueError(self.tool_violation)
+            if not self.allow_builtin_tools and name not in self.tools:
+                self.tool_violation = "Unregistered tool activity is forbidden"
+                raise ValueError(self.tool_violation)
             if self.stopping or params.get("threadId") != self.thread_id:
                 raise ValueError(
                     "External resource tools are registered for the lead thread only"
@@ -429,6 +489,9 @@ class Native:
             tool=name,
             arguments=self._journal_arguments(name, params.get("arguments")),
             success=success,
+            resource_effect=self.tools[name].resource_effect
+            if name in self.tools
+            else True,
             output=self._journal_output(name, output),
         )
         return {
@@ -463,8 +526,12 @@ class Native:
                 "The exact configured model/reasoning effort is unavailable"
             )
 
-    def install_delegation(self, model, effort, roles_path=None, environment=None):
+    def install_delegation(
+        self, model, effort, roles_path=None, environment=None, shared_input=None
+    ):
         if self.delegator is not None:
+            self.delegator.allow_builtin_tools = self.allow_builtin_tools
+            self.delegator.shared_input = shared_input
             return
         self.delegator = HostDelegation(
             self.client,
@@ -474,6 +541,8 @@ class Native:
             roles_path=roles_path,
             on_thread=self._add_child,
             environment=environment,
+            shared_input=shared_input,
+            allow_builtin_tools=self.allow_builtin_tools,
         )
 
         async def delegate(arguments):
@@ -490,7 +559,11 @@ class Native:
             if spec["name"] in self.tools:
                 raise ValueError(f"Delegation tool name collides with {spec['name']}")
             self.tools[spec["name"]] = Tool(
-                spec["name"], spec["description"], spec["parameters"], call
+                spec["name"],
+                spec["description"],
+                spec["parameters"],
+                call,
+                resource_effect=False,
             )
 
     async def run(
@@ -506,34 +579,61 @@ class Native:
         delegation="native",
         roles_path=None,
         environment=None,
+        allow_tools=True,
+        allow_builtin_tools=True,
+        max_output_chars=None,
     ):
+        if max_output_chars is not None and (
+            type(max_output_chars) is not int or max_output_chars <= 0
+        ):
+            raise ValueError("max_output_chars must be a positive integer or None")
+        if delegation not in {"native", "host", "none"}:
+            raise ValueError("Delegation mode must be native, host or none")
+        if not allow_tools and (delegation != "none" or self.tools):
+            raise ValueError(
+                "Tool-free context requires no delegation or dynamic tools"
+            )
+        if not allow_builtin_tools and delegation == "native":
+            raise ValueError("Disabled built-in tools require delegation=host or none")
+        self.allow_tools = allow_tools
+        self.allow_builtin_tools = allow_tools and allow_builtin_tools
+        self.delegation_mode = delegation
         if environment is None and isinstance(payload, dict):
             environment = payload.get("execution_environment")
         instructions = environment_instructions(instructions, environment)
         if self.stopping:
             raise RuntimeError("Stop requested before model admission")
         if delegation == "host":
-            self.install_delegation(model, effort, roles_path, environment)
+            self.install_delegation(
+                model,
+                effort,
+                roles_path,
+                environment,
+                payload.get("shared_input") if isinstance(payload, dict) else None,
+            )
         definition = {
             "model": model,
             "allowProviderModelFallback": False,
             "developerInstructions": instructions,
-            "permissions": "research",
+            "sandbox": "workspace-write",
+            "cwd": self.cwd,
             "approvalPolicy": "never",
             "config": {"model_reasoning_effort": effort},
             "dynamicTools": [tool.descriptor() for tool in self.tools.values()],
         }
         if thread_id:
+            resume_options = {
+                "model": model,
+                "sandbox": "workspace-write",
+                "cwd": self.cwd,
+                "approvalPolicy": "never",
+                "excludeTurns": True,
+                "developerInstructions": instructions,
+            }
             result = await asyncio.to_thread(
                 self.client.thread_resume,
                 thread_id,
-                {
-                    "model": model,
-                    "permissions": "research",
-                    "approvalPolicy": "never",
-                    "excludeTurns": True,
-                    "developerInstructions": instructions,
-                },
+                resume_options,
             )
         else:
             result = await asyncio.to_thread(self.client.thread_start, definition)
@@ -566,6 +666,7 @@ class Native:
         if self.stopping:
             await self.stop()
         final = ""
+        stream_chars = 0
         while True:
             notification = await asyncio.to_thread(
                 self.client.next_turn_notification, self.turn_id
@@ -573,7 +674,32 @@ class Native:
             method = notification.method
             data = plain(notification.payload)
             self.journal.emit("codex.event", method=method, data=data)
+            if (
+                max_output_chars is not None
+                and method.endswith("/delta")
+                and "delta" in data
+            ):
+                stream_chars += len(str(data["delta"]))
             item = data.get("item", {})
+            kind = item.get("type", "")
+            delegation_item = kind in {"collabAgentToolCall", "subAgentActivity"}
+            tool_item = is_tool_item(item)
+            registered_tool = (
+                kind
+                in {
+                    "dynamicToolCall",
+                    "function_call",
+                    "custom_tool_call",
+                }
+                and item.get("tool", item.get("name")) in self.tools
+            )
+            if (
+                (not allow_tools and tool_item)
+                or (delegation == "none" and delegation_item)
+                or (not self.allow_builtin_tools and tool_item and not registered_tool)
+            ):
+                self.tool_violation = "Forbidden tool or delegation activity observed"
+                await self.stop()
             if item.get("type") == "collabAgentToolCall":
                 self._add_children(item.get("receiverThreadIds", []))
             if item.get("type") == "subAgentActivity":
@@ -584,9 +710,26 @@ class Native:
                 and item.get("phase") in (None, "final_answer")
             ):
                 final = item.get("text", "")
+            observed_chars = max(stream_chars, len(final))
+            if max_output_chars is not None and observed_chars > max_output_chars:
+                self.journal.emit(
+                    "native.output_limit",
+                    observed_chars=observed_chars,
+                    max_output_chars=max_output_chars,
+                )
+                output_violation = (
+                    "Native output exceeded max_output_chars "
+                    f"({observed_chars} > {max_output_chars})"
+                )
+                await self.stop()
+                # An interrupt receipt does not guarantee a terminal event.
+                # Leave active set until the owner reconciles and closes.
+                raise RuntimeError(output_violation)
             if method == "turn/completed":
                 self.active = False
                 turn = data["turn"]
+                if self.tool_violation:
+                    raise RuntimeError(self.tool_violation)
                 if turn["status"] != "completed":
                     raise RuntimeError(
                         f"Native turn ended: {turn['status']}; {turn.get('error')}"
@@ -643,9 +786,19 @@ class Native:
         if self.delegator is not None:
             await asyncio.to_thread(self.delegator.stop)
         if self.thread_id and self.turn_id and self.active and not self.closed:
-            await asyncio.to_thread(
-                self.client.turn_interrupt, self.thread_id, self.turn_id
-            )
+            try:
+                async with asyncio.timeout(_INTERRUPT_TIMEOUT):
+                    await asyncio.to_thread(
+                        self.client.turn_interrupt, self.thread_id, self.turn_id
+                    )
+            except TimeoutError as error:
+                # Cancelling to_thread does not stop its worker. Closing our
+                # transport releases the SDK's pending response waiters.
+                await self.close()
+                raise RuntimeError(
+                    "Native interrupt timed out; app-server closed; "
+                    "execution outcome requires reconciliation"
+                ) from error
 
     async def close(self):
         if not self.closed:

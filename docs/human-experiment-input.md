@@ -10,8 +10,7 @@ user-authorized Codex session.
 `RUN/inputs/human.md` is an optional UTF-8 request file. Only the user authors or
 revises requests, directly or through an explicitly authorized Codex session.
 Research agents receive a read-only snapshot; the controller
-may consume a completed request. File permissions must enforce the agent write
-boundary, rather than relying only on role instructions.
+may consume a completed request. Ordinary workspace-write excludes the Study inputs and snapshots from agent write roots. Keep the Study outside any writable ancestor or system temporary directory; there are no custom deny overlays. Reading unrelated requests or histories remains outside the specialist task contract.
 
 At iteration admission, the controller reads the file at this fixed path. A
 missing or whitespace-only file leaves autonomous planning unchanged. A nonempty

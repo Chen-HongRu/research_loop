@@ -108,6 +108,10 @@ def initialize(
     effort="medium",
     provider=None,
     delegation=None,
+    coordinator="router",
+    groups_file=None,
+    recover_exp=None,
+    input_refs=(),
 ):
     project, goal = project.resolve(strict=True), goal.resolve(strict=True)
     if not project.is_dir() or not goal.is_file():
@@ -116,6 +120,36 @@ def initialize(
         delegation = "host" if provider else "native"
     if delegation not in {"native", "host"}:
         raise ValueError("Delegation mode must be native or host")
+    if coordinator not in {"lead", "router"}:
+        raise ValueError("Coordinator must be lead or router")
+    if recover_exp is not None and (
+        groups_file is not None or resource_file is not None
+    ):
+        raise ValueError(
+            "Recovery uses the reference publication Group without resource execution"
+        )
+    admitted = [Path(ref).resolve(strict=True) for ref in input_refs]
+    if any(not ref.is_file() for ref in admitted):
+        raise ValueError("Initial artifact references must be existing files")
+    definitions = []
+    if coordinator == "router" or recover_exp is not None:
+        if groups_file is None:
+            from .workflow import definitions as reference_workflow
+
+            definitions = reference_workflow(
+                resource=resource_file is not None, recovery=recover_exp is not None
+            )
+        else:
+            from .group_router import catalog
+
+            definitions = catalog(groups_file)
+    elif groups_file is not None:
+        raise ValueError("--groups requires --coordinator router")
+    result_authors = [
+        d.id for d in definitions if d.settings.get("produces_study_result")
+    ]
+    if len(result_authors) > 1:
+        raise ValueError("Only one Group may author the Study result")
     config = {
         "version": 1,
         "project": str(project),
@@ -123,6 +157,8 @@ def initialize(
         "effort": effort,
         "provider": provider,
         "delegation": delegation,
+        "coordinator": coordinator,
+        "input_refs": [str(ref) for ref in admitted],
         "environment": environment.read_config(environment_file)
         if environment_file
         else None,
@@ -143,6 +179,48 @@ def initialize(
     root.mkdir(mode=0o700, parents=False, exist_ok=False)
     (root / "work/tmp").mkdir(parents=True)
     (root / "goal.md").write_text(goal_text)
+    if recover_exp is not None:
+        from .group_programs.exp_recovery import build_recovery_bundle
+        from .recovery import evidence_packet
+
+        manifest_path, manifest = build_recovery_bundle(
+            recover_exp, root / "inputs/exp-recovery"
+        )
+        evidence_packet(manifest_path)
+        config["recovery_bundle"] = str(manifest_path)
+        config["input_refs"] = list(
+            dict.fromkeys(
+                [
+                    *config["input_refs"],
+                    str(manifest_path),
+                    manifest["evaluation_ref"],
+                    *[entry["ref"] for entry in manifest["artifacts"]],
+                ]
+            )
+        )
+    if definitions:
+        import shutil
+        from .group_router import definition_record
+
+        programs = root / "groups/programs"
+        programs.mkdir(parents=True)
+        records = []
+        for definition in definitions:
+            if (
+                definition.program.suffix != ".py"
+                or definition.program.stat().st_size > 1024 * 1024
+            ):
+                raise ValueError("Group program must be a small Python source file")
+            source = programs / (definition.id + ".py")
+            shutil.copyfile(definition.program, source)
+            record = definition_record(definition)
+            record["program"] = str(source)
+            records.append(record)
+        config["groups"] = records
+        if result_authors:
+            config["study_result_group"] = result_authors[0]
+        if groups_file is None:
+            config["workflow"] = "research-v1"
     write_json(root / "config.json", config)
     Knowledge(root).prepare()
     write_json(
@@ -178,10 +256,15 @@ def inspect(root):
         resource_status=resource_status,
         tools=tools,
     )
-    return {
+    policy = instructions(mode, snapshot)
+    if config.get("coordinator") == "router":
+        from .group_router import POLICY
+
+        policy = POLICY
+    result = {
         "config": config,
         "delegation": mode,
-        "instructions": instructions(mode, snapshot),
+        "instructions": policy,
         "output_schema": RESULT_SCHEMA,
         "input": {
             "goal_file": str(root / "goal.md"),
@@ -194,23 +277,32 @@ def inspect(root):
             "execution_environment": snapshot,
             "human_request_file": str(root / "inputs/human.md"),
         },
-        "tools": tools,
+        "tools": [] if config.get("coordinator") == "router" else tools,
         "permissions": {
-            "read": list(
-                dict.fromkeys(
-                    [
-                        config["project"],
-                        str(root),
-                        snapshot["local"]["prefix"],
-                        snapshot["local"]["base_prefix"],
-                    ]
-                )
-            ),
-            "write": [str(root / "work"), str(root / "knowledge/draft")],
+            "sandbox_mode": "workspace-write",
+            "read": [":root"],
+            "write": (
+                []
+                if config.get("coordinator") == "router"
+                else [str(root / "work"), str(root / "knowledge/draft")]
+            )
+            + [":slash_tmp", ":tmpdir"],
+            "group_writable_roots": "per-Run work and native scratch"
+            if config.get("coordinator") == "router"
+            else None,
             "shell_network": False,
-            "external_tools": "lead-only",
+            "external_tools": "runtime-only"
+            if config.get("coordinator") == "router"
+            else "lead-only",
         },
     }
+    if config.get("recovery_bundle"):
+        from .recovery import evidence_packet
+
+        result["input"]["shared_input"] = evidence_packet(config["recovery_bundle"])
+        result["input"]["goal_text"] = (root / "goal.md").read_text()
+        result["input"]["input_refs"] = config["input_refs"]
+    return result
 
 
 async def run_iteration(root, state, previous_result, journal, native_factory):
@@ -273,25 +365,50 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
         adapter = resource(config, root)
         knowledge = Knowledge(root)
         baseline = knowledge.prepare()
-        native_config, effective = configuration(
-            root,
-            Path(config["project"]),
-            [root / "work", knowledge.draft],
-            config["model"],
-            config["effort"],
-            provider=config.get("provider"),
-            delegation=mode,
-            execution_environment=call["input"]["execution_environment"],
-        )
-        effective["delegation"] = mode
-        call["effective_native_permissions"] = effective
+        if config.get("recovery_bundle"):
+            from .recovery import stage_evidence
+
+            stage_evidence(root, config["recovery_bundle"])
+        if config.get("coordinator") == "router" or config.get("recovery_bundle"):
+            from .group_router import GroupCoordinator, POLICY
+
+            call["instructions"] = POLICY
+            call["delegation"] = "none"
+            call["effective_native_permissions"] = {
+                "coordinator": config["coordinator"],
+                "router_tools": False,
+                "resource_dispatch": "disabled"
+                if config.get("recovery_bundle")
+                else "runtime-only",
+            }
+            coordinator_type = GroupCoordinator
+            if config.get("coordinator") == "lead":
+                from .recovery import RecoveryLeadCoordinator
+
+                coordinator_type = RecoveryLeadCoordinator
+            native = coordinator_type(
+                root, config, journal, adapter, native_factory=native_factory
+            )
+        else:
+            native_config, effective = configuration(
+                root,
+                Path(config["project"]),
+                [root / "work", knowledge.draft],
+                config["model"],
+                config["effort"],
+                provider=config.get("provider"),
+                delegation=mode,
+                execution_environment=call["input"]["execution_environment"],
+            )
+            effective["delegation"] = mode
+            call["effective_native_permissions"] = effective
+            native = native_factory(
+                native_config, journal, adapter.tools() if adapter else []
+            )
         call["input"].update(
             iteration=state["iteration"], previous_iteration_result=previous_result
         )
         write_json(root / "call.json", call)
-        native = native_factory(
-            native_config, journal, adapter.tools() if adapter else []
-        )
         await native.open()
         watch = asyncio.create_task(observe_stop())
         await native.verify(
@@ -345,6 +462,7 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
             status="stopped" if (root / "STOP").exists() else "failed",
             error={"type": type(error).__name__, "message": str(error)},
         )
+        record_status(root, state)
         journal.emit("run.error", iteration=state["iteration"], error=state["error"])
         raise
     finally:
@@ -480,6 +598,22 @@ def main():
     )
     init.add_argument("--model")
     init.add_argument("--effort", default="medium")
+    init.add_argument("--coordinator", choices=("lead", "router"), default="router")
+    init.add_argument(
+        "--groups", type=Path, help="Versioned Group catalog for Router coordination"
+    )
+    init.add_argument(
+        "--recover-exp",
+        type=Path,
+        help="Reuse a settled Exp Run for recovery/publication only",
+    )
+    init.add_argument(
+        "--input-ref",
+        type=Path,
+        action="append",
+        default=[],
+        help="Admit an existing artifact by reference",
+    )
     init.add_argument("--provider", help="OpenAI-compatible provider name")
     init.add_argument(
         "--provider-base-url", help="Provider Responses API root, for example /v1"
@@ -560,6 +694,10 @@ def main():
                     effort=args.effort,
                     provider=provider_config(args),
                     delegation=args.delegation,
+                    coordinator=args.coordinator,
+                    groups_file=args.groups,
+                    recover_exp=args.recover_exp,
+                    input_refs=args.input_ref,
                 )
             elif args.command == "inspect":
                 result = inspect(root)
