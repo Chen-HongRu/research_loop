@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 import json
+import re
 from pathlib import Path
 from time import perf_counter
 
@@ -41,6 +42,80 @@ def _time(value: str) -> datetime:
     if result.tzinfo is None or result.utcoffset() is None:
         raise ValueError("timestamps must include a timezone")
     return result
+
+
+def frozen_configuration(root, read):
+    """Read only the active pointer and normalized small configuration metadata."""
+    active = read(Path(root) / "active.json", "active")
+    revision = active.get("revision")
+    if revision is None:
+        return {}
+    if not isinstance(revision, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", revision
+    ):
+        raise ValueError("Invalid active configuration revision")
+    config = read(Path(root) / "configurations" / revision / "config.json", "config")
+    if config and config.get("revision") != revision:
+        raise ValueError("Active configuration revision does not match its metadata")
+    return config
+
+
+def tool_outcome(payload):
+    """Use explicit structured outcomes; ordinary text is unmeasured."""
+    output = payload.get("output")
+    if isinstance(output, str):
+        try:
+            output = json.loads(output)
+        except ValueError:
+            output = None
+    values = [payload, output] if isinstance(output, dict) else [payload]
+    known = False
+    for value in values:
+        for key in ("isError", "is_error"):
+            if type(value.get(key)) is bool:
+                known = True
+                if value[key]:
+                    return "failed"
+        if type(value.get("success")) is bool:
+            known = True
+            if not value["success"]:
+                return "failed"
+        if type(value.get("exit_code")) is int:
+            known = True
+            if value["exit_code"] != 0:
+                return "failed"
+    return "succeeded" if known else "unknown"
+
+
+def tool_outcomes():
+    return {
+        "returned_calls": 0,
+        "failed_calls": 0,
+        "unknown_outcome_calls": 0,
+        "failed_by_tool": {},
+    }
+
+
+def aggregate_tool_outcomes(tasks):
+    result = tool_outcomes()
+    failed = Counter()
+    for task in tasks:
+        value = task["tool_outcomes"]
+        for key in ("returned_calls", "failed_calls", "unknown_outcome_calls"):
+            result[key] += value[key]
+        failed.update(value["failed_by_tool"])
+    result["failed_by_tool"] = dict(failed)
+    return result
+
+
+def record_tool_outcome(target, name, payload):
+    target["returned_calls"] += 1
+    outcome = tool_outcome(payload)
+    if outcome == "failed":
+        target["failed_calls"] += 1
+        target["failed_by_tool"][name] = target["failed_by_tool"].get(name, 0) + 1
+    elif outcome == "unknown":
+        target["unknown_outcome_calls"] += 1
 
 
 def _tokens(value=None):
@@ -145,25 +220,21 @@ def report(
     root = Path(root)
     reader = _Reader()
     status = reader.json(root / "status.json", "status")
-    lead = status.get("thread_id")
-    if not isinstance(lead, str) or not lead:
-        reader.problem("status", "missing_thread_id")
-        lead = None
+    if until is None and status.get("ended_at"):
+        end = reader.at(status, "status", "ended_at") or end
+    identity = reader.json(root / "run.json", "run")
+    config = frozen_configuration(root, reader.json)
     roles_path = root / "roles.json"
     roles = reader.json(roles_path, "roles") if roles_path.exists() else {}
     role_threads = roles.get("threads") if isinstance(roles, dict) else None
     if not isinstance(role_threads, dict):
         role_threads = {}
-    # First lead.input is the default window start, independent of file order.
     events = []
-    starts = []
     streamed_threads = set()
     for row in reader.rows(root / "events.jsonl", "events"):
         at = reader.at(row, "events", "at")
         if at is None:
             continue
-        if row.get("event") == "lead.input":
-            starts.append(at)
         if row.get("event") == "resource.tool":
             events.append((at, row))
         data = row.get("data")
@@ -178,9 +249,11 @@ def report(
             if isinstance(data.get("threadId"), str):
                 streamed_threads.add(data["threadId"])
     if start is None:
-        start = min(starts) if starts else None
-        if start is None:
-            reader.problem("events", "missing_lead_input")
+        declared = status.get("started_at") or identity.get("created_at")
+        if declared:
+            start = reader.at({"at": declared}, "run", "at")
+        else:
+            reader.problem("run", "missing_start_time")
     if start is not None and start >= end:
         raise ValueError("since must be earlier than until")
 
@@ -209,7 +282,6 @@ def report(
             continue
         sessions[tid] = (path, payload)
     identities = resolve(
-        lead,
         [
             {
                 "thread_id": tid,
@@ -226,8 +298,10 @@ def report(
         role_threads,
     )
     selected = identities.keys()
-    if lead and lead not in sessions:
-        reader.problem("sessions", "missing_lead")
+    if sessions.keys() - selected:
+        reader.problem("sessions", "unmapped_threads")
+    if role_threads.keys() - sessions.keys():
+        reader.problem("sessions", "mapped_history_missing")
     totals = _usage()
     by_role = {}
     tasks = []
@@ -250,6 +324,8 @@ def report(
         consumption_evidence = tid in streamed_threads
         token_cutoff_reached = False
         started_at = first_tool_at = completed_at = None
+        pending_tools = {}
+        outcomes = tool_outcomes()
         pending_waits = {}
         returned_waits = set()
         waits = {name: _waits() for name in sorted(WAIT_TOOLS)}
@@ -293,6 +369,13 @@ def report(
             }:
                 if first_tool_at is None:
                     first_tool_at = at.isoformat()
+                call_id = payload.get("call_id", payload.get("id"))
+                if (
+                    inside(at)
+                    and isinstance(call_id, str)
+                    and call_id not in seen_calls
+                ):
+                    pending_tools.setdefault(call_id, payload.get("name", "unknown"))
                 name = payload.get("name")
                 cid = payload.get("call_id", payload.get("id"))
                 if (
@@ -308,6 +391,8 @@ def report(
                 "custom_tool_call_output",
             }:
                 cid = payload.get("call_id")
+                if cid in pending_tools:
+                    record_tool_outcome(outcomes, pending_tools.pop(cid), payload)
                 if cid in pending_waits and cid not in returned_waits:
                     name, called_at = pending_waits[cid]
                     duration = (at - called_at).total_seconds()
@@ -359,7 +444,7 @@ def report(
                 continue
             if kind == "compacted":
                 usage["compactions"] += 1
-            if kind == "event_msg" and event == "task_complete" and tid != lead:
+            if kind == "event_msg" and event == "task_complete":
                 complete_threads.add(tid)
             if kind == "response_item" and event in {
                 "function_call",
@@ -390,6 +475,7 @@ def report(
                 "first_tool_at": first_tool_at,
                 "completed_at": completed_at,
                 "waits_by_tool": waits,
+                "tool_outcomes": outcomes,
                 "usage": _derived(usage),
                 "cumulative_window": _derived(cumulative),
                 "usage_records_observed": lifetime_responses,
@@ -409,7 +495,7 @@ def report(
         (at, event) for at, event in events if event.get("resource_effect") is not False
     ]
     for at, event in resource_events:
-        if not inside(at) or event.get("thread_id") != lead:
+        if not inside(at):
             continue
         name = event.get("tool", "unknown")
         calls[name] += 1
@@ -433,11 +519,6 @@ def report(
                 and not text.strip()
             ):
                 empty_polls += 1
-    config = (
-        reader.json(root / "config.json", "config")
-        if (root / "config.json").exists()
-        else {}
-    )
     explicit_ledger = ledger_path is not None
     resource_config = config.get("resource") or {}
     configured_ledger = (
@@ -452,13 +533,17 @@ def report(
             raise ValueError("configured ledger_path must be a nonempty path string")
         ledger_path = Path(configured_ledger)
     else:
-        ledger_path = root / "gpu-budget.json"
+        ledger_path = None
     resource_expected = bool(
         explicit_ledger or resource_config or status.get("resource") or resource_events
     )
-    available = ledger_path.exists()
+    if resource_expected and ledger_path is None:
+        reader.problem("ledger", "undeclared")
+    available = ledger_path is not None and ledger_path.exists()
     ledger = (
-        reader.json(ledger_path, "ledger") if available or resource_expected else {}
+        reader.json(ledger_path, "ledger")
+        if ledger_path is not None and (available or resource_expected)
+        else {}
     )
     allocation = {
         "available": available,
@@ -513,6 +598,11 @@ def report(
     allocation["states"] = dict(states)
     return {
         "schema_version": 2,
+        "configuration": {
+            "revision": config.get("revision"),
+            "router": config.get("router"),
+            "profiles": config.get("profiles", {}),
+        },
         "window": {
             "since": start.isoformat() if start else None,
             "until": end.isoformat(),
@@ -555,6 +645,7 @@ def report(
             "spawn_calls": tool_names["spawn_agent"],
             "descendant_threads_with_task_complete": len(complete_threads),
             "tool_calls_by_name": dict(tool_names),
+            "tool_outcomes": aggregate_tool_outcomes(tasks),
             "waits_by_tool": {
                 name: {
                     key: sum(task["waits_by_tool"][name][key] for task in tasks)
@@ -577,9 +668,10 @@ def report(
         "limitations": [
             "Usage is unique Study-wide response_id token_usage_record, assigned by notification time in [since, until), including compaction requests. Input includes cached and output includes reasoning; cumulative token_count is only a cross-check.",
             "Missing request records never fall back to cumulative counts. Threads with consumption evidence and no valid receipts are incomplete; threads without such evidence await first usage. This cannot detect every missing request within an otherwise recorded thread.",
-            "Host-delegated roles use roles.json; other delegates are inferred from task names. Confirmed descendants and mapped host threads are included. Native tool counts exclude calls nested in code execution.",
+            "Agent and Router identities use roles.json plus native session metadata; mapped threads and confirmed descendants are included. Unmapped histories remain a coverage gap. Native tool counts exclude calls nested in code execution.",
             "Allocation seconds are full settled elapsed time for jobs dispatched in the window, not window overlap or GPU core utilization; CANCELLED is a terminal state, not automatically failure.",
             "Wait durations sum observed call-to-return intervals for window-started calls returned before cutoff; parallel waits overlap and do not measure wall-clock time or waste.",
+            "Tool failures require structured isError/is_error, success or exit_code outcomes. Plain-text outputs are unmeasured; tool-free time is not labeled idle or waste.",
             "Coverage describes readable local records, not proof all remote/native activity was recorded; live sources are not an atomic snapshot. No inference of research quality, wasted work or monetary cost.",
         ],
     }

@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from research_loop.group_programs.synthesis import (
+from research_workflows.programs.synthesis import (
     analysis_schema,
     bind_recovery_analysis,
     recovery_author_schema,
 )
 from research_loop.groups import GroupDefinition, GroupRuntime
-from research_loop.human_input import result_schema
-from research_loop.instructions import RESULT_SCHEMA
+from research_workflows.contracts import result_schema
+from research_workflows.contracts import RESULT_SCHEMA
 
 
-PROGRAMS = Path(__file__).resolve().parents[1] / "src/research_loop/group_programs"
+PROGRAMS = Path(__file__).resolve().parents[1] / "src/research_workflows/programs"
 
 
 def write(path, value):
@@ -32,14 +32,17 @@ class Services:
         self.responses = responses
         self.calls = calls
         self.study_context = study_context
+        ctx.state["research_context"] = study_context
 
     async def call(self, role, context, instructions, payload, schema, **kwargs):
+        assert kwargs.pop("step_id") in {
+            entry["step_id"] for entry in self.ctx.state["research_steps"].values()
+        }
         packet = self.study_context.get("input", {}).get("shared_input", {})
         if isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1":
             assert kwargs == {
                 "allow_tools": False,
-                "include_role_template": False,
-                "max_output_chars": 4000 if role == "critic" else 12000,
+                "max_output_chars": 4000 if role == "critique" else 12000,
             }
         else:
             assert kwargs == {}
@@ -110,7 +113,12 @@ def artifact(row, name):
 
 
 def base(summary="authored assessment", help_text=""):
-    return {"summary": summary, "help": help_text, "artifacts": []}
+    return {
+        "summary": summary,
+        "status": "blocked" if help_text else "ready",
+        "help": help_text,
+        "artifacts": [],
+    }
 
 
 def synthesis_review(
@@ -234,8 +242,8 @@ def test_direction_authors_real_task_after_independent_exploration(tmp_path):
         "direction",
         [
             ("scout", base("An independently sourced alternative")),
-            ("proposer", authored),
-            ("critic", direction_review(reason=reason)),
+            ("propose", authored),
+            ("critique", direction_review(reason=reason)),
         ],
     )
 
@@ -244,7 +252,7 @@ def test_direction_authors_real_task_after_independent_exploration(tmp_path):
 
     row = asyncio.run(scenario())
     assert row["status"] == "returned", row
-    assert [call[0] for call in calls] == ["scout", "proposer", "critic"]
+    assert [call[0] for call in calls] == ["scout", "propose", "critique"]
     assert calls[0][1] != calls[1][1] != calls[2][1]
     assert row["output"]["completion"] == "completed"
     assert row["output"]["help"] == ""
@@ -278,7 +286,7 @@ def test_direction_reads_both_authored_documents_before_publishing(
     runtime, task, _ = setup(
         tmp_path,
         "direction",
-        [("proposer", colliding)],
+        [("propose", colliding)],
         request={"id": "explicit", "text": "One bounded synthetic experiment."},
     )
 
@@ -308,7 +316,7 @@ def test_explicit_experiment_does_not_burn_scout_budget(tmp_path, human):
     runtime, task, calls = setup(
         tmp_path,
         "direction",
-        [("proposer", proposal(consequential=False))],
+        [("propose", proposal(consequential=False))],
         request=request,
     )
     if not human:
@@ -322,7 +330,7 @@ def test_explicit_experiment_does_not_burn_scout_budget(tmp_path, human):
 
     row = asyncio.run(scenario())
     assert row["status"] == "returned", row
-    assert [call[0] for call in calls] == ["proposer"]
+    assert [call[0] for call in calls] == ["propose"]
     assert calls[0][3]["explicit_experiment"] is True
 
 
@@ -381,7 +389,7 @@ def test_direction_rejects_invalid_authored_file_references(
     runtime, task, calls = setup(
         tmp_path,
         "direction",
-        [("proposer", invalid)],
+        [("propose", invalid)],
         request={"id": "explicit", "text": "One bounded synthetic experiment."},
     )
 
@@ -392,7 +400,7 @@ def test_direction_rejects_invalid_authored_file_references(
     assert row["status"] == "failed", row
     assert error in row["error"]
     assert "private_external_content" not in row["error"]
-    assert [call[0] for call in calls] == ["proposer"]
+    assert [call[0] for call in calls] == ["propose"]
 
 
 @pytest.mark.parametrize("reason", ["", "   "])
@@ -400,7 +408,7 @@ def test_direction_critic_requires_nonempty_reason(tmp_path, reason):
     runtime, task, _ = setup(
         tmp_path,
         "direction",
-        [("proposer", proposal()), ("critic", direction_review(reason=reason))],
+        [("propose", proposal()), ("critique", direction_review(reason=reason))],
         request={"id": "explicit", "text": "One bounded synthetic experiment."},
     )
 
@@ -422,7 +430,7 @@ def test_direction_no_useful_action_keeps_authored_frontier_without_task(tmp_pat
     runtime, task, _ = setup(
         tmp_path,
         "direction",
-        [("scout", base()), ("proposer", no_action), ("critic", direction_review())],
+        [("scout", base()), ("propose", no_action), ("critique", direction_review())],
     )
 
     async def scenario():
@@ -447,16 +455,16 @@ def test_direction_feedback_revises_candidate_without_repeating_scout(tmp_path):
         "direction",
         [
             ("scout", base()),
-            ("proposer", wrong),
+            ("propose", wrong),
             (
-                "critic",
+                "critique",
                 direction_review(
                     "revise", "Direction needs the missing negative control."
                 ),
             ),
-            ("proposer", revised),
+            ("propose", revised),
             (
-                "critic",
+                "critique",
                 direction_review(reason="The supplied control resolves the concern."),
             ),
         ],
@@ -485,10 +493,10 @@ def test_direction_feedback_revises_candidate_without_repeating_scout(tmp_path):
     assert row["output"]["completion"] == "completed"
     assert [call[0] for call in calls] == [
         "scout",
-        "proposer",
-        "critic",
-        "proposer",
-        "critic",
+        "propose",
+        "critique",
+        "propose",
+        "critique",
     ]
     assert calls[1][1] != calls[3][1]
     assert calls[2][1] != calls[4][1]
@@ -507,13 +515,13 @@ def test_synthesis_delivers_dynamic_human_result_and_every_manifest_source(tmp_p
     )
     analysis = write(
         tmp_path / "exported-evaluate.json",
-        {"summary": "Actual independent evaluation", "help": ""},
+        {"summary": "Actual independent evaluation", "status": "ready", "help": ""},
     )
     authored = synthesis(request, executions=[execution], analyses=[analysis])
     runtime, task, calls = setup(
         tmp_path,
         "synthesis",
-        [("analyst", authored), ("critic", synthesis_review())],
+        [("analysis", authored), ("critique", synthesis_review())],
         request=request,
     )
 
@@ -540,7 +548,7 @@ def test_synthesis_delivers_dynamic_human_result_and_every_manifest_source(tmp_p
             d for d in authored["knowledge_files"] if d["source"] == entry["source"]
         )
         assert exported.read_text() == source["content"]
-    assert [call[0] for call in calls] == ["analyst", "critic"]
+    assert [call[0] for call in calls] == ["analysis", "critique"]
     assert "No-useful-action stop requires" in calls[-1][2]
 
 
@@ -553,7 +561,8 @@ def test_synthesis_author_selects_host_receipts_and_preserves_auxiliary_evidence
     }
     execution = write(tmp_path / "execution.json", {"exit_code": 0, "running": False})
     evaluation = write(
-        tmp_path / "evaluate.json", {"summary": "Observed result", "help": ""}
+        tmp_path / "evaluate.json",
+        {"summary": "Observed result", "status": "ready", "help": ""},
     )
     auxiliary = write(
         tmp_path / "runner-receipt.json", {"runner_exit_code": 0, "pytest_exit_code": 0}
@@ -563,7 +572,7 @@ def test_synthesis_author_selects_host_receipts_and_preserves_auxiliary_evidence
     runtime, task, calls = setup(
         tmp_path,
         "synthesis",
-        [("analyst", authored), ("critic", synthesis_review())],
+        [("analysis", authored), ("critique", synthesis_review())],
         request=request,
     )
 
@@ -591,14 +600,15 @@ def test_synthesis_rejects_auxiliary_primary_receipt_when_transport_bypasses_sch
 ):
     execution = write(tmp_path / "execution.json", {"exit_code": 0})
     evaluation = write(
-        tmp_path / "evaluate.json", {"summary": "Observed result", "help": ""}
+        tmp_path / "evaluate.json",
+        {"summary": "Observed result", "status": "ready", "help": ""},
     )
     auxiliary = write(
         tmp_path / "runner-receipt.json", {"runner_exit_code": 0, "pytest_exit_code": 0}
     )
     authored = synthesis(executions=[execution], analyses=[evaluation])
     authored[field].append(auxiliary)
-    runtime, task, calls = setup(tmp_path, "synthesis", [("analyst", authored)])
+    runtime, task, calls = setup(tmp_path, "synthesis", [("analysis", authored)])
 
     async def scenario():
         return await boundary(
@@ -644,8 +654,8 @@ def test_synthesis_accept_explanation_does_not_request_assistance(tmp_path):
         tmp_path,
         "synthesis",
         [
-            ("analyst", synthesis()),
-            ("critic", synthesis_review("accept", reason)),
+            ("analysis", synthesis()),
+            ("critique", synthesis_review("accept", reason)),
         ],
     )
 
@@ -662,7 +672,7 @@ def test_synthesis_accept_explanation_does_not_request_assistance(tmp_path):
     assert review["verdict"] == "accept"
     assert review["reason"] == reason
     assert "help" not in review
-    assert [call[0] for call in calls] == ["analyst", "critic"]
+    assert [call[0] for call in calls] == ["analysis", "critique"]
 
 
 def test_synthesis_keeps_admitted_citations_without_exporting_them_again(tmp_path):
@@ -691,9 +701,9 @@ def test_synthesis_keeps_admitted_citations_without_exporting_them_again(tmp_pat
         tmp_path,
         "synthesis",
         [
-            ("analyst", synthesis(help_text="Need the bounded feedback artifact.")),
-            ("analyst", analyze),
-            ("critic", critique),
+            ("analysis", synthesis(help_text="Need the bounded feedback artifact.")),
+            ("analysis", analyze),
+            ("critique", critique),
         ],
     )
 
@@ -735,7 +745,7 @@ def test_synthesis_rejects_unknown_external_artifact_with_field_location(tmp_pat
         }
 
     runtime, task, _ = setup(
-        tmp_path, "synthesis", [("analyst", synthesis()), ("critic", critique)]
+        tmp_path, "synthesis", [("analysis", synthesis()), ("critique", critique)]
     )
 
     async def scenario():
@@ -767,7 +777,7 @@ def test_preparation_or_failed_execution_cannot_complete_human_request(
     runtime, task, _ = setup(
         tmp_path,
         "synthesis",
-        [("analyst", synthesis(request, executions=[execution], analyses=[analysis]))],
+        [("analysis", synthesis(request, executions=[execution], analyses=[analysis]))],
         request=request,
     )
 
@@ -785,7 +795,7 @@ def test_human_result_must_keep_admitted_identity(tmp_path):
     request = {"id": "admitted-identity", "text": "Do the experiment."}
     authored = synthesis({"id": "invented-identity"})
     runtime, task, _ = setup(
-        tmp_path, "synthesis", [("analyst", authored)], request=request
+        tmp_path, "synthesis", [("analysis", authored)], request=request
     )
 
     async def scenario():
@@ -801,14 +811,18 @@ def test_blocked_independent_evaluation_cannot_complete_human_request(tmp_path):
     execution = write(tmp_path / "execution.json", {"exit_code": 0})
     evaluation = write(
         tmp_path / "evaluate.json",
-        {"summary": "Missing frozen evaluator", "help": "Need frozen evaluator"},
+        {
+            "summary": "Missing frozen evaluator",
+            "status": "blocked",
+            "help": "Need frozen evaluator",
+        },
     )
     runtime, task, _ = setup(
         tmp_path,
         "synthesis",
         [
             (
-                "analyst",
+                "analysis",
                 synthesis(request, executions=[execution], analyses=[evaluation]),
             )
         ],
@@ -844,11 +858,11 @@ def test_no_useful_action_stop_requires_direction_frontier_evidence(
     )
     if with_direction:
         authored["direction_refs"] = [direction]
-    responses = [("analyst", authored)]
+    responses = [("analysis", authored)]
     if with_direction:
         responses.append(
             (
-                "critic",
+                "critique",
                 synthesis_review(reason="The Direction evidence supports Study stop."),
             )
         )
@@ -884,17 +898,17 @@ def test_synthesis_feedback_corrects_real_result_and_knowledge_without_compute(
         tmp_path,
         "synthesis",
         [
-            ("analyst", wrong),
+            ("analysis", wrong),
             (
-                "critic",
+                "critique",
                 synthesis_review(
                     "revise",
                     "Claim conflicts with the negative observation; revise it.",
                 ),
             ),
-            ("analyst", revised),
+            ("analysis", revised),
             (
-                "critic",
+                "critique",
                 synthesis_review(
                     reason="Direction evidence supports the continuing action."
                 ),
@@ -932,7 +946,12 @@ def test_synthesis_feedback_corrects_real_result_and_knowledge_without_compute(
 
     row = asyncio.run(scenario())
     assert row["output"]["completion"] == "completed"
-    assert [call[0] for call in calls] == ["analyst", "critic", "analyst", "critic"]
+    assert [call[0] for call in calls] == [
+        "analysis",
+        "critique",
+        "analysis",
+        "critique",
+    ]
     assert calls[0][1] != calls[2][1]
     assert calls[1][1] != calls[3][1]
     assert (
@@ -954,7 +973,7 @@ def test_knowledge_delivery_cannot_write_outside_run_or_publication(
 ):
     authored = synthesis()
     authored["knowledge_files"][0].update(source=bad_source, target=bad_target)
-    runtime, task, _ = setup(tmp_path, "synthesis", [("analyst", authored)])
+    runtime, task, _ = setup(tmp_path, "synthesis", [("analysis", authored)])
 
     async def scenario():
         return await boundary(runtime, await runtime.start("synthesis", task, []))
@@ -993,18 +1012,18 @@ def test_diagnosis_feedback_corrects_diagnosis_then_obtains_fresh_review(
         tmp_path,
         "diagnosis",
         [
-            ("experimenter", diagnose),
+            ("diagnose", diagnose),
             (
-                "critic",
+                "critique",
                 {
                     **base(help_text="Need fixture identity."),
                     "diagnosis": "Missing identity",
                     "review_required": False,
                 },
             ),
-            ("experimenter", revise),
+            ("diagnose", revise),
             (
-                "critic",
+                "critique",
                 {
                     **base(),
                     "diagnosis": "Repair scope supported",
@@ -1044,10 +1063,10 @@ def test_diagnosis_feedback_corrects_diagnosis_then_obtains_fresh_review(
     assert artifact(row, "repair.patch").is_file()
     assert artifact(row, "repair.patch").read_text().startswith("Revised patch")
     assert [call[0] for call in calls] == [
-        "experimenter",
-        "critic",
-        "experimenter",
-        "critic",
+        "diagnose",
+        "critique",
+        "diagnose",
+        "critique",
     ]
     assert "Never edit the original Run" in calls[0][2]
 
@@ -1057,11 +1076,19 @@ def recovery_candidate(tmp_path):
     execution = write(tmp_path / "execution.json", {"exit_code": 0})
     evaluation = write(
         tmp_path / "evaluation.json",
-        {"summary": "The formal criterion was satisfied.", "help": ""},
+        {
+            "summary": "The formal criterion was satisfied.",
+            "status": "ready",
+            "help": "",
+        },
     )
     original = write(
         tmp_path / "original-evaluation.json",
-        {"summary": "Original independent assessment.", "help": "publication boundary"},
+        {
+            "summary": "Original independent assessment.",
+            "status": "ready",
+            "help": "publication boundary",
+        },
     )
     packet = {
         "kind": "exp-recovery-v1",
@@ -1137,7 +1164,7 @@ def test_recovery_synthesis_has_inline_tool_free_author_and_candidate_review(tmp
     runtime, task, calls = setup(
         tmp_path,
         "synthesis",
-        [("analyst", compact_recovery(authored)), ("critic", review)],
+        [("analysis", compact_recovery(authored)), ("critique", review)],
         request=request,
         shared_input=packet,
     )
@@ -1149,7 +1176,7 @@ def test_recovery_synthesis_has_inline_tool_free_author_and_candidate_review(tmp
     assert row["status"] == "returned", row
     assert row["output"]["completion"] == "completed"
     assert len(calls) == 2
-    assert [call[0] for call in calls] == ["analyst", "critic"]
+    assert [call[0] for call in calls] == ["analysis", "critique"]
     for call in calls:
         assert call[3]["recovery_evidence"] == packet
         assert call[3]["study_context"]["input"]["human_request"] == request
@@ -1193,7 +1220,7 @@ def test_recovery_completion_requires_original_identity_and_final_disposition(
     runtime, task, calls = setup(
         tmp_path,
         "synthesis",
-        [("analyst", authored)],
+        [("analysis", authored)],
         request=request,
         shared_input=packet,
     )
@@ -1245,7 +1272,7 @@ def test_recovery_rejects_oversized_output_and_reserved_archive_targets(
     runtime, task, calls = setup(
         tmp_path,
         "synthesis",
-        [("analyst", authored)],
+        [("analysis", authored)],
         request=request,
         shared_input=packet,
     )
@@ -1260,7 +1287,7 @@ def test_recovery_rejects_oversized_output_and_reserved_archive_targets(
 
 
 def test_recovery_author_schema_bounds_do_not_change_normal_schema():
-    from research_loop.group_programs.synthesis import analysis_schema
+    from research_workflows.programs.synthesis import analysis_schema
 
     schema = result_schema(RESULT_SCHEMA, None)
     normal = analysis_schema(schema)
@@ -1290,7 +1317,7 @@ def test_recovery_synthesis_without_admitted_human_request(tmp_path):
     runtime, task, calls = setup(
         tmp_path,
         "synthesis",
-        [("analyst", compact_recovery(authored)), ("critic", synthesis_review())],
+        [("analysis", compact_recovery(authored)), ("critique", synthesis_review())],
         shared_input=packet,
     )
 
@@ -1358,7 +1385,15 @@ def test_recovery_binder_preserves_science_and_is_idempotent(tmp_path):
 
 @pytest.mark.parametrize(
     "field",
-    ["summary", "help", "stop_basis", "knowledge_files", "study_action", "limitations"],
+    [
+        "summary",
+        "status",
+        "help",
+        "stop_basis",
+        "knowledge_files",
+        "study_action",
+        "limitations",
+    ],
 )
 def test_recovery_binder_rejects_missing_scientific_fields(tmp_path, field):
     request, packet, authored, refs = recovery_candidate(tmp_path)
@@ -1405,7 +1440,10 @@ def test_recovery_binder_preserves_authored_disposition_and_help(tmp_path):
     request, packet, authored, refs = recovery_candidate(tmp_path)
     candidate = compact_recovery(authored)
     candidate.update(
-        summary="Scientific correction needed", help="Review uncertainty", stop_basis=""
+        summary="Scientific correction needed",
+        status="blocked",
+        help="Review uncertainty",
+        stop_basis="",
     )
     candidate["study_result"].update(
         goal="not-achieved",
@@ -1435,9 +1473,9 @@ def test_recovery_scientific_critic_can_request_revision(tmp_path):
         tmp_path,
         "synthesis",
         [
-            ("analyst", compact_recovery(authored)),
+            ("analysis", compact_recovery(authored)),
             (
-                "critic",
+                "critique",
                 synthesis_review(
                     "revise",
                     "Preserve the original uncertainty in the scientific prose.",
@@ -1476,3 +1514,269 @@ def test_recovery_scientific_content_headroom_boundary(tmp_path, characters):
         assert content.startswith("x" * characters)
         assert len(content) <= 3200
         assert bind_recovery_analysis(bound, sources) == bound
+
+
+def test_synthesis_ready_notes_and_ready_evaluation_complete_request(tmp_path):
+    request = {"id": "bounded-request", "text": "Compute and evaluate once."}
+    execution = write(tmp_path / "execution.json", {"exit_code": 0})
+    note = "No blocker; preserve the stated limitations."
+    evaluation = write(
+        tmp_path / "evaluate.json",
+        {"summary": "Observed 42", "status": "ready", "help": note},
+    )
+    authored = synthesis(request, executions=[execution], analyses=[evaluation])
+    authored["help"] = note
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analysis", authored), ("critique", synthesis_review())],
+        request=request,
+    )
+
+    async def scenario():
+        run_id = await runtime.start("synthesis", task, [execution, evaluation])
+        await boundary(runtime, run_id)
+        runtime.hold(run_id)
+        await runtime.resume(run_id, [evaluation])
+        return await boundary(runtime, run_id)
+
+    row = asyncio.run(scenario())
+    assert row["output"]["completion"] == "completed"
+    assert [call[0] for call in calls] == ["analysis", "critique"]
+    assert json.loads(artifact(row, "analysis.json").read_text())["help"] == note
+    assert (
+        json.loads(artifact(row, "study-result.json").read_text())["human_request"][
+            "status"
+        ]
+        == "completed"
+    )
+
+
+@pytest.mark.parametrize("status", ["blocked", "invalid"])
+def test_synthesis_cannot_complete_request_from_nonready_evaluation(tmp_path, status):
+    request = {"id": "bounded-request", "text": "Compute and evaluate once."}
+    execution = write(tmp_path / "execution.json", {"exit_code": 0})
+    evaluation = write(
+        tmp_path / "evaluate.json",
+        {"summary": "Unsettled evaluation", "status": status, "help": ""},
+    )
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [
+            (
+                "analysis",
+                synthesis(request, executions=[execution], analyses=[evaluation]),
+            )
+        ],
+        request=request,
+    )
+
+    async def scenario():
+        return await boundary(
+            runtime, await runtime.start("synthesis", task, [execution, evaluation])
+        )
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "failed"
+    assert "Blocked or missing evaluation" in row["error"]
+    assert [call[0] for call in calls] == ["analysis"]
+
+
+def test_diagnosis_ready_notes_preserve_independent_review(tmp_path):
+    note = "No blocker; operator may inspect the report."
+    diagnosis = {
+        **base(),
+        "help": note,
+        "diagnosis": "Observed a missing synthetic fixture.",
+        "review_required": True,
+    }
+    review = {
+        **base(),
+        "help": note,
+        "diagnosis": "The bounded repair is supported.",
+        "review_required": False,
+    }
+    runtime, task, calls = setup(
+        tmp_path, "diagnosis", [("diagnose", diagnosis), ("critique", review)]
+    )
+
+    async def scenario():
+        run_id = await runtime.start("diagnosis", task, [])
+        await boundary(runtime, run_id)
+        runtime.hold(run_id)
+        await runtime.resume(run_id, [task])
+        return await boundary(runtime, run_id)
+
+    row = asyncio.run(scenario())
+    assert row["output"]["completion"] == "completed"
+    assert [call[0] for call in calls] == ["diagnose", "critique"]
+    for name in ("diagnose", "critique"):
+        assert json.loads(artifact(row, f"{name}.json").read_text())["help"] == note
+
+
+@pytest.mark.parametrize("stage", ["scout", "propose"])
+def test_direction_ready_scout_with_informational_help_advances(tmp_path, stage):
+    note = "No Scout blocker. Proposer and independent Critic should finalize the question."
+
+    def author(ctx, payload):
+        record = proposal()(ctx, payload)
+        if stage == "propose":
+            record["help"] = note
+        return record
+
+    runtime, task, calls = setup(
+        tmp_path,
+        "direction",
+        [
+            (
+                "scout",
+                {**base(help_text=note if stage == "scout" else ""), "status": "ready"},
+            ),
+            ("propose", author),
+            ("critique", direction_review()),
+        ],
+    )
+
+    async def scenario():
+        run_id = await runtime.start("direction", task, [])
+        first = await boundary(runtime, run_id)
+        runtime.hold(run_id)
+        await runtime.resume(run_id, [task])
+        final = await boundary(runtime, run_id)
+        assert final["output"]["completion"] == first["output"]["completion"]
+        return final
+
+    row = asyncio.run(scenario())
+    assert [call[0] for call in calls] == ["scout", "propose", "critique"]
+    assert row["output"]["completion"] == "completed"
+    assert row["output"]["help"] == ""
+    assert json.loads(artifact(row, f"{stage}.json").read_text())["help"] == note
+
+
+def test_direction_blocked_scout_waits_for_feedback(tmp_path):
+    help_text = "Supply the approved missing input."
+    runtime, task, calls = setup(
+        tmp_path,
+        "direction",
+        [
+            ("scout", base(help_text=help_text)),
+            ("scout", base()),
+            ("propose", proposal()),
+            ("critique", direction_review()),
+        ],
+    )
+
+    async def scenario():
+        run_id = await runtime.start("direction", task, [])
+        first = await boundary(runtime, run_id)
+        assert first["output"]["completion"] == "blocked"
+        assert first["output"]["help"] == help_text
+        assert [call[0] for call in calls] == ["scout"]
+        runtime.hold(run_id)
+        await runtime.resume(run_id, [])
+        await boundary(runtime, run_id)
+        assert [call[0] for call in calls] == ["scout"]
+        runtime.hold(run_id)
+        await runtime.resume(run_id, [task])
+        return await boundary(runtime, run_id)
+
+    row = asyncio.run(scenario())
+    assert row["output"]["completion"] == "completed"
+    assert [call[0] for call in calls] == ["scout", "scout", "propose", "critique"]
+
+
+@pytest.mark.parametrize(
+    "status,help_text", [(None, ""), ("other", ""), ("blocked", "  ")]
+)
+@pytest.mark.parametrize("program", ["direction", "synthesis", "diagnosis"])
+def test_stage_rejects_missing_invalid_status_or_empty_blocker(
+    tmp_path, program, status, help_text
+):
+    record = {**base(help_text=help_text), "status": status}
+    if status is None:
+        del record["status"]
+    role = {"direction": "scout", "synthesis": "analysis", "diagnosis": "diagnose"}[
+        program
+    ]
+    runtime, task, calls = setup(tmp_path, program, [(role, record)])
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start(program, task, []))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "failed"
+    assert "status" in row["error"]
+    assert len(calls) == 1
+
+
+def test_recovery_synthesis_ready_note_advances_without_reauthoring(tmp_path):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    note = "No blocker; retain the original evidence and limitations."
+    authored["help"] = note
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analysis", compact_recovery(authored)), ("critique", synthesis_review())],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        identity = await runtime.start("synthesis", task, refs)
+        first = await boundary(runtime, identity)
+        assert first["output"]["completion"] == "completed", first
+        runtime.hold(identity)
+        await runtime.resume(identity, refs)
+        return await boundary(runtime, identity)
+
+    row = asyncio.run(scenario())
+    assert row["output"]["completion"] == "completed", row
+    assert [call[0] for call in calls] == ["analysis", "critique"]
+    analysis = json.loads(artifact(row, "analysis.json").read_text())
+    assert analysis["status"] == "ready" and analysis["help"] == note
+    assert (
+        json.loads(artifact(row, "study-result.json").read_text())["human_request"][
+            "status"
+        ]
+        == "completed"
+    )
+
+
+def test_recovery_synthesis_blocked_status_preserves_assistance_boundary(tmp_path):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    authored.update(
+        status="blocked",
+        help="Need the missing scientific authorization.",
+        study_result="",
+        knowledge_files=[],
+    )
+    compact = {
+        key: value
+        for key, value in authored.items()
+        if key not in {"artifacts", "execution_refs", "analysis_refs", "direction_refs"}
+    }
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analysis", compact)],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        identity = await runtime.start("synthesis", task, refs)
+        row = await boundary(runtime, identity)
+        runtime.hold(identity)
+        return runtime.observe(identity), row
+
+    held, row = asyncio.run(scenario())
+    assert held["status"] == "held"
+    assert (
+        row["output"]["completion"] == "blocked"
+        and row["output"]["help"] == authored["help"]
+    )
+    assert [call[0] for call in calls] == ["analysis"]
+    assert not any(
+        Path(ref).name == "study-result.json" for ref in row["output"]["artifacts"]
+    )

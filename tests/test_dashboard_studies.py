@@ -99,7 +99,7 @@ def test_http_scopes_state_metrics_tools_and_unknown_ids(tmp_path):
             state = get(f"/api/state?study={sid}")
             assert state["goal"] == path.name
             assert state["agents"][0]["task_name"] == f"{path.name}-review"
-            assert state["agents"][0]["role_source"] == "host-role-record"
+            assert state["agents"][0]["role_source"] == "thread-record"
             assert (
                 state["history"]["iterations"][0]["result"]["summary"]
                 == f"{path.name} result"

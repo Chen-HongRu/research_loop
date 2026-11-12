@@ -62,12 +62,12 @@ class Journal:
 
 
 class PublicationStopped(RuntimeError):
-    """STOP was observed before the staged knowledge pointer was activated."""
+    """STOP was observed before the staged publication pointer was activated."""
 
 
-class Knowledge:
+class PublicationStore:
     def __init__(self, root: Path):
-        self.root = root / "knowledge"
+        self.root = root / "outputs"
         self.current = self.root / "current"
         self.draft = self.root / "draft"
 
@@ -77,9 +77,7 @@ class Knowledge:
         if not self.current.exists():
             initial = versions / "initial"
             initial.mkdir(exist_ok=False)
-            (initial / "index.md").write_text(
-                "# Research knowledge\n\nNo reviewed findings have been published.\n"
-            )
+            (initial / "index.md").write_text("# Outputs\n\nNo published outputs.\n")
             self.current.symlink_to(
                 Path("versions") / "initial", target_is_directory=True
             )
@@ -90,29 +88,32 @@ class Knowledge:
     def published_state(self):
         if not self.current.exists():
             return None
-        version = self.current.resolve().name
+        target = self.current.resolve()
+        if target.parent != (self.root / "versions").resolve():
+            raise ValueError("Publication pointer must select its own version tree")
+        version = target.name
         path = self.root / "publications" / (version + ".json")
         if not path.exists():
             return None
         state = json.loads(path.read_text())
-        if state.get("knowledge_version") != version:
-            raise ValueError("Publication metadata does not match active knowledge")
+        if state.get("publication_version") != version:
+            raise ValueError("Publication metadata does not match active publication")
         return state
 
     def publish(self, baseline: str, publication=None):
         with (self.root / "publish.lock").open("a") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX)
             if str(self.current.resolve()) != baseline:
-                raise RuntimeError("Published knowledge changed since this draft began")
+                raise RuntimeError("Published outputs changed since this draft began")
             if self.draft.is_symlink() or not self.draft.is_dir():
-                raise ValueError("Knowledge draft must be a real directory")
+                raise ValueError("Publication draft must be a real directory")
             # Follow no links or special files into canonical data or secrets.
             for parent, dirs, files in os.walk(self.draft, followlinks=False):
                 for name in dirs + files:
                     path = Path(parent) / name
                     if path.is_symlink() or not (path.is_file() or path.is_dir()):
                         raise ValueError(
-                            "Knowledge draft must contain regular files/directories"
+                            "Publication draft must contain regular files/directories"
                         )
             version = uuid4().hex
             destination = self.root / "versions" / version
@@ -123,16 +124,21 @@ class Knowledge:
                 shutil.copytree(self.draft, destination)
                 if publication is not None:
                     metadata.parent.mkdir(exist_ok=True)
-                    write_json(metadata, {**publication, "knowledge_version": version})
+                    write_json(
+                        metadata, {**publication, "publication_version": version}
+                    )
                 pointer.symlink_to(Path("versions") / version, target_is_directory=True)
                 if (self.root.parent / "STOP").exists():
                     raise PublicationStopped(
-                        "STOP recorded before knowledge activation"
+                        "STOP recorded before publication activation"
                     )
                 pointer.replace(self.current)
             except BaseException:
                 pointer.unlink(missing_ok=True)
-                metadata.unlink(missing_ok=True)
-                shutil.rmtree(destination, ignore_errors=True)
+                # Activation can succeed immediately before an interruption is
+                # raised. Never delete the version selected by the commit fact.
+                if self.current.resolve() != destination.resolve():
+                    metadata.unlink(missing_ok=True)
+                    shutil.rmtree(destination, ignore_errors=True)
                 raise
             return version

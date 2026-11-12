@@ -73,18 +73,10 @@ def test_history_orders_numerically_and_marks_unfinished_iterations(tmp_path):
     assert "STALE_ROOT_RESULT" not in json.dumps(history)
 
 
-def test_history_uses_legacy_result_only_without_archive(tmp_path):
-    assert research_history(tmp_path) == {
-        "iterations": [],
-        "counts": {"total": 0, "with_result": 0, "missing_result": 0},
-    }
+def test_history_requires_an_iteration_archive(tmp_path):
     write_record(tmp_path, "status.json", {"status": "completed"})
-    write_record(tmp_path, "result.json", {"summary": "Legacy conclusion"})
-    legacy = research_history(tmp_path)["iterations"][0]
-    assert legacy["iteration"] is None
-    assert legacy["status"] == "completed"
-    assert legacy["source"] == "result.json"
-    assert legacy["result"]["summary"] == "Legacy conclusion"
+    write_record(tmp_path, "result.json", {"summary": "Root result is not an archive"})
+    assert research_history(tmp_path)["iterations"] == []
     write_record(tmp_path, "iterations/000002/status.json", {"status": "running"})
     assert [row["iteration"] for row in research_history(tmp_path)["iterations"]] == [2]
 

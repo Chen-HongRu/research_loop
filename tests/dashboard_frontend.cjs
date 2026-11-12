@@ -58,7 +58,7 @@ const catalog = { default: 'a', studies: [{ id: 'a', name: 'Alpha', status: 'run
 const overview = name => ({ as_of: '2026-01-01T12:00:00Z', status: { status: 'stopped', iteration: 50 }, research: { summary: { text: `${name} latest report`, iteration: 49, stale: true, source: 'iterations/000049/result.json' }, next_action: { text: 'Recorded recommendation', iteration: 49 } }, publication: { status: 'unpublished' }, stats: { agents: 3, working: 0, completed: 2 } });
 const history = (page = 1, status = 'completed') => ({ page, total_pages: 5, page_size: 10, counts: { total: 50, with_result: 49, missing_result: 1 }, iterations: [{ iteration: page === 1 ? 50 : 40, status, result_available: status === 'completed', summary_preview: 'Bounded preview' }, { iteration: page === 1 ? 49 : 39, status: 'completed', result_available: true, summary_preview: 'Previous report' }] });
 const iteration = (n, summary) => ({ iteration: n, status: 'completed', result_available: true, result: { summary, limitations: ['Synthetic limit'], evidence_refs: ['public-reference'] }, publication: { status: 'unknown' } });
-const agents = (role = 'Scout', status = 'working') => ({ page: 1, total_pages: 2, total: 21, agents: [{ id: 'task', title: `${role} task`, role, role_source: 'host-role-record', iteration: 50, iteration_source: 'time-range', status, history_available: false, preview: 'Short task preview' }] });
+const agents = (role = 'custom-reader', status = 'working') => ({ page: 1, total_pages: 2, total: 21, agents: [{ id: 'task', title: `${role} task`, role, role_source: 'thread-record', iteration: 50, iteration_source: 'time-range', status, history_available: false, preview: 'Short task preview' }] });
 (async () => {
   run(fs.readFileSync(path.join(frontend, 'app.js'), 'utf8'));
   await respond('studies', {}, catalog);
@@ -100,14 +100,14 @@ const agents = (role = 'Scout', status = 'working') => ({ page: 1, total_pages: 
   run("renderIteration({...ui.data.history.iterations[0],publication:{status:'historical'}})"); assert.match(el('iteration-detail').textContent, /历史发布记录（非当前）/);
 
   // A filter response cannot replace a later filter's list.
-  nav('agents'); change('role-filter', 'Critic'); await respond('agents', { role: 'Critic' }, agents('Critic'));
-  await respond('agents', { role: 'all' }, agents('Scout'));
-  assert.match(el('agent-list').textContent, /Critic task/); assert.doesNotMatch(el('agent-list').textContent, /Scout task/);
-  el('agent-list').children[0].dispatch('click'); await respond('agent', { id: 'task' }, { ...agents('Critic').agents[0], messages: [], result: 'Initial return' });
+  nav('agents'); change('role-filter', 'custom-reviewer'); await respond('agents', { role: 'custom-reviewer' }, agents('custom-reviewer'));
+  await respond('agents', { role: 'all' }, agents('custom-reader'));
+  assert.match(el('agent-list').textContent, /custom-reviewer task/); assert.doesNotMatch(el('agent-list').textContent, /custom-reader task/);
+  el('agent-list').children[0].dispatch('click'); await respond('agent', { id: 'task' }, { ...agents('custom-reviewer').agents[0], messages: [], result: 'Initial return' });
   assert.match(el('agent-detail').textContent, /原生会话历史不可用/);
   // Changed task status refreshes the selected detail without replacing selection.
-  run('refresh();'); await respond('studies', {}, catalog); await respond('overview', {}, overview('Beta')); await respond('agents', { role: 'Critic' }, agents('Critic', 'completed'));
-  await respond('agent', { id: 'task' }, { ...agents('Critic', 'completed').agents[0], messages: [], result: 'Final return' });
+  run('refresh();'); await respond('studies', {}, catalog); await respond('overview', {}, overview('Beta')); await respond('agents', { role: 'custom-reviewer' }, agents('custom-reviewer', 'completed'));
+  await respond('agent', { id: 'task' }, { ...agents('custom-reviewer', 'completed').agents[0], messages: [], result: 'Final return' });
   assert.match(el('agent-detail').textContent, /Final return/); assert.equal(run('ui.agent'), 'task');
   // Transient background detail failure preserves readable data and its observation time.
   const detailObservedAt = run("detailObserved.get('agent:task')");
@@ -115,14 +115,14 @@ const agents = (role = 'Scout', status = 'working') => ({ page: 1, total_pages: 
   assert.match(el('agent-detail').textContent, /Final return/); assert.match(el('agent-detail').textContent, /HTTP 500.*保留上次记录/);
   assert.ok(el('agent-detail').textContent.includes(detailObservedAt));
   // Identical recovered data must clear the stale notice without replacing the result.
-  run("loadDetail('agent', 'task', true)"); await respond('agent', { id: 'task' }, { ...agents('Critic', 'completed').agents[0], messages: [], result: 'Final return' });
+  run("loadDetail('agent', 'task', true)"); await respond('agent', { id: 'task' }, { ...agents('custom-reviewer', 'completed').agents[0], messages: [], result: 'Final return' });
   assert.match(el('agent-detail').textContent, /Final return/); assert.equal(el('agent-detail').querySelector('.detail-refresh-error'), undefined);
   run("loadDetail('agent', 'task', true)"); await respond('agent', { id: 'task' }, {}, 404);
   assert.match(el('agent-detail').textContent, /详情不可用.*HTTP 404/); assert.doesNotMatch(el('agent-detail').textContent, /Final return/);
   // Filter changes keep a selected off-page ID explicit; missing detail gives a real error.
-  change('role-filter', 'Analyst'); await respond('agents', { role: 'Analyst' }, { ...agents(), agents: [] }); await respond('agent', { id: 'task' }, {}, 404);
+  change('role-filter', 'custom-analyst'); await respond('agents', { role: 'custom-analyst' }, { ...agents(), agents: [] }); await respond('agent', { id: 'task' }, {}, 404);
   assert.match(el('agent-detail').textContent, /task.*不可用.*HTTP 404/);
-  run('refresh();'); await respond('studies', {}, catalog); await respond('overview', {}, overview('Beta')); await respond('agents', { role: 'Analyst' }, { ...agents(), agents: [] }); await respond('agent', { id: 'task' }, { ...agents('Critic', 'completed').agents[0], messages: [], result: 'Off-page completion' });
+  run('refresh();'); await respond('studies', {}, catalog); await respond('overview', {}, overview('Beta')); await respond('agents', { role: 'custom-analyst' }, { ...agents(), agents: [] }); await respond('agent', { id: 'task' }, { ...agents('custom-reviewer', 'completed').agents[0], messages: [], result: 'Off-page completion' });
   assert.match(el('agent-detail').textContent, /Off-page completion/); assert.match(el('agent-detail').textContent, /不在当前页/);
   // Context is on-demand; ordinary refresh never fetches it twice.
   nav('context'); await respond('state', {}, { goal: 'Synthetic goal', research: {}, curves: {} });

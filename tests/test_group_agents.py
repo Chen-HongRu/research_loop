@@ -1,46 +1,52 @@
-"""Synthetic leaf transport and real local CPU execution, without model calls."""
+"""Declarative Agent identity, lifecycle and cancellation without model calls."""
 
 import asyncio
-import importlib.util
 import json
-import shlex
-import signal
-import sys
-import venv
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-from research_loop.codex import Native, Tool, configuration
-from research_loop.environment import observe
 from openai_codex.client import CodexConfig
-from research_loop.group_agents import GROUP_GUARD, NativeGroupServices
+
+from research_loop.group_agents import NativeGroupServices
 from research_loop.state import Journal
+
+
+class Trace:
+    def __init__(self):
+        self.rows = []
+
+    def begin(self, kind, label, **data):
+        identifier = f"call-{len(self.rows)}"
+        self.rows.append({"id": identifier, "kind": kind, "label": label, **data})
+        return identifier
+
+    def end(self, identifier, status, **data):
+        self.rows.append({"id": identifier, "status": status, **data})
 
 
 class FakeNative:
     instances = []
-    outputs = []
 
     def __init__(self, config, journal):
         self.config = config
         self.calls = []
         self.lifecycle = []
-        self.thread_id = None
         self.instances.append(self)
 
     async def open(self):
         self.lifecycle.append("open")
 
-    async def verify(self, *args, **kwargs):
+    async def verify(self, *args):
         self.lifecycle.append("verify")
 
     async def run(self, instructions, payload, schema, **kwargs):
-        self.calls.append((instructions, payload, kwargs))
+        self.calls.append((instructions, payload, schema, kwargs))
         self.thread_id = kwargs["thread_id"] or f"thread-{len(self.instances)}"
         kwargs["on_started"](self.thread_id)
-        return self.outputs.pop(0) if self.outputs else {"ok": True}
+        return {"ok": True}
+
+    async def stop(self):
+        self.lifecycle.append("stop")
 
     async def settle(self):
         self.lifecycle.append("settle")
@@ -48,17 +54,21 @@ class FakeNative:
     async def close(self):
         self.lifecycle.append("close")
 
-    async def stop(self):
-        self.lifecycle.append("stop")
-
 
 @pytest.fixture
 def context(tmp_path, monkeypatch):
-    FakeNative.instances, FakeNative.outputs = [], []
-    monkeypatch.setattr(
-        "research_loop.group_agents.configuration",
-        lambda *a, **kw: (CodexConfig(), {"delegation": kw["delegation"]}),
-    )
+    FakeNative.instances = []
+
+    def configure(root, project, writable, model, effort, **kwargs):
+        return CodexConfig(cwd=str(root / "work")), {
+            "model": model,
+            "effort": effort,
+            "allow_tools": kwargs["allow_tools"],
+            "cwd": str(root / "work"),
+            "delegation": "none",
+        }
+
+    monkeypatch.setattr("research_loop.group_agents.configuration", configure)
     root = tmp_path / "groups/run-1"
     work = root / "work"
     work.mkdir(parents=True)
@@ -68,241 +78,87 @@ def context(tmp_path, monkeypatch):
         work=work,
         study_root=tmp_path,
         state={},
-        definition=SimpleNamespace(settings={}),
-        saves=0,
+        config_revision="revision-1",
         round=1,
+        trace=Trace(),
+        definition=SimpleNamespace(
+            settings={},
+            agents={"draft": "writer", "refine": "writer", "verify": "checker"},
+        ),
     )
-
-    def save():
-        ctx.saves += 1
-        (root / "state.json").write_text(json.dumps(ctx.state))
-
-    ctx.save_state = save
+    ctx.save_state = lambda: (root / "state.json").write_text(json.dumps(ctx.state))
     return ctx
 
 
-def services(ctx, tools=()):
+def services(ctx):
     journal = Journal(ctx.root / "events.jsonl")
     return NativeGroupServices(
         ctx,
         {
+            "revision": ctx.config_revision,
             "project": str(ctx.work),
-            "model": "gpt-6.1-sol",
-            "effort": "medium",
-            "resource": {"remote_root": "/authorized synthetic root"}
-            if tools
-            else None,
+            "profiles": {
+                "fast": {"model": "gpt-6.1-sol", "effort": "medium"},
+                "deep": {"model": "gpt-6-astra", "effort": "high"},
+            },
+            "agents": {
+                "writer": {
+                    "instructions": "Write the assigned artifact.",
+                    "profile": "fast",
+                    "tools": "workspace",
+                    "output_schema": {"type": "object"},
+                },
+                "checker": {
+                    "instructions": "Check the supplied evidence.",
+                    "profile": "deep",
+                    "tools": "none",
+                    "output_schema": None,
+                },
+            },
         },
         journal,
-        tools,
         native_factory=FakeNative,
     ), journal
 
 
-def test_context_reuse_fresh_roles_and_settled_lifecycle(context):
+def test_explicit_reuse_and_fresh_sessions_use_actual_profile(context):
     async def check():
         service, journal = services(context)
-        await service.call("proposer", "implementation", "refine", {}, {})
-        await service.call("experimenter", "implementation", "implement", {}, {})
-        await service.call("analyst", "analysis", "analyze", {}, {})
-        await service.call("critic", "critique", "challenge", {}, {})
-        instances = FakeNative.instances
-        assert instances[0].thread_id == instances[1].thread_id
-        assert len({instances[i].thread_id for i in (1, 2, 3)}) == 3
-        assert all(item.calls[0][0] == GROUP_GUARD for item in instances)
-        assert all(item.calls[0][2]["delegation"] == "none" for item in instances)
-        assert all(
-            item.lifecycle == ["open", "verify", "settle", "close"]
-            for item in instances
-        )
-        with pytest.raises(ValueError, match="independent"):
-            await service.call("critic", "analysis", "bad", {}, {})
-        await service.settle()
-        await service.close()
-        journal.close()
-        roles = json.loads((context.study_root / "roles.json").read_text())["threads"]
-        assert len(roles) == 3
-        assert all(row["group_run_id"] == context.run_id for row in roles.values())
-        assert roles[instances[1].thread_id]["role"] == "experimenter"
-
-    asyncio.run(check())
-
-
-def test_group_call_can_disable_tools_in_transport_and_native(context, monkeypatch):
-    configured = []
-
-    def configure(*args, **kwargs):
-        configured.append(kwargs)
-        return CodexConfig(), {"allow_tools": kwargs["allow_tools"]}
-
-    monkeypatch.setattr("research_loop.group_agents.configuration", configure)
-
-    async def check():
-        service, journal = services(context)
-        await service.call(
-            "analyst", "synthesis", "summarize", {}, {}, allow_tools=False
-        )
-        assert configured[0]["allow_tools"] is False
-        assert FakeNative.instances[0].calls[0][2]["allow_tools"] is False
-        assert context.state["native_calls"][0]["effective"]["allow_tools"] is False
-        await service.close()
-        journal.close()
-
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("recovery", [False, True])
-def test_recovery_evidence_is_serialized_once_without_mutating_inputs(
-    context, recovery
-):
-    async def check():
-        service, journal = services(context)
-        evidence = {"reference": "synthetic unique marker"}
-        service.study_context["input"].update(
-            shared_input=evidence, scoped_metadata={"scope": "synthetic"}
-        )
-        payload = {"study_context": json.loads(json.dumps(service.study_context))}
-        if recovery:
-            payload["recovery_evidence"] = evidence
-        original_payload = json.loads(json.dumps(payload))
-        original_context = json.loads(json.dumps(service.study_context))
-
-        await service.call("analyst", "synthesis", "summarize", payload, {})
-
-        packet = FakeNative.instances[0].calls[0][1]
-        assert json.dumps(packet).count("synthetic unique marker") == (
-            1 if recovery else 2
-        )
-        if recovery:
-            assert "study_context" not in packet
-        scopes = (packet["assignment"],) if recovery else (packet, packet["assignment"])
-        for scope in scopes:
-            assert scope["study_context"]["input"]["scoped_metadata"] == {
-                "scope": "synthetic"
-            }
-            assert ("shared_input" in scope["study_context"]["input"]) is not recovery
-        assert payload == original_payload
-        assert service.study_context == original_context
-        assert context.state["native_study_context"] == original_context
-        await service.close()
-        journal.close()
-
-    asyncio.run(check())
-
-
-def test_contexts_cannot_cross_run_and_stop_admission(context):
-    service, journal = services(context)
-    context.run_id = "another-run"
-    with pytest.raises(ValueError, match="another GroupRun"):
-        services(context)
-    context.run_id = "run-1"
-    (context.study_root / "STOP").touch()
-    with pytest.raises(RuntimeError, match="Stop requested"):
-        asyncio.run(service.call("experimenter", "implementation", "run", {}, {}))
-    assert not FakeNative.instances
-    journal.close()
-
-
-def test_call_failure_is_unknown_and_always_settles_closes(context):
-    class Failing(FakeNative):
-        async def run(self, *args, **kwargs):
-            raise RuntimeError("synthetic turn failure")
-
-    async def check():
-        service, journal = services(context)
-        service.native_factory = Failing
-        with pytest.raises(RuntimeError, match="synthetic"):
-            await service.call("experimenter", "implementation", "run", {}, {})
-        assert FakeNative.instances[-1].lifecycle[-3:] == ["stop", "settle", "close"]
-        with pytest.raises(RuntimeError, match="reconciliation"):
-            await service.call("experimenter", "implementation", "repeat", {}, {})
-        with pytest.raises(RuntimeError, match="reconciliation"):
-            await service.settle()
-        journal.close()
-
-    asyncio.run(check())
-
-
-def test_local_cpu_receipt_is_durable_and_never_repeated(context):
-    async def check():
-        service, journal = services(context)
-        command = f"{sys.executable} -c 'from pathlib import Path; Path(\"answer\").write_text(str(6 * 7))'"
-        receipt = await service.execute_prepared(command, backend="local")
-        assert receipt["exit_code"] == 0
-        assert (context.work / "answer").read_text() == "42"
-        (context.work / "answer").unlink()
-        assert await service.execute_prepared(command, backend="local") == receipt
-        assert not (context.work / "answer").exists()
-        await service.settle()
-        await service.close()
-        journal.close()
-
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("virtualenv", [True, False])
-def test_prepared_local_command_uses_selected_runtime(context, monkeypatch, virtualenv):
-    selected = context.root / "selected runtime"
-    python = selected / "bin/python"
-    if virtualenv:
-        venv.EnvBuilder(with_pip=False, symlinks=True).create(selected)
-        sites = list((selected / "lib").glob("python*/site-packages"))
-        assert len(sites) == 1
-        metadata = sites[0] / "synthetic_marker-7.1.dist-info"
-        metadata.mkdir()
-        (metadata / "METADATA").write_text(
-            "Metadata-Version: 2.1\nName: synthetic-marker\nVersion: 7.1\n"
-        )
-    else:
-        python.parent.mkdir(parents=True)
-        python.symlink_to(sys._base_executable)
-    snapshot = observe({"python": str(python)})
-    monkeypatch.setenv("PYTHONHOME", str(context.root / "wrong python home"))
-    monkeypatch.setenv("PYTHONPATH", str(context.root / "wrong import path"))
-    monkeypatch.setenv("VIRTUAL_ENV", str(context.root / "wrong virtualenv"))
-    monkeypatch.setenv("PYTHONNOUSERSITE", "0")
-    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "0")
-    monkeypatch.setenv("PREPARED_COMMAND_SETTING", "preserved")
-    script = context.work / "runtime witness.py"
-    script.write_text(
-        "import importlib.metadata, json, os, sys\n"
-        "from pathlib import Path\n"
-        "Path('witness.json').write_text(json.dumps({\n"
-        "'executable': sys.executable, 'prefix': sys.prefix,\n"
-        "'packages': {d.metadata['Name']: d.version "
-        "for d in importlib.metadata.distributions() if d.metadata['Name']},\n"
-        "'environment': {key: os.environ[key] for key in "
-        "('HOME', 'TMPDIR', 'VIRTUAL_ENV', 'PYTHONHOME', 'PYTHONPATH', 'PYTHONNOUSERSITE', "
-        "'PYTHONDONTWRITEBYTECODE', 'PREPARED_COMMAND_SETTING') "
-        "if key in os.environ},\n"
-        "'tmp_exists': Path(os.environ['TMPDIR']).is_dir()}))\n"
-    )
-
-    async def check():
-        service, journal = services(context)
-        service.config["execution_environment"] = snapshot
         try:
-            receipt = await service.execute_prepared(
-                "python " + shlex.quote(str(script)), backend="local"
+            await service.call(
+                "draft", "shared", "draft", {"value": 1}, step_id="explicit-step"
             )
-            assert receipt["exit_code"] == 0, Path(receipt["log_path"]).read_text()
-            witness = json.loads((context.work / "witness.json").read_text())
-            assert witness["executable"] == str(python)
-            assert witness["prefix"] == snapshot["local"]["prefix"]
-            if virtualenv:
-                assert witness["packages"]["synthetic-marker"] == "7.1"
-            env = witness["environment"]
-            assert "PYTHONHOME" not in env
-            assert "PYTHONPATH" not in env
-            assert env.get("VIRTUAL_ENV") == (
-                snapshot["local"]["prefix"] if virtualenv else None
+            await service.call("refine", "shared", "refine", {}, session="reuse")
+            await service.call("verify", "separate", "check", {})
+            await service.call("draft", "shared", "fresh", {})
+            instances = FakeNative.instances
+            assert instances[0].thread_id == instances[1].thread_id
+            assert len({item.thread_id for item in instances}) == 3
+            assert all(
+                item.lifecycle == ["open", "verify", "settle", "close"]
+                for item in instances
             )
-            assert env["HOME"] == str(context.work)
-            assert env["TMPDIR"] == str(context.work / "tmp")
-            assert witness["tmp_exists"]
-            assert env["PYTHONNOUSERSITE"] == "1"
-            assert env["PYTHONDONTWRITEBYTECODE"] == "1"
-            assert env["PREPARED_COMMAND_SETTING"] == "preserved"
+            assert instances[2].calls[0][3]["model"] == "gpt-6-astra"
+            assert instances[2].calls[0][3]["allow_tools"] is False
+            assert instances[0].calls[0][0] == "Write the assigned artifact."
+            calls = context.state["native_calls"]
+            assert calls[0]["session_id"] == calls[1]["session_id"]
+            assert calls[3]["session_id"] != calls[0]["session_id"]
+            assert all(row["thread_id"] and row["call_id"] for row in calls)
+            assert calls[0]["parent_step_id"] == "explicit-step"
+            assert calls[1]["parent_step_id"] is None
+            assert calls[1]["binding"] == "refine"
+            assert calls[2]["effective"]["allow_tools"] is False
+            assert len(context.state["native_sessions"]) == 3
+            mapping = json.loads((context.study_root / "roles.json").read_text())[
+                "threads"
+            ]
+            assert set(mapping) == {item.thread_id for item in instances}
+            assert {row["role"] for row in mapping.values()} == {"writer", "checker"}
+            assert all(
+                row["group_run_id"] == context.run_id and row["status"] == "completed"
+                for row in mapping.values()
+            )
             await service.settle()
         finally:
             await service.close()
@@ -311,636 +167,176 @@ def test_prepared_local_command_uses_selected_runtime(context, monkeypatch, virt
     asyncio.run(check())
 
 
-def test_unknown_resource_dispatch_is_not_retried(context):
-    calls = []
-
-    async def uncertain(args):
-        calls.append(args)
-        assert context.state["executions"]["experiment"]["status"] == "dispatching"
-        raise RuntimeError("transport lost after dispatch")
-
-    async def check():
-        service, journal = services(context, [Tool("gpu_exec", "fake", {}, uncertain)])
-        with pytest.raises(RuntimeError, match="transport lost"):
-            await service.execute_prepared("prepared")
-        with pytest.raises(RuntimeError, match="never redispatch"):
-            await service.execute_prepared("prepared")
-        assert len(calls) == 1
-        with pytest.raises(RuntimeError, match="reconciliation"):
-            await service.settle()
-        journal.close()
-
-    asyncio.run(check())
-
-
-def test_resource_command_polls_same_tool_instance_until_terminal(context):
-    calls = []
-
-    async def execute(args):
-        calls.append(("exec", args))
-        return {"session_id": "original", "running": True, "exit_code": None}
-
-    async def poll(args):
-        calls.append(("poll", args))
-        return {
-            "session_id": "original",
-            "running": False,
-            "exit_code": 0,
-            "log_path": "synthetic.log",
-        }
-
-    async def check():
-        service, journal = services(
-            context,
-            [Tool("gpu_exec", "fake", {}, execute), Tool("gpu_poll", "fake", {}, poll)],
-        )
-        receipt = await service.execute_prepared("prepared")
-        assert receipt["exit_code"] == 0
-        assert calls == [
-            ("exec", {"command": service._resource_command("prepared")}),
-            ("poll", {"session_id": "original"}),
-        ]
-        assert await service.execute_prepared("prepared") == receipt
-        assert len(calls) == 2
-        await service.settle()
-        journal.close()
-
-    asyncio.run(check())
-
-
-def test_exp_adapter_small_cpu_path_and_resumed_phases(context):
-    path = Path(__file__).parents[1] / "src/research_loop/group_programs/exp.py"
-    spec = importlib.util.spec_from_file_location("exp_group_test", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    plan = context.work / "plan.md"
-    plan.write_text("Compute 6 * 7 and report the value; synthetic CPU test only.")
-    context.definition.settings = {
-        "plan": str(plan),
-        "execution_backend": "local",
-        "critic": True,
-    }
-    scientific_plan = context.work / "scientific-plan.md"
-    scientific_plan.write_text(
-        "One bounded synthetic CPU experiment; preserve the supplied task."
-    )
-    FakeNative.outputs = [
-        {
-            "summary": "planned",
-            "help": "",
-            "artifacts": [str(scientific_plan)],
-            "command": "",
-            "plan_artifact": str(scientific_plan),
-        },
-        {
-            "summary": "prepared",
-            "help": "",
-            "artifacts": [],
-            "command": f'{sys.executable} -c \'from pathlib import Path; Path("result.json").write_text("42")\'',
-            "result_file": "result.json",
-        },
-        {
-            "summary": "Observed 42; synthetic CPU evidence only",
-            "help": "",
-            "artifacts": [],
-            "command": "",
-            "claim": "The synthetic command wrote 42.",
-            "evidence": ["result.json"],
-            "limitations": ["Synthetic CPU check only"],
-        },
-    ]
-
+def test_reuse_rejects_missing_identity_different_agent_and_tools(context):
     async def check():
         service, journal = services(context)
-        context.services = service
-        output = await module.run(context, {"task_ref": str(plan)})
-        assert output["completion"] == "completed"
-        assert "42" in output["summary"]
-        assert all(Path(p).is_relative_to(context.work) for p in output["artifacts"])
-        assert len(FakeNative.instances) == 3
-        assert await module.run(context, {"task_ref": str(plan)}) == output
-        assert len(FakeNative.instances) == 3
-        await service.settle()
-        await service.close()
-        journal.close()
-
-    asyncio.run(check())
-
-
-def test_tool_free_and_leaf_configuration(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    (home / ".codex").mkdir(parents=True)
-    (home / ".codex/auth.json").write_text("synthetic")
-    monkeypatch.setattr(Path, "home", lambda: home)
-    config, effective = configuration(
-        tmp_path,
-        tmp_path,
-        [],
-        "gpt-6.1-sol",
-        "medium",
-        delegation="none",
-        allow_tools=False,
-    )
-    args = config.launch_args_override
-    for feature in (
-        "shell_tool",
-        "unified_exec",
-        "code_mode_host",
-        "multi_agent",
-        "multi_agent_v2",
-        "browser_use",
-    ):
-        assert f"features.{feature}=false" in args
-    assert 'web_search="disabled"' in args
-    assert not effective["native_multi_agent"]
-    assert not effective["allow_tools"]
-    entry = json.loads(Path(effective["model_catalog"]).read_text())["models"][0]
-    assert entry["apply_patch_tool_type"] is None
-    assert entry["shell_type"] == "disabled"
-
-
-def test_tool_free_native_rejects_activity_and_dynamic_callback(context):
-    class Client:
-        def __init__(self, **kwargs):
-            self.interrupted = False
-            self.events = iter(
-                [
-                    ("item/started", {"item": {"type": "commandExecution"}}),
-                    ("turn/completed", {"turn": {"status": "interrupted"}}),
-                ]
-            )
-
-        def start(self):
-            pass
-
-        def initialize(self):
-            pass
-
-        def close(self):
-            pass
-
-        def thread_start(self, definition):
-            return {
-                "thread": {"id": "router"},
-                "model": "gpt-6.1-sol",
-                "reasoningEffort": "medium",
-            }
-
-        def turn_start(self, *args):
-            return {"turn": {"id": "turn"}}
-
-        def next_turn_notification(self, *args):
-            method, payload = next(self.events)
-            return SimpleNamespace(method=method, payload=payload)
-
-        def turn_interrupt(self, *args):
-            self.interrupted = True
-
-    async def check():
-        journal = Journal(context.root / "native-events")
-        native = Native(None, journal, client_factory=Client)
-        await native.open()
-        with pytest.raises(RuntimeError, match="Forbidden tool"):
-            await native.run(
-                "router",
-                {},
-                {},
-                model="gpt-6.1-sol",
-                effort="medium",
-                delegation="none",
-                allow_tools=False,
-            )
-        assert native.client.interrupted
-        rejected = await native._tool(
-            {"threadId": "router", "tool": "blocked", "arguments": {}}
-        )
-        assert not rejected["success"]
-        assert native.delegator is None
-        await native.close()
-        journal.close()
-
-    asyncio.run(check())
-
-
-def test_real_runtime_exp_hold_feedback_resumes_only_blocked_evaluate(
-    tmp_path, monkeypatch
-):
-    from research_loop.groups import GroupDefinition, GroupRuntime
-
-    FakeNative.instances, FakeNative.outputs = (
-        [],
-        [
-            {
-                "summary": "planned",
-                "help": "",
-                "artifacts": ["scientific-plan.md"],
-                "command": "",
-                "plan_artifact": "scientific-plan.md",
-            },
-            {
-                "summary": "prepared",
-                "help": "",
-                "artifacts": [],
-                "command": f'{sys.executable} -c \'from pathlib import Path; p=Path("dispatches"); p.write_text(p.read_text()+"once" if p.exists() else "once")\'',
-                "result_file": "dispatches",
-            },
-            {
-                "summary": "need interpretation input",
-                "help": "Supply the approved interpretation threshold",
-                "artifacts": [],
-                "command": "",
-            },
-            {
-                "summary": "Evaluation completed using approved feedback",
-                "help": "",
-                "artifacts": [],
-                "command": "",
-                "claim": "The synthetic command ran once.",
-                "evidence": ["dispatches"],
-                "limitations": ["Synthetic CPU check only"],
-            },
-        ],
-    )
-    monkeypatch.setattr(
-        "research_loop.group_agents.configuration", lambda *a, **kw: (CodexConfig(), {})
-    )
-    plan = tmp_path / "plan.md"
-    plan.write_text(
-        "Synthetic CPU receipt check, with interpretation threshold supplied separately."
-    )
-    feedback = tmp_path / "feedback.md"
-    feedback.write_text("The approved threshold is one execution.")
-    definition = GroupDefinition(
-        "exp",
-        "1",
-        "synthetic",
-        Path(__file__).parents[1] / "src/research_loop/group_programs/exp.py",
-        {"execution_backend": "local"},
-    )
-    journal = Journal(tmp_path / "events")
-
-    def factory(ctx):
-        (ctx.work / "scientific-plan.md").write_text(
-            "One bounded synthetic CPU command."
-        )
-        return NativeGroupServices(
-            ctx,
-            {
-                "project": str(tmp_path / "project"),
-                "model": "gpt-6.1-sol",
-                "effort": "medium",
-            },
-            journal,
-            native_factory=FakeNative,
-        )
-
-    async def check():
-        runtime = GroupRuntime(tmp_path, [definition], service_factory=factory)
-        run_id = await runtime.start("exp", str(plan), [])
-        first = await runtime.wait()
-        assert first["status"] == "returned", first
-        assert first["output"]["help"]
-        assert len(FakeNative.instances) == 3
-        runtime.hold(run_id)
-        await runtime.resume(run_id, [str(feedback)])
-        second = await runtime.wait()
-        assert second["status"] == "returned", second
-        assert second["output"]["completion"] == "completed"
-        assert (runtime.root / run_id / "work/dispatches").read_text() == "once"
-        assert len(FakeNative.instances) == 4
-        assert FakeNative.instances[3].calls[0][1]["assignment"]["feedback_refs"] == [
-            str(feedback)
-        ]
-        assert FakeNative.instances[0].thread_id == FakeNative.instances[1].thread_id
-        assert FakeNative.instances[1].thread_id != FakeNative.instances[2].thread_id
-        assert FakeNative.instances[2].thread_id == FakeNative.instances[3].thread_id
-        assert len(second["output"]["artifacts"]) == 7
-        raw = next(
-            Path(ref)
-            for ref in second["output"]["artifacts"]
-            if Path(ref).name == "dispatches"
-        )
-        assert raw.read_text() == "once"
-        assert any("evaluate.json" in item for item in second["output"]["artifacts"])
-        runtime.close(run_id)
-        await runtime.close_runtime()
-
-    try:
-        asyncio.run(check())
-    finally:
-        journal.close()
-
-
-def test_slurm_ssh_255_receipt_is_unknown_even_with_null_error(context):
-    async def execute(args):
-        return {
-            "session_id": "original",
-            "running": False,
-            "exit_code": 255,
-            "output": "SSH transport lost",
-            "log_path": "synthetic.log",
-            "error": None,
-            "reservation_id": "original-reservation",
-        }
-
-    async def check():
-        service, journal = services(context, [Tool("gpu_exec", "fake", {}, execute)])
-        with pytest.raises(RuntimeError, match="reconciliation"):
-            await service.execute_prepared("prepared")
-        assert context.state["executions"]["experiment"]["status"] == "unknown"
-        with pytest.raises(RuntimeError, match="reconciliation"):
-            await service.settle()
-        journal.close()
-
-    asyncio.run(check())
-
-
-def test_admitted_read_paths_are_files_and_queued_call_blocks_boundary(
-    context, monkeypatch
-):
-    input_root = context.root / "rounds/000001"
-    input_root.mkdir(parents=True)
-    task, evidence, feedback = [
-        context.study_root / name for name in ("task.md", "evidence.md", "feedback.md")
-    ]
-    input_root.joinpath("input.json").write_text(
-        json.dumps(
-            {
-                "task_ref": str(task),
-                "input_refs": [str(evidence)],
-                "feedback_refs": [str(feedback)],
-            }
-        )
-    )
-    observed = []
-    monkeypatch.setattr(
-        "research_loop.group_agents.configuration",
-        lambda *a, **kw: (observed.append(kw["readable_roots"]), {}),
-    )
-
-    async def check():
-        service, journal = services(context)
-        lock = service.locks.setdefault("implementation", asyncio.Lock())
-        await lock.acquire()
-        pending = asyncio.create_task(
-            service.call("experimenter", "implementation", "prepare", {}, {})
-        )
-        with pytest.raises(RuntimeError, match="still active"):
-            await service.settle()
-        assert not service.active and service.pending_calls == 1
-        lock.release()
-        await pending
-        assert observed == [[task, evidence, feedback]]
-        assert context.study_root not in observed[0]
-        await service.settle()
-        journal.close()
-
-    asyncio.run(check())
-
-
-def test_remote_work_namespace_is_run_specific_and_root_required(context):
-    import shlex
-
-    service, journal = services(context)
-    with pytest.raises(ValueError, match="authorized absolute remote_root"):
-        service._resource_command("prepared")
-    service.config["resource"] = {"remote_root": "/authorized root/with 'quote"}
-    first = service._resource_command("printf ready")
-    expected = "/authorized root/with 'quote/.group-runs/run-1"
-    assert shlex.split(first.split(" && ")[0]) == ["mkdir", "-p", expected]
-    assert service.execution_work == expected
-    context.run_id = "run-2"
-    second = service._resource_command("printf ready")
-    assert first != second
-    assert "/.group-runs/run-2" in second
-    journal.close()
-
-
-def test_stop_settles_real_local_process_without_new_admission(context):
-    async def check():
-        service, journal = services(context)
-        task = asyncio.create_task(
-            service.execute_prepared(
-                f"{sys.executable} -c 'import time; time.sleep(30)'", backend="local"
-            )
-        )
-        while not service.processes:
-            await asyncio.sleep(0)
-        await service.stop()
         try:
-            receipt = await asyncio.wait_for(task, 3)
-            assert receipt["exit_code"] != 0
-        except RuntimeError:
-            # A shell child surviving its parent is killed and conservatively unknown.
-            assert context.state["executions"]["experiment"]["status"] == "unknown"
-        assert not service.processes
-        with pytest.raises(RuntimeError, match="Stop requested"):
-            await service.execute_prepared(
-                "printf unexpected", operation_id="new", backend="local"
-            )
-        journal.close()
-
-    asyncio.run(check())
-
-
-def test_native_stop_error_still_terminates_owned_local_process(context, monkeypatch):
-    failure = RuntimeError("Native interrupt outcome requires reconciliation")
-
-    class FailedNative:
-        async def stop(self):
-            raise failure
-
-    class OwnedProcess:
-        pid = 12345
-        returncode = None
-
-    signals = []
-    monkeypatch.setattr(
-        "research_loop.group_agents.os.killpg",
-        lambda pid, sig: signals.append((pid, sig)),
-    )
-
-    async def check():
-        service, journal = services(context)
-        service.active.add(FailedNative())
-        service.processes.add(OwnedProcess())
-        try:
-            with pytest.raises(
-                RuntimeError, match="requires reconciliation"
-            ) as outcome:
-                await service.stop()
-            assert outcome.value is failure
-            assert service.stopping
-            assert signals == [(OwnedProcess.pid, signal.SIGTERM)]
+            with pytest.raises(ValueError, match="compatible"):
+                await service.call("draft", "missing", "x", {}, session="reuse")
+            await service.call("draft", "shared", "x", {})
+            with pytest.raises(ValueError, match="compatible"):
+                await service.call("verify", "shared", "x", {}, session="reuse")
+            with pytest.raises(ValueError, match="compatible"):
+                await service.call(
+                    "draft", "shared", "x", {}, session="reuse", allow_tools=False
+                )
+            assert len(FakeNative.instances) == 1
         finally:
+            await service.close()
             journal.close()
 
     asyncio.run(check())
 
 
-def test_shared_resource_lock_covers_dispatch_through_terminal(context):
+def test_definitions_are_snapshotted_and_cannot_change_within_run(context):
     async def check():
-        gate, entered = asyncio.Event(), asyncio.Event()
-        calls = []
-
-        async def execute(args):
-            calls.append(args)
-            return {
-                "session_id": f"session-{len(calls)}",
-                "running": True,
-                "exit_code": None,
-            }
-
-        async def poll(args):
-            if args["session_id"] == "session-1":
-                entered.set()
-                await gate.wait()
-            return {"session_id": args["session_id"], "running": False, "exit_code": 0}
-
-        tools = [
-            Tool("gpu_exec", "fake", {}, execute),
-            Tool("gpu_poll", "fake", {}, poll),
-        ]
-        one, journal = services(context, tools)
-        other = SimpleNamespace(**vars(context))
-        other.root = context.root.parent / "run-2"
-        other.work = other.root / "work"
-        other.work.mkdir(parents=True)
-        other.run_id, other.state, other.save_state = "run-2", {}, lambda: None
-        two, journal2 = services(other, tools)
-        shared = asyncio.Lock()
-        one.resource_lock = two.resource_lock = shared
-        first = asyncio.create_task(one.execute_prepared("prepared"))
-        await entered.wait()
-        second = asyncio.create_task(two.execute_prepared("prepared"))
-        await asyncio.sleep(0)
-        assert len(calls) == 1
-        with pytest.raises(RuntimeError, match="still active"):
-            await two.settle()
-        gate.set()
-        assert all(
-            receipt["exit_code"] == 0 for receipt in await asyncio.gather(first, second)
-        )
-        assert len(calls) == 2
-        assert calls[0]["command"] != calls[1]["command"]
-        await one.settle()
-        await two.settle()
-        journal.close()
-        journal2.close()
+        service, journal = services(context)
+        try:
+            service.config["agents"]["writer"]["instructions"] = "changed external copy"
+            await service.call("draft", "local", "x", {})
+            assert FakeNative.instances[0].calls[0][0] == "Write the assigned artifact."
+            context.definition.agents["draft"] = "checker"
+            with pytest.raises(ValueError, match="cannot change"):
+                services(context)
+            context.run_id = "other-run"
+            with pytest.raises(ValueError, match="another GroupRun"):
+                services(context)
+        finally:
+            await service.close()
+            journal.close()
 
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("project_is_study", [False, True])
-def test_group_workspace_uses_ordinary_reads_and_separate_write_roots(
-    tmp_path, monkeypatch, project_is_study
-):
-    home = tmp_path / "home"
-    (home / ".codex").mkdir(parents=True)
-    (home / ".codex/auth.json").write_text("synthetic")
-    monkeypatch.setattr(Path, "home", lambda: home)
-    project = tmp_path / "project"
-    study = project if project_is_study else project / "study"
-    own = study / "group-runs/own"
-    runtime, work = own / "native-runtime", own / "work"
-    runtime.mkdir(parents=True)
-    work.mkdir()
-    admitted = study / "group-runs/other/exports/000001/report.json"
-    config, effective = configuration(
-        runtime,
-        project,
-        [work],
-        "gpt-6.1-sol",
-        "medium",
-        delegation="none",
-        readable_roots=[admitted],
-    )
-    assert effective["filesystem"] == {
-        ":root": "read",
-        ":slash_tmp": "write",
-        ":tmpdir": "write",
-        str(runtime / "work"): "write",
-        str(work): "write",
-    }
-    assert config.cwd == str(runtime / "work")
-    assert effective["sandbox_mode"] == "workspace-write"
-    with pytest.raises(ValueError, match="does not support denied_roots"):
-        configuration(
-            runtime, project, [work], "gpt-6.1-sol", "medium", denied_roots=[study]
-        )
-
-
-def test_instruction_snapshot_survives_template_update_on_resume(context, monkeypatch):
-    async def check():
-        one, journal = services(context)
-        original = context.state["native_instruction_snapshot"]
-        monkeypatch.setattr("research_loop.group_agents.GROUP_GUARD", "changed guard")
-        monkeypatch.setattr(
-            "research_loop.group_agents._ROLE_SECTIONS",
-            {"experimenter": "changed template"},
-        )
-        two, journal2 = services(context)
-        await two.call("experimenter", "implementation", "resume", {}, {})
-        guard, payload, _ = FakeNative.instances[-1].calls[0]
-        assert guard == original["guard"]
-        assert payload["role_template"] == original["roles"]["experimenter"]
-        assert guard != "changed guard"
-        await two.close()
-        await one.close()
-        journal.close()
-        journal2.close()
-
-    asyncio.run(check())
-
-
-def test_exp_failed_execution_exports_explicit_code_and_directs_separate_repair(
-    context,
-):
-    path = Path(__file__).parents[1] / "src/research_loop/group_programs/exp.py"
-    spec = importlib.util.spec_from_file_location("failed_exp_group_test", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    plan = context.work / "plan.md"
-    plan.write_text("Synthetic known-failure receipt; never retry automatically.")
-    code = context.work / "implementation.py"
-    code.write_text("raise SystemExit(3)\n")
-    scientific_plan = context.work / "scientific-plan.md"
-    scientific_plan.write_text(
-        "One bounded synthetic CPU experiment; preserve the supplied task."
-    )
-    FakeNative.outputs = [
-        {
-            "summary": "planned",
-            "help": "",
-            "artifacts": [str(scientific_plan)],
-            "command": "",
-            "plan_artifact": str(scientific_plan),
-        },
-        {
-            "summary": "prepared",
-            "help": "",
-            "artifacts": [str(code)],
-            "command": f"{sys.executable} implementation.py",
-            "result_file": "unused.json",
-        },
-    ]
-    context.definition.settings = {"execution_backend": "local"}
+def test_settled_failure_is_recorded_without_retry(context):
+    class Failing(FakeNative):
+        async def run(self, *args, **kwargs):
+            raise ValueError("exact schema failure")
 
     async def check():
         service, journal = services(context)
-        context.services = service
-        output = await module.run(context, {"task_ref": str(plan)})
-        assert "separate repair Run" in output["help"]
-        assert str(code) in output["artifacts"]
-        assert context.state["experiment_phases"]["execution"]["exit_code"] == 3
-        assert (
-            await module.run(
-                context, {"task_ref": str(plan), "feedback_refs": [str(plan)]}
-            )
-            == output
-        )
-        assert len(FakeNative.instances) == 2
+        service.agents.native_factory = Failing
+        with pytest.raises(ValueError, match="exact schema failure"):
+            await service.call("draft", "local", "x", {})
+        with pytest.raises(ValueError, match="compatible"):
+            await service.call("draft", "local", "x", {}, session="reuse")
+        assert FakeNative.instances[0].lifecycle[-3:] == ["stop", "settle", "close"]
+        assert context.state["native_calls"][0]["status"] == "failed"
+        assert context.trace.rows[-1]["status"] == "failed"
+        assert len(FakeNative.instances) == 1
+        await service.settle()
+        journal.close()
+
+    asyncio.run(check())
+
+
+def test_all_native_cancellations_are_issued_before_wait(context):
+    async def check():
+        service, journal = services(context)
+        gate, seen = asyncio.Event(), set()
+
+        class Active:
+            def __init__(self, name):
+                self.name = name
+
+            async def stop(self):
+                seen.add(self.name)
+                await gate.wait()
+
+        service.agents.active.update([Active("one"), Active("two")])
+        pending = service.request_stop()
+        assert service.agents.stopping and service.commands.stopping
+        await asyncio.sleep(0)
+        assert seen == {"one", "two"}
+        with pytest.raises(RuntimeError, match="Stop requested"):
+            await service.call("draft", "local", "x", {})
+        gate.set()
+        assert await pending == [None, None]
+        service.agents.active.clear()
         await service.close()
+        journal.close()
+
+    asyncio.run(check())
+
+
+def test_payload_and_output_records_do_not_alias_mutable_inputs(context):
+    async def check():
+        service, journal = services(context)
+        payload = {"nested": ["initial"]}
+        result = await service.call("draft", "local", "x", payload)
+        payload["nested"].append("later")
+        result["ok"] = False
+        call = context.state["native_calls"][0]
+        assert call["input"]["assignment"] == {"nested": ["initial"]}
+        assert call["result"] == {"ok": True}
+        await service.close()
+        journal.close()
+
+    asyncio.run(check())
+
+
+def test_reloaded_session_failure_is_visible_to_settlement(context):
+    class Failing(FakeNative):
+        async def run(self, *args, **kwargs):
+            raise RuntimeError("synthetic resumed failure")
+
+        async def settle(self):
+            raise RuntimeError("synthetic unsettled native work")
+
+    async def check():
+        service, journal = services(context)
+        await service.call("draft", "local", "first", {})
+        await service.close()
+        journal.close()
+        context.state = json.loads((context.root / "state.json").read_text())
+        resumed, journal = services(context)
+        resumed.agents.native_factory = Failing
+        with pytest.raises(RuntimeError, match="resumed failure"):
+            await resumed.call("refine", "local", "next", {}, session="reuse")
+        with pytest.raises(RuntimeError, match="reconciliation"):
+            await resumed.settle()
+        session = context.state["native_contexts"]["local"]["session_id"]
+        assert context.state["native_sessions"][session]["status"] == "unknown"
+        journal.close()
+
+    asyncio.run(check())
+
+
+def test_actual_trace_records_calls_without_research_assumptions(context):
+    async def check():
+        del context.trace
+        service, journal = services(context)
+        await service.call("draft", "local", "write", {"synthetic": True})
+        await service.close()
+        journal.close()
+        records = list((context.root / "records/call").glob("*.json"))
+        assert len(records) == 1
+        record = json.loads(records[0].read_text())
+        assert record["status"] == "completed"
+        assert record["thread_id"] == FakeNative.instances[0].thread_id
+        assert record["binding"] == "draft"
+        assert record["profile"] == {"model": "gpt-6.1-sol", "effort": "medium"}
+
+    asyncio.run(check())
+
+
+def test_cleanup_error_does_not_replace_exact_call_error(context):
+    class Failing(FakeNative):
+        async def run(self, *args, **kwargs):
+            raise ValueError("original schema error")
+
+        async def settle(self):
+            raise RuntimeError("unsettled transport")
+
+    async def check():
+        service, journal = services(context)
+        service.agents.native_factory = Failing
+        with pytest.raises(ValueError, match="original schema error"):
+            await service.call("draft", "local", "x", {})
+        call = context.state["native_calls"][0]
+        assert call["error"] == "ValueError: original schema error"
+        assert call["cleanup_error"] == "RuntimeError: unsettled transport"
+        assert FakeNative.instances[0].lifecycle[-1] == "close"
         journal.close()
 
     asyncio.run(check())

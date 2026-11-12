@@ -1,192 +1,94 @@
-"""Opt-in isolated environment propagation; no cluster, GPU or real research."""
+"""Opt-in current declarative Agent environment propagation, without remote work."""
 
 import asyncio
 import json
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from research_loop.codex import Native, configuration
-from research_loop.instructions import RESULT_SCHEMA
-from research_loop.loop import initialize, inspect
+from research_loop import environment
+from research_loop.group_agents import NativeGroupServices
 from research_loop.state import Journal
+from test_native_integration import EFFORT, MODEL, context
 
 
 @pytest.mark.skipif(
     os.environ.get("RESEARCH_ENVIRONMENT_MODEL_TEST") != "1",
-    reason="Opt-in authorized subscription environment smoke",
+    reason="Opt-in authorized OpenAI environment smoke using an existing interpreter",
 )
-@pytest.mark.parametrize("mode", ["host", "native"])
-def test_real_model_sees_fixed_environment_in_fresh_role(tmp_path, mode):
-    selected = tmp_path / "selected environment"
-    subprocess.run(
-        ["uv", "venv", "--python", sys.executable, str(selected)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    python = selected / "bin/python"
-    site = Path(
-        subprocess.check_output(
-            [
-                str(python),
-                "-I",
-                "-c",
-                "import sysconfig;print(sysconfig.get_path('purelib'))",
-            ],
-            text=True,
-        ).strip()
-    )
-    distribution = site / "loop_env_witness-0.0.1.dist-info"
-    distribution.mkdir()
-    (distribution / "METADATA").write_text("Name: loop-env-witness\nVersion: 0.0.1\n")
-    resource_python = "/opt/synthetic-device-env/bin/python"
-    env_file = tmp_path / "environment.json"
-    env_file.write_text(
+def test_real_fresh_agents_use_fixed_declared_environment(tmp_path):
+    selected = os.environ.get("RESEARCH_ENVIRONMENT_PYTHON")
+    if not selected:
+        pytest.fail(
+            "Set RESEARCH_ENVIRONMENT_PYTHON to an existing authorized interpreter; this test does not create or install an environment"
+        )
+    declared = tmp_path / "environment.json"
+    declared.write_text(
         json.dumps(
             {
-                "python": str(python),
+                "python": selected,
                 "resource": {
-                    "python": resource_python,
+                    "python": "/opt/synthetic-device-env/bin/python",
                     "packages": {"synthetic-device-package": "7.8.9"},
                 },
             }
         )
     )
-    project = tmp_path / "project"
-    project.mkdir()
-    goal = tmp_path / "goal.md"
-    goal.write_text(
-        "Synthetic environment disclosure only; no research or compute grant."
+    snapshot = environment.observe(environment.read_config(declared))
+    schema = {
+        "type": "object",
+        "properties": {"artifact": {"type": "string"}},
+        "required": ["artifact"],
+        "additionalProperties": False,
+    }
+    config = dict(
+        revision="fixed",
+        project=str(tmp_path),
+        execution_environment=snapshot,
+        profiles={"selected": {"model": MODEL, "effort": EFFORT}},
+        agents={
+            "observer": {
+                "instructions": "You are one fresh environment observer. Use only the injected environment snapshot and your own local shell. No delegation, web, remote/GPU work, package installation or environment changes.",
+                "profile": "selected",
+                "tools": "workspace",
+                "output_schema": schema,
+            }
+        },
     )
-    root = tmp_path / "study"
-    model = os.environ.get("RESEARCH_ENVIRONMENT_MODEL", "gpt-6.1-terra")
-    initialize(
-        root,
-        project,
-        goal,
-        model=model,
-        delegation=mode,
-        environment_file=env_file,
-        coordinator="lead",
-    )
-    packet = inspect(root)
-    environment = packet["input"]["execution_environment"]
-    work = root / "work"
-    cfg, _ = configuration(
-        root,
-        project,
-        [work, root / "knowledge/draft"],
-        model,
-        "medium",
-        delegation=mode,
-        execution_environment=environment,
-    )
-    verification = f"""This is one bounded synthetic environment smoke, not research.
-This run's delegation mode is {mode}. In host mode you MUST use delegate_task
-and wait_tasks, never native spawn/collaboration tools, even if they are visible.
-In native mode you MUST use native spawn_agent with fork_turns='none'.
-The runtime has supplied execution-environment context to you and fresh children.
-1. Run one local shell command using the unqualified `python` from PATH. Write
-{work / "lead.json"} with fields python (actual sys.executable) and
-witness_version (installed loop-env-witness version from importlib.metadata).
-2. Start exactly ONE NEW Analyst with the same exact model {model} / medium.
-Use delegate_task in host mode, or native spawn_agent with fork_turns='none' in
-native mode. Do not copy interpreter paths, package versions, environment JSON
-or resource declarations into the child assignment: it must use the environment
-instructions injected by the runtime, not your handoff or parent history.
-Give only this assignment and output path: run one local shell command with
-unqualified python; write {work / "child.json"} with fields python (actual
-sys.executable), witness_version (installed loop-env-witness version),
-resource_python, resource_package_version (synthetic-device-package), and
-resource_status ('declared-unverified'), using the resource information visible
-in its injected execution-environment context. Reading Study environment/config
-files or parent histories to obtain those values is forbidden in this smoke.
-No further agents, web, remote hosts, GPU, package installation or environment
-changes. Wait for the child; host wait_tasks is nonblocking, so do not spin.
-Return the required result schema with goal='unknown', study_action='stop', and
-an explicit stop_reason that this synthetic smoke is complete. Cite both files.
-"""
+    ctx = context(tmp_path, config, {"observe": "observer"})
+    journal = Journal(tmp_path / "events.jsonl")
+    service = NativeGroupServices(ctx, config, journal)
 
     async def run():
-        journal = Journal(root / "events.jsonl")
-        native = Native(cfg, journal)
         try:
             async with asyncio.timeout(240):
-                await native.open()
-                await native.verify(model, "medium")
-                result = await native.run(
-                    verification,
-                    packet["input"],
-                    RESULT_SCHEMA,
-                    model=model,
-                    effort="medium",
-                    delegation=mode,
-                    roles_path=root / "roles.json",
-                    environment=environment,
-                )
-                await native.settle()
-            assert result["study_action"] == "stop"
-            assert len(native.children) == 1
-            return set(native.children)
+                for name in ("first", "independent"):
+                    result = await service.call(
+                        "observe",
+                        name,
+                        "Run one local shell command with unqualified python. Write the supplied output file as JSON with actual sys.executable (python), sys.prefix (prefix), and resource_python, resource_package_version, resource_status from the injected environment snapshot. Resource values are declared and unverified. Return only its artifact path.",
+                        {"output_file": f"{name}.json"},
+                        session="new",
+                        cwd=ctx.work,
+                    )
+                    assert Path(result["artifact"]).name == f"{name}.json"
         finally:
-            await native.stop()
-            await native.close()
+            await service.close()
             journal.close()
 
-    children = asyncio.run(run())
-    lead = json.loads((work / "lead.json").read_text())
-    child = json.loads((work / "child.json").read_text())
-    assert lead["python"] == child["python"] == str(python)
-    assert lead["witness_version"] == child["witness_version"] == "0.0.1"
-    assert child["resource_python"] == resource_python
-    assert child["resource_package_version"] == "7.8.9"
-    assert child["resource_status"] == "declared-unverified"
-    events = [
-        json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()
-    ]
-    starts = [row for row in events if row["event"] == "role.task.started"]
-    finishes = [row for row in events if row["event"] == "role.task.finished"]
-    if mode == "host":
-        assert len(starts) == len(finishes) == 1
-        assert starts[0]["role"] == "analyst"
-        assert finishes[0]["status"] == "completed"
-        assert starts[0]["thread_id"] in children
-        tools = {
-            row["tool"]
-            for row in events
-            if row["event"] == "resource.tool" and row["success"]
+    asyncio.run(run())
+    for name in ("first", "independent"):
+        observed = json.loads((ctx.work / f"{name}.json").read_text())
+        assert observed == {
+            "python": snapshot["local"]["executable"],
+            "prefix": snapshot["local"]["prefix"],
+            "resource_python": "/opt/synthetic-device-env/bin/python",
+            "resource_package_version": "7.8.9",
+            "resource_status": "declared-unverified",
         }
-        assert {"delegate_task", "wait_tasks"} <= tools
-        mapping = json.loads((root / "roles.json").read_text())["threads"]
-        assert mapping[starts[0]["thread_id"]]["status"] == "completed"
-    else:
-        assert not starts and not finishes and not (root / "roles.json").exists()
-    histories = {
-        row["thread_id"]: Path(row["path"])
-        for row in events
-        if row["event"] == "codex.history.reference"
-    }
-    for identity in children:
-        records = [
-            json.loads(line) for line in histories[identity].read_text().splitlines()
-        ]
-        models = {
-            row["payload"].get("model")
-            for row in records
-            if row.get("type") == "turn_context"
-        }
-        assert models == {model}
-        messages = [
-            row["payload"]
-            for row in records
-            if row.get("type") == "response_item"
-            and row.get("payload", {}).get("type") == "message"
-        ]
-        users = [json.dumps(m) for m in messages if m.get("role") == "user"]
-        developers = [json.dumps(m) for m in messages if m.get("role") == "developer"]
-        assert users and not any(resource_python in text for text in users)
-        assert any(resource_python in text for text in developers)
+    calls = ctx.state["native_calls"]
+    assert len(calls) == 2 and calls[0]["thread_id"] != calls[1]["thread_id"]
+    assert calls[0]["session_id"] != calls[1]["session_id"]
+    assert all(call["profile"] == {"model": MODEL, "effort": EFFORT} for call in calls)
+    assert all(call["input"]["execution_environment"] == snapshot for call in calls)

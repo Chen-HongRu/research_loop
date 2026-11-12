@@ -19,6 +19,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .state import now, write_json
+from .records import ExecutionTrace
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _MAX_SOURCE = 1024 * 1024
@@ -44,6 +45,7 @@ class GroupDefinition:
     description: str
     program: Path
     settings: dict = field(default_factory=dict)
+    agents: dict = field(default_factory=dict)
 
     def __post_init__(self):
         _name(self.id, "Group id")
@@ -54,6 +56,12 @@ class GroupDefinition:
             raise ValueError("Group settings must be an object")
         object.__setattr__(self, "program", Path(self.program).resolve())
         object.__setattr__(self, "settings", _json_copy(self.settings))
+        if not isinstance(self.agents, dict) or any(
+            not isinstance(k, str) or not isinstance(v, str)
+            for k, v in self.agents.items()
+        ):
+            raise ValueError("Group Agent bindings must map names to Agent IDs")
+        object.__setattr__(self, "agents", _json_copy(self.agents))
 
     @classmethod
     def from_json(cls, value, base_dir=None):
@@ -67,6 +75,7 @@ class GroupDefinition:
             "description",
             "program",
             "settings",
+            "agents",
         }:
             raise ValueError("Invalid Group definition")
         program = Path(value["program"])
@@ -78,6 +87,7 @@ class GroupDefinition:
             value["description"],
             program,
             value.get("settings", {}),
+            value.get("agents", {}),
         )
 
     def metadata(self):
@@ -87,6 +97,7 @@ class GroupDefinition:
             "description": self.description,
             "program": "program.py",
             "settings": _json_copy(self.settings),
+            "agents": _json_copy(self.agents),
         }
 
 
@@ -98,6 +109,14 @@ class GroupContext:
         self.work = self.root / "work"
         self.round = record["round"]
         self.definition = definition
+        self.config_revision = record.get("config_revision", runtime.revision)
+        self.predecessor = record.get("predecessor")
+        self.trace = ExecutionTrace(
+            self.root,
+            run_id=self.run_id,
+            round=self.round,
+            revision=self.config_revision,
+        )
         previous = self.root / "rounds" / f"{self.round - 1:06d}" / "output.json"
         self.previous_output = (
             json.loads(previous.read_text())
@@ -117,17 +136,26 @@ class GroupContext:
 class GroupRuntime:
     """One event-loop owner for isolated Group runs under a study directory."""
 
-    def __init__(self, study_root, definitions, service_factory=None):
+    def __init__(
+        self, study_root, definitions, service_factory=None, *, revision="initial"
+    ):
         self.study_root = Path(study_root).resolve()
         self.root = self.study_root / "group-runs"
         self.root.mkdir(parents=True, exist_ok=True)
         self.service_factory = service_factory
+        self.revision = revision
         self._tasks = {}
         self._contexts = {}
         self._stop_errors = {}
         self._records = {}
         self._events = asyncio.Queue()
         self._stopped = (self.study_root / "STOP").exists()
+        control_path = self.study_root / "group-control.json"
+        self._control = (
+            json.loads(control_path.read_text())
+            if control_path.exists()
+            else {"paused": False, "paused_runs": []}
+        )
         self.definitions = {}
         values = (
             definitions.values() if isinstance(definitions, Mapping) else definitions
@@ -158,7 +186,11 @@ class GroupRuntime:
         source = program.read_bytes()
         metadata = definition.metadata()
         destination = (
-            self.study_root / "group-definitions" / definition.id / definition.version
+            self.study_root
+            / "group-definitions"
+            / self.revision
+            / definition.id
+            / definition.version
         )
         if destination.exists():
             if (
@@ -177,9 +209,37 @@ class GroupRuntime:
     def _persist(self, record):
         write_json(self.root / record["run_id"] / "run.json", record)
 
-    def _admit(self):
+    def _admit(self, run_id=None):
         if self._stopped or (self.study_root / "STOP").exists():
             raise RuntimeError("Group runtime stopped; no new admission")
+        if self._control["paused"] or run_id in self._control["paused_runs"]:
+            raise RuntimeError("Group admission is paused")
+
+    def pause(self, run_id=None, *, paused=True):
+        before = copy.deepcopy(self._control)
+        if run_id is None:
+            self._control["paused"] = paused
+        else:
+            if run_id not in self._records:
+                raise KeyError(run_id)
+            ids = set(self._control["paused_runs"])
+            (ids.add if paused else ids.discard)(run_id)
+            self._control["paused_runs"] = sorted(ids)
+        if self._control != before:
+            write_json(self.study_root / "group-control.json", self._control)
+            self._events.put_nowait({"control": "pause", "run_id": run_id})
+
+    def replace_definitions(self, definitions, revision):
+        self.revision = revision
+        self.definitions = {d.id: self._pin_definition(d) for d in definitions}
+
+    def _dependencies(self, refs):
+        dependencies = set()
+        for ref in refs:
+            path = Path(ref)
+            if path.is_relative_to(self.root):
+                dependencies.add(path.relative_to(self.root).parts[0])
+        return sorted(dependencies)
 
     def _refs(self, refs):
         result = []
@@ -203,7 +263,18 @@ class GroupRuntime:
             result.append(str(path))
         return result
 
-    async def start(self, group_id, task_ref, input_refs, prompt=""):
+    async def start(
+        self,
+        group_id,
+        task_ref,
+        input_refs,
+        prompt="",
+        *,
+        context=None,
+        predecessor=None,
+        interventions=(),
+        recovery=None,
+    ):
         self._admit()
         definition = self.definitions[group_id]
         payload = {
@@ -211,6 +282,9 @@ class GroupRuntime:
             "input_refs": self._refs(input_refs),
             "prompt": prompt,
             "feedback_refs": [],
+            "study_context": context or {},
+            "interventions": list(interventions),
+            "recovery": recovery,
         }
         payload = _json_copy(payload)
         run_id = uuid4().hex
@@ -226,6 +300,11 @@ class GroupRuntime:
             "run_id": run_id,
             "group_id": definition.id,
             "version": definition.version,
+            "config_revision": self.revision,
+            "predecessor": predecessor,
+            "dependencies": self._dependencies(
+                [payload["task_ref"], *payload["input_refs"]]
+            ),
             "status": "running",
             "round": 1,
             "created_at": now(),
@@ -234,11 +313,26 @@ class GroupRuntime:
             **copy.deepcopy(payload),
         }
         self._records[run_id] = record
+        trace = ExecutionTrace(root, run_id=run_id, round=1, revision=self.revision)
+        for dependency in record["dependencies"]:
+            trace.handoff(
+                dependency,
+                run_id,
+                [
+                    r
+                    for r in [payload["task_ref"], *payload["input_refs"]]
+                    if str(r).startswith(str(self.root / dependency) + "/")
+                ],
+            )
+        if predecessor:
+            trace.handoff(
+                predecessor, run_id, payload["input_refs"], relation="recovery"
+            )
         self._schedule(record, payload)
         return run_id
 
-    async def resume(self, run_id, feedback_refs, prompt=""):
-        self._admit()
+    async def resume(self, run_id, feedback_refs, prompt="", *, interventions=()):
+        self._admit(run_id)
         record = self._records[run_id]
         if record["status"] != "held":
             raise RuntimeError("Only a held Group run may resume")
@@ -252,6 +346,7 @@ class GroupRuntime:
                 **previous,
                 "feedback_refs": self._refs(feedback_refs),
                 "prompt": prompt,
+                "interventions": list(interventions),
             }
         )
         record.update(
@@ -261,7 +356,27 @@ class GroupRuntime:
             updated_at=now(),
             feedback_refs=payload["feedback_refs"],
             prompt=payload["prompt"],
+            dependencies=sorted(
+                set(record["dependencies"])
+                | set(self._dependencies(payload["feedback_refs"]))
+            ),
         )
+        trace = ExecutionTrace(
+            self.root / run_id,
+            run_id=run_id,
+            round=record["round"],
+            revision=record["config_revision"],
+        )
+        for dependency in self._dependencies(payload["feedback_refs"]):
+            trace.handoff(
+                dependency,
+                run_id,
+                [
+                    r
+                    for r in payload["feedback_refs"]
+                    if str(r).startswith(str(self.root / dependency) + "/")
+                ],
+            )
         self._schedule(record, payload)
         return run_id
 
@@ -269,6 +384,16 @@ class GroupRuntime:
         directory = self.root / record["run_id"] / "rounds" / f"{record['round']:06d}"
         directory.mkdir()
         write_json(directory / "input.json", payload)
+        write_json(
+            directory / "input-receipt.json",
+            {
+                "run_id": record["run_id"],
+                "round": record["round"],
+                "config_revision": record["config_revision"],
+                "interventions": payload.get("interventions", []),
+                "accepted_at": now(),
+            },
+        )
         self._persist(record)
         self._tasks[record["run_id"]] = asyncio.create_task(
             self._execute(record, payload)
@@ -283,6 +408,7 @@ class GroupRuntime:
             root = self.root / record["run_id"]
             definition = GroupDefinition.from_json(root / "definition.json")
             ctx = GroupContext(self, record, definition)
+            ctx.payload = payload
             self._contexts[record["run_id"]] = ctx
             if self.service_factory is not None:
                 services = self.service_factory(ctx)
@@ -438,6 +564,7 @@ class GroupRuntime:
             return copy.deepcopy(self._records[run_id])
         return {
             "stopped": self._stopped,
+            **copy.deepcopy(self._control),
             "runs": [copy.deepcopy(value) for value in self._records.values()],
         }
 
@@ -469,31 +596,72 @@ class GroupRuntime:
         if self._tasks:
             await asyncio.gather(*list(self._tasks.values()))
 
-    async def stop(self):
+    async def stop(self, run_id=None):
         """Stop admission and owned work, then retain the cleanup outcome."""
-        self._stopped = True
+        if run_id is None:
+            self._stopped = True
+        elif run_id not in self._records:
+            raise KeyError(run_id)
         # Let newly admitted tasks enter their try/finally before cancellation.
         await asyncio.sleep(0)
-        for run_id, ctx in tuple(self._contexts.items()):
-            if self._tasks[run_id].done() or ctx.services is None:
+        targets = (
+            {
+                identity
+                for identity, row in self._records.items()
+                if row["status"] in {"running", "held"}
+            }
+            if run_id is None
+            else {run_id}
+        )
+        stopping = []
+        for target, ctx in tuple(self._contexts.items()):
+            if (
+                target not in targets
+                or self._tasks[target].done()
+                or ctx.services is None
+            ):
                 continue
+            close = getattr(ctx.services, "close_admission", None)
+            if close is not None:
+                close()
             action = getattr(ctx.services, "stop", None)
             if action is not None:
-                try:
-                    result = action()
-                    if inspect.isawaitable(result):
-                        await result
-                except BaseException as exc:
-                    self._stop_errors[run_id] = f"stop: {type(exc).__name__}: {exc}"
-        for task in tuple(self._tasks.values()):
+
+                async def stop_service(target=target, action=action):
+                    try:
+                        result = action()
+                        if inspect.isawaitable(result):
+                            await result
+                    except BaseException as exc:
+                        self._stop_errors[target] = f"stop: {type(exc).__name__}: {exc}"
+
+                stopping.append(asyncio.create_task(stop_service()))
+        for target in targets:
+            task = self._tasks.get(target)
+            if task is None:
+                continue
             if not task.done():
                 task.cancel()
-        await self.settle()
-        for run_id, error in self._stop_errors.items():
-            record = self._records[run_id]
+        await asyncio.gather(
+            *stopping,
+            *(self._tasks[t] for t in targets if t in self._tasks),
+            return_exceptions=True,
+        )
+        for target in targets:
+            record = self._records[target]
+            if record["status"] == "held":
+                record.update(status="failed", error="Stopped at held boundary")
+            record["interrupted"] = True
+            self._persist(record)
+        for target, error in self._stop_errors.items():
+            record = self._records[target]
             record.update(status="needs-reconciliation", error=error, updated_at=now())
             self._persist(record)
-        self._events.put_nowait({"stopped": True})
+        self._events.put_nowait(
+            {"stopped": True}
+            if run_id is None
+            else {"stopped": False, "run_id": run_id}
+        )
 
     async def close_runtime(self):
         await self.stop()

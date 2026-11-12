@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from research_loop.dashboard import server
-from research_loop.state import Knowledge
+from research_loop.state import PublicationStore
 
 
 def write(root, name, value):
@@ -74,7 +74,7 @@ def long_study(tmp_path):
         {
             "status": "stopped",
             "iteration": 50,
-            "thread_id": "lead",
+            "thread_id": "router",
             "started_at": "2026-01-01T00:50:00Z",
             "ended_at": "2026-01-01T00:50:59Z",
             "result": {"summary": "EMBEDDED_STATUS_RESULT"},
@@ -139,7 +139,7 @@ def long_study(tmp_path):
     append(tmp_path, "events.jsonl", events)
     append(
         tmp_path,
-        "native/sessions/2026/01/01/child.jsonl",
+        "groups/router/one/native/sessions/2026/01/01/child.jsonl",
         [
             {
                 "type": "session_meta",
@@ -197,6 +197,7 @@ def test_overview_is_lean_before_card_and_artifact_serialization(long_study):
     ):
         assert excluded not in serialized
     assert set(value) == {
+        "configuration",
         "as_of",
         "status",
         "last_event_at",
@@ -247,7 +248,7 @@ def test_task_filters_previews_details_and_unknown_associations(long_study):
         assert not {"messages", "result", "purpose"} & set(card)
         assert len(card["preview"]) <= 240
         assert card["iteration_source"] == "inferred-from-start-time"
-    assert request(studies, "/api/agents?iteration=49&role=Critic")[1]["total"] == 10
+    assert request(studies, "/api/agents?iteration=49&role=critic")[1]["total"] == 10
     unknown = request(studies, "/api/agents?iteration=unknown")[1]
     assert unknown["total"] == 5 and all(
         c["iteration"] is None for c in unknown["agents"]
@@ -294,7 +295,7 @@ def test_activity_paging_retention_and_public_message_detail(long_study):
         "/api/activity?page=1.5",
         "/api/agents?page=",
         "/api/history?page=1&page=2",
-        "/api/agents?role=critic",
+        "/api/agents?role=../invalid",
         "/api/agents?iteration=latest",
         "/api/iteration?iteration=../1",
         "/api/iteration?iteration=0",
@@ -308,24 +309,23 @@ def test_invalid_parameters_return_400(tmp_path, route):
     assert request(server.Studies([tmp_path]), route)[0] == 400
 
 
-def test_study_scope_and_legacy_and_symlink_iteration_selection(tmp_path):
+def test_study_scope_and_symlink_iteration_selection(tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
     for root in (a, b):
         write(root, "status.json", {"status": "completed"})
-        write(root, "result.json", {"summary": root.name})
+        write(root, "iterations/000002/result.json", {"summary": root.name})
     studies = server.Studies([a, b])
     selected = server.Studies.identifier(b)
     assert (
-        request(studies, f"/api/iteration?study={selected}&iteration=legacy")[1][
-            "result"
-        ]["summary"]
+        request(studies, f"/api/iteration?study={selected}&iteration=2")[1]["result"][
+            "summary"
+        ]
         == "b"
     )
     assert request(studies, "/api/overview?study=unknown")[0] == 404
     assert request(studies, "/api/iteration?iteration=1")[0] == 404
     outside = tmp_path / "outside"
     write(outside, "result.json", {"summary": "DO_NOT_FOLLOW"})
-    (a / "iterations").mkdir()
     (a / "iterations/000001").symlink_to(outside, target_is_directory=True)
     assert request(studies, "/api/iteration?iteration=1")[0] == 404
     assert "DO_NOT_FOLLOW" not in json.dumps(request(studies, "/api/history")[1])
@@ -333,7 +333,7 @@ def test_study_scope_and_legacy_and_symlink_iteration_selection(tmp_path):
 
 def test_publication_requires_matching_activated_knowledge(tmp_path):
     write(tmp_path, "iterations/000001/result.json", {"summary": "Reported result"})
-    knowledge = Knowledge(tmp_path)
+    knowledge = PublicationStore(tmp_path)
     baseline = knowledge.prepare()
     assert (
         server.iteration_detail(tmp_path, 1)["publication"]["status"] == "unpublished"
@@ -341,8 +341,8 @@ def test_publication_requires_matching_activated_knowledge(tmp_path):
     # Metadata for a version that never became active does not certify publication.
     write(
         tmp_path,
-        "knowledge/publications/not-activated.json",
-        {"iteration": 1, "knowledge_version": "not-activated"},
+        "outputs/publications/not-activated.json",
+        {"iteration": 1, "publication_version": "not-activated"},
     )
     assert server.publication_state(tmp_path, 1)["status"] == "unpublished"
     version = knowledge.publish(
@@ -351,7 +351,7 @@ def test_publication_requires_matching_activated_knowledge(tmp_path):
     assert server.publication_state(tmp_path, 1) == {
         "status": "published",
         "iteration": 1,
-        "knowledge_version": version,
+        "publication_version": version,
     }
     assert server.publication_state(tmp_path, 2)["status"] == "unpublished"
     assert server.publication_state(tmp_path, None)["status"] == "unknown"
@@ -360,26 +360,26 @@ def test_publication_requires_matching_activated_knowledge(tmp_path):
         baseline, publication={"iteration": 2, "status": "completed"}
     )
     assert server.publication_state(tmp_path, 1)["status"] == "unknown"
-    assert server.publication_state(tmp_path, 2)["knowledge_version"] == newer
+    assert server.publication_state(tmp_path, 2)["publication_version"] == newer
     knowledge.current.unlink()
     knowledge.current.symlink_to(Path("versions") / version, target_is_directory=True)
     write(
         tmp_path,
-        f"knowledge/publications/{version}.json",
-        {"iteration": 1, "knowledge_version": "wrong"},
+        f"outputs/publications/{version}.json",
+        {"iteration": 1, "publication_version": "wrong"},
     )
     assert server.publication_state(tmp_path, 1)["status"] == "invalid"
 
 
 @pytest.mark.parametrize("terminal", ["completed", "iteration-completed"])
 def test_historical_publication_matches_own_final_archive(tmp_path, terminal):
-    knowledge = Knowledge(tmp_path)
+    knowledge = PublicationStore(tmp_path)
     baseline = knowledge.prepare()
     version = knowledge.publish(baseline, publication={"iteration": 1})
     write(
         tmp_path,
         "iterations/000001/status.json",
-        {"iteration": 1, "status": terminal, "knowledge_version": version},
+        {"iteration": 1, "status": terminal, "publication_version": version},
     )
     current = knowledge.publish(
         str(knowledge.current.resolve()), publication={"iteration": 2}
@@ -387,27 +387,27 @@ def test_historical_publication_matches_own_final_archive(tmp_path, terminal):
     assert server.publication_state(tmp_path, 1) == {
         "status": "historical",
         "iteration": 1,
-        "knowledge_version": version,
+        "publication_version": version,
     }
     assert server.publication_state(tmp_path, 2) == {
         "status": "published",
         "iteration": 2,
-        "knowledge_version": current,
+        "publication_version": current,
     }
 
 
 @pytest.mark.parametrize(
     "archived_status,version,metadata",
     [
-        (None, "orphan", {"iteration": 1, "knowledge_version": "orphan"}),
-        ("starting", "inherited", {"iteration": 1, "knowledge_version": "inherited"}),
-        ("failed", "inherited", {"iteration": 1, "knowledge_version": "inherited"}),
-        ("completed", "prior", {"iteration": 0, "knowledge_version": "prior"}),
-        ("completed", "wrong", {"iteration": 1, "knowledge_version": "other"}),
+        (None, "orphan", {"iteration": 1, "publication_version": "orphan"}),
+        ("starting", "inherited", {"iteration": 1, "publication_version": "inherited"}),
+        ("failed", "inherited", {"iteration": 1, "publication_version": "inherited"}),
+        ("completed", "prior", {"iteration": 0, "publication_version": "prior"}),
+        ("completed", "wrong", {"iteration": 1, "publication_version": "other"}),
         (
             "completed",
             "../outside",
-            {"iteration": 1, "knowledge_version": "../outside"},
+            {"iteration": 1, "publication_version": "../outside"},
         ),
     ],
 )
@@ -419,30 +419,30 @@ def test_historical_publication_does_not_certify_orphan_or_inherited_metadata(
         write(
             tmp_path,
             "iterations/000001/status.json",
-            {"iteration": 1, "status": archived_status, "knowledge_version": version},
+            {"iteration": 1, "status": archived_status, "publication_version": version},
         )
-    write(tmp_path, f"knowledge/publications/{version}.json", metadata)
+    write(tmp_path, f"outputs/publications/{version}.json", metadata)
     assert server.publication_state(tmp_path, 1)["status"] == "unknown"
 
 
-@pytest.mark.parametrize("symlink", ["file", "publications", "knowledge"])
+@pytest.mark.parametrize("symlink", ["file", "publications", "outputs"])
 def test_historical_publication_rejects_symlink_records(tmp_path, symlink):
     write(
         tmp_path,
         "iterations/000001/status.json",
-        {"iteration": 1, "status": "completed", "knowledge_version": "old"},
+        {"iteration": 1, "status": "completed", "publication_version": "old"},
     )
     record = write(
         tmp_path,
-        "knowledge/publications/old.json",
-        {"iteration": 1, "knowledge_version": "old"},
+        "outputs/publications/old.json",
+        {"iteration": 1, "publication_version": "old"},
     )
     path = (
         record
         if symlink == "file"
-        else tmp_path / "knowledge/publications"
+        else tmp_path / "outputs/publications"
         if symlink == "publications"
-        else tmp_path / "knowledge"
+        else tmp_path / "outputs"
     )
     target = tmp_path / "outside"
     path.rename(target)
@@ -457,12 +457,12 @@ def test_historical_publication_requires_consistent_archive_iteration(
     write(
         tmp_path,
         "iterations/000001/status.json",
-        {"iteration": iteration, "status": "completed", "knowledge_version": "old"},
+        {"iteration": iteration, "status": "completed", "publication_version": "old"},
     )
     write(
         tmp_path,
-        "knowledge/publications/old.json",
-        {"iteration": 1, "knowledge_version": "old"},
+        "outputs/publications/old.json",
+        {"iteration": 1, "publication_version": "old"},
     )
     assert server.publication_state(tmp_path, 1)["status"] == "unknown"
 
@@ -574,3 +574,102 @@ def test_activity_uses_terminal_status_without_end_timestamp(tmp_path, status, l
     )
     activity = server.State(tmp_path).overview()["activity"]
     assert activity == {"label": label, "state": "idle"}
+
+
+def test_execution_endpoint_pages_real_trace_without_loading_native_history(tmp_path):
+    from research_loop.records import ExecutionTrace
+
+    write(tmp_path, "status.json", {"status": "running"})
+    group = tmp_path / "group-runs/group-one"
+    group.mkdir(parents=True)
+    write(group, "run.json", {"run_id": "group-one", "status": "running"})
+    trace = ExecutionTrace(group, run_id="group-one", round=1, revision="r1")
+    parent = trace.begin("step", "branch")
+    child = trace.begin("step", "evaluate", parent_step_id=parent)
+    trace.handoff(parent, child, ["explicit-report.json"])
+    studies = server.Studies([tmp_path])
+    with patch.object(
+        server.Session, "update", side_effect=AssertionError("Native history scan")
+    ):
+        status, page, _ = request(
+            studies, "/api/execution?kind=steps&run_id=group-one&limit=1"
+        )
+        assert status == 200
+        assert [record["id"] for record in page["items"]] == [parent]
+        assert page["next_cursor"] == parent
+        status, detail, _ = request(
+            studies, f"/api/execution?kind=steps&run_id=group-one&id={child}"
+        )
+        assert status == 200 and detail["parent_step_id"] == parent
+        status, transfers, _ = request(
+            studies, "/api/execution?kind=handoffs&run_id=group-one"
+        )
+        assert status == 200 and transfers["items"][0]["sender"] == parent
+    assert (
+        request(studies, "/api/execution?kind=calls&run_id=group-one&id=missing")[0]
+        == 404
+    )
+    assert request(studies, "/api/execution?kind=steps&run_id=../escape")[0] == 400
+    assert request(studies, "/api/execution?kind=steps")[0] == 400
+
+
+def test_current_revision_nested_agents_and_outputs_are_read_without_role_guessing(
+    tmp_path,
+):
+    from research_loop.records import record_thread
+
+    write(tmp_path, "status.json", {"status": "running", "iteration": 1})
+    write(tmp_path, "active.json", {"revision": "r1"})
+    write(
+        tmp_path,
+        "configurations/r1/config.json",
+        {
+            "revision": "r1",
+            "router": {"profile": "coordination"},
+            "profiles": {"coordination": {"model": "gpt-6.1-sol", "effort": "medium"}},
+            "agents": {"custom": {"instructions": "PRIVATE_INSTRUCTION"}},
+        },
+    )
+    record_thread(
+        tmp_path,
+        "independent",
+        role="custom-evaluator",
+        task="readout",
+        group_run_id="group-one",
+        config_revision="r1",
+        status="completed",
+    )
+    append(
+        tmp_path,
+        "group-runs/group-one/native-runtime/review/custom/none/native/sessions/trace.jsonl",
+        [
+            {
+                "type": "session_meta",
+                "timestamp": "2026-01-01T00:01:00Z",
+                "payload": {"id": "independent", "source": "cli"},
+            },
+            {
+                "type": "response_item",
+                "timestamp": "2026-01-01T00:02:00Z",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [
+                        {"type": "output_text", "text": "Actual retained result"}
+                    ],
+                },
+            },
+        ],
+    )
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    version = store.publish(baseline, publication={"iteration": 1})
+    snapshot = server.State(tmp_path).snapshot()
+    card = snapshot["agents"][0]
+    assert card["role"] == "custom-evaluator" and card["parent_id"] is None
+    assert card["result"] == "Actual retained result"
+    assert card["group_run_id"] == "group-one"
+    assert snapshot["configuration"]["revision"] == "r1"
+    assert "PRIVATE_INSTRUCTION" not in json.dumps(snapshot)
+    assert server.publication_state(tmp_path, 1)["publication_version"] == version

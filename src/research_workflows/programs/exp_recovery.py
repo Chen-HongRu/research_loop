@@ -11,8 +11,9 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from research_loop.group_programs.exp import EVALUATE_SCHEMA, _reference
+from research_workflows.programs.exp import EVALUATE_SCHEMA, _reference
 from research_loop.state import write_json
+from research_workflows.contracts import validate_stage
 
 _LIMIT = 4 * 1024 * 1024
 _TOTAL_LIMIT = 16 * 1024 * 1024
@@ -35,6 +36,10 @@ def _json(path):
 
 def _strict_evaluation(value):
     if not isinstance(value, dict) or set(value) != set(EVALUATE_SCHEMA["required"]):
+        return False
+    try:
+        validate_stage(value, "Recovered evaluation")
+    except ValueError:
         return False
     for field, definition in EVALUATE_SCHEMA["properties"].items():
         item = value[field]
@@ -76,7 +81,7 @@ def _original_call(state, exported):
     for index, call in enumerate(state.get("native_calls", [])):
         result = call.get("result")
         if (
-            call.get("role") == "critic"
+            call.get("binding") == "evaluate"
             and call.get("status") == "completed"
             and _strict_evaluation(result)
             and all(result[key] == exported[key] for key in result if key != "help")
@@ -87,23 +92,24 @@ def _original_call(state, exported):
             "Original assessment lacks a unique matching strict Critic result"
         )
     index, call = matches[0]
-    if call["result"]["help"] != "":
+    if call["result"]["status"] != "ready":
         raise ValueError(
             "Original Critic requested scientific help; it cannot be cleared"
         )
-    context = call.get("context")
-    session = state.get("native_contexts", {}).get(context, {})
-    if session.get("role") != "critic" or not session.get("thread_id"):
+    thread_id = call.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id:
         raise ValueError("Original Critic context identity is unavailable")
     if any(
-        other.get("thread_id") == session["thread_id"] and other.get("role") != "critic"
-        for other in state.get("native_contexts", {}).values()
+        other.get("thread_id") == thread_id and other.get("binding") != "evaluate"
+        for other in state.get("native_calls", [])
     ):
         raise ValueError("Original Critic shares a scientific author context")
     return deepcopy(call["result"]), {
         "raw_call_index": index,
-        "context": context,
-        "thread_id": session["thread_id"],
+        "context": call["context"],
+        "thread_id": thread_id,
+        "agent_id": call.get("agent_id"),
+        "session_id": call.get("session_id"),
     }
 
 
@@ -251,7 +257,7 @@ def build_recovery_bundle(run_root, destination):
             )
         state = _json(run_root / "state.json")
         raw, provenance = _original_call(state, original)
-        fixed_input = state.get("native_study_context", {}).get("input", {})
+        fixed_input = state.get("research_context", {}).get("input", {})
         scope_roots = list(
             dict.fromkeys(
                 str(Path(fixed_input[field]).resolve())

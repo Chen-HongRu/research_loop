@@ -11,9 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from research_loop import environment, loop
+from research_loop import application, environment
 from research_loop.codex import Native, configuration
-from research_loop.instructions import instructions
 from research_loop.state import Journal
 from test_native import Client, RESULT
 
@@ -114,38 +113,38 @@ def test_invalid_environment_configuration_is_rejected(tmp_path, value):
         environment.read_config(path)
 
 
-def test_init_copies_control_config_and_inspect_observes_once(
-    tmp_path, selected_python, monkeypatch
-):
+def test_prepare_copies_environment_and_inspect_uses_it(tmp_path, selected_python):
     project = tmp_path / "project"
     project.mkdir()
     goal = tmp_path / "goal.md"
     goal.write_text("Synthetic fixed interpreter inspection; no remote/model calls.")
     source = settings(tmp_path, selected_python)
     root = tmp_path / "study"
-    loop.initialize(root, project, goal, environment_file=source, coordinator="lead")
+    declaration = Path(__file__).resolve().parents[1] / "examples/research.yaml"
+    configured = tmp_path / "research.yaml"
+    configured.write_text(
+        declaration.read_text().replace(
+            "../src/", str(declaration.parent.parent / "src") + "/"
+        )
+        + "\nexecution:\n  environment: "
+        + str(source)
+        + "\n"
+    )
+    application.prepare(configured, root, project=project, goal=goal)
     source.write_text(json.dumps({"python": "/changed/after/initialization"}))
-    observed = []
-    observe = environment.observe
-
-    def capture(*args, **kwargs):
-        observed.append(args[0])
-        return observe(*args, **kwargs)
-
-    monkeypatch.setattr(environment, "observe", capture)
-    call = loop.inspect(root)
-    assert observed == [{"python": str(selected_python)}]
-    snapshot = call["input"]["execution_environment"]
+    call = application.inspect(root)
+    snapshot = call["environment_observation"]
     assert snapshot["local"]["packages"]["synthetic-marker"] == "7.1"
     assert snapshot["resource"]["configured"] is False
     assert snapshot["resource"]["status"] == "undeclared-unverified"
     assert snapshot["resource"]["tools"] == []
-    assert call["permissions"]["read"] == [":root"]
-    assert environment.render(snapshot) in call["instructions"]
+    assert call["config"]["environment"] == {"python": str(selected_python)}
+    assert call["agent_permissions"]["critic"]["declared"] == "workspace"
+    assert call["router"]["tools"] == []
     assert not (root / "events.jsonl").exists()
 
 
-def test_legacy_snapshot_uses_controller_python_without_resource_dispatch():
+def test_default_snapshot_uses_controller_python_without_resource_dispatch():
     snapshot = environment.observe()
     assert snapshot["local"]["executable"] == sys.executable
     assert snapshot["local"]["prefix"] == sys.prefix
@@ -258,8 +257,10 @@ def test_nonvenv_configuration_does_not_set_virtual_env(tmp_path, monkeypatch):
     assert "VIRTUAL_ENV" not in tomllib.loads("value = " + value)["value"]
 
 
-@pytest.mark.parametrize("mode", ["native", "host"])
-def test_native_run_infers_same_environment_and_host_child_receives_it(tmp_path, mode):
+@pytest.mark.parametrize("allow_tools", [True, False])
+def test_native_run_receives_observed_environment_without_delegation(
+    tmp_path, allow_tools
+):
     snapshot = environment.observe()
 
     async def check():
@@ -268,36 +269,18 @@ def test_native_run_infers_same_environment_and_host_child_receives_it(tmp_path,
         await native.open()
         try:
             result = await native.run(
-                instructions(mode, snapshot),
+                "Report only the supplied environment facts.",
                 {"execution_environment": snapshot},
                 {},
                 model="gpt-6.1-sol",
                 effort="medium",
-                delegation=mode,
+                allow_tools=allow_tools,
             )
             assert result == RESULT
             definition = native.client.definition
             assert environment.render(snapshot) in definition["developerInstructions"]
-            if mode == "host":
-                assert native.delegator.environment is snapshot
-                # Start a real host worker with a separate synthetic client stream.
-                from test_delegation import Client as RoleClient
-
-                role_client = RoleClient()
-                native.delegator.client = role_client
-                native.delegator.start(
-                    "analyst", "environment-check", "Read the supplied environment."
-                )
-                native.delegator.settle()
-                assert (
-                    environment.render(snapshot)
-                    in role_client.definitions[0]["developerInstructions"]
-                )
-            else:
-                common = definition["developerInstructions"].split(
-                    "## Common contract", 1
-                )[1]
-                assert environment.render(snapshot) in common
+            assert definition["dynamicTools"] == []
+            assert definition["allowProviderModelFallback"] is False
         finally:
             await native.close()
             journal.close()

@@ -4,6 +4,9 @@ import json
 import stat
 from pathlib import Path
 
+from research_workflows.programs.tracing import references, step
+from research_workflows.contracts import STAGE_STATUS, validate_stage
+
 
 def _schema(properties):
     return {
@@ -16,7 +19,7 @@ def _schema(properties):
 
 _TEXT = {"type": "string"}
 _STRINGS = {"type": "array", "items": _TEXT}
-_BASE = {"summary": _TEXT, "help": _TEXT, "artifacts": _STRINGS}
+_BASE = {"summary": _TEXT, "status": STAGE_STATUS, "help": _TEXT, "artifacts": _STRINGS}
 _SCOUT = _schema(_BASE)
 _CRITIC = _schema(
     {
@@ -92,16 +95,7 @@ def _authored_json(ctx, ref, field):
 
 
 def _context(ctx, payload):
-    context = payload.get("study_context") or getattr(
-        ctx.services, "study_context", None
-    )
-    if context is None:
-        candidate = Path(payload["task_ref"])
-        if candidate.suffix == ".json":
-            value = json.loads(candidate.read_text())
-            if isinstance(value, dict) and "output_schema" in value:
-                context = value
-    return context or {}
+    return ctx.state.setdefault("research_context", payload.get("study_context", {}))
 
 
 def _revise(ctx, payload):
@@ -128,21 +122,38 @@ def _revise(ctx, payload):
     return ctx.state.get("direction_revision", {})
 
 
-async def _stage(ctx, payload, name, role, instructions, assignment, schema):
+async def _stage(ctx, payload, name, instructions, assignment, schema):
     stages = ctx.state.setdefault("direction_stages", {})
     attempts = ctx.state.setdefault("direction_attempts", {})
     record = stages.get(name)
     retry = (
         record
-        and (record["verdict"] == "revise" if name == "critique" else record["help"])
+        and (
+            record["verdict"] == "revise"
+            if name == "critique"
+            else record["status"] == "blocked"
+        )
         and payload.get("feedback_refs")
         and attempts[name] != ctx.round
     )
     if record is None or retry:
         attempts[name] = ctx.round
-        record = await ctx.services.call(
-            role, f"direction-{name}-{ctx.round}", instructions, assignment, schema
-        )
+        predecessors = {
+            "scout": (),
+            "propose": ("direction.scout", "direction.explicit-experiment"),
+            "critique": ("direction.propose",),
+        }
+        with step(
+            ctx, f"direction.{name}", references(assignment), after=predecessors[name]
+        ) as step_id:
+            record = await ctx.services.call(
+                name,
+                f"direction-{name}-{ctx.round}",
+                instructions,
+                assignment,
+                schema,
+                step_id=step_id,
+            )
         stages[name] = record
         ctx.save_state()
         _json(ctx, f"reports/history/{ctx.round:06d}-{name}.json", record)
@@ -160,6 +171,8 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
             raise ValueError(
                 "Direction Critic requires an explicit verdict and nonempty reason"
             )
+    else:
+        validate_stage(record, "Direction stage")
     _json(ctx, f"reports/{name}.json", record)
     return record
 
@@ -175,6 +188,15 @@ def _finish(ctx, summary, help_text="", extra=()):
             if not path.is_relative_to(ctx.work) or ".." in path.parts:
                 raise ValueError("Direction artifacts must be inside this Run's work")
             artifacts.append(str(path))
+    with step(
+        ctx,
+        "direction.boundary",
+        list(dict.fromkeys(artifacts)),
+        after=("direction.scout", "direction.propose", "direction.critique"),
+        completion="blocked" if help_text else "completed",
+        waiting_for_assistance=bool(help_text),
+    ):
+        pass
     return {
         "summary": summary,
         "completion": "blocked" if help_text else "completed",
@@ -204,11 +226,18 @@ async def run(ctx, payload):
         "explicit_experiment": explicit,
         "revision": _revise(ctx, payload),
     }
+    if explicit:
+        with step(
+            ctx,
+            "direction.explicit-experiment",
+            references(payload),
+            explicit_experiment=True,
+        ):
+            pass
     if not explicit:
         scout = await _stage(
             ctx,
             payload,
-            "scout",
             "scout",
             "Independently explore the next question worth spending the authorized "
             "budget on. Read goal/task, published knowledge index and relevant actual "
@@ -217,18 +246,17 @@ async def run(ctx, payload):
             "hypothesis IDs and cite inspected evidence, uncertainty and estimated "
             "cost. Write a concise report inside work and return its artifact path. "
             "Do not read chats or pretend recalled literature was retrieved. Return "
-            "help for evidence or authorization missing outside this scope.",
+            "status=blocked and meaningful help for evidence or authorization missing outside this scope; otherwise return status=ready even with informational help.",
             sources,
             _SCOUT,
         )
-        if scout["help"]:
+        if scout["status"] == "blocked":
             return _finish(ctx, scout["summary"], scout["help"])
         sources["scout_report"] = str(ctx.work / "reports/scout.json")
     proposal = await _stage(
         ctx,
         payload,
         "propose",
-        "proposer",
         "Own selection of the next scientific question and its scientific constraints. "
         "Read the goal, task, knowledge index, relevant positive AND negative actual "
         "history and the independent Scout report when supplied. An admitted human "
@@ -246,7 +274,7 @@ async def run(ctx, payload):
         "data_roles, evaluation, inputs, constraints, completion_criteria. These are "
         "scientific constraints, not a duplicate execution Plan; Exp owns concrete Plan "
         "and Prepare. Include model/loss/masks/time/state/evaluation/resource boundaries "
-        "where relevant. Do not fill scientific gaps with null: return help instead. "
+        "where relevant. Do not fill scientific gaps with null: return status=blocked and meaningful help instead. Otherwise return status=ready even with informational help. "
         "For no-useful-action give concrete Study-wide frontier/evidence reasons, not "
         "merely one failed branch. For no-useful-action or blocked, leave "
         "experiment_task_ref empty. Return file paths in these reference fields, "
@@ -268,10 +296,10 @@ async def run(ctx, payload):
         raise ValueError(
             "Direction non-experiment proposal requires an empty experiment_task_ref"
         )
-    if proposal["help"] or proposal["disposition"] == "blocked":
-        return _finish(
-            ctx, proposal["summary"], proposal["help"] or "Direction remains blocked"
-        )
+    if proposal["disposition"] == "blocked" and proposal["status"] != "blocked":
+        raise ValueError("Direction blocked disposition requires blocked status")
+    if proposal["status"] == "blocked":
+        return _finish(ctx, proposal["summary"], proposal["help"])
     frontier = _authored_json(ctx, proposal["frontier_ref"], "frontier_ref")
     if not isinstance(frontier, dict) or not isinstance(
         frontier.get("hypotheses"), list
@@ -342,7 +370,6 @@ async def run(ctx, payload):
             ctx,
             payload,
             "critique",
-            "critic",
             "Independently review only the new consequential direction judgment, "
             "frontier disposition and scientific constraints using source evidence. "
             "Do not repeat experiment execution review. Check stable hypothesis IDs, "

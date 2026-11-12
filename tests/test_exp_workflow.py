@@ -10,9 +10,11 @@ from types import SimpleNamespace
 import pytest
 from openai_codex.client import CodexConfig
 
-from research_loop.group_agents import GROUP_GUARD, NativeGroupServices
-from research_loop.group_programs import exp
+from research_loop.group_agents import NativeGroupServices
+from research_loop.configuration import prepare_configuration
+from research_workflows.programs import exp
 from research_loop.state import Journal, write_json
+from research_loop.records import ExecutionTrace
 
 
 @pytest.fixture
@@ -40,16 +42,27 @@ def experiment(tmp_path, monkeypatch):
         work=work,
         study_root=tmp_path,
         round=1,
+        config_revision="revision-test",
         state={},
-        definition=SimpleNamespace(settings={"execution_backend": "local"}),
+        definition=SimpleNamespace(
+            settings={"execution_backend": "local"},
+            agents={
+                "plan": "experiment",
+                "prepare": "experiment",
+                "evaluate": "critic",
+            },
+        ),
+    )
+    ctx.trace = ExecutionTrace(
+        ctx.root, run_id=ctx.run_id, round=ctx.round, revision=ctx.config_revision
     )
     ctx.save_state = lambda: write_json(ctx.root / "state.json", ctx.state)
     goal = tmp_path / "goal.md"
     goal.write_text("One bounded synthetic check only.\n")
-    published = tmp_path / "knowledge/versions/initial"
+    published = tmp_path / "outputs/versions/initial"
     published.mkdir(parents=True)
     (published / "index.md").write_text("No reviewed findings.\n")
-    (tmp_path / "knowledge/current").symlink_to("versions/initial")
+    (tmp_path / "outputs/current").symlink_to("versions/initial")
     write_json(
         tmp_path / "call.json",
         {
@@ -101,11 +114,17 @@ def experiment(tmp_path, monkeypatch):
                 exp.PLAN_INSTRUCTIONS: "plan",
                 exp.PREPARE_INSTRUCTIONS: "prepare",
                 exp.EVALUATE_INSTRUCTIONS: "evaluate",
-            }[payload["instructions"]]
+            }[payload["instructions"].removeprefix(exp.COMMON + "\n")]
             thread = kwargs["thread_id"] or f"thread-{len(calls)}"
             kwargs["on_started"](thread)
             calls.append((phase, thread, self.config, instructions, payload))
-            result = {"summary": phase, "help": "", "artifacts": [], "command": ""}
+            result = {
+                "summary": phase,
+                "status": "ready",
+                "help": "",
+                "artifacts": [],
+                "command": "",
+            }
             if phase == "plan":
                 result["plan_artifact"] = "scientific-plan.md"
                 (work / "scientific-plan.md").write_text(
@@ -130,21 +149,23 @@ def experiment(tmp_path, monkeypatch):
                 assert json.loads((work / "result.json").read_text()) == 42
                 result["summary"] = result["claim"]
             if blocked["phase"] == phase and not payload["assignment"]["feedback_refs"]:
+                result["status"] = "blocked"
                 result["help"] = "Supply the approved missing scientific decision."
                 result["command"] = ""
             return result
 
     journal = Journal(tmp_path / "events.jsonl")
-    service = NativeGroupServices(
-        ctx,
-        {
-            "project": str(tmp_path / "project"),
-            "model": "gpt-6.1-sol",
-            "effort": "medium",
-        },
-        journal,
-        native_factory=Native,
+    config = prepare_configuration(
+        Path(__file__).resolve().parents[1] / "examples/research.yaml",
+        tmp_path / "configurations",
+        revision=ctx.config_revision,
     )
+    config["project"] = str(tmp_path / "project")
+    ctx.state["research_context"] = {
+        "input": {"published_knowledge_root": str(published.resolve())},
+        "output_schema": {"type": "object"},
+    }
+    service = NativeGroupServices(ctx, config, journal, native_factory=Native)
     ctx.services = service
     yield ctx, task, calls, blocked, configuration_calls
     journal.close()
@@ -165,26 +186,34 @@ def test_h11_exact_prompts_roles_threads_cwd_and_real_command(experiment):
         }
         assert [call[0] for call in calls] == ["plan", "prepare", "evaluate"]
         assert calls[0][1] == calls[1][1] != calls[2][1]
-        assert [call[4]["role"] for call in calls] == [
-            "proposer",
-            "experimenter",
+        assert [call["binding"] for call in ctx.state["native_calls"]] == [
+            "plan",
+            "prepare",
+            "evaluate",
+        ]
+        assert [call["agent_id"] for call in ctx.state["native_calls"]] == [
+            "experiment",
+            "experiment",
             "critic",
         ]
-        assert all(call[3] == exp.COMMON + "\n" + GROUP_GUARD for call in calls)
+        assert calls[0][3] == calls[1][3] != calls[2][3]
         assert all("role_template" not in call[4] for call in calls)
         assert all(call[2].cwd == str(ctx.work) for call in calls)
         assert all(call[2].launch_args_override == ("preserved",) for call in calls)
-        assert len({str(args[0]) for args, _ in configurations}) == 1
+        assert configurations[0][0][0] == configurations[1][0][0]
+        assert configurations[1][0][0] != configurations[2][0][0]
         assert all(
             args[1] == Path(ctx.services.config["project"])
             for args, _ in configurations
         )
         assert all(not kwargs.get("denied_roots") for _, kwargs in configurations)
-        assert ctx.services.study_context["input"]["published_knowledge_root"] == str(
-            (ctx.study_root / "knowledge/current").resolve()
-        )
-        assert calls[2][4]["study_context"]["output_schema"] == {"type": "object"}
-        assert ctx.study_root / "call.json" not in ctx.services.readable
+        assert ctx.state["research_context"]["input"][
+            "published_knowledge_root"
+        ] == str(published_root := (ctx.study_root / "outputs/current").resolve())
+        assert published_root.is_dir()
+        assert calls[2][4]["assignment"]["study_context"]["output_schema"] == {
+            "type": "object"
+        }
         assert (ctx.work / "dispatches").read_text() == "once"
         assert ctx.state["experiment_phases"]["execution"]["backend"] == "local"
         assert {
@@ -253,17 +282,32 @@ def test_exp_requires_explicit_backend_and_real_plan_artifact(experiment):
 
 
 def test_published_context_is_pinned_across_service_recreation(experiment):
-    ctx, _, _, _, _ = experiment
-    snapshot = ctx.services.study_context
-    write_json(ctx.study_root / "call.json", {"input": {"goal_file": "changed"}})
+    ctx, task, calls, _, _ = experiment
+    snapshot = json.loads(json.dumps(ctx.state["research_context"]))
+    asyncio.run(exp.run(ctx, {"task_ref": str(task)}))
+    replacement = ctx.study_root / "outputs/versions/replacement"
+    replacement.mkdir()
+    (ctx.study_root / "outputs/current").unlink()
+    (ctx.study_root / "outputs/current").symlink_to("versions/replacement")
     ctx.services.__init__(
         ctx,
         ctx.services.config,
-        ctx.services.raw_journal,
-        native_factory=ctx.services.native_factory,
+        ctx.services.agents.journal,
+        native_factory=ctx.services.agents.native_factory,
     )
-    assert ctx.services.study_context == snapshot
-    assert Path(snapshot["input"]["published_knowledge_root"]) in ctx.services.readable
+    asyncio.run(
+        exp.run(
+            ctx,
+            {
+                "task_ref": str(task),
+                "study_context": {
+                    "input": {"published_knowledge_root": str(replacement)}
+                },
+            },
+        )
+    )
+    assert ctx.state["research_context"] == snapshot
+    assert len(calls) == 3
 
 
 def test_absolute_refs_and_admitted_citations_need_no_scientific_retry(experiment):
@@ -273,7 +317,7 @@ def test_absolute_refs_and_admitted_citations_need_no_scientific_retry(experimen
 
     async def absolute_refs(*args, **kwargs):
         result = await original(*args, **kwargs)
-        if args[0] == "critic":
+        if args[0] == "evaluate":
             result["evidence"] = [str(ctx.work / "result.json"), str(task)]
             result["artifacts"] = [str(task)]
         raw_results.append(json.loads(json.dumps(result)))
@@ -313,7 +357,7 @@ def test_boundary_error_preserves_assessment_and_repairs_without_model(experimen
 
     async def missing_evidence(*args, **kwargs):
         result = await original(*args, **kwargs)
-        if args[0] == "critic":
+        if args[0] == "evaluate":
             result["evidence"].append("independent-check.md")
         return result
 
@@ -339,5 +383,129 @@ def test_boundary_error_preserves_assessment_and_repairs_without_model(experimen
         assert len(calls) == 3
         assert (ctx.work / "dispatches").read_text() == "once"
         await ctx.services.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("phase", ["plan", "prepare", "evaluate"])
+def test_ready_phase_with_informational_help_advances_once(experiment, phase):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+    note = "No phase blocker; retain the stated limitations."
+
+    async def informative(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        if result["summary"] == phase or (
+            phase == "evaluate" and args[0] == "evaluate"
+        ):
+            result["help"] = note
+        return result
+
+    ctx.services.call = informative
+
+    async def check():
+        output = await exp.run(ctx, {"task_ref": str(task)})
+        assert output["completion"] == "completed"
+        assert output["help"] == ""
+        assert ctx.state["experiment_phases"][phase]["help"] == note
+        assert json.loads((ctx.work / f"{phase}.json").read_text())["help"] == note
+        ctx.round += 1
+        again = await exp.run(
+            ctx, {"task_ref": str(task), "feedback_refs": [str(task)]}
+        )
+        assert again == output
+        assert [call[0] for call in calls] == ["plan", "prepare", "evaluate"]
+        assert (ctx.work / "dispatches").read_text() == "once"
+        await ctx.services.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize(
+    "status,help_text", [(None, ""), ("invalid", ""), ("blocked", " ")]
+)
+def test_exp_rejects_missing_status_or_empty_blocker(experiment, status, help_text):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+
+    async def malformed(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        result.update(status=status, help=help_text)
+        if status is None:
+            del result["status"]
+        return result
+
+    ctx.services.call = malformed
+    with pytest.raises(ValueError, match="status"):
+        asyncio.run(exp.run(ctx, {"task_ref": str(task)}))
+    assert [call[0] for call in calls] == ["plan"]
+    assert not (ctx.work / "dispatches").exists()
+
+
+def test_ready_note_cannot_mask_missing_required_plan(experiment):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+
+    async def missing_plan(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        result.update(plan_artifact="missing-plan.md", help="No scientific blocker.")
+        return result
+
+    ctx.services.call = missing_plan
+    output = asyncio.run(exp.run(ctx, {"task_ref": str(task)}))
+    assert output["completion"] == "blocked"
+    assert "plan.plan_artifact" in output["help"]
+    assert [call[0] for call in calls] == ["plan"]
+    assert not (ctx.work / "dispatches").exists()
+
+
+def test_failed_prepared_command_is_never_rerun_with_feedback(experiment):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+
+    async def failing_command(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        result["help"] = "No phase blocker."
+        if args[0] == "prepare":
+            script = ctx.work / "implementation.py"
+            script.write_text(script.read_text() + "raise SystemExit(7)\n")
+        return result
+
+    ctx.services.call = failing_command
+
+    async def check():
+        output = await exp.run(ctx, {"task_ref": str(task)})
+        assert output["completion"] == "blocked"
+        assert ctx.state["experiment_phases"]["execution"]["exit_code"] == 7
+        ctx.round += 1
+        assert (
+            await exp.run(ctx, {"task_ref": str(task), "feedback_refs": [str(task)]})
+            == output
+        )
+        assert [call[0] for call in calls] == ["plan", "prepare"]
+        assert (ctx.work / "dispatches").read_text() == "once"
+        await ctx.services.close()
+
+    asyncio.run(check())
+
+
+def test_unknown_prepared_command_cannot_redispatch_with_feedback(experiment):
+    ctx, task, calls, _, _ = experiment
+    ctx.state["executions"]["prepared-experiment"] = {
+        "status": "unknown",
+        "tool": "local",
+        "arguments": {"command": f"{shlex.quote(sys.executable)} implementation.py"},
+    }
+
+    async def check():
+        for feedback in ([], [str(task)]):
+            with pytest.raises(RuntimeError, match="reconciliation"):
+                await exp.run(ctx, {"task_ref": str(task), "feedback_refs": feedback})
+            ctx.round += 1
+        assert [call[0] for call in calls] == ["plan", "prepare"]
+        assert "execution" not in ctx.state["experiment_phases"]
+        assert not (ctx.work / "dispatches").exists()
+        with pytest.raises(RuntimeError, match="reconciliation"):
+            await ctx.services.close()
 
     asyncio.run(check())

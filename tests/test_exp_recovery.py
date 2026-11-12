@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from research_loop.group_programs.exp_recovery import build_recovery_bundle
+from research_workflows.programs.exp_recovery import build_recovery_bundle
 from research_loop.state import write_json
 
 
@@ -19,6 +19,7 @@ def settled_exp(tmp_path):
     canonical.write_text("x" * 69_120)
     raw = {
         "summary": "Independent calculation matched the frozen result.",
+        "status": "ready",
         "help": "",
         "artifacts": [],
         "command": "",
@@ -83,24 +84,20 @@ def settled_exp(tmp_path):
         {
             "native_calls": [
                 {
-                    "role": "critic",
+                    "binding": "evaluate",
+                    "thread_id": "synthetic-independent-thread",
                     "context": "critic",
                     "status": "completed",
                     "result": raw,
                 },
                 {
-                    "role": "critic",
+                    "binding": "evaluate",
+                    "thread_id": "synthetic-independent-thread",
                     "context": "critic",
                     "status": "completed",
                     "result": later,
                 },
             ],
-            "native_contexts": {
-                "critic": {
-                    "role": "critic",
-                    "thread_id": "synthetic-independent-thread",
-                }
-            },
         },
     )
     return root, canonical, raw
@@ -165,7 +162,7 @@ def test_fixed_readonly_scope_citations_need_no_input_content_reads(
     state = json.loads((root / "state.json").read_text())
     ref = os.path.relpath(source, root / "work")
     state["native_calls"][0]["result"]["evidence"].append(ref)
-    state["native_study_context"] = {"input": {scope_field: str(scope)}}
+    state["research_context"] = {"input": {scope_field: str(scope)}}
     write_json(root / "state.json", state)
     write_json(
         root / "exports/000001/evaluate.json",
@@ -207,7 +204,7 @@ def test_readonly_scope_never_admits_unknown_inputs_or_outputs(
     source = scope / "frozen.json"
     source.write_text("Synthetic input; metadata only.")
     state = json.loads((root / "state.json").read_text())
-    state["native_study_context"] = {"input": {"project_root": str(scope)}}
+    state["research_context"] = {"input": {"project_root": str(scope)}}
     if fault == "unknown-root":
         source = tmp_path / "unknown.json"
         source.write_text("Outside declared scope.")
@@ -250,6 +247,7 @@ def test_authority_failure_never_fabricates_completed_evaluation(
     root, _, _ = settled_exp
     state = json.loads((root / "state.json").read_text())
     if fault == "scientific-help":
+        state["native_calls"][0]["result"]["status"] = "blocked"
         state["native_calls"][0]["result"]["help"] = "Missing a frozen evaluator."
     elif fault == "duplicate-call":
         state["native_calls"].append(deepcopy(state["native_calls"][0]))
@@ -263,10 +261,12 @@ def test_authority_failure_never_fabricates_completed_evaluation(
     elif fault == "changed-science":
         state["native_calls"][0]["result"]["claim"] = "Different claim."
     elif fault == "shared-context":
-        state["native_contexts"]["plan"] = {
-            "role": "proposer",
-            "thread_id": "synthetic-independent-thread",
-        }
+        state["native_calls"].append(
+            {
+                "binding": "plan",
+                "thread_id": "synthetic-independent-thread",
+            }
+        )
     else:
         ledger = json.loads((root / "executions.json").read_text())
         if fault == "unsettled-execution":
@@ -291,3 +291,50 @@ def test_recovery_rejects_unpublished_or_escaping_artifacts(settled_exp, tmp_pat
     with pytest.raises(ValueError, match="explicitly published"):
         build_recovery_bundle(root, tmp_path / "bad-bundle")
     assert not (tmp_path / "bad-bundle").exists()
+
+
+@pytest.mark.parametrize(
+    "status,help_text,accepted",
+    [
+        ("ready", "", True),
+        ("ready", "No blocker; retain the limitations.", True),
+        ("blocked", "Supply the missing evaluation input.", False),
+        ("blocked", "", False),
+        ("invalid", "", False),
+    ],
+)
+def test_recovery_accepts_ready_current_receipts_without_clearing_notes(
+    settled_exp, tmp_path, status, help_text, accepted
+):
+    root, _, _ = settled_exp
+    state = json.loads((root / "state.json").read_text())
+    state["native_calls"][0]["result"].update(status=status, help=help_text)
+    write_json(root / "state.json", state)
+    original_path = root / "exports/000001/evaluate.json"
+    original = json.loads(original_path.read_text())
+    original["status"] = status
+    write_json(original_path, original)
+    original_bytes = original_path.read_bytes()
+
+    _, manifest = build_recovery_bundle(root, tmp_path / "current-receipt-bundle")
+    assert bool(manifest["warnings"]) is not accepted
+    assert original_path.read_bytes() == original_bytes
+    if accepted:
+        evaluation = json.loads(Path(manifest["evaluation_ref"]).read_text())
+        assert evaluation["status"] == status
+        assert evaluation["help"] == help_text
+        assert evaluation["provenance"]["raw_call_index"] == 0
+        assert Path(manifest["original_evaluation_ref"]).read_bytes() == original_bytes
+
+
+def test_recovery_requires_the_current_exp_status_schema(settled_exp):
+    from research_workflows.programs.exp import EVALUATE_SCHEMA
+    from research_workflows.programs.exp_recovery import _strict_evaluation
+
+    _, _, record = settled_exp
+    assert "status" in EVALUATE_SCHEMA["required"]
+    assert _strict_evaluation(record)
+    assert not _strict_evaluation(
+        {key: value for key, value in record.items() if key != "status"}
+    )
+    assert not _strict_evaluation({**record, "status": "other"})

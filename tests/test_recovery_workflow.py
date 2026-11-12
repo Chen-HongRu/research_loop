@@ -1,81 +1,42 @@
-"""Same completion gate for reuse-only Router and controlled Lead publication."""
+"""A stopped settled experiment resumes evaluation in a new Run, without dispatch."""
 
 import asyncio
-from copy import deepcopy
 import json
+import shlex
+import sys
+from pathlib import Path
 
 import pytest
 
-from research_loop import group_router, human_input, loop
 from research_loop.codex import CodexConfig
-from test_exp_recovery import settled_exp as _settled_exp
-
-settled_exp = _settled_exp
-
-
-def candidate(sources):
-    request = sources["study_context"]["input"].get("human_request")
-    result = dict(
-        summary="Recovered the existing independent assessment.",
-        goal="achieved",
-        limitations=["Synthetic only; no new computation."],
-        next_action="",
-        study_action="stop",
-        stop_reason="The bounded recovery request is complete.",
-    )
-    if request:
-        result["human_request"] = dict(
-            id=request["id"],
-            status="completed",
-            reason="Existing execution and independent assessment are published.",
-        )
-    return dict(
-        summary=result["summary"],
-        help="",
-        study_result=result,
-        knowledge_files=[
-            dict(
-                source="knowledge/index.md",
-                target="index.md",
-                content="# Recovery\n\n[Finding](finding.md)\n",
-            ),
-            dict(
-                source="knowledge/finding.md",
-                target="finding.md",
-                content="Existing result retained; synthetic only.",
-            ),
-        ],
-        stop_basis="goal-satisfied",
-    )
+from research_loop.configuration import prepare_configuration
+from research_loop.group_agents import NativeGroupServices
+from research_loop.groups import GroupDefinition, GroupRuntime
+from research_loop.state import Journal
+from research_workflows.research import create
 
 
-@pytest.mark.parametrize("mode", ["router", "lead"])
-@pytest.mark.parametrize("with_request", [False, True])
-def test_recovery_publication_uses_same_completion_gate_without_experiment(
-    settled_exp,
-    tmp_path,
-    monkeypatch,
-    mode,
-    with_request,
+@pytest.mark.parametrize(
+    "revision", ["same", "instructions", "instructions-twice", "protocol", "task"]
+)
+def test_stop_after_command_recovers_evaluation_without_reexecution(
+    tmp_path, monkeypatch, revision
 ):
-    source, _, _ = settled_exp
-    project = tmp_path / "project"
-    project.mkdir()
-    goal = tmp_path / "goal.md"
-    goal.write_text(
-        "Recover and publish already settled evidence; never execute the experiment."
+    source = Path(__file__).resolve().parents[1] / "examples/research.yaml"
+    config = prepare_configuration(source, tmp_path / "declarations", revision="fixed")
+    config["project"] = str(tmp_path)
+    task = tmp_path / "task.md"
+    task.write_text(
+        "Compute 6 * 7 exactly once on CPU and independently evaluate its actual result."
     )
-    root = tmp_path / mode
-    loop.initialize(root, project, goal, coordinator=mode, recover_exp=source)
-    if with_request:
-        human_input.submit(root, goal.read_text())
-    assert {g["id"] for g in loop.read_config(root)["groups"]} == {"synthesis"}
+    evaluation_started = asyncio.Event()
     calls = []
-    thread_ids = []
+    executions = []
+    evaluating = 0
 
-    class Fake:
-        def __init__(self, config, journal, tools=()):
-            self.tools = {tool.name: tool for tool in tools}
+    class Native:
+        def __init__(self, config, journal):
+            pass
 
         async def open(self):
             pass
@@ -93,60 +54,214 @@ def test_recovery_publication_uses_same_completion_gate_without_experiment(
             pass
 
         async def run(self, instructions, payload, schema, **kwargs):
-            thread = f"thread-{len(thread_ids)}"
-            thread_ids.append(thread)
-            if kwargs.get("on_started"):
-                kwargs["on_started"](thread)
-            if "action" in schema["properties"]:
-                raise AssertionError("The fixed recovery profile needs no Router model")
-            if "review_candidate" in self.tools:
-                calls.append("lead")
-                assert kwargs["allow_builtin_tools"] is False
-                value = candidate(payload)
-                reviewed = await self.tools["review_candidate"].call(deepcopy(value))
-                assert reviewed["review"]["verdict"] == "accept"
-                return reviewed["accepted_candidate"]
-            assert kwargs["allow_tools"] is False
-            if "verdict" in schema["properties"]:
-                calls.append("critic")
-                assert (
-                    payload["assignment"]["analysis_record"]["study_result"]["goal"]
-                    == "achieved"
+            nonlocal evaluating
+            work = Path(payload["work"])
+            kwargs["on_started"](f"thread-{len(calls)}")
+            fields = schema["properties"]
+            base = dict(
+                summary="Bounded synthetic evidence",
+                status="ready",
+                help="",
+                artifacts=[],
+                command="",
+            )
+            if "plan_artifact" in fields:
+                calls.append("plan")
+                (work / "scientific-plan.md").write_text(
+                    "Exact integer multiplication, one execution, independent evaluation."
                 )
                 return dict(
-                    summary="Independent review complete",
-                    verdict="accept",
-                    reason="The candidate preserves existing evidence and limitations.",
-                    artifacts=[],
+                    base,
+                    plan_artifact="scientific-plan.md",
+                    artifacts=["scientific-plan.md"],
                 )
-            calls.append("analyst")
-            return candidate(payload["assignment"])
-
-    def config(*args, **kwargs):
-        return CodexConfig(cwd=str(project)), {}
-
-    monkeypatch.setattr(group_router, "configuration", config)
-    monkeypatch.setattr("research_loop.group_agents.configuration", config)
-    monkeypatch.setattr("research_loop.recovery.configuration", config)
-
-    async def no_execution(*args, **kwargs):
-        raise AssertionError("Recovery must not execute an experiment")
+            if "result_file" in fields:
+                calls.append("prepare")
+                (work / "experiment.py").write_text(
+                    'from pathlib import Path\nPath("result.json").write_text("42")\nPath("dispatch-count").write_text("once")\n'
+                )
+                return dict(
+                    base,
+                    command=f"{shlex.quote(sys.executable)} experiment.py",
+                    result_file="result.json",
+                    artifacts=["experiment.py"],
+                )
+            assert "claim" in fields
+            calls.append("evaluate")
+            evaluating += 1
+            assert (work / "result.json").read_text() == "42"
+            if evaluating == 1 or (
+                revision == "instructions-twice" and evaluating == 2
+            ):
+                evaluation_started.set()
+                await asyncio.Future()
+            return dict(
+                base,
+                claim="Observed 42",
+                limitations=["Synthetic, recovered evidence"],
+                evidence=["result.json"],
+            )
 
     monkeypatch.setattr(
-        "research_loop.group_agents.NativeGroupServices.execute_prepared", no_execution
+        "research_loop.group_agents.configuration",
+        lambda *a, **k: (CodexConfig(cwd=str(tmp_path)), {}),
     )
-    state = asyncio.run(loop.run(root, native_factory=Fake))
-    assert state["status"] == "completed"
-    if with_request:
-        assert state["result"]["human_request"]["status"] == "completed"
-        assert (root / "inputs/human.md").read_text() == ""
-    else:
-        assert "human_request" not in state["result"]
-    assert (root / "knowledge/current/finding.md").is_file()
-    assert (root / "knowledge/current/recovery-evidence/evaluation.json").is_file()
-    assert calls == (["analyst", "critic"] if mode == "router" else ["lead", "critic"])
-    assert state["thread_id"] == thread_ids[0]
-    assert len(set(thread_ids)) == len(thread_ids)
-    assert len(list((root / "group-runs").glob("*/run.json"))) == 1
-    source_record = json.loads((source / "run.json").read_text())
-    assert source_record["status"] == "closed" and source_record["round"] == 2
+    original_execute = NativeGroupServices.execute_prepared
+
+    async def execute(self, *args, **kwargs):
+        executions.append((self.ctx.run_id, kwargs["operation_id"]))
+        return await original_execute(self, *args, **kwargs)
+
+    monkeypatch.setattr(NativeGroupServices, "execute_prepared", execute)
+    journal = Journal(tmp_path / "events.jsonl")
+    runtime = GroupRuntime(
+        tmp_path,
+        config["groups"],
+        revision=config["revision"],
+        service_factory=lambda ctx: NativeGroupServices(
+            ctx, config, journal, native_factory=Native
+        ),
+    )
+    workflow = create({})
+
+    async def scenario():
+        context = {"input": {}, "output_schema": workflow.result_schema(None)}
+        old_id = await runtime.start("exp", str(task), [], context=context)
+        await asyncio.wait_for(evaluation_started.wait(), 5)
+        await runtime.stop(old_id)
+        old = runtime.observe(old_id)
+        packet = workflow.recover({"root": tmp_path}, old)
+        assert packet["operation"]["origin_group_run_id"] == old_id
+        assert packet["operation_id"] == "prepared-experiment"
+        assert packet["limitations"]
+        if revision != "same":
+            declaration = source.read_text().replace(
+                "../src/", str(source.parent.parent / "src") + "/"
+            )
+            if revision in {"instructions", "instructions-twice"}:
+                critic = tmp_path / "revised-critic.md"
+                critic.write_text(
+                    config["agents"]["critic"]["instructions"]
+                    + "\nInspect the actual recovered result carefully.\n"
+                )
+                declaration = declaration.replace(
+                    str(
+                        source.parent.parent / "src/research_workflows/agents/critic.md"
+                    ),
+                    str(critic),
+                )
+            if revision == "protocol":
+                declaration = declaration.replace(
+                    "execution_backend: local",
+                    "execution_backend: local\n      protocol: revised-scientific-protocol",
+                )
+            revised_source = tmp_path / "revised.yaml"
+            revised_source.write_text(declaration)
+            revised_config = prepare_configuration(
+                revised_source, tmp_path / "revised-declarations", revision="new"
+            )
+            revised_config["project"] = str(tmp_path)
+            config.clear()
+            config.update(revised_config)
+            runtime.replace_definitions(
+                [GroupDefinition.from_json(row) for row in config["groups"]],
+                config["revision"],
+            )
+            if revision == "task":
+                task.write_text("Use a different scientific comparison.")
+        evaluation_started.clear()
+        new_id = await runtime.start(
+            "exp", str(task), [], context=context, predecessor=old_id, recovery=packet
+        )
+        intermediate_id = None
+        if revision == "instructions-twice":
+            await asyncio.wait_for(evaluation_started.wait(), 5)
+            await runtime.stop(new_id)
+            intermediate_id = new_id
+            packet = workflow.recover(
+                {"root": tmp_path}, runtime.observe(intermediate_id)
+            )
+            assert packet["source_run_id"] == intermediate_id
+            assert packet["source_config_revision"] == "new"
+            assert packet["operation"]["origin_group_run_id"] == old_id
+            assert packet["operation"]["source_config_revision"] == "fixed"
+            new_id = await runtime.start(
+                "exp",
+                str(task),
+                [],
+                context=context,
+                predecessor=intermediate_id,
+                recovery=packet,
+            )
+        while runtime.observe(new_id)["status"] == "running":
+            await runtime.wait()
+        new = runtime.observe(new_id)
+        if revision in {"protocol", "task"}:
+            assert new["status"] == "failed", new
+            assert executions == [(old_id, "prepared-experiment")]
+            assert calls == ["plan", "prepare", "evaluate"]
+            await runtime.close_runtime()
+            return
+        assert new["status"] == "returned", new
+        assert new["output"]["completion"] == "completed"
+        new_state = json.loads(
+            (tmp_path / "group-runs" / new_id / "state.json").read_text()
+        )
+        assert [call["binding"] for call in new_state["native_calls"]] == ["evaluate"]
+        transfers = [
+            json.loads(path.read_text())
+            for path in (tmp_path / "group-runs" / new_id / "records/handoff").glob(
+                "*.json"
+            )
+        ]
+        assert any(
+            transfer.get("sender_run_id") == old_id
+            and transfer.get("receiver_run_id") == new_id
+            for transfer in transfers
+        )
+
+        operation = new_state["executions"]["prepared-experiment"]
+        assert operation["origin_group_run_id"] == old_id
+        assert operation["source_config_revision"] == "fixed"
+        assert new["config_revision"] == (
+            "new" if revision in {"instructions", "instructions-twice"} else "fixed"
+        )
+        assert operation["receipt"] == packet["operation"]["receipt"]
+        assert not (tmp_path / "group-runs" / new_id / "work/dispatch-count").exists()
+        assert (
+            tmp_path / "group-runs" / old_id / "work/dispatch-count"
+        ).read_text() == "once"
+        assert executions == [(old_id, "prepared-experiment")]
+        assert calls == ["plan", "prepare", "evaluate", "evaluate"] + (
+            ["evaluate"] if intermediate_id else []
+        )
+        if intermediate_id:
+            intermediate_state = json.loads(
+                (tmp_path / "group-runs" / intermediate_id / "state.json").read_text()
+            )
+            assert (
+                intermediate_state["executions"]["prepared-experiment"][
+                    "origin_group_run_id"
+                ]
+                == old_id
+            )
+            assert (
+                intermediate_state["executions"]["prepared-experiment"][
+                    "source_config_revision"
+                ]
+                == "fixed"
+            )
+            assert new_state["recovery_source"] == intermediate_id
+            assert new["predecessor"] == intermediate_id
+            assert not (
+                tmp_path / "group-runs" / intermediate_id / "work/dispatch-count"
+            ).exists()
+        ledger_path = tmp_path / "group-runs" / old_id / "executions.json"
+        ledger = json.loads(ledger_path.read_text())
+        ledger["prepared-experiment"]["status"] = "unknown"
+        ledger_path.write_text(json.dumps(ledger))
+        assert workflow.recover({"root": tmp_path}, old) is None
+        await runtime.close_runtime()
+
+    asyncio.run(scenario())
+    journal.close()

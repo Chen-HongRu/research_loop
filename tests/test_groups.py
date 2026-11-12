@@ -99,7 +99,7 @@ def test_hold_resume_reuses_state_and_pins_version_across_restart(tmp_path):
             runtime.root / run_id / "rounds/000001/output.json"
         ).read_bytes()
         runtime.hold(run_id)
-        await runtime.close_runtime()
+        await runtime.settle()
         new = definition(
             tmp_path, PROGRAM.replace("report written", "new program"), "v2"
         )
@@ -501,7 +501,7 @@ def test_unknown_effects_never_publish_diagnostic_or_allow_close(tmp_path):
 
 
 def test_resume_clears_active_boundary_and_keeps_prior_exports_discoverable(tmp_path):
-    from research_loop.group_router import GroupCoordinator
+    from research_loop.group_router import packet as router_packet
 
     async def scenario():
         study = tmp_path / "study"
@@ -522,14 +522,18 @@ def test_resume_clears_active_boundary_and_keeps_prior_exports_discoverable(tmp_
             is None
         )
         assert json.loads(old_metadata.read_text()) == first["output"]
-        coordinator = GroupCoordinator(study, {"groups": []}, None)
-        coordinator.runtime = runtime
-        packet = coordinator.packet({"iteration": 1})
+        packet = router_packet(
+            study,
+            {"groups": [], "revision": "initial"},
+            runtime.observe()["runs"],
+            [run_id],
+            {},
+        )
         row = packet["runs"][0]
-        assert row["output"] == {}
-        assert [
-            coordinator.resolve_ref(ref, packet) for ref in row["prior_artifacts"]
-        ] == [old_artifact]
+        assert row["output"] == {"artifacts": []}
+        assert [packet["references"][ref] for ref in row["prior_artifacts"]] == [
+            old_artifact
+        ]
         with pytest.raises(RuntimeError, match="boundary"):
             runtime.hold(run_id)
         second = await runtime.wait()

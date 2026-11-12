@@ -1,12 +1,12 @@
 [project]
 name = "research-loop"
-version = "0.3.0"
-description = "A Codex-led research loop with native delegation"
+version = "0.4.0"
+description = "Explicit Group workflows with a Codex Router"
 requires-python = ">=3.12,<3.13"
-dependencies = ["openai-codex==0.167.0", "pydantic>=2.11,<3"]
+dependencies = ["openai-codex==0.167.0", "pydantic>=2.11,<3", "PyYAML>=6.0.2,<7"]
 
 [project.scripts]
-research-loop = "research_loop.loop:main"
+research-loop = "research_loop.cli:main"
 
 [dependency-groups]
 dev = ["pytest==9.2.0"]
@@ -16,7 +16,7 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/research_loop"]
+packages = ["src/research_loop", "src/research_workflows"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

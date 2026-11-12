@@ -5,6 +5,9 @@ import json
 import posixpath
 from pathlib import Path, PurePosixPath
 
+from research_workflows.programs.tracing import references, step
+from research_workflows.contracts import STAGE_STATUS, validate_stage
+
 
 def _schema(properties):
     return {
@@ -17,7 +20,7 @@ def _schema(properties):
 
 _TEXT = {"type": "string"}
 _STRINGS = {"type": "array", "items": _TEXT}
-_BASE = {"summary": _TEXT, "help": _TEXT, "artifacts": _STRINGS}
+_BASE = {"summary": _TEXT, "status": STAGE_STATUS, "help": _TEXT, "artifacts": _STRINGS}
 _CRITIC = _schema(
     {
         "summary": _TEXT,
@@ -45,7 +48,7 @@ AUTHOR_INSTRUCTIONS = (
     "For continue define the next falsifiable action. A completed human_request "
     "must match its admitted ID and be supported by actual successful execution "
     "AND independent analysis: cite admitted small JSON exit_code=0 receipts in "
-    "execution_refs and independent evaluate JSON receipts (help='') in analysis_refs. Preparation/failure "
+    "execution_refs and independent evaluate JSON receipts (status=ready, informational help allowed) in analysis_refs. Preparation/failure "
     "alone leaves it pending or blocked. Include those references in its evidence. "
     "Use ONLY standardized host execution receipts in execution_refs and independent "
     "evaluation receipts in analysis_refs. When supplied, choose the exact admitted "
@@ -58,7 +61,7 @@ AUTHOR_INSTRUCTIONS = (
     "the existing index references; preserve historical/negative evidence and "
     "limitations. Do not erase prior history or claim it validates new behavior. "
     "Python installs these files verbatim, never fills in scientific content. "
-    "Return help with study_result='' if required evidence lies outside scope, "
+    "Return status=blocked with meaningful help and study_result='' if required evidence lies outside scope; otherwise return status=ready even with informational help, "
     "rather than fabricating result fields. Do not read raw agent chats. "
     "Return artifacts only for new files inside this Run's work; admitted input "
     "paths are evidence citations, not new outputs. Use study_result.evidence, "
@@ -91,7 +94,7 @@ REVIEW_INSTRUCTIONS = (
 RECOVERY_INSTRUCTIONS = (
     " Recovery-only contract: recovery_evidence is the complete bounded inline "
     "evidence packet; use its contents without opening paths or using tools. "
-    "Do not return help solely because tools or paths are unavailable: the packet "
+    "Return status=ready even with informational help. Do not return status=blocked solely because tools or paths are unavailable: the packet "
     "contains the required evidence. The formal criterion is already settled by "
     "the completed original Exp. Do not execute compute, recompute metrics, "
     "reinterpret the criterion, or review the whole Exp again. Author only the "
@@ -154,12 +157,7 @@ def _validate(value, schema):
 
 
 def _context(ctx, payload):
-    study = payload.get("study_context") or getattr(ctx.services, "study_context", None)
-    if study is None and Path(payload["task_ref"]).suffix == ".json":
-        value = json.loads(Path(payload["task_ref"]).read_text())
-        if isinstance(value, dict) and "output_schema" in value:
-            study = value
-    return study or {}
+    return ctx.state.setdefault("research_context", payload.get("study_context", {}))
 
 
 def _revise(ctx, payload):
@@ -185,13 +183,17 @@ def _revise(ctx, payload):
     return ctx.state.get("synthesis_revision", {})
 
 
-async def _stage(ctx, payload, name, role, instructions, assignment, schema):
+async def _stage(ctx, payload, name, instructions, assignment, schema):
     stages = ctx.state.setdefault("synthesis_stages", {})
     attempts = ctx.state.setdefault("synthesis_attempts", {})
     record = stages.get(name)
     retry = (
         record
-        and (record["verdict"] == "revise" if name == "critique" else record["help"])
+        and (
+            record["verdict"] == "revise"
+            if name == "critique"
+            else record["status"] == "blocked"
+        )
         and payload.get("feedback_refs")
         and attempts[name] != ctx.round
     )
@@ -199,22 +201,28 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
         attempts[name] = ctx.round
         packet = assignment.get("recovery_evidence", {})
         recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"
-        record = await ctx.services.call(
-            role,
-            f"synthesis-{name}-{ctx.round}",
-            instructions,
-            assignment,
-            schema,
-            **(
-                {
-                    "allow_tools": False,
-                    "include_role_template": False,
-                    "max_output_chars": 12000 if name == "analysis" else 4000,
-                }
-                if recovery
-                else {}
-            ),
-        )
+        with step(
+            ctx,
+            f"synthesis.{name}",
+            references(assignment),
+            after=("synthesis.analysis",) if name == "critique" else (),
+        ) as step_id:
+            record = await ctx.services.call(
+                name,
+                f"synthesis-{name}-{ctx.round}",
+                instructions,
+                assignment,
+                schema,
+                step_id=step_id,
+                **(
+                    {
+                        "allow_tools": False,
+                        "max_output_chars": 12000 if name == "analysis" else 4000,
+                    }
+                    if recovery
+                    else {}
+                ),
+            )
         if recovery and name == "analysis":
             record = bind_recovery_analysis(record, assignment)
         stages[name] = record
@@ -224,6 +232,8 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
         _validate(record, schema)
         if not record["reason"].strip():
             raise ValueError("Synthesis Critic requires a nonempty reason")
+    else:
+        validate_stage(record, "Synthesis stage")
     _json(ctx, f"reports/{name}.json", record)
     return record
 
@@ -250,6 +260,15 @@ def _finish(ctx, payload, summary, help_text="", extra=()):
                     f"an explicitly admitted input: {ref}"
                 )
             artifacts.append(str(path))
+    with step(
+        ctx,
+        "synthesis.boundary",
+        list(dict.fromkeys(artifacts)),
+        after=("synthesis.analysis", "synthesis.critique"),
+        completion="blocked" if help_text else "completed",
+        waiting_for_assistance=bool(help_text),
+    ):
+        pass
     return {
         "summary": summary,
         "completion": "blocked" if help_text else "completed",
@@ -324,7 +343,7 @@ def _completed_request_evidence(result, analysis, sources):
                 "Human completion requires a small independent evaluation receipt"
             )
         evaluation = json.loads(path.read_text())
-        if evaluation.get("help") != "" or not evaluation.get("summary"):
+        if evaluation.get("status") != "ready" or not evaluation.get("summary"):
             raise ValueError("Blocked or missing evaluation cannot complete a request")
 
 
@@ -435,7 +454,7 @@ def validate_analysis(analysis, result_schema, sources):
 
 
 def analysis_schema(result_schema, *, recovery=False, sources=None):
-    """Strict Author result contract shared with the recovery Lead baseline."""
+    """Strict Author result contract for ordinary and recovery synthesis."""
     schema = _schema(
         {
             **_BASE,
@@ -538,9 +557,10 @@ def bind_recovery_analysis(candidate, sources):
             bind(result["human_request"], "evidence", refs)
     output_schema = sources["study_context"]["output_schema"]
     _validate(record, analysis_schema(output_schema, recovery=True))
+    validate_stage(record, "Recovery synthesis stage")
     if isinstance(result, dict):
         _validate(result, output_schema)
-    elif result != "" or not record["help"]:
+    elif result != "" or record["status"] != "blocked" or not record["help"].strip():
         raise ValueError("Recovery requires an authored Study result or explicit help")
     documents = record["knowledge_files"]
     if documents:
@@ -622,12 +642,11 @@ async def run(ctx, payload):
         ctx,
         payload,
         "analysis",
-        "analyst",
         AUTHOR_INSTRUCTIONS + (RECOVERY_INSTRUCTIONS if recovery else ""),
         sources,
         author_schema,
     )
-    if analysis["help"]:
+    if analysis["status"] == "blocked":
         return _finish(ctx, payload, analysis["summary"], analysis["help"])
     validate_analysis(analysis, result_schema, sources)
     result = analysis["study_result"]
@@ -656,7 +675,6 @@ async def run(ctx, payload):
         ctx,
         payload,
         "critique",
-        "critic",
         REVIEW_INSTRUCTIONS + (RECOVERY_INSTRUCTIONS if recovery else ""),
         {
             **sources,

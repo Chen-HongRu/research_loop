@@ -139,14 +139,40 @@ def item(value, method="item/completed"):
         "at": "2026-01-01T12:00:00Z",
         "event": "codex.event",
         "method": method,
-        "data": {"threadId": "lead", "item": value},
+        "data": {"threadId": "router", "item": value},
     }
 
 
 def initialize(root):
-    (root / "status.json").write_text(
-        json.dumps({"status": "running", "thread_id": "lead"})
+    (root / "status.json").write_text(json.dumps({"status": "running", "iteration": 1}))
+
+    (root / "roles.json").write_text(
+        json.dumps({"threads": {"router": {"role": "router", "task": "routing"}}})
     )
+    (root / "active.json").write_text(json.dumps({"revision": "r1"}))
+    config = root / "configurations/r1/config.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        json.dumps(
+            {
+                "revision": "r1",
+                "router": {"profile": "main"},
+                "profiles": {"main": {"model": "gpt-6.1-sol", "effort": "medium"}},
+            }
+        )
+    )
+
+
+def map_agent(root, identity, *, role="custom-reviewer", task="review"):
+    path = root / "roles.json"
+    document = json.loads(path.read_text())
+    document["threads"][identity] = {
+        "role": role,
+        "task": task,
+        "group_run_id": "group-one",
+        "config_revision": "r1",
+    }
+    path.write_text(json.dumps(document))
 
 
 def test_milestones_survive_polling_and_private_reasoning_is_not_projected(tmp_path):
@@ -195,7 +221,8 @@ def test_milestones_survive_polling_and_private_reasoning_is_not_projected(tmp_p
 
 def test_child_responsibility_result_and_followup_have_separate_states(tmp_path):
     initialize(tmp_path)
-    path = tmp_path / "native/sessions/2026/01/01/child.jsonl"
+    map_agent(tmp_path, "child", task="plan_review")
+    path = tmp_path / "groups/router/one/native/sessions/2026/01/01/child.jsonl"
     meta = {
         "type": "session_meta",
         "payload": {
@@ -203,7 +230,7 @@ def test_child_responsibility_result_and_followup_have_separate_states(tmp_path)
             "source": {
                 "subagent": {
                     "thread_spawn": {
-                        "parent_thread_id": "lead",
+                        "parent_thread_id": "router",
                         "agent_path": "/root/plan_review",
                         "agent_nickname": "Ada",
                     }
@@ -273,7 +300,7 @@ def test_child_responsibility_result_and_followup_have_separate_states(tmp_path)
     state = server.State(tmp_path)
     result = state.snapshot()
     child = result["agents"][0]
-    assert child["title"] == "方案审查"
+    assert child["title"] == "plan_review"
     assert child["name"] == "Ada" and child["status"] == "completed"
     assert child["result"] == "建议先补一个对照。" and len(child["messages"]) == 1
     assert "PRIVATE_CHILD_REASONING" not in json.dumps(result)
@@ -342,6 +369,7 @@ def test_native_and_resource_views_are_one_operation_and_preserve_failure(tmp_pa
 
 def test_missing_native_history_does_not_invent_a_task_result(tmp_path):
     initialize(tmp_path)
+    map_agent(tmp_path, "child", task="probe_script")
     append(
         tmp_path / "events.jsonl",
         item(
@@ -354,18 +382,19 @@ def test_missing_native_history_does_not_invent_a_task_result(tmp_path):
         ),
     )
     child = server.State(tmp_path).snapshot()["agents"][0]
-    assert child["title"] == "诊断脚本实现"
+    assert child["title"] == "probe_script"
     assert child["status"] == "working"
     assert child["result"] is None and child["messages"] == []
 
 
-def test_explicit_roles_do_not_reclassify_legacy_tasks():
-    assert server.task_role("scout_alternatives") == "Scout"
-    assert server.task_role("gca_Analyst_readout") == "Analyst"
-    assert server.task_role("experimenter-state") == "Experimenter"
-    assert server.task_role("plan_review") == "unknown"
-    assert server.task_role("probe_script") == "unknown"
-    assert server.task_role("critic_proposer") == "unknown"
+def test_dynamic_agent_identity_is_not_guessed_from_task_name(tmp_path):
+    initialize(tmp_path)
+    map_agent(tmp_path, "one", role="custom-evaluator", task="scout_critic_analysis")
+    card = server.State(tmp_path).snapshot()["agents"][0]
+    assert card["role"] == "custom-evaluator"
+    assert card["title"] == "scout_critic_analysis"
+    assert card["group_run_id"] == "group-one"
+    assert card["config_revision"] == "r1"
 
 
 def test_current_meta_records_take_precedence_over_old_generic_records(tmp_path):
@@ -437,12 +466,13 @@ def test_artifacts_reject_symlinks_and_bound_content(tmp_path):
 
 def test_agent_iteration_comes_from_session_start_not_latest_activity(tmp_path):
     initialize(tmp_path)
+    map_agent(tmp_path, "child", role="critic")
     for iteration, start in ((1, "2026-01-01T11:00:00Z"), (2, "2026-01-01T12:00:00Z")):
         path = tmp_path / f"iterations/{iteration:06d}/status.json"
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({"iteration": iteration, "started_at": start}))
     append(
-        tmp_path / "native/sessions/2026/01/01/child.jsonl",
+        tmp_path / "groups/router/one/native/sessions/2026/01/01/child.jsonl",
         {
             "type": "session_meta",
             "timestamp": "2026-01-01T11:30:00Z",
@@ -451,7 +481,7 @@ def test_agent_iteration_comes_from_session_start_not_latest_activity(tmp_path):
                 "source": {
                     "subagent": {
                         "thread_spawn": {
-                            "parent_thread_id": "lead",
+                            "parent_thread_id": "router",
                             "agent_path": "/root/critic_design",
                         }
                     }
@@ -467,7 +497,7 @@ def test_agent_iteration_comes_from_session_start_not_latest_activity(tmp_path):
     child = server.State(tmp_path).snapshot()["agents"][0]
     assert child["iteration"] == 1
     assert child["started_at"] == "2026-01-01T11:30:00Z"
-    assert child["role"] == "Critic"
+    assert child["role"] == "critic"
     assert child["fresh_context"] == "unknown"
 
 
@@ -491,7 +521,7 @@ def host_mapping(root, status="completed"):
 
 def host_history(root):
     append(
-        root / "native/sessions/2026/01/01/host.jsonl",
+        root / "groups/router/one/native/sessions/2026/01/01/host.jsonl",
         {
             "type": "session_meta",
             "timestamp": "2026-01-01T12:01:00Z",
@@ -544,7 +574,7 @@ def test_host_role_uses_explicit_identity_and_host_terminal_status(
     host_history(tmp_path)
     # An independent, unmapped CLI thread must not become a Study delegate.
     append(
-        tmp_path / "native/sessions/2026/01/01/unrelated.jsonl",
+        tmp_path / "groups/router/one/native/sessions/2026/01/01/unrelated.jsonl",
         {
             "type": "session_meta",
             "payload": {"id": "unrelated", "source": "cli"},
@@ -555,8 +585,8 @@ def test_host_role_uses_explicit_identity_and_host_terminal_status(
     child = result["agents"][0]
     assert child["id"] == "host-child"
     assert child["task_name"] == "inspect-result"
-    assert child["role"] == "Critic"
-    assert child["role_source"] == "host-role-record"
+    assert child["role"] == "critic"
+    assert child["role_source"] == "thread-record"
     assert child["status"] == expected
     assert child["result"] == "Synthetic verdict."
     assert "PRIVATE_" not in json.dumps(result)
@@ -566,6 +596,7 @@ def test_native_and_host_roles_coexist_without_duplicate_cards(tmp_path):
     initialize(tmp_path)
     host_mapping(tmp_path)
     host_history(tmp_path)
+    map_agent(tmp_path, "native-child", role="custom-reader")
     for tid in ("native-child", "host-child"):
         append(
             tmp_path / "events.jsonl",
@@ -579,7 +610,7 @@ def test_native_and_host_roles_coexist_without_duplicate_cards(tmp_path):
             ),
         )
     append(
-        tmp_path / "native/sessions/2026/01/01/native.jsonl",
+        tmp_path / "groups/router/one/native/sessions/2026/01/01/native.jsonl",
         {
             "type": "session_meta",
             "payload": {
@@ -587,7 +618,7 @@ def test_native_and_host_roles_coexist_without_duplicate_cards(tmp_path):
                 "source": {
                     "subagent": {
                         "thread_spawn": {
-                            "parent_thread_id": "lead",
+                            "parent_thread_id": "router",
                             "agent_path": "/root/scout-sources",
                         }
                     },
@@ -599,11 +630,11 @@ def test_native_and_host_roles_coexist_without_duplicate_cards(tmp_path):
     assert result["stats"]["agents"] == 2
     cards = {c["id"]: c for c in result["agents"]}
     native = cards["native-child"]
-    assert native["parent_id"] == "lead"
-    assert native["role"] == "Scout"
-    assert native["role_source"] == "inferred-from-task-name"
+    assert native["parent_id"] == "router"
+    assert native["role"] == "custom-reader"
+    assert native["role_source"] == "thread-record"
     assert native["status"] == "completed"
-    assert cards["host-child"]["role"] == "Critic"
+    assert cards["host-child"]["role"] == "critic"
 
 
 def test_host_role_without_history_has_original_iteration_and_refreshes(tmp_path):
@@ -648,7 +679,6 @@ def test_host_role_without_history_has_original_iteration_and_refreshes(tmp_path
         '{"threads": []}',
         '{"threads": {"bad": null, "invalid": {"task": 1}}}',
         '{"threads": {"bad": {"task": "x", "role": [], "status": []}}}',
-        '{"threads": {"native-child": {"task": "broken", "role": "invalid", "status": "completed"}}}',
         '{"threads": {"native-child": {"task": "broken", "role": "critic", "status": "invalid"}}}',
     ],
 )

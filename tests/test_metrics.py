@@ -40,14 +40,14 @@ def record(rid="one", at=START):
 
 
 def session(
-    root, tid="lead", parent=None, task="root", at="2026-01-01T00:00:00Z", events=()
+    root, tid="router", parent=None, task="root", at="2026-01-01T00:00:00Z", events=()
 ):
     source = (
         {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}
         if parent
         else "cli"
     )
-    path = root / "native/sessions" / f"{tid}.jsonl"
+    path = root / "groups/router/one/native/sessions" / f"{tid}.jsonl"
     append(
         path,
         row(
@@ -63,14 +63,32 @@ def session(
     return path
 
 
+def configure(root, resource):
+    write(root / "active.json", {"revision": "r1"})
+    write(
+        root / "configurations/r1/config.json",
+        {
+            "revision": "r1",
+            "profiles": {"coordination": {"model": "gpt-6.1-sol", "effort": "medium"}},
+            "router": {"profile": "coordination"},
+            "resource": resource,
+        },
+    )
+
+
 @pytest.fixture
 def study(tmp_path):
     root = tmp_path / "study"
-    write(root / "status.json", {"thread_id": "lead"})
-    write(root / "config.json", {"model": "test-model", "effort": "medium"})
+    write(root / "status.json", {"started_at": START})
+    write(
+        root / "roles.json",
+        {"threads": {"router": {"role": "router", "task": "routing"}}},
+    )
+    configure(root, {"ledger_path": str(root / "gpu-budget.json")})
     write(root / "gpu-budget.json", {"entries": []})
     append(
-        root / "events.jsonl", {"at": START, "event": "lead.input", "thread_id": "lead"}
+        root / "events.jsonl",
+        {"at": START, "event": "run.started", "thread_id": "router"},
     )
     return root
 
@@ -93,7 +111,13 @@ def test_incremental_partial_restart_and_permissions(study):
         second = c.poll(END)
         small_bytes = sum(
             (study / n).stat().st_size
-            for n in ("status.json", "config.json", "gpu-budget.json")
+            for n in (
+                "status.json",
+                "roles.json",
+                "active.json",
+                "configurations/r1/config.json",
+                "gpu-budget.json",
+            )
         )
         assert second["reader"]["bytes_read"] == small_bytes
         partial = json.dumps(record("two", "2026-01-01T00:02:00Z"))
@@ -120,6 +144,16 @@ def test_incremental_partial_restart_and_permissions(study):
 
 
 def test_boundaries_tree_records_compaction_and_cohorts(study):
+    write(
+        study / "roles.json",
+        {
+            "threads": {
+                "router": {"role": "router"},
+                "child": {"role": "critic"},
+                "grandchild": {"role": "analyst"},
+            }
+        },
+    )
     session(
         study,
         events=[
@@ -139,7 +173,7 @@ def test_boundaries_tree_records_compaction_and_cohorts(study):
     session(
         study,
         "child",
-        "lead",
+        "router",
         "critic_one",
         START,
         [
@@ -160,7 +194,7 @@ def test_boundaries_tree_records_compaction_and_cohorts(study):
         assert total["reasoning_output_tokens"] == 12
         assert result["coverage"]["selected_threads"] == 3
         assert result["coverage"]["excluded_session_threads"] == 1
-        lead = next(t for t in result["llm"]["by_task"] if t["role"] == "lead")
+        lead = next(t for t in result["llm"]["by_task"] if t["role"] == "router")
         assert lead["compactions"] == 1
         assert lead["duplicate_responses"] == 1
         assert lead["startup"]["responses"] == 0
@@ -264,7 +298,7 @@ def test_resources_ledger_precedence_and_missing_coverage(study):
     event = {
         "at": START,
         "event": "resource.tool",
-        "thread_id": "lead",
+        "thread_id": "router",
         "tool": "gpu_poll",
         "success": True,
         "output": {"running": True, "output": ""},
@@ -289,7 +323,7 @@ def test_resources_ledger_precedence_and_missing_coverage(study):
             ]
         },
     )
-    write(study / "config.json", {"resource": {"ledger_path": str(ledger)}})
+    configure(study, {"ledger_path": str(ledger)})
     with collector(study) as c:
         result = c.poll(END)
         assert result["resources"]["calls"] == 2
@@ -313,11 +347,12 @@ def test_readonly_callback_needs_no_resource_ledger_and_retains_model_usage(
     study, resource_effect
 ):
     (study / "gpu-budget.json").unlink()
+    configure(study, None)
     session(study, events=[record()])
     event = {
         "at": START,
         "event": "resource.tool",
-        "thread_id": "lead",
+        "thread_id": "router",
         "tool": "inspect_evidence",
         "success": True,
         "output": {"summary": "Read-only evidence inspected."},
@@ -333,7 +368,9 @@ def test_readonly_callback_needs_no_resource_ledger_and_retains_model_usage(
         assert result["resources"]["by_tool"] == (
             {} if readonly else {"inspect_evidence": 1}
         )
-        assert ("ledger:missing" in result["coverage"]["tick_issues"]) is not readonly
+        assert (
+            "ledger:undeclared" in result["coverage"]["tick_issues"]
+        ) is not readonly
         assert result["coverage"]["complete"] is readonly
         assert result["allocation"]["available"] is False
         assert result["llm"]["total"]["responses"] == 1
@@ -412,6 +449,7 @@ def test_truncate_does_not_silently_replay(study):
 
 def test_cpu_only_and_usage_format_coverage(study):
     (study / "gpu-budget.json").unlink()
+    configure(study, None)
     path = session(study)
     with collector(study) as c:
         empty = c.poll(END)
@@ -531,7 +569,7 @@ def test_authority_coverage_is_per_thread(study, evidence):
     child = session(
         study,
         "child",
-        "lead",
+        "router",
         "critic_one",
         START,
         [row("turn_context", START, model="test-model", effort="medium"), evidence],
@@ -579,7 +617,7 @@ def test_old_orphan_context_and_delivery_do_not_poison_usage_or_cohorts(study):
     session(
         study,
         "orphan",
-        "lead",
+        "router",
         "experimenter_orphan",
         "2026-01-01T00:00:00Z",
         [
@@ -642,19 +680,20 @@ def test_watch_refreshes_comparison_without_model_calls(study, capsys):
 
 
 def test_host_role_mapping_selects_unparented_threads(study):
-    session(study, tid="lead", events=[record("lead")])
+    session(study, tid="router", events=[record("router")])
     session(study, tid="hostchild", parent=None, events=[record("child")])
     write(
         study / "roles.json",
         {
             "version": 1,
             "threads": {
+                "router": {"role": "router", "task": "routing"},
                 "hostchild": {
                     "role": "scout",
                     "task": "scout-frontier",
                     "task_id": "scout-001",
                     "status": "completed",
-                }
+                },
             },
         },
     )
@@ -665,3 +704,67 @@ def test_host_role_mapping_selects_unparented_threads(study):
     tasks = {row["thread_id"]: row for row in snapshot["llm"]["by_task"]}
     assert tasks["hostchild"]["role"] == "scout"
     assert tasks["hostchild"]["task"] == "scout-frontier"
+
+
+def test_revision_change_and_structured_failures_survive_incremental_ticks(study):
+    events = []
+    for identity, output in (
+        ("failed", {"is_error": True}),
+        ("unknown", "an error hypothesis"),
+        ("success", {"success": True}),
+    ):
+        events.extend(
+            [
+                row(
+                    "response_item",
+                    type="function_call",
+                    name="read_file",
+                    call_id=identity,
+                ),
+                row(
+                    "response_item",
+                    "2026-01-01T00:02:00Z",
+                    type="function_call_output",
+                    call_id=identity,
+                    output=output,
+                ),
+            ]
+        )
+    events.append(record(at="2026-01-01T00:02:01Z"))
+    events.sort(key=lambda event: event["timestamp"])
+    session(study, events=events)
+    append(
+        study / "events.jsonl",
+        {
+            "at": START,
+            "event": "resource.tool",
+            "tool": "gpu_exec",
+            "success": False,
+            "output": {"error": "synthetic"},
+        },
+    )
+    with collector(study) as current:
+        first = current.poll(END)
+        task = first["llm"]["by_task"][0]
+        assert task["tool_outcomes"] == {
+            "returned_calls": 3,
+            "failed_calls": 1,
+            "unknown_outcome_calls": 1,
+            "failed_by_tool": {"read_file": 1},
+        }
+        assert first["resources"]["failed_calls"] == 1
+        assert first["tools"] == task["tool_outcomes"]
+        write(study / "active.json", {"revision": "r2"})
+        write(
+            study / "configurations/r2/config.json",
+            {
+                "revision": "r2",
+                "profiles": {"new": {"model": "gpt-6.1-terra", "effort": "medium"}},
+                "router": {"profile": "new"},
+            },
+        )
+        second = current.poll(END)
+        assert second["configuration"]["revision"] == "r2"
+        assert second["configuration"]["profiles"]["new"]["model"] == "gpt-6.1-terra"
+        assert second["llm"]["by_task"][0]["tool_outcomes"] == task["tool_outcomes"]
+        assert second["resources"]["failed_calls"] == 1

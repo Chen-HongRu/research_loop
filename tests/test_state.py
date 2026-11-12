@@ -2,11 +2,11 @@ import os
 
 import pytest
 
-from research_loop.state import Knowledge, writer
+from research_loop.state import PublicationStore, writer
 
 
 def test_atomic_snapshot_does_not_share_draft_inode(tmp_path):
-    knowledge = Knowledge(tmp_path)
+    knowledge = PublicationStore(tmp_path)
     baseline = knowledge.prepare()
     path = knowledge.draft / "finding.md"
     path.write_text("negative result")
@@ -24,7 +24,7 @@ def test_atomic_snapshot_does_not_share_draft_inode(tmp_path):
 
 
 def test_publication_rejects_symlink_without_reading_its_target(tmp_path):
-    knowledge = Knowledge(tmp_path)
+    knowledge = PublicationStore(tmp_path)
     baseline = knowledge.prepare()
     (knowledge.draft / "external").symlink_to(tmp_path / "not-a-knowledge-file")
     with pytest.raises(ValueError, match="regular"):
@@ -47,7 +47,7 @@ def test_publication_metadata_is_written_before_pointer_activation(
     from pathlib import Path
     from research_loop.state import write_json
 
-    knowledge = Knowledge(tmp_path)
+    knowledge = PublicationStore(tmp_path)
     baseline = knowledge.prepare()
     seen = []
 
@@ -59,13 +59,13 @@ def test_publication_metadata_is_written_before_pointer_activation(
 
     monkeypatch.setattr("research_loop.state.write_json", check_metadata)
     version = knowledge.publish(
-        baseline, publication={"iteration": 1, "result": {"study_action": "continue"}}
+        baseline, publication={"iteration": 1, "result": {"action": "continue"}}
     )
     assert seen == [
         {
             "iteration": 1,
-            "result": {"study_action": "continue"},
-            "knowledge_version": version,
+            "result": {"action": "continue"},
+            "publication_version": version,
         }
     ]
     assert knowledge.published_state() == seen[0]
@@ -76,7 +76,7 @@ def test_stop_during_copy_discards_staged_version_and_metadata(tmp_path, monkeyp
     import shutil
     from research_loop.state import PublicationStopped
 
-    knowledge = Knowledge(tmp_path)
+    knowledge = PublicationStore(tmp_path)
     baseline = knowledge.prepare()
     (knowledge.draft / "index.md").write_text("retained unfinished draft")
     copytree = shutil.copytree
@@ -87,7 +87,7 @@ def test_stop_during_copy_discards_staged_version_and_metadata(tmp_path, monkeyp
         return result
 
     monkeypatch.setattr("research_loop.state.shutil.copytree", stop_after_copy)
-    with pytest.raises(PublicationStopped, match="before knowledge activation"):
+    with pytest.raises(PublicationStopped, match="before publication activation"):
         knowledge.publish(baseline, publication={"iteration": 1})
     assert str(knowledge.current.resolve()) == baseline
     assert (knowledge.draft / "index.md").read_text() == "retained unfinished draft"
@@ -96,3 +96,35 @@ def test_stop_during_copy_discards_staged_version_and_metadata(tmp_path, monkeyp
     ]
     assert not list((knowledge.root / "publications").glob("*.json"))
     assert not list(knowledge.root.glob(".current-*"))
+
+
+def test_interruption_immediately_after_pointer_rename_keeps_active_tree(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    (store.draft / "answer.txt").write_text("42")
+    replace = Path.replace
+
+    def interrupt_after_rename(source, target):
+        result = replace(source, target)
+        if source.name.startswith(".current-"):
+            raise RuntimeError("interrupted after atomic rename")
+        return result
+
+    monkeypatch.setattr(Path, "replace", interrupt_after_rename)
+    with pytest.raises(RuntimeError, match="after atomic rename"):
+        store.publish(
+            baseline,
+            publication={
+                "iteration": 1,
+                "result": {"answer": 42},
+                "action": "stop",
+                "status": "completed",
+            },
+        )
+    assert str(store.current.resolve()) != baseline
+    assert (store.current / "answer.txt").read_text() == "42"
+    assert store.published_state()["result"] == {"answer": 42}

@@ -12,6 +12,12 @@ import threading
 from time import perf_counter, process_time
 
 from .identity import resolve, session_paths
+from .efficiency import (
+    aggregate_tool_outcomes,
+    frozen_configuration,
+    record_tool_outcome,
+    tool_outcomes,
+)
 from .sample_store import _atomic, publish_pending
 from .token_usage import AUTHORITY, TOKEN_KEYS, accept_record, cumulative_counts
 
@@ -32,10 +38,11 @@ TERMINAL = {
 LIMITATIONS = [
     "Unique token_usage_record response IDs are authoritative, including compaction requests. token_count is a separate cross-check, never added. Input includes cached; output includes reasoning.",
     "Usage belongs to notification time in [since, until), without prorating requests. Startup and first-3/5 refer to the thread's lifetime response order, restricted to the phase window.",
-    "Membership uses session metadata plus status.thread_id, mapped host roles and native descendants. Explicit Router roles override coordinator attribution; other roles fall back to task-name prefixes. Tool counts exclude dynamically nested calls.",
+    "Membership uses explicit Agent/Router roles.json mappings and native descendants; unmapped histories remain a coverage gap; descendants without explicit roles stay unclassified. Tool counts exclude dynamically nested calls.",
     "Background association is a heuristic: visible cat/sed/read_text references to goal.md, knowledge/index.md or AGENTS.md, excluding apply_patch, paired via tool output to the next usage record. Association is not demonstrated waste.",
     "Wait seconds are summed call-to-return intervals for window-started calls returned before cutoff, with overlapping parallel waits. Structured timed_out counts require a JSON boolean.",
     "Allocation seconds are whole settled elapsed time for window-dispatched jobs, not exact window overlap, core utilization or money; cancellation is not automatically a failure.",
+    "Tool failures require explicit structured outcome fields; plain-text outcomes and tool-free time remain unmeasured, not inferred idle or waste.",
     "Sources are not an atomic snapshot; local coverage cannot prove all activity was recorded. Future-dated rows defer their file tail until a later cutoff; timestamps are expected to be chronological within a source.",
     "Checkpoint-first journal repair prevents duplicate samples after interruption. Power-loss durability depends on filesystem fsync semantics; output files must not be externally edited.",
 ]
@@ -80,6 +87,7 @@ def task_state(tid, task, parent, role):
         "compactions": 0,
         "duplicate_responses": 0,
         "tool_calls": {},
+        "tool_outcomes": tool_outcomes(),
         "waits": {
             n: {"calls": 0, "returned_calls": 0, "seconds": 0.0, "timed_out": 0}
             for n in sorted(WAITS)
@@ -125,6 +133,7 @@ class Collector:
             self.lock = None
             raise RuntimeError("metrics output already has an active writer") from None
         identity = {
+            "source_format": "frozen-workflow-v1",
             "root": str(self.root),
             "since": self.since.isoformat(),
             "phase": phase,
@@ -269,7 +278,7 @@ class Collector:
         except OSError:
             self._issue(label + ":unreadable_or_missing")
 
-    def _discover(self, lead):
+    def _discover(self):
         try:
             paths = session_paths(self.root, self.sessions_dir)
         except OSError:
@@ -313,7 +322,7 @@ class Collector:
         roles_path = self.root / "roles.json"
         if roles_path.exists():
             try:
-                document = json.loads(roles_path.read_text())
+                document = self._json(roles_path, "roles")
                 threads = (
                     document.get("threads", {}) if isinstance(document, dict) else None
                 )
@@ -334,14 +343,16 @@ class Collector:
                 key: row.get(key)
                 if isinstance(row.get(key), str) and row[key]
                 else None
-                for key in ("task", "role")
+                for key in ("task", "role", "group_run_id")
             }
             for tid, row in roles.items()
         }
-        identities = resolve(lead, self.state["metadata"].values(), normalized_roles)
+        identities = resolve(self.state["metadata"].values(), normalized_roles)
         selected = identities.keys()
-        if lead not in known:
-            self._issue("sessions:missing_lead")
+        if known - selected:
+            self._issue("sessions:unmapped_threads")
+        if roles.keys() - known:
+            self._issue("sessions:mapped_history_missing")
         seen = set()
         for path, meta in self.state["metadata"].items():
             tid = meta["thread_id"]
@@ -352,17 +363,12 @@ class Collector:
                 continue
             seen.add(tid)
             identity = identities[tid]
-            explicit_role = identity.role_source == "host-role-record"
-            parent = None if tid == lead else meta["parent"]
-            # Existing collector initialization treats parentless tasks without
-            # an explicit role as lead. Keep this historical checkpoint behavior.
-            initial_role = (
-                "lead" if parent is None and not explicit_role else identity.role
-            )
+            explicit_role = identity.role_source == "thread-record"
             task = self.state["tasks"].setdefault(
                 tid,
-                task_state(tid, identity.task, parent, initial_role),
+                task_state(tid, identity.task, meta["parent"], identity.role),
             )
+            task["is_router"] = identity.is_router
             if explicit_role and task.get("role") != identity.role:
                 task["role"] = identity.role
             for row, at in self._tail(Path(path), "sessions"):
@@ -481,6 +487,8 @@ class Collector:
             if pending["background"]:
                 task["background_pending"] = True
             name = pending["name"]
+            if pending["inside"]:
+                record_tool_outcome(task["tool_outcomes"], name, p)
             if name in WAITS and pending["inside"]:
                 seconds = (at - timestamp(pending["at"])).total_seconds()
                 if seconds < 0:
@@ -498,13 +506,12 @@ class Collector:
                 if isinstance(output, dict) and output.get("timed_out") is True:
                     wait["timed_out"] += 1
 
-    def _events(self, lead):
+    def _events(self):
         for row, at in self._tail(self.root / "events.jsonl", "events"):
             self._source_at(at)
             if (
                 not self._inside(at)
                 or row.get("event") != "resource.tool"
-                or row.get("thread_id") != lead
                 or row.get("resource_effect") is False
             ):
                 continue
@@ -540,9 +547,7 @@ class Collector:
         ):
             raise ValueError("configured ledger_path must be a nonempty path string")
         path = self.explicit_ledger or (
-            Path(configured)
-            if isinstance(configured, str) and configured
-            else self.root / "gpu-budget.json"
+            Path(configured) if isinstance(configured, str) and configured else None
         )
         expected = bool(
             self.explicit_ledger
@@ -550,14 +555,20 @@ class Collector:
             or status.get("resource")
             or self.state["resources"]["calls"]
         )
-        ledger = self._json(path, "ledger", optional=not expected)
+        ledger = (
+            self._json(path, "ledger", optional=not expected)
+            if path is not None
+            else {}
+        )
+        if expected and path is None:
+            self._issue("ledger:undeclared")
         result = {
             "available": bool(ledger),
             "source": "explicit"
             if self.explicit_ledger
             else "frozen_config"
             if configured
-            else "legacy_root",
+            else "undeclared",
             "reservations": 0,
             "dispatched_jobs": 0,
             "not_dispatched": 0,
@@ -627,6 +638,7 @@ class Collector:
                 "source_versions",
                 "coverage",
                 "resources",
+                "tools",
                 "allocation",
                 "reader",
             )
@@ -661,25 +673,11 @@ class Collector:
             tid: set(t["seen_calls"]) for tid, t in self.state["tasks"].items()
         }
         status = self._json(self.root / "status.json", "status")
-        lead = status.get("thread_id")
-        if not isinstance(lead, str) or not lead:
-            self._issue("status:missing_thread_id")
-            lead = None
-        if self.state.get("lead") not in (None, lead):
-            roles = self._json(self.root / "roles.json", "roles", optional=True)
-            threads = roles.get("threads", {})
-            if not isinstance(threads, dict) or not all(
-                isinstance(threads.get(tid), dict)
-                and threads[tid].get("role") == "router"
-                for tid in (self.state["lead"], lead)
-            ):
-                raise ValueError("Study lead changed; start a new phase output")
-        self.state["lead"] = lead
         # New task call sets are lazily created by _session.
         self.calls = _CallSets(self.calls)
-        discovered, selected, excluded = self._discover(lead)
-        self._events(lead)
-        config = self._json(self.root / "config.json", "config", optional=True)
+        discovered, selected, excluded = self._discover()
+        self._events()
+        config = frozen_configuration(self.root, self._json)
         allocation = self._allocation(config, status)
         observed_records = len(self.responses)
         missing_record_threads = [
@@ -799,7 +797,11 @@ class Collector:
                 "until": self.cutoff.isoformat(),
                 "interval": "since <= notification time < until",
             },
-            "configuration": {k: config.get(k) for k in ("model", "effort")},
+            "configuration": {
+                "revision": config.get("revision"),
+                "router": config.get("router"),
+                "profiles": config.get("profiles", {}),
+            },
             "source_versions": sorted(
                 {
                     m["cli_version"]
@@ -827,6 +829,7 @@ class Collector:
                 "by_role": roles,
                 "by_task": tasks,
             },
+            "tools": aggregate_tool_outcomes(tasks),
             "resources": {
                 **self.state["resources"],
                 "successful_calls": self.state["resources"]["calls"]
@@ -879,7 +882,7 @@ def compare(baseline, optimized):
         value = json.loads((Path(directory) / "latest.json").read_text())
         total, tasks = value["llm"]["total"], value["llm"]["by_task"]
         children = [
-            t for t in tasks if t["role"] != "lead" and t.get("active_in_phase", True)
+            t for t in tasks if not t["is_router"] and t.get("active_in_phase", True)
         ]
         startups = [t for t in children if t["startup"]["responses"]]
 
@@ -913,11 +916,12 @@ def compare(baseline, optimized):
                 "mixed": sum(t.get("mixed", True) for t in children),
                 "children_with_startup": len(startups),
                 "completed_by_role": cohorts,
-                "lead": [t for t in tasks if t["role"] == "lead"],
+                "router": [t for t in tasks if t["is_router"]],
             },
             "totals": {
                 "llm": total,
                 "resources": value["resources"],
+                "tools": value["tools"],
                 "allocation": value["allocation"],
             },
             "normalized": {

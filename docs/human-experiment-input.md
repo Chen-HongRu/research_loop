@@ -1,73 +1,69 @@
 # Human experiment input
 
-Design contract v1. Status: approved for implementation in the task conversation.
-The user confirmed that human input selects a priority experiment without changing
-the Study goal, approved this contract, and added injection through a separately
-user-authorized Codex session.
+The reference research workflow accepts priority experiment requests through the
+shared intervention interface. The request selects work within the existing goal,
+scientific protocol and resource authorization. It grants no additional compute
+or model authority.
 
-## Interface and lifecycle
+## Submit and inspect
 
-`RUN/inputs/human.md` is an optional UTF-8 request file. Only the user authors or
-revises requests, directly or through an explicitly authorized Codex session.
-Research agents receive a read-only snapshot; the controller
-may consume a completed request. Ordinary workspace-write excludes the Study inputs and snapshots from agent write roots. Keep the Study outside any writable ancestor or system temporary directory; there are no custom deny overlays. Reading unrelated requests or histories remains outside the specialist task contract.
+```sh
+uv run research-loop intervene RUN --kind experiment --file /path/to/experiment.md \
+  --id experiment-one --expected-revision r000001
+uv run research-loop query RUN --kind interventions --id experiment-one
+```
 
-At iteration admission, the controller reads the file at this fixed path. A
-missing or whitespace-only file leaves autonomous planning unchanged. A nonempty
-file is recorded with the iteration and supplied to the coordinator before
-direction selection. Changes during an iteration apply to a subsequent iteration.
-One snapshot is one request, possibly containing several related experiments.
+The text file is read once by the caller and submitted as `{text: ...}`. The
+workflow requires nonempty text. Python callers use
+`application.intervene(root, kind="experiment", payload={"text": text}, ...)`.
+Human and separately authorized Codex callers use the same interface; caller
+identity comes from the submitting process, not a role claimed in the payload.
 
-The request takes priority over autonomous experiment selection within the
-existing Study goal, scientific protocol and resource authorization. It may be
-a question, hypothesis or experiment design. The Proposer supplies missing design
-details; ambiguity that changes the experiment's meaning requires clarification.
-An incompatible or blocked request remains pending with an explicit explanation.
+Submission persists an immutable request under `RUN/interventions/requests/`.
+The same ID and identical content returns the existing receipt; conflicting
+content is rejected. Submit a new ID for a changed request. Editing the original
+text file does not alter an already submitted request. `expected_revision` guards
+the requested contract; by default the application selects the target's current
+revision. The standard experiment command targets the whole run, and the workflow
+admits it once at a valid boundary.
 
-Completion requires execution of the requested experiment scope, analysis and
-summary, and successful publication of their evidence. Negative or inconclusive
-scientific results can complete a request; execution failure or missing required
-work cannot. The coordinator reports request disposition and evidence separately
-from Study goal status and continuation. Publication alone is not a scientific
-completion judgment.
+## Admission and completion
 
-After completion is durably published, the controller consumes the admitted
-request. User-visible pending content is cleared only if doing so cannot discard
-a newer user edit. Operator injection and editing coordinate with the controller
-using `inputs/human.lock`. Direct edits are supported while the controller is
-stopped; during execution, use `edit-experiment`, which holds the lock for the
-whole editor session. Unlocked external writes cannot receive this guarantee.
-The original snapshot and its result references remain in the iteration record.
-Failure, STOP or unsuccessful publication retains the pending request. Recovery
-uses the published request receipt so a crash after publication does not cause
-the same completed experiment to be dispatched again.
+The controller supplies the admitted request to the research workflow before
+Direction chooses its experiment. Explicit experiment input skips autonomous
+Scout exploration; the configured planning Agent completes missing design details.
+Ambiguity that changes experiment meaning requires clarification. Incompatible,
+blocked or incomplete work retains an explicit disposition.
 
-## Integration
+Intervention states are received, pending, applied or rejected. An input receipt
+is persisted before the admitted Group's side effects; applied is a projection of
+that admission. It does not mean the experiment is complete or the scientific goal
+is achieved.
 
-Observed in the current source: `loop.py:run_iteration` constructs iteration
-input and settles work; `publication.py:commit` publishes knowledge and
-acknowledges the request, while `publication.py:recover` replays acknowledgement
-and repairs stale records before admission. `instructions.py` defines coordinator
-policy and result schema; `roles.md` defines Proposer and other specialist roles.
-The interface reuses these entry points and the existing iteration
-archive and publication receipt. It adds no scheduler, task algorithm or resource
-authorization. Existing uncommitted changes must be preserved.
+Research completion requires the requested execution scope, independent evaluation,
+analysis and successful publication. Negative or inconclusive scientific results
+can complete a request; failed execution or missing required evidence cannot.
+The published receipt exposes `work_outcome` separately from the intervention's
+applied state. Publication acknowledgement identifies the admitted request ID,
+so an older result cannot complete or clear a newer request.
 
-## Acceptance
+Failure, STOP or unsuccessful publication does not acknowledge completion.
+Recovery consults original input/operation/publication receipts rather than
+redispatching a completed experiment. An uncertain command outcome requires
+reconciliation; it cannot be repeated merely because an input remains pending.
 
-Focused controller tests and a tracker-free local smoke must demonstrate:
+## Integration and verification
 
-- Missing and empty requests preserve autonomous behavior.
-- A request reaches planning before autonomous direction selection and retains
-  its exact admitted snapshot.
-- A completed, analyzed and published request is consumed, including when its
-  scientific result is negative.
-- Failed, blocked, interrupted and unpublished work retains the request.
-- User edits made during execution or consumption are preserved.
-- Restart after publication recognizes completion without rerunning the request.
-- Lead and specialist write attempts against the user input are denied by the
-  effective permission configuration.
+`application.py` submits requests; `interventions.py` persists requests and
+receipts; `controller.py` owns admission; `research_workflows/research.py` validates
+experiment input and constructs the scientific context. The research contract
+checks execution/evaluation evidence before proposing `input_outcome` to the
+generic publisher. `publication.py` commits and recovers that outcome from the
+activated `outputs/current` publication.
 
-Implementation and verification are local to this task. Acceptance evidence must
-distinguish controller/CPU tests from actual model execution and permission
-enforcement. Model or remote compute execution requires its existing authorization.
+[Operations](../references/operations.md) defines control, queries and revisions.
+Controller tests and local smokes must distinguish admission from completion,
+retain unfinished requests, preserve newer inputs and recover committed outcomes
+without repeating work. Independent Agent contexts and configured write roots do
+not establish filesystem read isolation. Real model, permissions and remote
+execution acceptance require their own authorized evidence.

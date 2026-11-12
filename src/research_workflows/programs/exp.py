@@ -8,6 +8,8 @@ from copy import deepcopy
 from pathlib import Path
 
 from research_loop.state import write_json
+from research_workflows.programs.tracing import references, step
+from research_workflows.contracts import STAGE_STATUS, validate_stage
 
 COMMON = (
     "You are one specialist in a bounded, coordinator-free benchmark.\n"
@@ -28,11 +30,12 @@ PHASE_SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
+        "status": STAGE_STATUS,
         "help": {"type": "string"},
         "artifacts": {"type": "array", "items": {"type": "string"}},
         "command": {"type": "string"},
     },
-    "required": ["summary", "help", "artifacts", "command"],
+    "required": ["summary", "status", "help", "artifacts", "command"],
     "additionalProperties": False,
 }
 PLAN_SCHEMA = {
@@ -70,7 +73,8 @@ inputs, constraints and completion_criteria. Markdown tasks are equally valid.
 Do not select another research question or change any explicit upstream choice.
 Plan develops one complete experiment within those constraints; Prepare implements
 that plan. Missing external scientific decisions, evidence, authorization or inputs
-require help, not an invented choice. Feedback resolves the currently blocked phase;
+require status=blocked and meaningful help, not an invented choice. Return status=ready
+when the phase can advance, even with informational help. Feedback resolves the currently blocked phase;
 completed computation is never rerun. The host executes only the prepared command
 on the explicit execution_backend and supplies its settled receipt.
 The assignment's workspace is this Run's work directory. Write a small complete
@@ -78,8 +82,8 @@ scientific plan to scientific-plan.md during Plan and return its exact path as
 plan_artifact and in artifacts. The complete plan specifies the intended bounded
 command and result filename. During Prepare write small implementation/code and
 handoff files there and return the exact bounded command and workspace-relative
-result_file; do not execute it or create the result file. On help result_file may
-be empty.
+result_file; do not execute it or create the result file. Only when status=blocked
+may result_file be empty.
 Evaluate is the independent Critic, including metrics, comparison, analysis and
 interpretation. Return its small evaluation report as JSON with claim and
 limitations supported by actual evidence; the host writes evaluate.json. Remain
@@ -87,8 +91,10 @@ read-only and do not rerun the experiment. There is no extra
 Analyst or internal review stage. No benchmark-specific metric or dataset is implied.
 Artifacts must be exact existing file paths under workspace, using relative names
 where requested by the phase. Do not export canonical data, checkpoints, raw chats
-or large outputs. Plan and Evaluate return command as an empty string. For help,
-return an empty command and available small artifacts; plan_artifact may be empty.
+or large outputs. Plan and Evaluate return command as an empty string. When
+status=blocked return an empty command and available small artifacts; plan_artifact
+may be empty. When status=ready, required phase artifacts, Prepare command/result_file
+and Evaluate evidence remain mandatory even with informational help.
 """
 
 
@@ -104,6 +110,10 @@ async def run(ctx, payload):
             "Missing execution authorization",
             "Set execution_backend explicitly to local or resource for this Group.",
         )
+    if payload.get("recovery"):
+        from research_workflows.recovery import adopt_experiment
+
+        adopt_experiment(ctx, payload["recovery"], payload)
     phases = ctx.state.setdefault("experiment_phases", {})
     phase_rounds = ctx.state.setdefault("experiment_phase_rounds", {})
     validation = ctx.state.setdefault("experiment_phase_validation", {})
@@ -115,27 +125,40 @@ async def run(ctx, payload):
         "feedback_refs": payload.get("feedback_refs", []),
         "prompt": payload.get("prompt", ""),
         "execution_backend": backend,
+        "execution_work": ctx.services.execution_work,
         "group_contract": GROUP_CONTRACT,
+        "study_context": ctx.state.setdefault(
+            "research_context", payload.get("study_context", {})
+        ),
     }
 
-    async def phase(name, role, context, instructions, schema, assignment):
+    async def phase(name, context, instructions, schema, assignment):
         blocked = name in phases and (
-            phases[name]["help"] or (name == "prepare" and not phases[name]["command"])
+            phases[name]["status"] == "blocked"
+            or (name == "prepare" and not phases[name]["command"])
         )
         retry = (
             blocked and sources["feedback_refs"] and phase_rounds.get(name) != ctx.round
         )
         if name not in phases or retry:
-            result = await ctx.services.call(
-                role,
-                context,
-                instructions,
-                assignment,
-                schema,
-                common=COMMON,
-                include_role_template=False,
-                cwd=ctx.work,
-            )
+            previous = {
+                "plan": (),
+                "prepare": ("exp.plan",),
+                "evaluate": ("exp.execute",),
+            }
+            with step(
+                ctx, f"exp.{name}", references(assignment), after=previous[name]
+            ) as step_id:
+                result = await ctx.services.call(
+                    name,
+                    context,
+                    COMMON + "\n" + instructions,
+                    assignment,
+                    schema,
+                    step_id=step_id,
+                    session="reuse" if name == "prepare" else "new",
+                    cwd=ctx.work,
+                )
             history.setdefault(name, []).append(
                 {"round": ctx.round, "result": deepcopy(result)}
             )
@@ -153,7 +176,7 @@ async def run(ctx, payload):
 
     def phase_help(name, result):
         errors = validation[name]["errors"]
-        return result["help"] or (
+        return (result["help"] if result["status"] == "blocked" else "") or (
             "Artifact boundary requires mechanical repair: "
             + "; ".join(f"{error['field']}: {error['reason']}" for error in errors)
             if errors
@@ -162,7 +185,6 @@ async def run(ctx, payload):
 
     plan = await phase(
         "plan",
-        "proposer",
         "plan",
         PLAN_INSTRUCTIONS,
         PLAN_SCHEMA,
@@ -172,7 +194,6 @@ async def run(ctx, payload):
         return _finish(ctx, phases, plan["summary"], phase_help("plan", plan), backend)
     prepare = await phase(
         "prepare",
-        "experimenter",
         "plan",
         PREPARE_INSTRUCTIONS,
         PREPARE_SCHEMA,
@@ -193,11 +214,19 @@ async def run(ctx, payload):
     if "execution" not in phases:
         # The service durably admits this identity before dispatch. Unknown effects
         # raise and require reconciliation; they never become a retryable phase.
-        receipt = await ctx.services.execute_prepared(
-            prepare["command"],
+        with step(
+            ctx,
+            "exp.execute",
+            [str(ctx.work / "prepare.json")],
+            after=("exp.prepare",),
             operation_id="prepared-experiment",
             backend=backend,
-        )
+        ):
+            receipt = await ctx.services.execute_prepared(
+                prepare["command"],
+                operation_id="prepared-experiment",
+                backend=backend,
+            )
         phases["execution"] = {**receipt, "backend": backend}
         ctx.save_state()
     write_json(ctx.work / "execution.json", phases["execution"])
@@ -213,7 +242,6 @@ async def run(ctx, payload):
         )
     evaluate = await phase(
         "evaluate",
-        "critic",
         "critic",
         EVALUATE_INSTRUCTIONS,
         EVALUATE_SCHEMA,
@@ -258,6 +286,7 @@ def _reference(ctx, ref, admitted=(), *, existing=True):
 
 
 def _normalize_phase(ctx, name, record, assignment):
+    validate_stage(record, "Exp phase")
     result = deepcopy(record)
     errors, citations = [], []
     admitted = [
@@ -284,7 +313,7 @@ def _normalize_phase(ctx, name, record, assignment):
         if not citation:
             outputs.append(value)
     result["artifacts"] = list(dict.fromkeys(outputs))
-    if not result.get("help"):
+    if result["status"] == "ready":
         if name == "plan":
             value, _ = normalize(
                 result.get("plan_artifact", ""), "plan.plan_artifact", inputs=False
@@ -353,7 +382,7 @@ def _finish(ctx, phases, summary, help_text, backend):
     artifacts = [str(report), *[str(ctx.work / f"{name}.json") for name in phases]]
     # Keep the verified small raw evidence beside evaluate.json after export.
     evaluation = phases.get("evaluate", {})
-    if not evaluation.get("help"):
+    if evaluation.get("status") == "ready":
         for ref in evaluation.get("evidence", []):
             path = _artifact(ctx, ref)
             if path is not None and str(path) not in artifacts:
@@ -363,4 +392,13 @@ def _finish(ctx, phases, summary, help_text, backend):
             path = _artifact(ctx, ref)
             if path is not None and str(path) not in artifacts:
                 artifacts.append(str(path))
+    with step(
+        ctx,
+        "exp.boundary",
+        artifacts,
+        after=("exp.plan", "exp.prepare", "exp.execute", "exp.evaluate"),
+        completion="blocked" if help_text else "completed",
+        waiting_for_assistance=bool(help_text),
+    ):
+        pass
     return _output(summary, help_text, artifacts)

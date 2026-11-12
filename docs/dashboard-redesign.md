@@ -89,9 +89,10 @@ page is open. Raw detail is fetched on demand.
   `research.summary.provisional` flag is insufficient for either claim.
 - A stopped iteration without a result stays visible. The overview may show the
   preceding reported result, with its source iteration explicitly labeled.
-- Task role/status follows explicit host records where available. Inferred role
-  and time-derived iteration association remain labeled. Missing history does
-  not hide the task or establish fresh-context compliance.
+- Task identity/status follows recorded Agent/Router mappings. Scientific roles
+  are not inferred from task names. Time-derived iteration association remains
+  labeled; missing history does not hide a recorded task or establish fresh-context
+  compliance.
 - Metrics schema 2 uses unique request receipts as token authority. Legacy schema
   1 and unversioned snapshots retain explicit legacy/unknown labels. Do not merge
   or compare incompatible authorities silently. Unavailable values are not zero.
@@ -139,7 +140,7 @@ latency improvements for a real Study or deployment.
 3. A Study switch during overview/detail fetch cannot display the old Study's
    response. Refresh retains page, filters and selection; removed Studies and
    expired tool IDs produce explicit unavailable states.
-4. Host-role tasks with missing session history remain listed; time-based
+4. Recorded Agent tasks with missing session history remain listed; time-based
    associations and unknown roles are not silently promoted to certainty.
 5. Schema 1, schema 2, unversioned, partial and missing metrics show distinct
    accounting/coverage states. Existing data is not rewritten to satisfy the UI.

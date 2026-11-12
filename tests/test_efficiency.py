@@ -72,12 +72,31 @@ def receipt(rid, at, inputs, cached=0, output=0, reasoning=0):
     }
 
 
+def configure(root, resource):
+    write_json(root / "active.json", {"revision": "r1"})
+    write_json(
+        root / "configurations/r1/config.json",
+        {
+            "revision": "r1",
+            "profiles": {"coordination": {"model": "gpt-6.1-sol", "effort": "medium"}},
+            "router": {"profile": "coordination"},
+            "resource": resource,
+        },
+    )
+
+
 @pytest.fixture
 def study(tmp_path):
-    write_json(tmp_path / "status.json", {"thread_id": "lead"})
+    write_json(tmp_path / "status.json", {"started_at": START})
+    write_json(tmp_path / "run.json", {"id": "run-one", "created_at": START})
+    write_json(
+        tmp_path / "roles.json",
+        {"threads": {"router": {"role": "router", "task": "routing"}}},
+    )
+    configure(tmp_path, {"ledger_path": str(tmp_path / "gpu-budget.json")})
     rows(
         tmp_path / "events.jsonl",
-        [{"at": START, "event": "lead.input", "thread_id": "lead"}],
+        [{"at": START, "event": "run.started", "thread_id": "router"}],
     )
     write_json(tmp_path / "gpu-budget.json", {"entries": []})
     return tmp_path
@@ -101,8 +120,8 @@ def test_usage_window_dedup_reconciliation_and_tree(study):
         },
     }
     session(
-        study / "native/sessions/lead.jsonl",
-        "lead",
+        study / "groups/router/one/native/sessions/lead.jsonl",
+        "router",
         events=[
             before,
             during,
@@ -114,9 +133,9 @@ def test_usage_window_dedup_reconciliation_and_tree(study):
         ],
     )
     session(
-        study / "native/sessions/child.jsonl",
+        study / "groups/router/one/native/sessions/child.jsonl",
         "child",
-        "lead",
+        "router",
         "critic_one",
         [
             token("2026-01-01T00:02:00Z", 10, 0, 3, 1),
@@ -126,7 +145,7 @@ def test_usage_window_dedup_reconciliation_and_tree(study):
         ],
     )
     session(
-        study / "native/sessions/other.jsonl",
+        study / "groups/router/one/native/sessions/other.jsonl",
         "other",
         events=[token("2026-01-01T00:02:00Z", 9999, 0, 0, 0)],
     )
@@ -148,14 +167,14 @@ def test_usage_window_dedup_reconciliation_and_tree(study):
     assert result["llm"]["reconciliation"]["unique_response_records"] == 2
     assert result["llm"]["reconciliation"]["cumulative_usage"]["input_tokens"] == 70
     assert result["coverage"]["excluded_session_threads"] == 1
-    assert result["coverage"]["complete"]
+    assert result["coverage"]["issues"]["sessions:unmapped_threads"] == 1
 
 
 def test_resource_tools_agents_ledger_and_truncated_tail(study):
     poll = {
         "at": START,
         "event": "resource.tool",
-        "thread_id": "lead",
+        "thread_id": "router",
         "tool": "gpu_poll",
         "success": True,
         "output": {"running": True, "output": ""},
@@ -172,11 +191,13 @@ def test_resource_tools_agents_ledger_and_truncated_tail(study):
         }
         for name in ["spawn_agent", "wait_agent", "sleep"]
     ]
-    session(study / "native/sessions/a.jsonl", "lead", events=events)
     session(
-        study / "native/sessions/b.jsonl",
+        study / "groups/router/one/native/sessions/a.jsonl", "router", events=events
+    )
+    session(
+        study / "groups/router/one/native/sessions/b.jsonl",
         "child",
-        "lead",
+        "router",
         events=[
             {
                 "timestamp": START,
@@ -218,8 +239,8 @@ def test_resource_tools_agents_ledger_and_truncated_tail(study):
 
 def test_counter_reset_is_reported_without_negative_usage(study):
     session(
-        study / "native/sessions/a.jsonl",
-        "lead",
+        study / "groups/router/one/native/sessions/a.jsonl",
+        "router",
         events=[
             token("2026-01-01T00:00:00Z", 100, 0, 10, 0),
             token(START, 10, 0, 1, 0),
@@ -230,12 +251,12 @@ def test_counter_reset_is_reported_without_negative_usage(study):
     assert result["llm"]["total"]["input_tokens"] == 0
     assert result["llm"]["reconciliation"]["cumulative_usage"]["input_tokens"] == 10
     assert not result["llm"]["measurable"]
-    assert result["coverage"]["usage_records_missing_threads"] == ["lead"]
+    assert result["coverage"]["usage_records_missing_threads"] == ["router"]
     assert result["coverage"]["issues"]["sessions:cumulative_counter_decrease"] == 1
 
 
 def test_streamed_output_without_usage_is_unknown_cost_not_awaiting(study):
-    session(study / "native/sessions/a.jsonl", "lead")
+    session(study / "groups/router/one/native/sessions/a.jsonl", "router")
     with (study / "events.jsonl").open("a") as stream:
         stream.write(
             json.dumps(
@@ -243,7 +264,7 @@ def test_streamed_output_without_usage_is_unknown_cost_not_awaiting(study):
                     "at": "2026-01-01T00:02:00Z",
                     "event": "codex.event",
                     "method": "item/agentMessage/delta",
-                    "data": {"threadId": "lead", "delta": " " * 100},
+                    "data": {"threadId": "router", "delta": " " * 100},
                 }
             )
             + "\n"
@@ -251,15 +272,16 @@ def test_streamed_output_without_usage_is_unknown_cost_not_awaiting(study):
     result = report(study, until=END)
     assert not result["llm"]["measurable"]
     assert not result["coverage"]["complete"]
-    assert result["coverage"]["usage_records_missing_threads"] == ["lead"]
+    assert result["coverage"]["usage_records_missing_threads"] == ["router"]
     assert result["coverage"]["awaiting_first_usage_threads"] == []
 
 
 def test_nonresource_review_callback_does_not_require_resource_ledger(study):
     (study / "gpu-budget.json").unlink()
+    configure(study, None)
     session(
-        study / "native/sessions/a.jsonl",
-        "lead",
+        study / "groups/router/one/native/sessions/a.jsonl",
+        "router",
         events=[receipt("reviewed", START, 100, output=10)],
     )
     with (study / "events.jsonl").open("a") as stream:
@@ -268,7 +290,7 @@ def test_nonresource_review_callback_does_not_require_resource_ledger(study):
                 {
                     "at": START,
                     "event": "resource.tool",
-                    "thread_id": "lead",
+                    "thread_id": "router",
                     "tool": "synthetic_readonly_review",
                     "resource_effect": False,
                     "success": True,
@@ -296,7 +318,7 @@ def test_timezone_required_and_cli(study, capsys):
         report(study, since="2026-01-01T00:01:00", until=END)
     with pytest.raises(ValueError, match="earlier"):
         report(study, since=END, until=START)
-    session(study / "native/sessions/a.jsonl", "lead")
+    session(study / "groups/router/one/native/sessions/a.jsonl", "router")
     main([str(study), "--until", END])
     assert json.loads(capsys.readouterr().out)["schema_version"] == 2
 
@@ -310,8 +332,8 @@ def test_wait_pairing_and_task_timestamps(study):
         }
 
     session(
-        study / "native/sessions/a.jsonl",
-        "lead",
+        study / "groups/router/one/native/sessions/a.jsonl",
+        "router",
         events=[
             tool(
                 "2026-01-01T00:00:30Z",
@@ -369,12 +391,13 @@ def test_wait_pairing_and_task_timestamps(study):
 
 
 def test_optional_ledger_and_not_dispatched(study):
-    session(study / "native/sessions/a.jsonl", "lead")
+    session(study / "groups/router/one/native/sessions/a.jsonl", "router")
     (study / "gpu-budget.json").unlink()
+    configure(study, None)
     result = report(study, until=END)
     assert not result["allocation"]["available"]
     assert result["coverage"]["complete"]
-    write_json(study / "config.json", {"resource": {"adapter": "synthetic"}})
+    configure(study, {"ledger_path": str(study / "gpu-budget.json")})
     result = report(study, until=END)
     assert result["coverage"]["issues"]["ledger:missing"] == 1
     write_json(
@@ -404,7 +427,7 @@ def test_optional_ledger_and_not_dispatched(study):
 
 
 def test_frozen_ledger_and_explicit_snapshot_override(study, tmp_path, capsys):
-    session(study / "native/sessions/a.jsonl", "lead")
+    session(study / "groups/router/one/native/sessions/a.jsonl", "router")
 
     def ledger(seconds):
         return {
@@ -423,7 +446,7 @@ def test_frozen_ledger_and_explicit_snapshot_override(study, tmp_path, capsys):
     write_json(external, ledger(9))
     write_json(snapshot, ledger(4))
     write_json(study / "gpu-budget.json", ledger(999))
-    write_json(study / "config.json", {"resource": {"ledger_path": str(external)}})
+    configure(study, {"ledger_path": str(external)})
     result = report(study, until=END)
     assert result["allocation"]["elapsed_seconds"] == 9
     assert str(external) not in json.dumps(result)
@@ -440,9 +463,14 @@ def test_frozen_ledger_and_explicit_snapshot_override(study, tmp_path, capsys):
 
 
 def test_host_role_mapping_attributes_unparented_child_threads(study):
-    session(study / "native/sessions/lead.jsonl", "lead", parent=None, task="root")
     session(
-        study / "native/sessions/host.jsonl",
+        study / "groups/router/one/native/sessions/lead.jsonl",
+        "router",
+        parent=None,
+        task="root",
+    )
+    session(
+        study / "groups/router/one/native/sessions/host.jsonl",
         "child",
         parent=None,
         task="root",
@@ -456,12 +484,13 @@ def test_host_role_mapping_attributes_unparented_child_threads(study):
         {
             "version": 1,
             "threads": {
+                "router": {"role": "router", "task": "routing"},
                 "child": {
                     "role": "scout",
                     "task": "scout-frontier",
                     "task_id": "scout-001",
                     "status": "completed",
-                }
+                },
             },
         },
     )
@@ -469,3 +498,82 @@ def test_host_role_mapping_attributes_unparented_child_threads(study):
     assert out["coverage"]["selected_threads"] == 2
     assert out["llm"]["by_role"]["scout"]["input_tokens"] == 10
     assert out["llm"]["by_role"]["scout"]["uncached_input_tokens"] == 10
+
+
+def test_current_metadata_default_window_and_explicit_tool_outcomes(study):
+    write_json(study / "status.json", {"started_at": START, "ended_at": END})
+    # No coordinator input event or singleton status thread is needed.
+    rows(study / "events.jsonl", [])
+    events = []
+    outcomes = [
+        {"success": False},
+        {"exit_code": 0},
+        {"exit_code": 2},
+        "error appears in ordinary scientific text",
+        {"isError": True},
+    ]
+    for i, output in enumerate(outcomes):
+        events.extend(
+            [
+                {
+                    "timestamp": START,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": str(i),
+                    },
+                },
+                {
+                    "timestamp": "2026-01-01T00:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": str(i),
+                        "output": output,
+                    },
+                },
+            ]
+        )
+    events.append(receipt("structured", "2026-01-01T00:02:01Z", 10))
+    events.sort(key=lambda event: event["timestamp"])
+    session(
+        study / "groups/router/one/native/sessions/router.jsonl",
+        "router",
+        events=events,
+    )
+    result = report(study)
+    assert result["window"]["since"] == "2026-01-01T00:01:00+00:00"
+    assert result["window"]["until"] == "2026-01-01T00:03:00+00:00"
+    assert result["configuration"]["revision"] == "r1"
+    assert result["agents"]["tool_outcomes"] == {
+        "returned_calls": 5,
+        "failed_calls": 3,
+        "unknown_outcome_calls": 1,
+        "failed_by_tool": {"read_file": 3},
+    }
+    assert result["coverage"]["complete"]
+
+
+def test_resource_events_do_not_require_a_model_thread_identity(study):
+    session(study / "groups/router/one/native/sessions/router.jsonl", "router")
+    rows(
+        study / "events.jsonl",
+        [
+            {
+                "at": START,
+                "event": "resource.tool",
+                "tool": "gpu_exec",
+                "success": False,
+                "output": {"error": "synthetic transport failure"},
+            }
+        ],
+    )
+    result = report(study, until=END)
+    assert result["resources"]["calls"] == result["resources"]["failed_calls"] == 1
+
+
+def test_active_revision_path_is_validated_before_reading(study):
+    write_json(study / "active.json", {"revision": "../escape"})
+    with pytest.raises(ValueError, match="revision"):
+        report(study, until=END)

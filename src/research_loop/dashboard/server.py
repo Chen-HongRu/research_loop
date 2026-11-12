@@ -13,7 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from research_loop.state import Knowledge
+from research_loop.state import PublicationStore
+from research_loop.efficiency import frozen_configuration
+from research_loop.identity import resolve, session_paths
+from research_loop import queries
 
 PUBLIC_PHASES = {None, "commentary", "partial_answer", "final_answer"}
 TOOL_TITLES = {
@@ -23,44 +26,32 @@ TOOL_TITLES = {
     "gpu_reconcile": "核对原作业结算",
     "gpu_release": "释放 GPU 分配",
 }
-# Display-only translations of task names chosen by the lead, not prescribed roles.
-TASK_WORDS = {
-    "probe": "诊断",
-    "replication": "复现",
-    "plan": "方案",
-    "crossover": "交叉对照",
-    "continuation": "采样续接",
-    "script": "脚本实现",
-    "review": "审查",
-    "source": "源码",
-    "audit": "核查",
-    "verify": "核验",
-}
-
-
-ROLE_LABELS = {
-    "Scout": "探索",
-    "Proposer": "方案",
-    "Experimenter": "实验",
-    "Analyst": "分析",
-    "Critic": "独立批判",
-    "unknown": "未确认角色",
-}
-HOST_ROLES = {role.lower() for role in ROLE_LABELS if role != "unknown"}
 HOST_TASK_STATES = {
     "queued": "pending",
     "running": "working",
     "completed": "completed",
     "failed": "failed",
+    "unknown": "unknown",
+    "needs-reconciliation": "unknown",
+    "interrupted": "interrupted",
 }
 ARTIFACT_LIMIT = 64 * 1024
 
 
-def task_role(task):
-    """Only explicit role words in the task name are evidence of a role."""
-    words = set(re.split(r"[^a-z]+", task.lower()))
-    roles = [role for role in ROLE_LABELS if role.lower() in words]
-    return roles[0] if len(roles) == 1 else "unknown"
+def current_configuration(root):
+    try:
+        return frozen_configuration(root, lambda path, source: _read_record(path) or {})
+    except (OSError, ValueError):
+        return {}
+
+
+def configuration_view(root):
+    config = current_configuration(root)
+    return {
+        "revision": config.get("revision"),
+        "router": config.get("router"),
+        "profiles": config.get("profiles", {}),
+    }
 
 
 def timestamp(value):
@@ -123,8 +114,6 @@ def _iteration_candidates(root):
             pass
     if directories:
         return [(int(path.name), path) for path in directories]
-    if _read_record(root / "result.json") is not None:
-        return [(None, root)]
     return []
 
 
@@ -239,7 +228,7 @@ def history_page(root, page=1):
 def publication_state(root, iteration):
     """Only the controller's activated pointer establishes current publication."""
     try:
-        published = Knowledge(root).published_state()
+        published = PublicationStore(root).published_state()
     except (OSError, ValueError, TypeError, AttributeError, RuntimeError):
         return {"status": "invalid"}
     if published is not None and not isinstance(published, dict):
@@ -248,7 +237,7 @@ def publication_state(root, iteration):
         return {
             "status": "published",
             "iteration": iteration,
-            "knowledge_version": published["knowledge_version"],
+            "publication_version": published["publication_version"],
         }
     historical = _historical_publication(root, iteration)
     if historical is not None:
@@ -261,7 +250,7 @@ def publication_state(root, iteration):
         and iteration > published["iteration"]
     ):
         return {"status": "unpublished", "iteration": iteration}
-    current = root / "knowledge/current"
+    current = root / "outputs/current"
     if current.is_symlink() and not current.exists():
         return {"status": "invalid"}
     if (
@@ -277,7 +266,7 @@ def _historical_publication(root, iteration):
     """Match an archived final status to its own publication, without activation claims."""
     if type(iteration) is not int:
         return None
-    knowledge = root / "knowledge"
+    knowledge = root / "outputs"
     publications = knowledge / "publications"
     if knowledge.is_symlink() or publications.is_symlink():
         return None
@@ -287,7 +276,7 @@ def _historical_publication(root, iteration):
         status = _read_record(directory / "status.json") or {}
         if type(status.get("iteration")) is not int or status["iteration"] != iteration:
             return None
-        version = status.get("knowledge_version")
+        version = status.get("publication_version")
         if status.get("status") not in {"completed", "iteration-completed"} or not (
             isinstance(version, str)
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", version)
@@ -301,14 +290,14 @@ def _historical_publication(root, iteration):
             return None
         metadata = _read_record(path) or {}
         if (
-            metadata.get("knowledge_version") == version
+            metadata.get("publication_version") == version
             and type(metadata.get("iteration")) is int
             and metadata["iteration"] == iteration
         ):
             return {
                 "status": "historical",
                 "iteration": iteration,
-                "knowledge_version": version,
+                "publication_version": version,
             }
     return None
 
@@ -374,8 +363,8 @@ def research_state(root, status, include_artifacts=True):
             root, [f"frontier{current}.md", f"{prefix}-frontier.md", "frontier.md"]
         ),
         "policy": {
-            "name": "Scout / Proposer / Experimenter / Analyst / Critic",
-            "application": "角色政策展示；实际调用与 fresh context 遵循情况未核验",
+            "name": "Configured workflow / Groups / Agents",
+            "application": "实际身份与版本来自运行记录；会话隔离不等于文件系统隔离",
         },
     }
 
@@ -541,7 +530,9 @@ def metrics_snapshot(root):
         for t in tasks
     ):
         children = [
-            t for t in tasks if t["role"] != "lead" and t["active_in_phase"] is True
+            t
+            for t in tasks
+            if not t.get("is_router", False) and t["active_in_phase"] is True
         ]
         result["tasks"] = {
             "completed": sum(
@@ -795,15 +786,10 @@ class Session:
         host_role = host_role or {}
         path = self.path or activity.get("path") or ""
         task = host_role.get("task") or path.rsplit("/", 1)[-1]
-        role = task_role(task)
-        role_source = "inferred-from-task-name" if role != "unknown" else "unknown"
-        if host_role:
-            role = next(
-                (r for r in ROLE_LABELS if r.lower() == host_role.get("role")),
-                "unknown",
-            )
-            role_source = "host-role-record" if role != "unknown" else "unknown"
-        title = "".join(TASK_WORDS.get(word, word) for word in task.split("_"))
+        role = host_role.get("role")
+        role = role if isinstance(role, str) and role else "unclassified"
+        role_source = "thread-record" if role != "unclassified" else "unknown"
+        title = task
         status = (
             self.status
             if self.status != "unknown"
@@ -817,7 +803,9 @@ class Session:
             "name": self.name,
             "task_name": task,
             "role": role,
-            "role_label": ROLE_LABELS[role],
+            "role_label": role,
+            "group_run_id": host_role.get("group_run_id"),
+            "config_revision": host_role.get("config_revision"),
             "role_source": role_source,
             "fresh_context": "unknown",
             "started_at": self.started_at or activity.get("started_at"),
@@ -853,7 +841,6 @@ class State:
         self.reset()
 
     def reset(self):
-        self.lead_id = None
         self.last_event_at = None
         self.event_count = 0
         self.messages = OrderedDict()
@@ -872,8 +859,6 @@ class State:
     def record(self, event):
         self.event_count += 1
         kind, at = event.get("event"), event.get("at")
-        if kind == "lead.input":
-            self.lead_id = event.get("thread_id")
         if kind in {"codex.event", "resource.tool"}:
             self.last_event_at = at
         if kind in {"role.task.started", "role.task.finished"}:
@@ -983,7 +968,7 @@ class State:
         for event in records:
             self.record(event)
         # Discover only this run's native histories; read each incrementally.
-        for path in (self.root / "native/sessions").glob("*/*/*/*.jsonl"):
+        for path in session_paths(self.root):
             session = self.sessions.setdefault(path, Session(path))
             session.update()
 
@@ -994,7 +979,7 @@ class State:
             return dict(record) if record else None
 
     def _budget(self):
-        config = read_json(self.root / "config.json", {}) or {}
+        config = current_configuration(self.root)
         resource = config.get("resource") or {}
         ledger_path = (
             Path(resource["ledger_path"]) if resource.get("ledger_path") else None
@@ -1039,67 +1024,67 @@ class State:
         role_threads = (
             role_document.get("threads") if isinstance(role_document, dict) else None
         )
-        host_roles = (
+        mappings = (
             {
                 tid: row
-                for tid, row in role_threads.items()
+                for tid, row in (role_threads or {}).items()
                 if isinstance(tid, str)
-                and tid
-                and tid != self.lead_id
                 and isinstance(row, dict)
+                and isinstance(row.get("role"), str)
+                and row["role"]
                 and isinstance(row.get("task"), str)
                 and row["task"]
-                and isinstance(row.get("role"), str)
-                and isinstance(row.get("status"), str)
-                and row["role"] in HOST_ROLES
-                and row["status"] in HOST_TASK_STATES
+                and (
+                    "status" not in row
+                    or (
+                        isinstance(row["status"], str)
+                        and row["status"] in HOST_TASK_STATES
+                    )
+                )
             }
             if isinstance(role_threads, dict)
             else {}
         )
-        descendants = {self.lead_id} if self.lead_id else set()
-        for _ in self.sessions:
-            added = {
-                s.id
-                for s in self.sessions.values()
-                if s.parent_id in descendants and s.id
-            }
-            if added <= descendants:
-                break
-            descendants.update(added)
+        identities = resolve(
+            [
+                {
+                    "thread_id": session.id,
+                    "parent": session.parent_id,
+                    "task": session.path or "",
+                }
+                for session in self.sessions.values()
+                if session.id
+            ],
+            mappings,
+        )
         for session in self.sessions.values():
-            if (
-                session.id
-                and session.id != self.lead_id
-                and (
-                    session.id in descendants
-                    or session.id in self.agents
-                    or session.id in host_roles
-                )
+            identity = identities.get(session.id)
+            if identity is None or identity.is_router or session.id in known:
+                continue
+            if selected_id is not None and session.id != selected_id:
+                continue
+            activity = {
+                **self.agents.get(session.id, {}),
+                **self.host_activity.get(session.id, {}),
+            }
+            children.append(
+                session.card(activity, mappings.get(session.id), detail=detail)
+            )
+            known.add(session.id)
+        for identifier, mapping in mappings.items():
+            if identifier in known or (
+                mapping.get("role") == "router" and not mapping.get("group_run_id")
             ):
-                if selected_id is not None and session.id != selected_id:
-                    continue
-                activity = {
-                    **self.agents.get(session.id, {}),
-                    **self.host_activity.get(session.id, {}),
-                }
-                children.append(
-                    session.card(activity, host_roles.get(session.id), detail=detail)
-                )
-                known.add(session.id)
-        for identifier in {**self.agents, **host_roles}:
-            if identifier not in known and (
-                selected_id is None or identifier == selected_id
-            ):
-                activity = {
-                    **self.agents.get(identifier, {}),
-                    **self.host_activity.get(identifier, {}),
-                }
-                stub = Session(self.root / "unavailable")
-                stub.id = identifier
-                children.append(
-                    stub.card(activity, host_roles.get(identifier), detail=detail)
-                )
+                continue
+            if selected_id is not None and identifier != selected_id:
+                continue
+            activity = {
+                **self.agents.get(identifier, {}),
+                **self.host_activity.get(identifier, {}),
+            }
+            stub = Session(self.root / "unavailable")
+            stub.id = identifier
+            children.append(stub.card(activity, mapping, detail=detail))
         boundaries = iteration_metadata(self.root)
         for child in children:
             started = timestamp(child["started_at"])
@@ -1118,9 +1103,14 @@ class State:
     def _coordinator_messages(self):
         if self.messages:
             return self.messages
+        mappings = (read_json(self.root / "roles.json", {}) or {}).get("threads", {})
+        messages = OrderedDict()
         for session in self.sessions.values():
-            if session.id == self.lead_id:
-                return session.messages
+            mapping = mappings.get(session.id, {})
+            if mapping.get("role") == "router" and not mapping.get("group_run_id"):
+                messages.update(session.messages)
+        if messages:
+            return messages
         return self.messages
 
     def _activity(self, status, alive):
@@ -1162,7 +1152,6 @@ class State:
         with self.lock:
             self.update()
             status = _read_record(self.root / "status.json") or {}
-            self.lead_id = self.lead_id or status.get("thread_id")
             supervisor = _read_record(self.root / "supervisor.json") or {}
             _, alive = supervisor_process(supervisor)
             children = self._agent_cards(detail=False)
@@ -1178,6 +1167,7 @@ class State:
             if isinstance(status.get("error"), dict):
                 projected["error"] = _fields(status["error"], ("type", "message"))
             return {
+                "configuration": configuration_view(self.root),
                 "as_of": datetime.now(UTC).isoformat(),
                 "status": projected,
                 "last_event_at": self.last_event_at,
@@ -1198,12 +1188,12 @@ class State:
         with self.lock:
             self.update()
             status = _read_record(self.root / "status.json") or {}
-            self.lead_id = self.lead_id or status.get("thread_id")
             current = status.get("iteration")
             selected = current if iteration == "current" else iteration
+            cards = self._agent_cards(detail=False)
             rows = [
                 card
-                for card in self._agent_cards(detail=False)
+                for card in cards
                 if (
                     iteration == "all"
                     or (
@@ -1223,6 +1213,7 @@ class State:
             )
             return {
                 "agents": _page(rows, page, 20),
+                "roles": sorted({card["role"] for card in cards}),
                 "total": len(rows),
                 "current_iteration": current,
                 **_pagination(len(rows), page, 20),
@@ -1231,16 +1222,12 @@ class State:
     def agent_detail(self, identifier):
         with self.lock:
             self.update()
-            status = _read_record(self.root / "status.json") or {}
-            self.lead_id = self.lead_id or status.get("thread_id")
             cards = self._agent_cards(selected_id=identifier)
             return cards[0] if cards else None
 
     def activity_page(self, page=1):
         with self.lock:
             self.update()
-            status = _read_record(self.root / "status.json") or {}
-            self.lead_id = self.lead_id or status.get("thread_id")
             messages = self._coordinator_messages()
             # Slice identifiers first; serialize at most one page of previews.
             message_ids = _page(list(reversed(messages)), page, 20)
@@ -1267,8 +1254,6 @@ class State:
     def message_detail(self, identifier):
         with self.lock:
             self.update()
-            status = _read_record(self.root / "status.json") or {}
-            self.lead_id = self.lead_id or status.get("thread_id")
             record = self._coordinator_messages().get(identifier)
             return dict(record) if record else None
 
@@ -1276,7 +1261,6 @@ class State:
         with self.lock:
             self.update()
             status = read_json(self.root / "status.json", {}) or {}
-            self.lead_id = self.lead_id or status.get("thread_id")
             budget = self._budget()
             supervisor = read_json(self.root / "supervisor.json", {}) or {}
             pid, alive = supervisor_process(supervisor)
@@ -1289,6 +1273,7 @@ class State:
             except OSError:
                 goal = "研究目标暂时不可读"
             return {
+                "configuration": configuration_view(self.root),
                 "as_of": datetime.now(UTC).isoformat(),
                 "status": status,
                 "supervisor_pid": pid,
@@ -1386,6 +1371,35 @@ def _positive_integer(value):
     return int(value)
 
 
+def execution_query(root, parameters):
+    """Expose existing application facts without reading native histories."""
+    kind = parameters.get("kind", ["runs"])[0]
+    run_id = parameters.get("run_id", [None])[0]
+    identity = parameters.get("id", [None])[0]
+    limit = _positive_integer(parameters.get("limit", ["50"])[0])
+    cursor = parameters.get("cursor", [None])[0]
+    if kind == "runs":
+        return (
+            queries.get_run(root, identity or run_id)
+            if identity or run_id
+            else queries.list_runs(root, cursor=cursor, limit=limit)
+        )
+    methods = {
+        "steps": (queries.list_steps, queries.get_step),
+        "calls": (queries.list_calls, queries.get_call),
+        "handoffs": (queries.list_handoffs, queries.get_handoff),
+        "operations": (queries.list_operations, queries.get_operation),
+    }
+    if kind not in methods or not run_id:
+        raise ValueError("Execution queries require a supported kind and run_id")
+    listing, get = methods[kind]
+    return (
+        get(root, run_id, identity)
+        if identity
+        else listing(root, run_id, cursor=cursor, limit=limit)
+    )
+
+
 def handler_for(state, allowed_hosts):
     studies = state if isinstance(state, Studies) else Studies([state.root])
     directory = Path(__file__).resolve().parent
@@ -1420,6 +1434,7 @@ def handler_for(state, allowed_hosts):
                 "/api/agent",
                 "/api/activity",
                 "/api/message",
+                "/api/execution",
             }:
                 query = parse_qs(parsed.query, keep_blank_values=True)
                 if any(len(values) != 1 for values in query.values()):
@@ -1434,6 +1449,8 @@ def handler_for(state, allowed_hosts):
                     if path == "/api/state":
                         value = selected.snapshot()
                         value["history"] = research_history(selected.root)
+                    elif path == "/api/execution":
+                        value = execution_query(selected.root, query)
                     elif path == "/api/metrics":
                         value = metrics_snapshot(selected.root)
                     elif path == "/api/overview":
@@ -1442,14 +1459,14 @@ def handler_for(state, allowed_hosts):
                         value = history_page(selected.root, page)
                     elif path == "/api/iteration":
                         raw = query.get("iteration", [""])[0]
-                        number = None if raw == "legacy" else _positive_integer(raw)
+                        number = _positive_integer(raw)
                         value = iteration_detail(selected.root, number)
                     elif path == "/api/agents":
                         iteration = query.get("iteration", ["current"])[0]
                         if iteration not in {"current", "all", "unknown"}:
                             iteration = _positive_integer(iteration)
                         role = query.get("role", ["all"])[0]
-                        if role not in {"all", *ROLE_LABELS}:
+                        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", role):
                             raise ValueError("Invalid role")
                         value = selected.agents_page(iteration, role, page)
                     elif path == "/api/activity":
@@ -1463,6 +1480,9 @@ def handler_for(state, allowed_hosts):
                             "/api/agent": selected.agent_detail,
                             "/api/message": selected.message_detail,
                         }[path](identifier)
+                except (FileNotFoundError, KeyError):
+                    self.send_error(404, "Record unavailable in selected run")
+                    return
                 except ValueError as error:
                     self.send_error(400, str(error))
                     return

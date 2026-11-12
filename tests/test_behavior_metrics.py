@@ -57,18 +57,36 @@ def record(rid="r", seconds=100):
 def study(tmp_path):
     root = tmp_path / "study"
     root.mkdir()
-    (root / "status.json").write_text(json.dumps({"thread_id": "lead"}))
-    append(
-        root / "events.jsonl", {"at": START, "event": "lead.input", "thread_id": "lead"}
+    (root / "status.json").write_text(json.dumps({"started_at": START}))
+    (root / "active.json").write_text(json.dumps({"revision": "r1"}))
+    config = root / "configurations/r1/config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"revision": "r1", "profiles": {}, "router": {}}))
+    (root / "roles.json").write_text(
+        json.dumps(
+            {
+                "threads": {
+                    "router": {"role": "router", "task": "routing"},
+                    "child": {"role": "analyst", "task": "analyst_one"},
+                }
+            }
+        )
     )
-    for tid, task, parent in (("lead", "root", None), ("child", "analyst_one", "lead")):
+    append(
+        root / "events.jsonl",
+        {"at": START, "event": "run.started", "thread_id": "router"},
+    )
+    for tid, task, parent in (
+        ("router", "root", None),
+        ("child", "analyst_one", "router"),
+    ):
         source = (
             {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}
             if parent
             else "cli"
         )
         append(
-            root / "native/sessions" / f"{tid}.jsonl",
+            root / "groups/router/one/native/sessions" / f"{tid}.jsonl",
             row("session_meta", 0, id=tid, source=source, agent_path=f"/root/{task}"),
         )
     return root
@@ -85,7 +103,7 @@ def child(sample):
 
 
 def test_batched_outputs_utf8_dedup_and_unknown_ready(study):
-    p = study / "native/sessions/child.jsonl"
+    p = study / "groups/router/one/native/sessions/child.jsonl"
     append(
         p,
         call("a"),
@@ -134,7 +152,7 @@ def test_batched_outputs_utf8_dedup_and_unknown_ready(study):
 
 
 def test_cross_phase_partial_output_repeat_and_union(study):
-    p = study / "native/sessions/child.jsonl"
+    p = study / "groups/router/one/native/sessions/child.jsonl"
     append(
         p,
         call("pre", "read_file", 30, "path"),
@@ -190,7 +208,10 @@ def test_explicit_readiness_and_missing_is_not_inferred(study):
 
 
 def test_cli_once_and_future_tail(study, capsys):
-    append(study / "native/sessions/child.jsonl", call("future", seconds=180))
+    append(
+        study / "groups/router/one/native/sessions/child.jsonl",
+        call("future", seconds=180),
+    )
     main(
         [
             "watch",
@@ -214,7 +235,12 @@ def test_cli_once_and_future_tail(study, capsys):
 def test_recovery_republishes_one_sample_after_interruption(study, monkeypatch):
     import research_loop.sample_store as module
 
-    append(study / "native/sessions/child.jsonl", call("a"), result("a"), record())
+    append(
+        study / "groups/router/one/native/sessions/child.jsonl",
+        call("a"),
+        result("a"),
+        record(),
+    )
     original = module._atomic
 
     def interrupted(path, value):
@@ -243,7 +269,7 @@ def test_recovery_republishes_one_sample_after_interruption(study, monkeypatch):
 
 def test_usage_missing_id_persistent_gap_and_resume(study):
     append(
-        study / "native/sessions/child.jsonl",
+        study / "groups/router/one/native/sessions/child.jsonl",
         call("a"),
         result("a", output="Warning: truncated output"),
         row("token_usage_record", 100, response_id={"invalid": "id"}, usage={}),
@@ -260,8 +286,8 @@ def test_usage_missing_id_persistent_gap_and_resume(study):
 
 
 def test_phase_cohorts_exclude_historical_completed_and_orphan(study):
-    sessions = study / "native/sessions"
-    source = {"subagent": {"thread_spawn": {"parent_thread_id": "lead"}}}
+    sessions = study / "groups/router/one/native/sessions"
+    source = {"subagent": {"thread_spawn": {"parent_thread_id": "router"}}}
     for tid in ("old_done", "old_orphan"):
         append(
             sessions / f"{tid}.jsonl",
@@ -273,8 +299,8 @@ def test_phase_cohorts_exclude_historical_completed_and_orphan(study):
         result("old_done-wait", 20),
         row("event_msg", 30, type="task_complete"),
     )
-    # Both lead and child have real activity during this phase.
-    append(sessions / "lead.jsonl", record("lead-active"))
+    # Both Router and child have real activity during this phase.
+    append(sessions / "router.jsonl", record("lead-active"))
     append(sessions / "child.jsonl", call("child-active"))
     with collector(study) as c:
         sample = c.poll(END)
@@ -282,7 +308,7 @@ def test_phase_cohorts_exclude_historical_completed_and_orphan(study):
     active_ids = {
         t["thread_id"] for t in sample["llm"]["by_task"] if t["active_in_phase"]
     }
-    assert active_ids == {"lead", "child"}
+    assert active_ids == {"router", "child"}
     assert {t["thread_id"] for t in b["by_task"] if t["active_in_phase"]} == active_ids
     assert b["total"]["tasks"] == 2
     assert b["children"]["tasks"] == 1
@@ -293,7 +319,7 @@ def test_phase_cohorts_exclude_historical_completed_and_orphan(study):
     assert "unclassified" not in b["by_role"]
     assert "resources" not in sample and "allocation" not in sample
     assert {t["thread_id"] for t in b["by_task"]} == {
-        "lead",
+        "router",
         "child",
         "old_done",
         "old_orphan",
@@ -313,9 +339,9 @@ def test_readiness_ready_at_only_and_late_session_discovery(study):
     )
     with collector(study) as c:
         assert c.poll(END)["behavior"]["coverage"]["unmatched_readiness_records"] == 1
-        source = {"subagent": {"thread_spawn": {"parent_thread_id": "lead"}}}
+        source = {"subagent": {"thread_spawn": {"parent_thread_id": "router"}}}
         append(
-            study / "native/sessions/late.jsonl",
+            study / "groups/router/one/native/sessions/late.jsonl",
             row(
                 "session_meta",
                 80,
@@ -335,7 +361,7 @@ def resource_event(at=START, tool="gpu_exec", **output):
     return {
         "at": at,
         "event": "resource.tool",
-        "thread_id": "lead",
+        "thread_id": "router",
         "tool": tool,
         "output": output,
     }
@@ -439,7 +465,7 @@ def test_compare_shared_complete_roles_unknown_ready_and_atomic_watch(
 ):
     from research_loop import sample_store
 
-    path = study / "native/sessions/child.jsonl"
+    path = study / "groups/router/one/native/sessions/child.jsonl"
     meta = json.loads(path.read_text().strip())
     meta["timestamp"] = "2026-01-01T00:01:10Z"
     path.write_text(json.dumps(meta) + "\n")
@@ -536,3 +562,36 @@ def test_compare_shared_complete_roles_unknown_ready_and_atomic_watch(
     assert i["shared_role_cohort"]["readiness"]["created_before_ready_count"] == 0
     assert b["resource_presentations"]["status"] == "unavailable_in_source"
     assert i["resource_presentations"]["status"] == "no_records"
+
+
+def test_parentless_group_agent_is_included_without_invented_native_parent(study):
+    path = (
+        study
+        / "group-runs/one/native-runtime/review/router/none/native/sessions/agent.jsonl"
+    )
+    append(
+        path,
+        row("session_meta", 70, id="independent", source="cli", agent_path="/root"),
+        call("review-wait", seconds=80),
+        result("review-wait", 90),
+        record("independent", 100),
+        row("event_msg", 120, type="task_complete"),
+    )
+    mappings = json.loads((study / "roles.json").read_text())
+    mappings["threads"]["independent"] = {
+        "role": "router",
+        "group_run_id": "one",
+        "task": "review",
+    }
+    (study / "roles.json").write_text(json.dumps(mappings))
+    with collector(study) as current:
+        sample = current.poll(END)
+    agent = next(
+        task
+        for task in sample["behavior"]["by_task"]
+        if task["thread_id"] == "independent"
+    )
+    assert agent["parent"] is None
+    assert agent["is_router"] is False
+    assert agent["wait_union_seconds"] == 10
+    assert sample["behavior"]["children"]["tasks"] == 1

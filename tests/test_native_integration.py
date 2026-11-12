@@ -1,232 +1,203 @@
-"""Explicit opt-in pinned-runtime checks; default tests do not call a model."""
+"""Explicit opt-in checks of current declarative Agents and the native harness."""
 
 import asyncio
 import json
 import os
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import yaml
 
-from research_loop.codex import Native, Tool, configuration, plain
-from research_loop.instructions import INSTRUCTIONS, RESULT_SCHEMA
-from research_loop.loop import initialize, inspect
-from research_loop.state import Journal
+from research_loop.codex import Native, configuration
+from research_loop.configuration import prepare_configuration
+from research_loop.group_agents import NativeGroupServices
+from research_loop.groups import GroupRuntime
+from research_loop.state import Journal, write_json
+
+MODEL = os.environ.get("RESEARCH_MODEL", "gpt-6.1-sol")
+EFFORT = "medium"
 
 
-def workspace(tmp_path):
-    project = tmp_path / "project"
-    project.mkdir()
-    goal = tmp_path / "goal.md"
-    goal.write_text("Synthetic runtime verification only; no remote or GPU.")
-    root = tmp_path / "run"
-    initialize(root, project, goal, coordinator="lead")
-    config, _ = configuration(
-        root,
-        project,
-        [root / "work", root / "knowledge/draft"],
-        "gpt-6.1-sol",
-        "medium",
+def context(tmp_path, config, bindings):
+    work = tmp_path / "work"
+    work.mkdir()
+    ctx = SimpleNamespace(
+        root=tmp_path,
+        work=work,
+        study_root=tmp_path,
+        run_id="native-check",
+        round=1,
+        config_revision=config["revision"],
+        definition=SimpleNamespace(agents=bindings, settings={}),
+        state={},
     )
-    return root, config
-
-
-def assess_role_smoke(root, result, receipts, children, thread_id, marker):
-    """Check retained smoke evidence without admitting another model turn."""
-    work = root / "work"
-    expected = {"count": 4, "sum": 10, "sum_squares": 30}
-    assert result["goal"] == "unknown"
-    assert result["study_action"] == "stop"
-    assert result["stop_reason"].strip()
-    assert receipts == [{"marker": marker}]
-    plan = json.loads((work / "plan.json").read_text())
-    assert plan["numbers"] == [1, 2, 3, 4]
-    assert plan["expected"] == expected
-    assert plan["scope"].strip()
-    assert (work / "experiment.py").stat().st_size
-    output = json.loads((work / "result.json").read_text())
-    assert output.get("actual", output) == expected
-    if "all_checks_passed" in output:
-        assert output["all_checks_passed"] is True
-    assert (work / "execution.log").stat().st_size
-    critique = json.loads((work / "critique.json").read_text())
-    assert critique["verdict"] == "accept"
-    assert critique["observed"] == expected
-    assert critique["scope"] == "synthetic-only"
-    assert critique["limitations"].strip()
-    assert (work / "coordination.md").stat().st_size
-    assert (root / "knowledge/draft/index.md").stat().st_size
-    assert result["evidence"]
-    assert len(children) >= 3
-    rows = [
-        json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()
-    ]
-    references = {
-        row["thread_id"]: Path(row["path"])
-        for row in rows
-        if row["event"] == "codex.history.reference"
-    }
-    assert children <= references.keys()
-    for child in children:
-        assert marker not in references[child].read_text()
-    # Inspect native tool records rather than matching policy text.
-    calls = []
-    for line in references[thread_id].read_text().splitlines():
-        item = json.loads(line).get("payload", {})
-        if item.get("type") == "function_call":
-            calls.append((item["name"].split(".")[-1], json.loads(item["arguments"])))
-    spawns = [args for name, args in calls if name == "spawn_agent"]
-    assert len(spawns) >= 3
-    assert all(args.get("fork_turns") == "none" for args in spawns)
-    assert not any(name in {"resume_agent", "followup_task"} for name, _ in calls)
-    # Native v2 reports child starts as subAgentActivity rather than spawnAgent.
-    items = [
-        row["data"]["item"]
-        for row in rows
-        if row["event"] == "codex.event"
-        and row["method"] == "item/completed"
-        and "item" in row["data"]
-    ]
-    spawned = set()
-    for item in items:
-        if (
-            item.get("type") == "collabAgentToolCall"
-            and item.get("tool") == "spawnAgent"
-        ):
-            spawned.update(item.get("receiverThreadIds", []))
-        elif item.get("type") == "subAgentActivity" and item.get("kind") == "started":
-            spawned.add(item["agentThreadId"])
-    assert len(spawned) >= 3
-    assert spawned <= children
+    ctx.save_state = lambda: write_json(tmp_path / "state.json", ctx.state)
+    return ctx
 
 
 @pytest.mark.skipif(
     os.environ.get("RESEARCH_NATIVE_TEST") != "1",
-    reason="Opt-in native SDK metadata check",
+    reason="Opt-in native account/model metadata handshake; no model turn",
 )
 def test_pinned_native_handshake_without_model(tmp_path):
-    async def check():
-        root, config = workspace(tmp_path)
-        journal = Journal(root / "events.jsonl")
+    config, _ = configuration(
+        tmp_path, tmp_path, [tmp_path / "work"], MODEL, EFFORT, allow_tools=False
+    )
+
+    async def run():
+        journal = Journal(tmp_path / "events.jsonl")
         native = Native(config, journal)
         try:
             async with asyncio.timeout(40):
                 await native.open()
-                await native.verify("gpt-6.1-sol", "medium")
-                started = plain(
-                    await asyncio.to_thread(
-                        native.client.thread_start,
-                        {
-                            "model": "gpt-6.1-sol",
-                            "allowProviderModelFallback": False,
-                            "permissions": "research",
-                            "approvalPolicy": "never",
-                            "dynamicTools": [],
-                        },
-                    )
-                )
-                assert (
-                    started["model"] == "gpt-6.1-sol"
-                    and started["reasoningEffort"] == "medium"
-                )
-                native.thread_id = started["thread"]["id"]
+                await native.verify(MODEL, EFFORT)
                 await native.settle()
         finally:
             await native.close()
             journal.close()
 
-    asyncio.run(check())
+    asyncio.run(run())
 
 
 @pytest.mark.skipif(
     os.environ.get("RESEARCH_MODEL_TEST") != "1",
-    reason="Opt-in subscription/native-delegation smoke",
+    reason="Opt-in actual OpenAI Plan/Prepare/local command/independent Evaluate smoke",
 )
-def test_native_fresh_research_roles_and_local_command(tmp_path):
-    async def check():
-        root, config = workspace(tmp_path)
-        marker = f"SYNTHETIC_PARENT_ONLY_{uuid.uuid4().hex}"
-        receipts = []
+def test_current_research_group_shared_author_and_independent_evaluation(tmp_path):
+    source = Path(__file__).resolve().parents[1] / "examples/research.yaml"
+    declaration = yaml.safe_load(source.read_text())
+    declaration["workflow"]["program"] = str(
+        source.parent / declaration["workflow"]["program"]
+    )
+    for group in declaration["groups"].values():
+        group["program"] = str(source.parent / group["program"])
+    for agent in declaration["agents"].values():
+        agent["instructions"] = str(source.parent / agent["instructions"])
+    for profile in declaration["profiles"].values():
+        profile.update(model=MODEL, effort=EFFORT)
+    marker = "SYNTHETIC_AUTHOR_ONLY_" + uuid.uuid4().hex
+    instructions = tmp_path / "author.md"
+    instructions.write_text(
+        Path(declaration["agents"]["experiment"]["instructions"]).read_text()
+        + "\nConversation isolation witness: "
+        + marker
+        + ". Never write this witness into artifacts or pass it to Evaluate.\n"
+    )
+    declaration["agents"]["experiment"]["instructions"] = str(instructions)
+    configured = tmp_path / "native.yaml"
+    configured.write_text(yaml.safe_dump(declaration))
+    config = prepare_configuration(
+        configured, tmp_path / "configuration", revision="native-fixed"
+    )
+    config["project"] = str(tmp_path)
+    task = tmp_path / "task.md"
+    task.write_text("""One bounded synthetic CPU smoke; no scientific generalization.
+Design and prepare a standard-library Python script computing count, sum and sum
+of squares from [1,2,3,4]. Exact expected output is {"count":4,"sum":10,"sum_squares":30}.
+Write the actual output to result.json and a local dispatch-count file containing
+'once'. The host alone executes the prepared command once. Plan writes a scientific
+plan with the control and toy-only scope. Prepare may syntax-check only. Independent
+Evaluate reads the actual plan, host execution receipt and result.json, checks the
+three exact values without rerunning, and reports limitations. Do not spawn agents,
+install packages, use web, remote resources or GPUs. Stop after this bounded Group.
+""")
+    journal = Journal(tmp_path / "events.jsonl")
+    runtime = GroupRuntime(
+        tmp_path,
+        config["groups"],
+        revision=config["revision"],
+        service_factory=lambda ctx: NativeGroupServices(ctx, config, journal),
+    )
 
-        async def record_probe(arguments):
-            receipts.append(arguments)
-            return {"recorded": True}
-
-        tool = Tool(
-            "record_probe",
-            "Record the synthetic smoke marker on the host. Lead only.",
-            {
-                "type": "object",
-                "properties": {"marker": {"type": "string"}},
-                "required": ["marker"],
-                "additionalProperties": False,
-            },
-            record_probe,
-        )
-        payload = inspect(root)["input"]
-        payload["parent_only_marker"] = marker
-        work = root / "work"
-        expected = {"count": 4, "sum": 10, "sum_squares": 30}
-        payload["verification"] = f"""One bounded synthetic integration smoke only.
-Call record_probe once with parent_only_marker. Never pass that marker to children.
-Use exactly three fresh native spawn_agent calls with fork_turns='none', sequentially:
-Proposer, Experimenter, Critic. Copy the common contract and selected supplied role
-into each self-contained task-specific handoff. Pin children to gpt-6.1-sol / medium,
-no fallback. Include goal/project paths, evidence, ownership and completion check.
-No nested delegation, resume/reuse/followup, web, GPU, SSH, or runtime edits.
-This dependency sequence is only this smoke, not a mandatory general workflow.
-
-1. Proposer owns only {work / "plan.json"}. Design a deterministic arithmetic check
-on [1,2,3,4] with exact count, sum and sum of squares. Write a JSON plan with
-numbers=[1,2,3,4], expected={json.dumps(expected)}, and a nonempty scope string
-explaining the toy-only limitation. Compare the sum with an independent direct
-addition control. No scientific/generalization claim or computation job.
-Wait for completion; use its actual plan as evidence in the next fresh handoff.
-
-2. NEW Experimenter reads the plan and owns only {work / "experiment.py"}. Prepare
-a small standard-library Python script reading plan.json, computing those values
-from numbers and writing {work / "result.json"}. It may syntax-check but must leave
-the actual experiment invocation to you. Require exact command and expected output.
-Do not write the script yourself. After it finishes, inspect the script and execute
-its prepared command once yourself using native shell. Record command, stdout/stderr
-and exit status in {work / "execution.log"}. No remote/model computation.
-
-3. Only after result.json exists, NEW read-only Critic receives goal/project paths,
-plan.json, experiment.py, result.json and execution.log, never executor chats.
-Challenge the bounded claim: this arithmetic implementation matches this exact toy
-plan. Critic must not edit files or rerun computation. Require its final reply as
-JSON with verdict='accept' if supported, observed equal to the actual three values,
-scope='synthetic-only', and a nonempty limitations string explaining why this does
-not validate real scientific benefit. Persist that JSON yourself to
-{work / "critique.json"}.
-
-Maintain {work / "coordination.md"} with role, task, child identity, dependencies,
-status and artifacts. Wait for all children to finish and close them with native
-tools. Integrate an artifact-citing synthetic note into knowledge_draft/index.md.
-Return the requested schema with goal='unknown', study_action='stop', and explicit
-stop_reason that this authorized synthetic smoke is complete. Evidence must cite
-actual artifact paths. Do not propose further runs.
-"""
-        journal = Journal(root / "events.jsonl")
-        native = Native(config, journal, [tool])
+    async def run():
         try:
             async with asyncio.timeout(480):
-                await native.open()
-                await native.verify("gpt-6.1-sol", "medium")
-                result = await native.run(
-                    INSTRUCTIONS,
-                    payload,
-                    RESULT_SCHEMA,
-                    model="gpt-6.1-sol",
-                    effort="medium",
+                identity = await runtime.start(
+                    "exp",
+                    str(task),
+                    [],
+                    context={"input": {"project_root": str(tmp_path)}},
                 )
-                await native.settle()
-                assess_role_smoke(
-                    root, result, receipts, native.children, native.thread_id, marker
-                )
+                await runtime.wait()
+                result = runtime.observe(identity)
+                assert result["status"] == "returned", result
+                assert result["output"]["completion"] == "completed", result["output"]
+                return identity
         finally:
-            await native.stop()
-            await native.close()
+            await runtime.close_runtime()
             journal.close()
 
-    asyncio.run(check())
+    identity = asyncio.run(run())
+    root = tmp_path / "group-runs" / identity
+    state = json.loads((root / "state.json").read_text())
+    calls = state["native_calls"]
+    assert [call["binding"] for call in calls] == ["plan", "prepare", "evaluate"]
+    assert calls[0]["thread_id"] == calls[1]["thread_id"] != calls[2]["thread_id"]
+    assert calls[0]["session_id"] == calls[1]["session_id"] != calls[2]["session_id"]
+    assert all(call["profile"] == {"model": MODEL, "effort": EFFORT} for call in calls)
+    assert marker in calls[0]["instructions"] and marker not in json.dumps(calls[2])
+    assert json.loads((root / "work/result.json").read_text()) == {
+        "count": 4,
+        "sum": 10,
+        "sum_squares": 30,
+    }
+    assert (root / "work/dispatch-count").read_text() == "once"
+    assert len(state["executions"]) == 1
+    assert state["executions"]["prepared-experiment"]["receipt"]["exit_code"] == 0
+    assert state["experiment_phases"]["evaluate"]["limitations"]
+    assert all(
+        state["experiment_phases"][name]["status"] == "ready"
+        for name in ("plan", "prepare", "evaluate")
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("RESEARCH_MODEL_TEST") != "1",
+    reason="Opt-in actual declarative OpenAI tools-none Agent",
+)
+def test_current_declarative_agent_has_no_tools_and_exact_profile(tmp_path):
+    schema = {
+        "type": "object",
+        "properties": {"token": {"type": "string"}},
+        "required": ["token"],
+        "additionalProperties": False,
+    }
+    config = dict(
+        revision="native-fixed",
+        project=str(tmp_path),
+        profiles={"text": {"model": MODEL, "effort": EFFORT}},
+        agents={
+            "echo": {
+                "instructions": "Return the supplied token exactly as structured JSON. Use no tools or delegation.",
+                "profile": "text",
+                "tools": "none",
+                "output_schema": schema,
+            }
+        },
+    )
+    ctx = context(tmp_path, config, {"reply": "echo"})
+    journal = Journal(tmp_path / "events.jsonl")
+    services = NativeGroupServices(ctx, config, journal)
+    token = "SYNTHETIC_TOKEN_" + uuid.uuid4().hex
+
+    async def run():
+        try:
+            async with asyncio.timeout(90):
+                return await services.call(
+                    "reply", "echo", "Echo the token.", {"token": token}, session="new"
+                )
+        finally:
+            await services.close()
+            journal.close()
+
+    assert asyncio.run(run()) == {"token": token}
+    receipt = ctx.state["native_calls"][0]
+    assert receipt["agent_id"] == "echo" and receipt["profile"] == {
+        "model": MODEL,
+        "effort": EFFORT,
+    }
+    assert receipt["effective"]["allow_tools"] is False
+    assert receipt["effective"]["allow_builtin_tools"] is False
+    assert receipt["status"] == "completed"

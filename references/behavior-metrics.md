@@ -1,11 +1,13 @@
 # Observational behavior metrics
 
 `research_loop.behavior_metrics` is a local, single-writer sidecar. It reads the
-Study's `status.json`, optional `config.json`, `events.jsonl`, and native session
+run's `status.json`, `active.json`, normalized `configurations/REV/config.json`,
+`roles.json`, `events.jsonl`, and managed native session
 JSONL histories. It writes only its own output directory, outside the Study. It
 never invokes a model, changes a research budget, inspects datasets/checkpoints,
-or launches compute. Native metadata and Host role mappings select Study threads. Roles use explicit
-Host mappings or task-name-prefix inference; unknown roles stay unclassified.
+or launches compute. Explicit Agent/Router mappings and native ancestry select run threads. Roles use
+recorded identities; unmapped descendants stay unclassified. Discovery includes
+per-Agent histories beneath `group-runs/*/native-runtime/**/native/sessions/`.
 
 ```sh
 uv run python -m research_loop.behavior_metrics watch /path/to/study \
@@ -49,26 +51,29 @@ ordinary collector. Behavior calculation, enrichment and history detail pruning
 remain in `BehaviorCollector`; the shared code only completes the three output
 files. It preserves the committed journal prefix and rejects a journal shorter
 than the checkpoint position. Existing version 2 phases resume with the same
-fields and sample IDs; no format migration is needed for this refactor.
+fields and sample IDs. Use a new output directory when the source/checkpoint
+format differs; earlier checkpoints are not migrated.
 
 `behavior.by_task` preserves thread ID, parent, task, role, start-before-phase and
 right-censoring flags. `behavior.total`, `behavior.children`, and `behavior.by_role` give counts, wait,
-byte and associated-token aggregates for all sessions, descendants, and roles.
+byte and associated-token aggregates for all sessions, Agent work, and roles.
+The `children` field includes independently started Group Agents with no native
+parent; it excludes the actual Router using recorded identity, not an Agent name.
+`is_router` marks that distinction while `parent` remains the native fact.
 Aggregates include only sessions that the original Collector marks
 `active_in_phase` in that sample (a recorded source event in the phase). Full
 `by_task` retains historical sessions with this flag explicit. Incomplete historical
 sessions do not become active merely because their lifetime is right-censored.
-Readiness missing counts and coverage lists include only active descendants; the
-lead coordinator does not need a readiness record. Aggregated wait unions sum
+Readiness missing counts and coverage lists include only active Agent work; the
+Router does not need a readiness record. Aggregated wait unions sum
 per-session unions and can overlap across sessions. `resources` and `allocation` fields
 are omitted; the ordinary metrics collector remains their authoritative sidecar.
 `llm` retains the shared unique-response usage counters as context, with the same
 request-usage acceptance rule as ordinary continuous metrics and offline schema
 version 2 audits. Cumulative counters never replace missing request receipts. Input
 includes cached input; output includes reasoning. These are tokens, not currency.
-The underlying report/checkpoint version is now 2. Start a fresh output directory
-for a version 1 phase; old receipts with absent usage fields cannot be corrected
-from saved offsets alone. Historical samples are not rewritten.
+Accounting reports retain schema version 2. Historical samples remain unchanged;
+start a fresh phase for a different source/checkpoint format.
 
 - `wait_calls`: visible `wait`, `wait_agent`, or `sleep` calls started in the phase.
   Namespaced native tools are normalized to their terminal name. Returned waits
@@ -211,12 +216,12 @@ uv run python -m research_loop.behavior_metrics watch /path/to/study \
 
 `compare` reads only the two `latest.json` snapshots. It reports phase windows,
 configuration, source coverage and resource presentation metadata separately. Its
-cohort includes active descendants with known starts in the phase, a completion,
+cohort includes active Agent work with known starts in the phase, a completion,
 and no right-censoring. Only roles with at least one such task in both snapshots
 enter the shared-role cohort. Counts expose excluded mixed/incomplete tasks and
-roles present on just one side. Historical sessions and the lead are excluded.
-Roles use explicit Host mappings or task-name-prefix inference; shared roles do
-not imply matched workloads.
+roles present on just one side. Historical sessions and Router sessions are
+excluded. Roles use recorded mappings; a shared role does not imply a matched
+workload.
 
 Cohort reports include mean per-task and pooled wait-lifetime fractions, mean
 output bytes for tasks with known output sizes, large-output count and fractions,

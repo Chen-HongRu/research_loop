@@ -1,124 +1,280 @@
-"""Real filesystem commit/recovery, with synthetic research results only."""
+"""Generic publication and recovery with real filesystem activation boundaries."""
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
-from research_loop import human_input, loop, publication
-from research_loop.state import Knowledge, writer
-from test_human_input import outcome
-from test_loop import CONTINUE, prepare, scripted_native
-from test_native import RESULT
+from research_loop import publication
+from research_loop.interventions import get_intervention, submit_intervention
+from research_loop.state import PublicationStopped, PublicationStore, writer
+
+
+def request(root, identity):
+    submit_intervention(
+        root,
+        {
+            "id": identity,
+            "kind": "task",
+            "expected_revision": "revision-1",
+            "payload": {"task": "synthetic work"},
+        },
+    )
+
+
+def proposal(action="stop", **changes):
+    return {
+        "action": action,
+        "result": {"answer": 42},
+        "artifacts": [{"content": "# Answer\n\n42\n", "destination": "answer.md"}],
+        **changes,
+    }
 
 
 @pytest.mark.parametrize("action", ["continue", "stop"])
-def test_commit_and_repeated_recovery_through_public_entries(tmp_path, action):
-    root = prepare(tmp_path)
-    human_input.submit(root, "Synthetic request")
-    request = human_input.admit(root)
-    result = outcome(request, study_action=action)
-    state = {
-        "iteration": 1,
-        "status": "running",
-        "result": result,
-        "human_request": request,
-    }
-    baseline = Knowledge(root).prepare()
-    with writer(root):
-        assert asyncio.run(publication.commit(root, state, baseline)) is state
-        committed = Knowledge(root).published_state()
-        assert state["status"] == (
-            "iteration-completed" if action == "continue" else "completed"
+def test_commit_and_repeated_recovery_are_generic(tmp_path, action):
+    request(tmp_path, "first")
+    state = {"iteration": 1, "status": "running"}
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    original = proposal(action, input_outcome={"id": "first", "status": "completed"})
+    with writer(tmp_path):
+        assert (
+            asyncio.run(publication.commit(tmp_path, state, baseline, original))
+            is state
         )
-        assert state["knowledge_version"] == committed["knowledge_version"]
-        if action == "continue":
-            assert state["next_iteration"] == committed["next_iteration"] == 2
-        else:
-            assert "next_iteration" not in state
-        assert human_input.admit(root) is None
-
-        # The pointer is authoritative when live status has not been saved.
-        recovered = asyncio.run(
-            publication.recover(root, {"iteration": 1, "status": "failed"})
-        )
-        assert recovered == committed
-        paths = [
-            root / "status.json",
-            root / "result.json",
-            root / "iterations/000001/status.json",
-        ]
-        saved = [path.read_bytes() for path in paths]
-        assert json.loads(saved[1]) == result
-        assert json.loads(saved[2]) == committed
-        assert asyncio.run(publication.recover(root, recovered)) is recovered
-        assert [path.read_bytes() for path in paths] == saved
-        assert Knowledge(root).published_state() == committed
-
-
-def test_restart_after_activation_keeps_new_request_without_research_replay(
-    tmp_path, monkeypatch
-):
-    root = prepare(tmp_path)
-    human_input.submit(root, "First request")
-    first = human_input.admit(root)
-    publish = Knowledge.publish
-
-    def interrupted_publish(*args, **kwargs):
-        publish(*args, **kwargs)
-        raise RuntimeError("synthetic interruption after activation")
-
-    factory, clients = scripted_native(monkeypatch, [outcome(first)])
-    with monkeypatch.context() as patch:
-        patch.setattr(Knowledge, "publish", interrupted_publish)
-        with pytest.raises(RuntimeError, match="after activation"):
-            asyncio.run(loop.run(root, native_factory=factory))
-    assert human_input.admit(root) == first
-    with human_input.input_lock(root) as path:
-        path.write_text("New request after interruption")
-    newer = human_input.admit(root)
-    committed = Knowledge(root).published_state()
-
-    for _ in range(2):
-        state = asyncio.run(loop.run(root, native_factory=factory))
-        assert state == committed
-        assert state["status"] == "completed"
-        assert human_input.admit(root) == newer
-        assert Knowledge(root).published_state() == committed
-    assert len(clients) == 1
-
-
-def test_recovery_keeps_newer_failed_iteration_and_pending_request(
-    tmp_path, monkeypatch
-):
-    root = prepare(tmp_path)
-    human_input.submit(root, "First request")
-    first = human_input.admit(root)
-
-    def replace_request(number, packet):
-        if number == 1:
-            with human_input.input_lock(root) as path:
-                path.write_text("Second request")
-
-    factory, _ = scripted_native(
-        monkeypatch, [outcome(first, **CONTINUE), RESULT], replace_request, fail_at=2
+    committed = store.published_state()
+    assert committed == state
+    assert committed["action"] == action
+    assert committed["proposal"] == original
+    assert committed["status"] == (
+        "iteration-completed" if action == "continue" else "completed"
     )
-    with pytest.raises(RuntimeError, match="intermediate failure"):
-        asyncio.run(loop.run(root, native_factory=factory))
-    newer = human_input.admit(root)
-    state = json.loads((root / "status.json").read_text())
-    assert state["iteration"] == 2 and state["status"] == "failed"
-    assert state["human_request"] == newer
-    assert Knowledge(root).published_state()["iteration"] == 1
+    assert committed.get("next_iteration") == (2 if action == "continue" else None)
+    assert (store.current / "answer.md").read_text() == "# Answer\n\n42\n"
+    receipt = get_intervention(tmp_path, "first")
+    assert receipt["status"] == "applied"
+    assert receipt["work_outcome"] == "completed"
+    assert receipt["publication"] == committed["publication_version"]
+    recovered = asyncio.run(
+        publication.recover(tmp_path, {"iteration": 1, "status": "failed"})
+    )
+    assert recovered == committed
     paths = [
-        root / "status.json",
-        root / "result.json",
-        root / "iterations/000001/status.json",
-        root / "iterations/000002/status.json",
+        tmp_path / "status.json",
+        tmp_path / "result.json",
+        tmp_path / "iterations/000001/status.json",
+        tmp_path / "iterations/000001/result.json",
+        tmp_path / "interventions/receipts/first.json",
     ]
     saved = [path.read_bytes() for path in paths]
-    with writer(root):
-        for _ in range(2):
-            assert asyncio.run(publication.recover(root, state)) is state
-            assert human_input.admit(root) == newer
-            assert [path.read_bytes() for path in paths] == saved
+    assert asyncio.run(publication.recover(tmp_path, recovered)) is recovered
+    assert [path.read_bytes() for path in paths] == saved
+    assert json.loads((tmp_path / "result.json").read_text()) == {"answer": 42}
+
+
+def test_stop_before_activation_does_not_acknowledge_input(tmp_path, monkeypatch):
+    import shutil
+
+    request(tmp_path, "first")
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    state = {"iteration": 1, "status": "running"}
+    copytree = shutil.copytree
+
+    def stop_after_version_copy(source, destination, *args, **kwargs):
+        copied = copytree(source, destination, *args, **kwargs)
+        if Path(destination).parent == store.root / "versions":
+            (tmp_path / "STOP").write_text("stop\n")
+        return copied
+
+    monkeypatch.setattr("research_loop.state.shutil.copytree", stop_after_version_copy)
+    with pytest.raises(PublicationStopped, match="before publication activation"):
+        asyncio.run(
+            publication.commit(
+                tmp_path,
+                state,
+                baseline,
+                proposal(input_outcome={"id": "first", "status": "completed"}),
+            )
+        )
+    assert str(store.current.resolve()) == baseline
+    assert store.published_state() is None
+    assert get_intervention(tmp_path, "first")["status"] == "received"
+    assert state == {"iteration": 1, "status": "running"}
+    assert not (tmp_path / "result.json").exists()
+
+
+def test_crash_after_activation_recovers_without_affecting_new_input(
+    tmp_path, monkeypatch
+):
+    request(tmp_path, "first")
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    publish = PublicationStore.publish
+
+    def interrupted(*args, **kwargs):
+        publish(*args, **kwargs)
+        raise RuntimeError("crash after activation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PublicationStore, "publish", interrupted)
+        with pytest.raises(RuntimeError, match="crash after activation"):
+            asyncio.run(
+                publication.commit(
+                    tmp_path,
+                    {"iteration": 1, "status": "running"},
+                    baseline,
+                    proposal(input_outcome={"id": "first", "status": "completed"}),
+                )
+            )
+    assert get_intervention(tmp_path, "first")["status"] == "received"
+    request(tmp_path, "newer")
+    newer = get_intervention(tmp_path, "newer")
+    for _ in range(2):
+        recovered = asyncio.run(
+            publication.recover(tmp_path, {"iteration": 1, "status": "failed"})
+        )
+        assert recovered == store.published_state()
+        assert get_intervention(tmp_path, "first")["work_outcome"] == "completed"
+        assert get_intervention(tmp_path, "newer") == newer
+    assert len(list((store.root / "versions").iterdir())) == 2
+
+
+def test_recovery_retains_newer_unfinished_iteration(tmp_path):
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    asyncio.run(
+        publication.commit(tmp_path, {"iteration": 1}, baseline, proposal("continue"))
+    )
+    state = {"iteration": 2, "status": "failed", "result": {"error": "new attempt"}}
+    (tmp_path / "status.json").write_text(json.dumps(state))
+    (tmp_path / "result.json").write_text(json.dumps(state["result"]))
+    saved = [(tmp_path / name).read_bytes() for name in ("status.json", "result.json")]
+    assert asyncio.run(publication.recover(tmp_path, state)) is state
+    assert [
+        (tmp_path / name).read_bytes() for name in ("status.json", "result.json")
+    ] == saved
+
+
+def test_staging_copies_only_declared_outputs_and_previous_publication(tmp_path):
+    source = tmp_path / "selected.txt"
+    source.write_text("selected output")
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    (store.draft / "unproposed.txt").write_text("unfinished unrelated edit")
+    asyncio.run(
+        publication.commit(
+            tmp_path,
+            {"iteration": 1},
+            baseline,
+            proposal(
+                artifacts=[
+                    {"source": str(source), "destination": "nested/selected.txt"}
+                ]
+            ),
+        )
+    )
+    assert not (store.current / "unproposed.txt").exists()
+    assert (store.current / "nested/selected.txt").read_text() == "selected output"
+    source.write_text("later source mutation")
+    assert (store.current / "nested/selected.txt").read_text() == "selected output"
+    baseline = store.prepare()
+    asyncio.run(publication.commit(tmp_path, {"iteration": 2}, baseline, proposal()))
+    assert (store.current / "nested/selected.txt").read_text() == "selected output"
+    assert (store.current / "answer.md").exists()
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["/outside", "../outside", "a/../outside", "a/./b", "a//b", ".", "", "a\x00b"],
+)
+def test_invalid_destination_is_rejected_without_changing_pointer(
+    tmp_path, destination
+):
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    with pytest.raises(ValueError, match="relative"):
+        asyncio.run(
+            publication.commit(
+                tmp_path,
+                {"iteration": 1},
+                baseline,
+                proposal(artifacts=[{"content": "small", "destination": destination}]),
+            )
+        )
+    assert str(store.current.resolve()) == baseline
+
+
+@pytest.mark.parametrize(
+    "destinations",
+    [("same", "same"), ("nested", "nested/file"), ("nested/file", "nested")],
+)
+def test_duplicate_or_conflicting_destinations_are_rejected(tmp_path, destinations):
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    with pytest.raises(ValueError, match="unique"):
+        asyncio.run(
+            publication.commit(
+                tmp_path,
+                {"iteration": 1},
+                baseline,
+                proposal(
+                    artifacts=[
+                        {"content": "small", "destination": name}
+                        for name in destinations
+                    ]
+                ),
+            )
+        )
+
+
+def test_sparse_oversized_source_and_symlink_are_not_read(tmp_path):
+    source = tmp_path / "large.bin"
+    with source.open("wb") as stream:
+        stream.truncate(publication.MAX_FILE_BYTES + 1)
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    with pytest.raises(ValueError, match="4 MiB"):
+        asyncio.run(
+            publication.commit(
+                tmp_path,
+                {"iteration": 1},
+                baseline,
+                proposal(
+                    artifacts=[{"source": str(source), "destination": "large.bin"}]
+                ),
+            )
+        )
+    link = tmp_path / "link"
+    link.symlink_to(source)
+    with pytest.raises(ValueError, match="regular"):
+        asyncio.run(
+            publication.commit(
+                tmp_path,
+                {"iteration": 1},
+                baseline,
+                proposal(
+                    artifacts=[{"source": str(link), "destination": "linked.bin"}]
+                ),
+            )
+        )
+    assert str(store.current.resolve()) == baseline
+
+
+def test_selected_content_aggregate_limit_precedes_staging(tmp_path):
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    text = "x" * publication.MAX_FILE_BYTES
+    artifacts = [
+        {"content": text, "destination": f"part-{number}"} for number in range(5)
+    ]
+    with pytest.raises(ValueError, match="16 MiB"):
+        asyncio.run(
+            publication.commit(
+                tmp_path, {"iteration": 1}, baseline, proposal(artifacts=artifacts)
+            )
+        )
+    assert not (store.draft / "part-0").exists()
+    assert str(store.current.resolve()) == baseline

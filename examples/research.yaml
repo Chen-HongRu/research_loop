@@ -1,0 +1,90 @@
+version: 1
+workflow:
+  program: ../src/research_workflows/research.py
+  settings:
+    synthesis_group: synthesis
+router:
+  profile: coordination
+profiles:
+  coordination:
+    model: gpt-6.1-sol
+    effort: medium
+  research:
+    model: gpt-6.1-sol
+    effort: medium
+  independent-review:
+    model: gpt-6.1-sol
+    effort: medium
+agents:
+  scout:
+    instructions: ../src/research_workflows/agents/scout.md
+    profile: research
+    tools: workspace
+  proposer:
+    instructions: ../src/research_workflows/agents/proposer.md
+    profile: research
+    tools: workspace
+  experiment:
+    instructions: ../src/research_workflows/agents/experiment.md
+    profile: research
+    tools: workspace
+  analyst:
+    instructions: ../src/research_workflows/agents/analyst.md
+    profile: research
+    tools: workspace
+  critic:
+    instructions: ../src/research_workflows/agents/critic.md
+    profile: independent-review
+    tools: workspace
+  experimenter:
+    instructions: ../src/research_workflows/agents/experimenter.md
+    profile: research
+    tools: workspace
+groups:
+  direction:
+    version: '1'
+    description: >-
+      Select the next worthwhile research question. Read the goal, admitted human
+      experiment and published knowledge; explore alternatives when autonomous,
+      maintain the frontier and export experiment-task.json with scientific constraints.
+      Does not implement or execute experiments or write a Study conclusion.
+    program: ../src/research_workflows/programs/direction.py
+    agents:
+      scout: scout
+      propose: proposer
+      critique: critic
+  exp:
+    version: '1'
+    description: >-
+      Answer one selected experiment question: Plan and Prepare in a shared context,
+      execute the prepared command once, independently Evaluate its evidence.
+      Accept experiment-task.json or an explicit scientific task; return experiment
+      reports or assistance needs, not a Study-level final result.
+    program: ../src/research_workflows/programs/exp.py
+    agents:
+      plan: experiment
+      prepare: experiment
+      evaluate: critic
+    settings:
+      execution_backend: local
+  synthesis:
+    version: '1'
+    description: >-
+      Integrate completed experimental evidence across the Study. Maintain scientific
+      knowledge, negative results and uncertainty, obtain independent scrutiny of new
+      claims, and export study-result.json plus knowledge-manifest.json. Owns the
+      Study goal/continue/stop and human-request disposition; does not execute experiments.
+    program: ../src/research_workflows/programs/synthesis.py
+    agents:
+      analysis: analyst
+      critique: critic
+  diagnosis:
+    version: '1'
+    description: >-
+      Diagnose a bounded implementation, tool or environment failure outside another
+      Group's scope. Export a diagnosis, patch or recovery instructions in its own
+      workspace. Does not change scientific design or repair/activate the controller.
+    program: ../src/research_workflows/programs/diagnosis.py
+    agents:
+      diagnose: experimenter
+      critique: critic

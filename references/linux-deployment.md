@@ -1,61 +1,53 @@
-# Moving a Study to a Linux host
+# Linux supervision
 
-For a fresh Study on Linux or macOS, use the unchanged checkout configuration and
-the [portable startup command](installation.md#linux-and-macos-fresh-studies).
-The path-preservation and state-transfer requirements below apply to moving an
-existing Study, not to creating a new Study on a different machine.
+Install the locked runtime on the target host using
+[installation](installation.md), its own Codex login, and already authorized
+scientific resources. Prepare a fresh private run with paths valid on that host.
+Moving older runs or rewriting frozen paths is not a supported migration route.
+Canonical datasets/checkpoints may remain on their authorized backend as explicit
+references; provisioning or copying them requires separate authority.
 
-Prepare the pinned runtime with Python 3.12 and `uv sync --locked`. Verify the
-remote ChatGPT login, exact model/effort, native sandbox and delegation before
-moving control. The shell/search utilities used by prepared scripts must exist.
-Keep the original scientific execution backend and authorization unless the user
-explicitly changes them.
+## Controller ownership
 
-Preserve the Study and project absolute paths: saved scripts, native histories and
-resource ledgers can refer to them. Copy current source edits as well as tracked
-files; rebuild environments instead of copying platform-specific virtualenvs.
-Canonical datasets and checkpoints can remain on the existing experiment backend.
+`research-loop start RUN` launches the prepared interpreter and source snapshot
+in a detached process session. The launching Codex conversation may end without
+owning that process. Query `status`, `controller.log`, and `completion.json` for
+observed progress and terminal outcome. Detached launch is local process ownership,
+not a guarantee of host availability or automatic recovery.
 
-If the Study has an explicit execution environment, provision its configured
-interpreter at the corresponding Linux path before continuation. `inspect`
-reports observed local Python/package metadata and separately labeled,
-unverified resource-environment declarations. These declarations do not probe
-the cluster or replace an authorized GPU/debug smoke. See
-[execution environments](operations.md#execution-environments). Updating main
-does not update a pinned release or restart an already running Study.
+An existing process supervisor may own `research-loop start RUN --foreground`.
+Both launch modes select the interpreter and Python source snapshot recorded in
+`RUN/run.json`; `inspect` uses that implementation too. Inspect the actual process
+and first recorded execution to verify the selected implementation. Keep one
+controller owner; the writer lock is host-local and does not coordinate two hosts.
+Stop and settle the old owner before any authorized ownership transfer.
 
-Copy private files with ownership matching the remote service user. Host root access does not prove that a user-namespace sandbox can traverse files owned by another UID. Preserve restrictive modes instead of widening permissions.
+Configure the supervisor to retain terminal failures and operator stop intent.
+Research failure, STOP or unknown backend state must not trigger unconditional
+restart. Explicit `research-loop resume RUN` starts a new recovery admission after
+checking original operation receipts; it does not reset budgets, repeat unknown
+submissions or restore interrupted Agent sessions. See
+[control and recovery](operations.md#inputs-and-interventions).
 
-The writer lock is host-local. Stop and unregister the original supervisor before
-the final copy and remote admission. Confirm original jobs are terminal and settle
-native processes; retain and reconcile any cleanup warning. Transfer the complete
-Study, relative knowledge links, native session/database state, budget ledger and
-its lock coherently after shutdown. Never run `init` or reset the ledger. Exclude
-`native/auth.json`: the remote runtime recreates it against the remote user's
-existing login. Do not transfer credentials through source archives or logs.
+No event-to-external-Codex wakeup is installed. Terminal completion records support
+manual queries or an independently configured authorized supervisor integration.
+Do not describe them as automatic diagnostic follow-up.
 
-The runtime uses ordinary Codex workspace-write: default filesystem reads, writes
-only in explicit work/scratch roots and temporary directories, and shell network
-disabled. Do not add custom deny overlays or move native state behind deny mounts;
-these fail during Bubblewrap setup on the pinned Linux runtime. Group contexts
-and selected evidence are separated by the task contract; this mode does not hide
-other host-readable files. Keep Study/control state and read-only inputs outside writable work roots and system temporary directories.
-Verify project reads, work/temporary writes and rejection of project writes with
-synthetic files before a bounded model smoke.
+## Permissions and remote work
 
-Resume the original Study explicitly with `run STUDY --continue` after confirming
-there is one controller owner. Use a supervised service, retain original records
-and inspect the actual resumed thread, resource balance and first live activity.
-Research failure must not trigger an unconditional service restart. Do not reopen
-an operator STOP through automatic restart.
+Preserve restrictive file ownership for the actual service user. Verify selected
+project reads and work/scratch writes using synthetic files before a bounded live
+model smoke. Workspace permissions do not hide other readable host files; keep
+scientific evidence selection explicit and credentials/control state outside
+writable ancestors. Never transfer authentication through source archives or logs.
 
-Run the dashboard separately on loopback. If using a reverse-proxy path prefix,
-retain its trailing slash and serve relative asset/API URLs. Keep existing HTTPS
-and access control. Verify both the backend and external route without exposing
-research artifacts or credentials publicly.
+Retain original resource ledgers and operation/job identities. Local cancellation
+is not proof that a remote job stopped. Reconcile UNKNOWN receipts before any new
+allocation. Remote command inputs/code must already exist under the authorized
+backend; configuration does not install dependencies or deploy files.
 
-For several Studies, configure the dashboard with repeated `--study RUN` flags
-or `--studies-dir STUDIES` for immediate-child discovery. Existing single-Study
-commands remain valid. Every discovered Study is readable to dashboard visitors;
-choose the directory and access control accordingly. This changes only the
-read-only view, and does not start or resume a research controller.
+The existing dashboard is a separate read-only loopback process. External proxying
+and access control belong to the host deployment. Share only directories whose
+private records are authorized for every viewer. Internal Group records are available through the application queries and the
+read-only `/api/execution` endpoint described in
+[operations](operations.md#queries-and-publication).

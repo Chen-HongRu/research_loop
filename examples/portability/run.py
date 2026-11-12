@@ -9,8 +9,8 @@ import platform
 import subprocess
 
 from research_loop.codex import Native
-from research_loop.human_input import submit
-from research_loop.loop import initialize, run
+from research_loop import application
+from research_loop.controller import run_foreground
 
 
 async def execute(study, *, timeout, max_calls):
@@ -25,15 +25,15 @@ async def execute(study, *, timeout, max_calls):
             kwargs.setdefault("max_output_chars", 32768)
             return await super().run(*args, **kwargs)
 
-    task = asyncio.create_task(run(study, native_factory=BoundedNative))
+    task = asyncio.create_task(run_foreground(study, native_factory=BoundedNative))
     done, _ = await asyncio.wait({task}, timeout=timeout)
     if task not in done:
-        (study / "STOP").write_text("Audit wall-time limit reached\n")
-        task.cancel()
+        application.stop(study, identity="audit-wall-time-limit")
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=40)
-        except asyncio.CancelledError:
-            pass
+        except (asyncio.CancelledError, TimeoutError):
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         raise TimeoutError("Audit stopped at its wall-time limit")
     return await task
 
@@ -41,8 +41,12 @@ async def execute(study, *, timeout, max_calls):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("study", type=Path, help="New private Study directory")
-    parser.add_argument("--model", default="gpt-6.1-sol")
-    parser.add_argument("--effort", default="medium")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "research.yaml",
+        help="Explicit declarative workflow and OpenAI model profiles",
+    )
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--max-model-calls", type=int, default=18)
     parser.add_argument(
@@ -58,15 +62,13 @@ def main():
     study = args.study.absolute()
     study.parent.mkdir(parents=True, exist_ok=True)
     goal = Path(__file__).with_name("goal.md")
-    initialize(
+    inspected = application.prepare(args.config, study, project=project, goal=goal)
+    application.intervene(
         study,
-        project,
-        goal,
-        model=args.model,
-        effort=args.effort,
-        environment_file=project / "examples/environment.json",
+        kind="experiment",
+        payload={"text": f"Source revision: {revision}\n\n" + goal.read_text()},
+        identity="portability-audit",
     )
-    submit(study, f"Source revision: {revision}\n\n" + goal.read_text())
     (study / "portability-input.json").write_text(
         json.dumps(
             {
@@ -74,6 +76,8 @@ def main():
                 "platform": platform.system(),
                 "prepared_at": datetime.now(UTC).isoformat(),
                 "model_calls_started": args.run,
+                "config_revision": inspected["config"]["revision"],
+                "profiles": inspected["config"]["profiles"],
                 "timeout_seconds": args.timeout,
                 "max_model_calls": args.max_model_calls,
             },

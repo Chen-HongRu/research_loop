@@ -1,53 +1,36 @@
 # Installation
 
-Use Python 3.12 and [uv](https://docs.astral.sh/uv/) from a complete checkout:
+From a complete checkout, use Python 3.12 and
+[uv](https://docs.astral.sh/uv/):
 
 ```sh
 uv sync --locked
 uv run research-loop doctor
+uv run research-loop --help
 ```
 
-The runtime pins Codex 0.167.0 and uses the Codex ChatGPT subscription with `gpt-6.1-sol` and medium reasoning. `doctor` checks the local setup; it does not establish that an authorized model call, native delegation, or a remote GPU job works. Model and remote execution require separate authorization. See [operations](operations.md).
+The package pins the Codex SDK/runtime to `0.167.0`. Use the host's own existing
+Codex ChatGPT login. `doctor` reports local SDK/binary/login metadata without
+calling a model; it does not verify model availability, sandbox behavior, or remote
+execution. YAML profiles select explicit OpenAI models and efforts without a
+fallback. Real model and resource work require the relevant authorization.
 
-The runtime environment and the Python used for agent shell commands may be
-separate. Provision the latter with `uv`, then pass `--environment FILE` to
-`init` to select its existing interpreter. Without that flag, agents use the
-controller's Python. The loop observes installed distribution metadata and
-shows it to the coordinator and delegates; it does not install dependencies.
-See [execution environments](operations.md#execution-environments).
+Rebuild `.venv` from `uv.lock` independently on Linux and macOS; virtualenvs and
+native binaries are platform-specific. The controller and Agent command Python
+may differ. Provision an existing command environment separately, then select it
+through `execution.environment` in the YAML. `examples/environment.json` points
+to the checkout's `.venv`. Paths inside it resolve from its own directory, and the
+virtualenv interpreter symlink is preserved. Configuration selection installs no
+dependencies and probes no resource host.
 
-## Linux and macOS fresh Studies
+Use [`examples/research.yaml`](../examples/research.yaml) to prepare a fresh
+private run, following [operations](operations.md). Keep the run and canonical
+inputs outside the checkout and protected control data outside writable workspace
+ancestors. A prepared run records absolute paths and its implementation identity;
+source edits do not update it. Older run formats are not migrated or accepted as
+new prepared runs. Historical portability results describe their original
+implementation and do not establish current cross-host acceptance.
 
-Use the same project files, `uv.lock` and relative environment declaration on both
-systems. From a clean checkout, the same command installs the locked runtime and
-its platform-specific Codex binary, selects the checkout's Python, and starts the
-real repository audit:
-
-```sh
-uv run --locked python examples/portability/run.py /path/to/new-private-study --model gpt-6.1-terra --run
-```
-
-The example needs `uv`, Git and the host's own existing Codex ChatGPT login.
-Authentication is local; do not copy credentials between
-machines. Python dependencies and the native binary are rebuilt from the lock,
-so do not copy a macOS virtualenv to Linux or edit interpreter paths per host.
-The example uses the unchanged `examples/environment.json`. Omit `--run` to
-prepare without model calls. The paired verification used Terra / medium; the
-model is an explicit Study choice, not a machine-specific environment setting.
-`--run` needs authorization for real model calls
-and one local CPU audit. It does not use network/GPU during the audit or install
-packages inside a Group. Outputs belong in a new private directory outside source.
-Keep both the checkout and Study outside system temporary directories when
-checking the ordinary workspace-write project boundary.
-
-The task lives in [the portability example](../examples/portability/goal.md).
-Its supplied Python audit program owns the exact test invocation, metadata and
-JUnit accounting. Experts plan the audit, prepare its command and independently
-interpret its actual outputs; they do not regenerate mechanical runner code.
-It tests actual repository behavior; some underlying unit tests use scripted model
-responses, while the outer workflow uses real Router/specialist calls. Pass/fail
-results are observations, not proof of general research quality. Each host creates
-a new Study. Moving a running Study or its native sessions is a separate operation;
-see [Linux continuation](linux-deployment.md).
-
-An OpenAI-compatible Responses provider can replace the subscription model without changing the harness. Pass `--provider NAME --provider-base-url URL --api-key-env VAR --model MODEL` to `init`; the key stays in `VAR` and is forwarded only to the isolated native process. This mode does not require `~/.codex/auth.json`. Because non-OpenAI gateways cannot read Codex V2 inter-agent task payloads, the generated model catalog selects the V1 delegation family, and hosted web search is disabled. See [provider operations](operations.md#openai-compatible-provider).
+For an existing authorized host supervisor, see
+[Linux deployment](linux-deployment.md). Upgrading shared controller/package
+implementation requires stopping the entire run and preparing a matching version.

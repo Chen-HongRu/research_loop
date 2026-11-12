@@ -49,7 +49,7 @@ def assert_parity(root, sample, until=END):
     return offline
 
 
-def test_windowed_native_host_usage_matches_incremental_and_restarts(tmp_path):
+def test_windowed_mapped_usage_matches_incremental_and_restarts(tmp_path):
     root = prepare(tmp_path)
     before = receipt("before", "2026-01-01T00:00:30Z", 100)
     request = receipt("request", START, 120, cached=50, output=10, reasoning=2)
@@ -67,11 +67,19 @@ def test_windowed_native_host_usage_matches_incremental_and_restarts(tmp_path):
         ],
     )
     session(
-        root, "native", "lead", "critic_test", events=[receipt("native", START, 20)]
+        root, "native", "router", "critic_test", events=[receipt("native", START, 20)]
     )
     session(root, "host", task="root", events=[receipt("host", START, 30)])
     session(root, "unrelated", events=[receipt("other", START, 99999)])
-    write(root / "roles.json", {"threads": {"host": {"role": "scout", "task": "host"}}})
+    write(
+        root / "roles.json",
+        {
+            "threads": {
+                "router": {"role": "router"},
+                "host": {"role": "custom-agent", "task": "host"},
+            }
+        },
+    )
     halfway = "2026-01-01T00:01:30Z"
     with collector(root) as c:
         first = c.poll(halfway)
@@ -101,18 +109,18 @@ def test_windowed_native_host_usage_matches_incremental_and_restarts(tmp_path):
 
 def test_missing_receipts_never_use_cumulative_fallback_and_can_arrive_later(tmp_path):
     root = prepare(tmp_path)
-    session(root, events=[receipt("lead", START, 10)])
+    session(root, events=[receipt("router", START, 10)])
     path = session(
         root,
         "child",
-        "lead",
+        "router",
         "critic_test",
         events=[
             row("response_item", START, type="message", role="assistant"),
             token(START, 999, 0, 0, 0),
         ],
     )
-    session(root, "awaiting", "lead", "scout_pending")
+    session(root, "awaiting", "router", "scout_pending")
     with collector(root) as c:
         sample = c.poll(END)
         offline = assert_parity(root, sample)
@@ -253,13 +261,13 @@ def test_explicit_zero_receipt_is_measured_not_missing(tmp_path):
 
 def test_cross_thread_duplicate_uses_same_file_order_and_prewindow_identity(tmp_path):
     root = prepare(tmp_path)
-    write(root / "status.json", {"thread_id": "zlead"})
+    write(root / "roles.json", {"threads": {"zrouter": {"role": "router"}}})
     path = session(
-        root, "zlead", events=[receipt("shared", "2026-01-01T00:00:30Z", 100)]
+        root, "zrouter", events=[receipt("shared", "2026-01-01T00:00:30Z", 100)]
     )
     path.rename(path.with_name("a.jsonl"))
     path = session(
-        root, "achild", "zlead", "critic_test", events=[receipt("shared", START, 100)]
+        root, "achild", "zrouter", "critic_test", events=[receipt("shared", START, 100)]
     )
     path.rename(path.with_name("z.jsonl"))
     with collector(root) as c:

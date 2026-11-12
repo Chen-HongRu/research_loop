@@ -225,7 +225,7 @@ class BehaviorCollector(Collector):
             return super()._at(row, "ready_at")
         return super()._at(row, key)
 
-    def _events(self, lead):
+    def _events(self):
         readiness = self.state.setdefault("behavior_readiness", [])
         for row, at in self._tail(self.root / "events.jsonl", "events"):
             self._source_at(at)
@@ -370,6 +370,7 @@ class BehaviorCollector(Collector):
             "task": task["task"],
             "role": task["role"],
             "parent": task["parent"],
+            "is_router": task["is_router"],
             "created_at_proxy": task.get("started_at"),
             "completed_at": task.get("completed_at"),
             "started_before_phase": started < since if started else None,
@@ -437,7 +438,7 @@ class BehaviorCollector(Collector):
             for task in tasks:
                 task["active_in_phase"] = task["thread_id"] in active_ids
             active_tasks = [t for t in tasks if t["active_in_phase"]]
-            active_children = [t for t in active_tasks if t["parent"] is not None]
+            active_children = [t for t in active_tasks if not t["is_router"]]
             pending["behavior"] = {
                 "threshold_bytes": THRESHOLD,
                 "by_task": tasks,
@@ -473,8 +474,7 @@ class BehaviorCollector(Collector):
                     large_bytes / byte_count if byte_count else None
                 )
                 totals["dependency_ready_missing_tasks"] = sum(
-                    t["parent"] is not None
-                    and t["dependency_ready_status"] == "missing"
+                    not t["is_router"] and t["dependency_ready_status"] == "missing"
                     for t in cohort
                 )
                 totals["associated_usage"] = {
@@ -565,7 +565,7 @@ def compare(baseline, improved):
         return [
             task
             for task in snapshot["behavior"]["by_task"]
-            if task.get("parent") is not None
+            if not task["is_router"]
             and task.get("active_in_phase") is True
             and task.get("started_before_phase") is False
             and task.get("completed_at") is not None
@@ -689,13 +689,13 @@ def compare(baseline, improved):
     result = {
         "shared_completed_roles": roles,
         "phases": {},
-        "interpretation": "Descriptive observations only. Cohorts share inferred roles, not matched workloads. Missing values remain unknown. Usage is associated tokens, not causal cost or savings; overlapping usage categories must not be added. Resource metadata covers its explicitly reported interval only.",
+        "interpretation": "Descriptive observations only. Cohorts share recorded roles, not matched workloads. Missing values remain unknown. Usage is associated tokens, not causal cost or savings; overlapping usage categories must not be added. Resource metadata covers its explicitly reported interval only.",
     }
     for name, snapshot, complete in zip(("baseline", "improved"), snapshots, cohorts):
         active_children = [
             t
             for t in snapshot["behavior"]["by_task"]
-            if t.get("parent") is not None and t.get("active_in_phase") is True
+            if not t["is_router"] and t.get("active_in_phase") is True
         ]
         included = [t for t in complete if t["role"] in roles]
         result["phases"][name] = {

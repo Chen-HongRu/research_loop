@@ -3,10 +3,10 @@ const byId = id => document.getElementById(id);
 const views = ['overview', 'history', 'agents', 'activity', 'metrics', 'context'];
 const query = new URLSearchParams(location.search);
 const positivePage = value => /^\d+$/.test(value || '') && Number(value) > 0 ? Number(value) : 1;
-const validIteration = value => value === 'legacy' || /^\d+$/.test(value || '') ? value : null;
+const validIteration = value => /^\d+$/.test(value || '') ? value : null;
 const ui = { study: query.get('study'), view: views.includes(query.get('view')) ? query.get('view') : 'overview', epoch: 0, viewGeneration: 0, requests: {}, data: {}, signatures: {}, errors: {}, observed: {}, pages: { history: 1, agents: 1, activity: 1 }, selectedIteration: validIteration(query.get('iteration')), agent: query.get('agent'), role: 'all', period: 'current', details: new Set(), expanded: new Set(), scroll: {}, iteration: null };
 ui.pages[ui.view] = positivePage(query.get('page'));
-if (['all','Scout','Proposer','Experimenter','Analyst','Critic','unknown'].includes(query.get('role'))) ui.role = query.get('role');
+if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(query.get('role') || '')) ui.role = query.get('role');
 if (['current','all','unknown'].includes(query.get('period')) || /^\d+$/.test(query.get('period') || '')) ui.period = query.get('period');
 const toolCache = new Map();
 const stateNames = { starting: '准备下一轮', 'iteration-completed': '本轮已归档', initialized: '已初始化', running: '运行中', completed: '已完成', stopped: '已停止', failed: '失败', interrupted: '已中断', working: '工作中', inProgress: '进行中', pending: '等待中', unknown: '未知', 'needs-reconciliation': '需要对账' };
@@ -225,8 +225,8 @@ function renderHistory(data) {
   byId('history-count').textContent = `${counts.total ?? 0} 轮记录 · ${counts.with_result ?? 0} 轮有结果 · ${counts.missing_result ?? 0} 轮未报告结果`;
   pager('history-pagination', data, 'history');
   if (!rows.length) root.append(text('p', '此页暂无轮次记录。', 'empty'));
-  rows.forEach(row => { const id = row.iteration == null ? 'legacy' : String(row.iteration); root.append(listButton(id === 'legacy' ? '早期研究记录' : `第 ${id} 轮`, `${nameState(row.status)} · ${row.result_available ? '有结果' : '未报告结果'}`, row.summary_preview, id === ui.selectedIteration, () => selectIteration(id))); });
-  selectionNote('iteration-detail', ui.selectedIteration, rows.some(row => (row.iteration == null ? 'legacy' : String(row.iteration)) === ui.selectedIteration), '轮次');
+  rows.forEach(row => { const id = String(row.iteration); root.append(listButton(`第 ${id} 轮`, `${nameState(row.status)} · ${row.result_available ? '有结果' : '未报告结果'}`, row.summary_preview, id === ui.selectedIteration, () => selectIteration(id))); });
+  selectionNote('iteration-detail', ui.selectedIteration, rows.some(row => (String(row.iteration)) === ui.selectedIteration), '轮次');
 }
 function selectionNote(rootId, selected, onPage, label) {
   const root = byId(rootId);
@@ -241,12 +241,17 @@ function renderIteration(row) {
   if (!row.result_available) root.append(text('p', '本轮尚无结果记录。执行状态不代表科学目标已达成。', 'empty'));
   else { const content = text('div', '', 'markdown'); structuredContent(content, row.result || {}, `iteration-${row.iteration}`); root.append(content); }
   root.append(text('p', `来源：${row.source || '无可用记录'}`, 'muted provenance'));
-  selectionNote('iteration-detail', ui.selectedIteration, (ui.data.history?.iterations || []).some(item => (item.iteration == null ? 'legacy' : String(item.iteration)) === ui.selectedIteration), '轮次');
+  selectionNote('iteration-detail', ui.selectedIteration, (ui.data.history?.iterations || []).some(item => (String(item.iteration)) === ui.selectedIteration), '轮次');
 }
-const roles = { Scout: '探索', Proposer: '方案', Experimenter: '实验', Analyst: '分析', Critic: '批判' };
-function roleName(agent) { return roles[agent.role] ? `${agent.role} · ${agent.role_source === 'host-role-record' ? '已记录' : '推测'}` : '角色未知'; }
+function roleName(agent) { return `${agent.role || 'unclassified'} · ${agent.role_source === 'thread-record' ? '已记录' : '身份未确认'}${agent.group_run_id ? ` · Group ${agent.group_run_id}` : ''}`; }
+function roleOptions(values = []) {
+  const root = byId('role-filter'); root.replaceChildren();
+  ['all', ...new Set([...values, ...(ui.role === 'all' ? [] : [ui.role])])].forEach(value => { const option = text('option', value === 'all' ? '全部 Agent' : value); option.value = value; root.append(option); });
+  root.value = ui.role;
+}
 function association(agent) { return agent.iteration == null ? '轮次未知' : `第 ${agent.iteration} 轮${agent.iteration_source && agent.iteration_source !== 'host-role-record' ? ` · ${agent.iteration_source.includes('time') ? '按时间关联' : agent.iteration_source}` : ''}`; }
 function renderAgents(data) {
+  roleOptions(data.roles || (data.agents || []).map(agent => agent.role));
   const rows = data.agents || [], root = byId('agent-list'); root.replaceChildren(); pager('agents-pagination', data, 'agents');
   if (!rows.length) root.append(text('p', '此筛选下暂无任务记录。', 'empty'));
   rows.forEach(agent => root.append(listButton(agent.title || agent.name || agent.task_name || '任务', `${roleName(agent)} · ${association(agent)} · ${nameState(agent.status)}${agent.history_available === false ? ' · 原生历史不可用' : ''}`, agent.preview, String(agent.id) === ui.agent, () => selectAgent(String(agent.id)))));
@@ -398,7 +403,7 @@ function selectStudy(study, keepRoute = false) {
   if (!keepRoute) { ui.pages = { history: 1, agents: 1, activity: 1 }; ui.selectedIteration = null; ui.agent = null; ui.role = 'all'; ui.period = 'current'; }
   ui.details.clear(); ui.expanded.clear(); toolCache.clear(); detailSignatures.clear(); detailObserved.clear();
   for (const id of ['overview-status','overview-error','research-summary','next-action','task-stats','budget','history-count','history-list','history-pagination','iteration-detail','agent-list','agent-detail','agents-pagination','messages','tools','activity-count','activity-pagination','metrics','metrics-budget','goal','plan','charts','provenance','research-docs']) byId(id).replaceChildren();
-  byId('state').textContent = study ? '加载中' : '暂无 Study'; byId('iteration').textContent = ''; byId('last-refresh').textContent = '尚未同步'; byId('role-filter').value = ui.role; updatePeriodOptions(); syncURL(); showViews(); window.scrollTo({ top: 0, behavior: 'instant' });
+  byId('state').textContent = study ? '加载中' : '暂无 Study'; byId('iteration').textContent = ''; byId('last-refresh').textContent = '尚未同步'; roleOptions(); updatePeriodOptions(); syncURL(); showViews(); window.scrollTo({ top: 0, behavior: 'instant' });
 }
 async function refresh() {
   const current = ticket('catalog');
@@ -421,12 +426,12 @@ async function refresh() {
 }
 document.querySelectorAll('.nav').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
 byId('study-select').addEventListener('change', event => { selectStudy(event.target.value); refresh(); });
-byId('role-filter').value = ui.role; updatePeriodOptions();
+roleOptions(); updatePeriodOptions();
 for (const [id,key] of [['role-filter','role'],['period-filter','period']]) byId(id).addEventListener('change', event => { ui[key] = event.target.value; ui.pages.agents = 1; ui.viewGeneration++; syncURL(); loadPage(true); });
 byId('summary-link').addEventListener('click', () => { const iteration = ui.data.overview?.research?.summary?.iteration; if (iteration == null) return; ui.selectedIteration = String(iteration); setView('history'); });
 byId('tasks-link').addEventListener('click', () => setView('agents'));
 window.addEventListener('popstate', () => {
   const params = new URLSearchParams(location.search); selectStudy(params.get('study')); ui.view = views.includes(params.get('view')) ? params.get('view') : 'overview'; ui.pages[ui.view] = positivePage(params.get('page')); ui.selectedIteration = validIteration(params.get('iteration')); ui.agent = params.get('agent');
-  ui.role = ['all','Scout','Proposer','Experimenter','Analyst','Critic','unknown'].includes(params.get('role')) ? params.get('role') : 'all'; ui.period = ['current','all','unknown'].includes(params.get('period')) || /^\d+$/.test(params.get('period') || '') ? params.get('period') : 'current'; byId('role-filter').value = ui.role; updatePeriodOptions(); syncURL(); showViews(); refresh();
+  ui.role = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(params.get('role') || '') ? params.get('role') : 'all'; ui.period = ['current','all','unknown'].includes(params.get('period')) || /^\d+$/.test(params.get('period') || '') ? params.get('period') : 'current'; roleOptions(); updatePeriodOptions(); syncURL(); showViews(); refresh();
 });
 showViews(); refresh(); setInterval(refresh, 5000);
