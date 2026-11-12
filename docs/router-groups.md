@@ -76,3 +76,15 @@ Router packets contain up to 4,000 characters of the exact current request plus 
 This design reuses Router strategy principles and H11 instruction text, not the prior implementation verbatim. Historical performance results do not establish a benefit for the new integration. Earlier engine CPU and recovery attempts exposed reference-format rejection and streaming output without usage receipts; their failed costs remain part of the private evidence.
 
 A subsequent bounded recovery comparison completed both paths on the same settled Exp evidence: independent Critics accepted the candidates, human requests were consumed, knowledge and the original assessment were published, and no experiment was rerun. The Router profile used deterministic admission to the fixed Synthesis Group. Its baseline was the controlled Lead sharing the Python recovery/publication API, not the unmodified historical Lead. Each arm ran once; elapsed time and token counts have cache and ordering effects. This validates that recovery case and does not establish general efficiency, autonomous Direction, new-experiment integration or resource/GPU behavior.
+
+The explicit-task workflow was subsequently verified on Linux and macOS from
+separate clean checkouts of the same revision, unchanged lock/config files and
+the same startup command. Real Router/specialist calls drove Direction, one local
+execution of the supplied repository auditor, independent Evaluate, Synthesis
+review and publication. Both completed with consumed requests, clean subjects,
+resolvable knowledge links and complete recorded usage coverage. No-model native
+sandbox probes also verified project reads, work writes and rejection of project
+writes. This covers the bounded repository audit on those two hosts; autonomous
+Scout exploration, running-Study relocation and resource/GPU behavior remain
+unverified. Unit-test fixtures inside the audit are distinct from the real outer
+model workflow and do not establish general research benefit.

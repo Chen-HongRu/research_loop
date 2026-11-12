@@ -24,7 +24,7 @@ its platform-specific Codex binary, selects the checkout's Python, and starts th
 real repository audit:
 
 ```sh
-uv run --locked python examples/portability/run.py /path/to/new-private-study --run
+uv run --locked python examples/portability/run.py /path/to/new-private-study --model gpt-6.1-terra --run
 ```
 
 The example needs `uv`, Git and the host's own existing Codex ChatGPT login.
@@ -32,7 +32,9 @@ Authentication is local; do not copy credentials between
 machines. Python dependencies and the native binary are rebuilt from the lock,
 so do not copy a macOS virtualenv to Linux or edit interpreter paths per host.
 The example uses the unchanged `examples/environment.json`. Omit `--run` to
-prepare without model calls; `--run` needs authorization for real model calls
+prepare without model calls. The paired verification used Terra / medium; the
+model is an explicit Study choice, not a machine-specific environment setting.
+`--run` needs authorization for real model calls
 and one local CPU audit. It does not use network/GPU during the audit or install
 packages inside a Group. Outputs belong in a new private directory outside source.
 Keep both the checkout and Study outside system temporary directories when
