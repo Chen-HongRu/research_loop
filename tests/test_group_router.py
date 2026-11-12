@@ -409,3 +409,309 @@ async def run(ctx, payload):
         await runtime.close_runtime()
 
     asyncio.run(check())
+
+
+REFERENCE_PROGRAM = """
+import asyncio
+import json
+async def run(ctx, payload):
+    await asyncio.sleep(0.01)
+    if ctx.definition.settings.get("fail"):
+        raise RuntimeError("synthetic settled implementation failure")
+    report = ctx.work / "report.json"
+    report.write_text(json.dumps({"round": ctx.round, "feedback": payload["feedback_refs"]}))
+    if ctx.definition.id != "synthesis":
+        return {"summary": "helper complete", "completion": "completed", "help": "", "unfinished": [], "artifacts": ["report.json"]}
+    if ctx.definition.settings.get("needs_help") and ctx.round == 1:
+        return {"summary": "bounded assistance needed", "completion": "blocked", "help": "Need a helper report", "unfinished": ["external evidence"], "artifacts": ["report.json"]}
+    result = {"summary": "synthetic reviewed synthesis", "goal": "unknown", "evidence": [], "limitations": ["CPU fixture"], "next_action": "", "study_action": "stop", "stop_reason": "synthetic complete"}
+    (ctx.work / "study-result.json").write_text(json.dumps(result))
+    (ctx.work / "knowledge-index.md").write_text("# Group-authored synthetic knowledge\\n")
+    (ctx.work / "knowledge-manifest.json").write_text(json.dumps({"files": [{"source": "knowledge-index.md", "target": "index.md"}]}))
+    return {"summary": "reviewed final exported", "completion": "completed", "help": "", "unfinished": [], "artifacts": ["study-result.json", "knowledge-index.md", "knowledge-manifest.json", "report.json"]}
+"""
+
+
+def reference_study(tmp_path, *, needs_help=False, failing_helper=False):
+    project = tmp_path / "project"
+    project.mkdir()
+    goal = tmp_path / "goal.md"
+    goal.write_text("synthetic task")
+    program = tmp_path / "reference.py"
+    program.write_text(REFERENCE_PROGRAM)
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "synthesis",
+                    "version": "1",
+                    "description": "Synthesize supplied evidence",
+                    "program": str(program),
+                    "settings": {
+                        "produces_study_result": True,
+                        "needs_help": needs_help,
+                    },
+                },
+                {
+                    "id": "diagnosis",
+                    "version": "1",
+                    "description": "Bounded helper",
+                    "program": str(program),
+                    "settings": {"fail": failing_helper},
+                },
+            ]
+        )
+    )
+    root = tmp_path / "study"
+    loop.initialize(root, project, goal, coordinator="router", groups_file=catalog)
+    source = root / "operator-manifest.json"
+    source.write_text('{"evidence": "synthetic operator input"}')
+    config = json.loads((root / "config.json").read_text())
+    config.update(workflow="research-v1", input_refs=[str(source)])
+    (root / "config.json").write_text(json.dumps(config))
+    return root, source
+
+
+def scripted_reference_router(monkeypatch, choose):
+    calls = []
+
+    class Services:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def settle(self):
+            pass
+
+        async def close(self):
+            pass
+
+    class Router:
+        def __init__(self, *args):
+            pass
+
+        async def open(self):
+            pass
+
+        async def verify(self, *args, **kwargs):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def settle(self):
+            pass
+
+        async def close(self):
+            pass
+
+        async def run(self, policy, packet, schema, **kwargs):
+            assert policy == group_router.REFERENCE_POLICY
+            assert not any(
+                row["status"] in {"running", "returned", "failed"}
+                for row in packet["runs"]
+            )
+            assert schema["properties"]["action"]["enum"] == packet["allowed_actions"]
+            assert set(packet["allowed_actions"]) <= {"start", "resume", "escalate"}
+            calls.append(packet)
+            return choose(packet)
+
+    monkeypatch.setattr(
+        group_router, "configuration", lambda *args, **kwargs: (None, {})
+    )
+    monkeypatch.setattr(group_router, "NativeGroupServices", Services)
+    return Router, calls
+
+
+def test_reference_python_waits_closes_and_publishes_after_one_routing_call(
+    tmp_path, monkeypatch
+):
+    root, source = reference_study(tmp_path)
+
+    def choose(packet):
+        assert packet["references"][packet["input_refs"][0]] == source.name
+        return decision(
+            "start",
+            group_id="synthesis",
+            task_ref=packet["request_ref"],
+            input_refs=packet["input_refs"],
+        )
+
+    router, calls = scripted_reference_router(monkeypatch, choose)
+    state = asyncio.run(loop.run(root, native_factory=router))
+    assert state["status"] == "completed"
+    assert state["result"]["summary"] == "synthetic reviewed synthesis"
+    assert len(calls) == 1
+    assert calls[0]["allowed_actions"] == ["start", "escalate"]
+    assert (
+        "Group-authored synthetic knowledge"
+        in (root / "knowledge/current/index.md").read_text()
+    )
+    records = [
+        json.loads(path.read_text())
+        for path in (root / "group-runs").glob("*/run.json")
+    ]
+    assert len(records) == 1 and records[0]["status"] == "closed"
+    assert records[0]["input_refs"] == [str(source)]
+
+
+def test_reference_python_holds_waiter_closes_helper_and_resumes_without_lifecycle_calls(
+    tmp_path, monkeypatch
+):
+    root, _ = reference_study(tmp_path, needs_help=True)
+
+    def choose(packet):
+        if not packet["runs"]:
+            return decision(
+                "start", group_id="synthesis", task_ref=packet["request_ref"]
+            )
+        waiting = next(row for row in packet["runs"] if row["group_id"] == "synthesis")
+        assert waiting["status"] == "held"
+        helper = next(
+            (row for row in packet["runs"] if row["group_id"] == "diagnosis"), None
+        )
+        if helper is None:
+            return decision(
+                "start",
+                group_id="diagnosis",
+                task_ref=waiting["output"]["artifacts"][0],
+            )
+        assert helper["status"] == "closed"
+        return decision(
+            "resume", run_id=waiting["id"], input_refs=helper["output"]["artifacts"]
+        )
+
+    router, calls = scripted_reference_router(monkeypatch, choose)
+    state = asyncio.run(loop.run(root, native_factory=router))
+    assert state["status"] == "completed"
+    assert len(calls) == 3
+    records = [
+        json.loads(path.read_text())
+        for path in (root / "group-runs").glob("*/run.json")
+    ]
+    assert all(row["status"] == "closed" for row in records)
+    main = next(row for row in records if row["group_id"] == "synthesis")
+    assert main["round"] == 2 and main["feedback_refs"]
+    assert "resume" in calls[1]["allowed_actions"]
+    assert list(
+        (root / "knowledge/current/groups" / main["run_id"] / "000001").glob(
+            "*report.json"
+        )
+    )
+
+
+def test_reference_rejects_model_lifecycle_actions_and_invalid_operator_inputs(
+    tmp_path,
+):
+    root, source = reference_study(tmp_path)
+    config = json.loads((root / "config.json").read_text())
+    for invalid in (
+        ["relative.json"],
+        [str(tmp_path / "missing")],
+        [str(root)],
+        "not-a-list",
+    ):
+        with pytest.raises(ValueError, match="input_refs"):
+            group_router.GroupCoordinator(root, {**config, "input_refs": invalid}, None)
+    coordinator = group_router.GroupCoordinator(root, config, None)
+    assert coordinator.input_refs == [str(source)]
+    packet = {
+        "references": {},
+        "groups": [],
+        "runs": [],
+        "allowed_actions": ["start", "escalate"],
+    }
+    for action in ("close", "hold", "wait", "finish_round", "resume"):
+        with pytest.raises(ValueError, match="not allowed"):
+            group_router.validate_decision(decision(action), packet)
+
+
+def test_reference_does_not_publish_with_unresolved_held_work(tmp_path):
+    from research_loop.groups import GroupRuntime
+    from research_loop.state import Journal
+
+    root, _ = reference_study(tmp_path, needs_help=True)
+    config = json.loads((root / "config.json").read_text())
+    journal = Journal(root / "mechanics-events")
+
+    async def check():
+        coordinator = group_router.GroupCoordinator(root, config, journal)
+        coordinator.runtime = GroupRuntime(root, coordinator.definitions)
+        coordinator.iteration, coordinator.result_schema = 1, RESULT_SCHEMA
+        waiting = await coordinator.runtime.start("synthesis", root / "goal.md", [])
+        coordinator.admitted = {waiting}
+        coordinator.study_result = lambda *args: pytest.fail(
+            "Unresolved work must not publish"
+        )
+        assert await coordinator.advance({"iteration": 1}) is None
+        assert coordinator.runtime.observe(waiting)["status"] == "held"
+        # Even a completed formal synthesis must not publish while another
+        # admitted Run still needs assistance.
+        other = await coordinator.runtime.start("synthesis", root / "goal.md", [])
+        coordinator.admitted.add(other)
+        original = coordinator.runtime.observe(waiting)["output"]["artifacts"][0]
+        await coordinator.runtime.resume(waiting, [original])
+        assert await coordinator.advance({"iteration": 1}) is None
+        assert coordinator.runtime.observe(waiting)["status"] == "closed"
+        assert coordinator.runtime.observe(other)["status"] == "held"
+        await coordinator.close()
+
+    try:
+        asyncio.run(check())
+    finally:
+        journal.close()
+
+
+def test_reference_closes_known_failure_with_diagnostic_without_model(tmp_path):
+    from research_loop.groups import GroupRuntime
+    from research_loop.state import Journal
+
+    root, _ = reference_study(tmp_path, failing_helper=True)
+    config = json.loads((root / "config.json").read_text())
+    journal = Journal(root / "mechanics-events")
+
+    async def check():
+        coordinator = group_router.GroupCoordinator(root, config, journal)
+        coordinator.runtime = GroupRuntime(root, coordinator.definitions)
+        coordinator.iteration = 1
+        failed = await coordinator.runtime.start("diagnosis", root / "goal.md", [])
+        coordinator.admitted = {failed}
+        assert await coordinator.advance({"iteration": 1}) is None
+        record = coordinator.runtime.observe(failed)
+        assert record["status"] == "closed"
+        assert record["output"]["artifacts"][0].endswith("runtime-error.json")
+        await coordinator.close()
+
+    try:
+        asyncio.run(check())
+    finally:
+        journal.close()
+
+
+def test_reference_uncertain_effects_block_all_automatic_lifecycle_actions(tmp_path):
+    from types import SimpleNamespace
+
+    root, _ = reference_study(tmp_path)
+    config = json.loads((root / "config.json").read_text())
+    coordinator = group_router.GroupCoordinator(root, config, None)
+    coordinator.runtime = SimpleNamespace(
+        observe=lambda: {
+            "runs": [
+                {
+                    "run_id": "completed",
+                    "status": "returned",
+                    "output": {"completion": "completed", "help": "", "unfinished": []},
+                },
+                {
+                    "run_id": "uncertain",
+                    "status": "needs-reconciliation",
+                    "output": None,
+                },
+            ]
+        },
+        close=lambda *args: pytest.fail(
+            "Unknown effects must not trigger lifecycle work"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="operator reconciliation"):
+        asyncio.run(coordinator.advance({"iteration": 1}))

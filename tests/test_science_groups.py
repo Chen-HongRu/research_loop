@@ -28,7 +28,12 @@ class Services:
         self.calls = calls
         self.study_context = study_context
 
-    async def call(self, role, context, instructions, payload, schema):
+    async def call(self, role, context, instructions, payload, schema, **kwargs):
+        packet = self.study_context.get("input", {}).get("shared_input", {})
+        if isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1":
+            assert kwargs == {"allow_tools": False}
+        else:
+            assert kwargs == {}
         self.calls.append((role, context, instructions, payload, schema))
         expected_role, response = self.responses.pop(0)
         assert role == expected_role
@@ -48,7 +53,7 @@ class Services:
         return True
 
 
-def setup(tmp_path, program, responses, *, request=None):
+def setup(tmp_path, program, responses, *, request=None, shared_input=None):
     goal = tmp_path / "goal.md"
     goal.write_text("Synthetic goal: discriminate two fixed hypotheses.")
     schema = result_schema(RESULT_SCHEMA, request)
@@ -62,6 +67,8 @@ def setup(tmp_path, program, responses, *, request=None):
         },
         "output_schema": schema,
     }
+    if shared_input is not None:
+        study["input"]["shared_input"] = shared_input
     task = write(tmp_path / "call.json", study)
     calls = []
 
@@ -760,3 +767,239 @@ def test_diagnosis_feedback_corrects_diagnosis_then_obtains_fresh_review(
         "critic",
     ]
     assert "Never edit the original Run" in calls[0][2]
+
+
+def recovery_candidate(tmp_path):
+    request = {"id": "recovery-request", "text": "Publish the settled experiment."}
+    execution = write(tmp_path / "execution.json", {"exit_code": 0})
+    evaluation = write(
+        tmp_path / "evaluation.json",
+        {"summary": "The formal criterion was satisfied.", "help": ""},
+    )
+    original = write(
+        tmp_path / "original-evaluation.json",
+        {"summary": "Original independent assessment.", "help": "publication boundary"},
+    )
+    packet = {
+        "kind": "exp-recovery-v1",
+        "execution_ref": execution,
+        "evaluation_ref": evaluation,
+        "original_evaluation_ref": original,
+        "evidence_files": [
+            {"kind": kind, "ref": ref, "content": json.loads(Path(ref).read_text())}
+            for kind, ref in (
+                ("execution", execution),
+                ("evaluation", evaluation),
+                ("original_evaluation", original),
+            )
+        ],
+        "limitations": ["One synthetic experiment; no general causal conclusion."],
+        "publication_paths": {original: "recovery-evidence/original-evaluation.json"},
+    }
+    authored = synthesis(request, executions=[execution], analyses=[evaluation])
+    refs = [execution, evaluation, original]
+    authored["study_result"].update(
+        summary="The settled formal criterion is satisfied.",
+        goal="achieved",
+        study_action="stop",
+        stop_reason="The scoped goal's formal criterion is satisfied.",
+        next_action="",
+        evidence=list(refs),
+    )
+    authored["study_result"]["human_request"]["evidence"] = list(refs)
+    authored["stop_basis"] = "goal-satisfied"
+    authored["knowledge_files"][1]["content"] = (
+        "Formal criterion satisfied under the original constraints. "
+        f"Original independent assessment: {original}. "
+        "One synthetic experiment; no general causal conclusion.\n"
+    )
+    return request, packet, authored, refs
+
+
+def test_recovery_synthesis_has_inline_tool_free_author_and_candidate_review(tmp_path):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+
+    def review(ctx, payload):
+        assert payload["analysis_record"] == authored
+        assert "study_result" not in payload
+        assert "knowledge_files" not in payload
+        return synthesis_review(reason="Only the publication delta was reviewed.")
+
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analyst", authored), ("critic", review)],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("synthesis", task, refs))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert row["output"]["completion"] == "completed"
+    assert len(calls) == 2
+    assert [call[0] for call in calls] == ["analyst", "critic"]
+    for call in calls:
+        assert call[3]["recovery_evidence"] == packet
+        assert call[3]["study_context"]["input"]["human_request"] == request
+        assert call[3]["study_context"]["output_schema"]["properties"]["human_request"]
+        assert "Do not execute compute" in call[2]
+        assert "review the whole Exp again" in call[2]
+    completed = json.loads(artifact(row, "study-result.json").read_text())
+    assert completed == authored["study_result"]
+    assert (
+        artifact(row, "current.md").read_text()
+        == authored["knowledge_files"][1]["content"]
+    )
+    manifest = json.loads(artifact(row, "knowledge-manifest.json").read_text())
+    assert manifest["files"] == [
+        {"source": document["source"], "target": document["target"]}
+        for document in authored["knowledge_files"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["study_evidence", "human_evidence", "knowledge", "goal", "status", "admission"],
+)
+def test_recovery_completion_requires_original_identity_and_final_disposition(
+    tmp_path, missing
+):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    original = packet["original_evaluation_ref"]
+    if missing == "study_evidence":
+        authored["study_result"]["evidence"].remove(original)
+    elif missing == "human_evidence":
+        authored["study_result"]["human_request"]["evidence"] = refs[:-1]
+    elif missing == "knowledge":
+        authored["knowledge_files"][1]["content"] = "Original identity omitted."
+    elif missing == "goal":
+        authored["study_result"]["goal"] = "not-achieved"
+    elif missing == "status":
+        authored["study_result"]["human_request"]["status"] = "pending"
+    else:
+        refs = refs[:-1]
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analyst", authored)],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("synthesis", task, refs))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "failed", row
+    assert "Recovery" in row["error"]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "extra_file",
+        "long_content",
+        "long_summary",
+        "long_result_summary",
+        "archive_root",
+        "archive_child",
+    ],
+)
+def test_recovery_rejects_oversized_output_and_reserved_archive_targets(
+    tmp_path, invalid
+):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    if invalid == "extra_file":
+        authored["knowledge_files"].append(
+            {
+                "source": "knowledge/extra.md",
+                "target": "extra.md",
+                "content": "Extra output",
+            }
+        )
+    elif invalid == "long_content":
+        authored["knowledge_files"][0]["content"] = "x" * 2001
+    elif invalid == "long_summary":
+        authored["summary"] = "x" * 401
+    elif invalid == "long_result_summary":
+        authored["study_result"]["summary"] = "x" * 401
+    else:
+        authored["knowledge_files"][1]["target"] = (
+            "recovery-evidence"
+            if invalid == "archive_root"
+            else "recovery-evidence/original-evaluation.json"
+        )
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analyst", authored)],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("synthesis", task, refs))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "failed", row
+    assert "Recovery" in row["error"]
+    assert len(calls) == 1
+
+
+def test_recovery_author_schema_bounds_do_not_change_normal_schema():
+    from research_loop.group_programs.synthesis import analysis_schema
+
+    schema = result_schema(RESULT_SCHEMA, None)
+    normal = analysis_schema(schema)
+    recovery = analysis_schema(schema, recovery=True)
+    assert "maxLength" not in normal["properties"]["summary"]
+    assert "maxLength" not in schema["properties"]["summary"]
+    assert "maxItems" not in normal["properties"]["knowledge_files"]
+    assert recovery["properties"]["summary"]["maxLength"] == 400
+    assert (
+        recovery["properties"]["study_result"]["anyOf"][0]["properties"]["summary"][
+            "maxLength"
+        ]
+        == 400
+    )
+    assert recovery["properties"]["knowledge_files"]["maxItems"] == 2
+    assert (
+        recovery["properties"]["knowledge_files"]["items"]["properties"]["content"][
+            "maxLength"
+        ]
+        == 2000
+    )
+
+
+def test_recovery_synthesis_without_admitted_human_request(tmp_path):
+    _, packet, authored, refs = recovery_candidate(tmp_path)
+    del authored["study_result"]["human_request"]
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analyst", authored), ("critic", synthesis_review())],
+        shared_input=packet,
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("synthesis", task, refs))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert row["output"]["completion"] == "completed"
+    result = json.loads(artifact(row, "study-result.json").read_text())
+    assert result == authored["study_result"]
+    assert "human_request" not in result
+    assert result["goal"] == "achieved"
+    assert result["study_action"] == "stop"
+    assert set(refs).issubset(result["evidence"])
+    assert len(calls) == 2
+    assert (
+        "human_request"
+        not in calls[0][4]["properties"]["study_result"]["anyOf"][0]["properties"]
+    )
+    assert calls[-1][3]["analysis_record"] == authored

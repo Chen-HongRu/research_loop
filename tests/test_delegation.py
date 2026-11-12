@@ -37,6 +37,7 @@ class Client:
         self.turns = 0
         self.interrupted = []
         self.definitions = []
+        self.messages = []
 
     def start(self):
         pass
@@ -61,6 +62,7 @@ class Client:
         )
 
     def turn_start(self, thread_id, message, params):
+        self.messages.append(message)
         with self.lock:
             self.turns += 1
             turn_id = f"turn-{next(self._ids)}"
@@ -155,6 +157,7 @@ def test_fresh_role_task_collects_a_summary_and_records_identity(tmp_path):
 
     definition = client.definitions[0]
     assert definition["dynamicTools"] == []
+    assert client.messages == ["Inspect the supplied sources."]
     assert "Research role templates" not in definition["developerInstructions"]
     assert "## Scout" in definition["developerInstructions"]
     assert "Do not spawn or delegate" in definition["developerInstructions"]
@@ -247,6 +250,153 @@ def test_native_installs_host_tools_and_settles_child_threads(tmp_path):
         journal.close()
 
     asyncio.run(check())
+
+
+def test_registered_only_lead_delegates_critic_with_shared_input(tmp_path):
+    shared = {"references": [{"name": "synthetic", "text": "Only supplied evidence."}]}
+    candidate = {"study_result": {"summary": "synthetic"}, "knowledge_files": {}}
+    assignment = json.dumps({"candidate": candidate})
+
+    class LeadClient(Client):
+        def __init__(self, approval_handler=None, **kwargs):
+            super().__init__()
+            self.handler = approval_handler
+
+        def thread_start(self, definition):
+            return super().thread_start(definition).value
+
+        def turn_start(self, thread_id, message, params):
+            # Only the lead has explicit dynamic tools; the Critic has none.
+            if not self.definitions[-1]["dynamicTools"]:
+                return super().turn_start(thread_id, message, params)
+            self.messages.append(message)
+            turn_id = "lead-turn"
+            stream = queue.Queue()
+            self.queues[turn_id] = stream
+
+            def lead():
+                reply = self.handler(
+                    "item/tool/call",
+                    {
+                        "threadId": thread_id,
+                        "tool": "delegate_task",
+                        "arguments": {
+                            "role": "critic",
+                            "task_name": "review",
+                            "message": assignment,
+                        },
+                    },
+                )
+                assert reply["success"]
+                task_id = json.loads(reply["contentItems"][0]["text"])["task_id"]
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    reply = self.handler(
+                        "item/tool/call",
+                        {
+                            "threadId": thread_id,
+                            "tool": "wait_tasks",
+                            "arguments": {"task_ids": [task_id]},
+                        },
+                    )
+                    assert reply["success"]
+                    rows = json.loads(reply["contentItems"][0]["text"])["tasks"]
+                    if rows[0]["status"] == "completed":
+                        break
+                    time.sleep(0.01)
+                else:
+                    raise AssertionError("Critic did not complete")
+                for tool in ("delegate_task", "wait_tasks"):
+                    stream.put(
+                        SimpleNamespace(
+                            method="item/completed",
+                            payload={"item": {"type": "dynamicToolCall", "tool": tool}},
+                        )
+                    )
+                stream.put(
+                    SimpleNamespace(
+                        method="item/completed",
+                        payload={
+                            "item": {
+                                "type": "agentMessage",
+                                "text": json.dumps(candidate),
+                            }
+                        },
+                    )
+                )
+                stream.put(
+                    SimpleNamespace(
+                        method="turn/completed",
+                        payload={"turn": {"status": "completed"}},
+                    )
+                )
+
+            threading.Thread(target=lead, daemon=True).start()
+            return {"turn": {"id": turn_id}}
+
+    async def check():
+        journal = Journal(tmp_path / "events.jsonl")
+        native = Native(None, journal, client_factory=LeadClient)
+        await native.open()
+        result = await native.run(
+            "Coordinate a review using registered tools.",
+            {"shared_input": shared, "private_lead_field": "not forwarded"},
+            {},
+            model="synthetic-model",
+            effort="medium",
+            delegation="host",
+            allow_builtin_tools=False,
+        )
+        assert result == candidate
+        definitions = native.client.definitions
+        assert {item["name"] for item in definitions[0]["dynamicTools"]} == {
+            "delegate_task",
+            "wait_tasks",
+        }
+        assert definitions[1]["dynamicTools"] == []
+        assert not native.delegator.allow_builtin_tools
+        assert json.loads(native.client.messages[1]) == {
+            "assignment": assignment,
+            "shared_input": shared,
+        }
+        assert native.client.interrupted == []
+        await native.settle()
+        await native.close()
+        journal.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("kind", ["commandExecution", "dynamicToolCall"])
+def test_restricted_child_rejects_any_tool_activity(tmp_path, kind):
+    class ToolChild(Client):
+        def turn_start(self, thread_id, message, params):
+            turn = super().turn_start(thread_id, message, params)
+            turn_id = turn.value["turn"]["id"]
+            stream = queue.Queue()
+            stream.put(
+                SimpleNamespace(
+                    method="item/started",
+                    payload={"item": {"type": kind, "tool": "delegate_task"}},
+                )
+            )
+            stream.put(
+                SimpleNamespace(
+                    method="turn/completed",
+                    payload={"turn": {"status": "interrupted"}},
+                )
+            )
+            self.queues[turn_id] = stream
+            return turn
+
+    client = ToolChild()
+    instance = delegator(tmp_path, client, allow_builtin_tools=False)
+    started = instance.start("critic", "review", "Review supplied evidence.")
+    rows = wait_for(instance, [started["task_id"]])
+    assert rows[0]["status"] == "failed"
+    assert "Tool activity is forbidden" in rows[0]["error"]
+    assert client.interrupted
+    instance.close()
 
 
 def test_compat_instructions_use_host_tools_and_the_same_role_contract():

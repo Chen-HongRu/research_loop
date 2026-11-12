@@ -164,6 +164,7 @@ class NativeGroupServices:
         common=None,
         include_role_template=True,
         cwd=None,
+        allow_tools=True,
     ):
         self.pending_calls += 1
         try:
@@ -176,6 +177,7 @@ class NativeGroupServices:
                 common=common,
                 include_role_template=include_role_template,
                 cwd=cwd,
+                allow_tools=allow_tools,
             )
         finally:
             self.pending_calls -= 1
@@ -191,6 +193,7 @@ class NativeGroupServices:
         common,
         include_role_template,
         cwd,
+        allow_tools,
     ):
         self._admit()
         role = role.lower()
@@ -217,6 +220,7 @@ class NativeGroupServices:
                 delegation="none",
                 readable_roots=self.readable,
                 execution_environment=self.config.get("execution_environment"),
+                allow_tools=allow_tools,
             )
             if cwd is not None:
                 directory = Path(cwd).resolve(strict=True)
@@ -258,6 +262,24 @@ class NativeGroupServices:
                     "group_run_id": self.ctx.run_id,
                     "execution_environment": self.config.get("execution_environment"),
                 }
+                if isinstance(payload, dict) and "recovery_evidence" in payload:
+                    # Recovery already carries the complete evidence packet.
+                    # Copy only the model-facing context dictionaries so state
+                    # and the caller retain their original shared input.
+                    assignment["assignment"] = dict(payload)
+                    for scope in (assignment, assignment["assignment"]):
+                        study_context = scope.get("study_context")
+                        if isinstance(study_context, dict) and isinstance(
+                            study_context.get("input"), dict
+                        ):
+                            scope["study_context"] = {
+                                **study_context,
+                                "input": {
+                                    key: value
+                                    for key, value in study_context["input"].items()
+                                    if key != "shared_input"
+                                },
+                            }
                 if include_role_template:
                     assignment["role_template"] = self.role_sections[role]
                 result = await native.run(
@@ -269,6 +291,7 @@ class NativeGroupServices:
                     thread_id=record["thread_id"],
                     on_started=started,
                     delegation="none",
+                    allow_tools=allow_tools,
                 )
                 call.update(status="completed", result=result, effective=effective)
                 record["status"] = "completed"

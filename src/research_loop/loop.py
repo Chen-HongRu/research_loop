@@ -110,6 +110,8 @@ def initialize(
     delegation=None,
     coordinator="router",
     groups_file=None,
+    recover_exp=None,
+    input_refs=(),
 ):
     project, goal = project.resolve(strict=True), goal.resolve(strict=True)
     if not project.is_dir() or not goal.is_file():
@@ -120,12 +122,23 @@ def initialize(
         raise ValueError("Delegation mode must be native or host")
     if coordinator not in {"lead", "router"}:
         raise ValueError("Coordinator must be lead or router")
+    if recover_exp is not None and (
+        groups_file is not None or resource_file is not None
+    ):
+        raise ValueError(
+            "Recovery uses the reference publication Group without resource execution"
+        )
+    admitted = [Path(ref).resolve(strict=True) for ref in input_refs]
+    if any(not ref.is_file() for ref in admitted):
+        raise ValueError("Initial artifact references must be existing files")
     definitions = []
-    if coordinator == "router":
+    if coordinator == "router" or recover_exp is not None:
         if groups_file is None:
             from .workflow import definitions as reference_workflow
 
-            definitions = reference_workflow(resource=resource_file is not None)
+            definitions = reference_workflow(
+                resource=resource_file is not None, recovery=recover_exp is not None
+            )
         else:
             from .group_router import catalog
 
@@ -145,6 +158,7 @@ def initialize(
         "provider": provider,
         "delegation": delegation,
         "coordinator": coordinator,
+        "input_refs": [str(ref) for ref in admitted],
         "environment": environment.read_config(environment_file)
         if environment_file
         else None,
@@ -165,6 +179,25 @@ def initialize(
     root.mkdir(mode=0o700, parents=False, exist_ok=False)
     (root / "work/tmp").mkdir(parents=True)
     (root / "goal.md").write_text(goal_text)
+    if recover_exp is not None:
+        from .group_programs.exp_recovery import build_recovery_bundle
+        from .recovery import evidence_packet
+
+        manifest_path, manifest = build_recovery_bundle(
+            recover_exp, root / "inputs/exp-recovery"
+        )
+        evidence_packet(manifest_path)
+        config["recovery_bundle"] = str(manifest_path)
+        config["input_refs"] = list(
+            dict.fromkeys(
+                [
+                    *config["input_refs"],
+                    str(manifest_path),
+                    manifest["evaluation_ref"],
+                    *[entry["ref"] for entry in manifest["artifacts"]],
+                ]
+            )
+        )
     if definitions:
         import shutil
         from .group_router import definition_record
@@ -228,7 +261,7 @@ def inspect(root):
         from .group_router import POLICY
 
         policy = POLICY
-    return {
+    result = {
         "config": config,
         "delegation": mode,
         "instructions": policy,
@@ -263,6 +296,13 @@ def inspect(root):
             else "lead-only",
         },
     }
+    if config.get("recovery_bundle"):
+        from .recovery import evidence_packet
+
+        result["input"]["shared_input"] = evidence_packet(config["recovery_bundle"])
+        result["input"]["goal_text"] = (root / "goal.md").read_text()
+        result["input"]["input_refs"] = config["input_refs"]
+    return result
 
 
 async def run_iteration(root, state, previous_result, journal, native_factory):
@@ -325,17 +365,28 @@ async def run_iteration(root, state, previous_result, journal, native_factory):
         adapter = resource(config, root)
         knowledge = Knowledge(root)
         baseline = knowledge.prepare()
-        if config.get("coordinator") == "router":
+        if config.get("recovery_bundle"):
+            from .recovery import stage_evidence
+
+            stage_evidence(root, config["recovery_bundle"])
+        if config.get("coordinator") == "router" or config.get("recovery_bundle"):
             from .group_router import GroupCoordinator, POLICY
 
             call["instructions"] = POLICY
             call["delegation"] = "none"
             call["effective_native_permissions"] = {
-                "coordinator": "router",
+                "coordinator": config["coordinator"],
                 "router_tools": False,
-                "resource_dispatch": "runtime-only",
+                "resource_dispatch": "disabled"
+                if config.get("recovery_bundle")
+                else "runtime-only",
             }
-            native = GroupCoordinator(
+            coordinator_type = GroupCoordinator
+            if config.get("coordinator") == "lead":
+                from .recovery import RecoveryLeadCoordinator
+
+                coordinator_type = RecoveryLeadCoordinator
+            native = coordinator_type(
                 root, config, journal, adapter, native_factory=native_factory
             )
         else:
@@ -551,6 +602,18 @@ def main():
     init.add_argument(
         "--groups", type=Path, help="Versioned Group catalog for Router coordination"
     )
+    init.add_argument(
+        "--recover-exp",
+        type=Path,
+        help="Reuse a settled Exp Run for recovery/publication only",
+    )
+    init.add_argument(
+        "--input-ref",
+        type=Path,
+        action="append",
+        default=[],
+        help="Admit an existing artifact by reference",
+    )
     init.add_argument("--provider", help="OpenAI-compatible provider name")
     init.add_argument(
         "--provider-base-url", help="Provider Responses API root, for example /v1"
@@ -633,6 +696,8 @@ def main():
                     delegation=args.delegation,
                     coordinator=args.coordinator,
                     groups_file=args.groups,
+                    recover_exp=args.recover_exp,
+                    input_refs=args.input_ref,
                 )
             elif args.command == "inspect":
                 result = inspect(root)

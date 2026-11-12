@@ -247,6 +247,9 @@ def test_exp_requires_explicit_backend_and_real_plan_artifact(experiment):
     assert exp._artifact(ctx, str(task)) is None
     assert exp._artifact(ctx, "missing.md") is None
     assert exp._artifact(ctx, "../state.json") is None
+    (ctx.work / "real.md").write_text("Synthetic report.\n")
+    (ctx.work / "linked.md").symlink_to("real.md")
+    assert exp._artifact(ctx, "linked.md") is None
 
 
 def test_published_context_is_pinned_across_service_recreation(experiment):
@@ -261,3 +264,80 @@ def test_published_context_is_pinned_across_service_recreation(experiment):
     )
     assert ctx.services.study_context == snapshot
     assert Path(snapshot["input"]["published_knowledge_root"]) in ctx.services.readable
+
+
+def test_absolute_refs_and_admitted_citations_need_no_scientific_retry(experiment):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+    raw_results = []
+
+    async def absolute_refs(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        if args[0] == "critic":
+            result["evidence"] = [str(ctx.work / "result.json"), str(task)]
+            result["artifacts"] = [str(task)]
+        raw_results.append(json.loads(json.dumps(result)))
+        return result
+
+    ctx.services.call = absolute_refs
+
+    async def check():
+        output = await exp.run(ctx, {"task_ref": str(task)})
+        assert output["completion"] == "completed"
+        evaluation = ctx.state["experiment_phases"]["evaluate"]
+        assert evaluation["evidence"] == ["result.json", str(task)]
+        assert evaluation["artifacts"] == []
+        assert ctx.state["experiment_phase_validation"]["evaluate"][
+            "input_citations"
+        ] == [str(task)]
+        assert (
+            ctx.state["experiment_phase_history"]["evaluate"][0]["result"]
+            == raw_results[-1]
+        )
+        assert ctx.state["native_calls"][0]["result"]["artifacts"] == [
+            "scientific-plan.md"
+        ]
+        assert str(task) not in output["artifacts"]
+        ctx.round += 1
+        await exp.run(ctx, {"task_ref": str(task), "feedback_refs": [str(task)]})
+        assert len(calls) == 3
+        assert (ctx.work / "dispatches").read_text() == "once"
+        await ctx.services.close()
+
+    asyncio.run(check())
+
+
+def test_boundary_error_preserves_assessment_and_repairs_without_model(experiment):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+
+    async def missing_evidence(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        if args[0] == "critic":
+            result["evidence"].append("independent-check.md")
+        return result
+
+    ctx.services.call = missing_evidence
+
+    async def check():
+        first = await exp.run(ctx, {"task_ref": str(task)})
+        assert first["completion"] == "blocked"
+        assessment = ctx.state["experiment_phases"]["evaluate"]
+        assert assessment["help"] == ""
+        assert "evaluate.evidence[1]" in first["help"]
+        before = json.loads(json.dumps(assessment))
+        ctx.round += 1
+        still_blocked = await exp.run(
+            ctx, {"task_ref": str(task), "feedback_refs": [str(task)]}
+        )
+        assert still_blocked["completion"] == "blocked"
+        assert len(calls) == 3
+        (ctx.work / "independent-check.md").write_text("Synthetic receipt.\n")
+        final = await exp.run(ctx, {"task_ref": str(task)})
+        assert final["completion"] == "completed"
+        assert ctx.state["experiment_phases"]["evaluate"] == before
+        assert len(calls) == 3
+        assert (ctx.work / "dispatches").read_text() == "once"
+        await ctx.services.close()
+
+    asyncio.run(check())

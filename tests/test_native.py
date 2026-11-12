@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from openai_codex.models import Notification, UnknownNotification
 from openai_codex.generated.v2_all import (
+    DynamicToolSpec,
     ItemCompletedNotification,
     TurnCompletedNotification,
 )
@@ -544,6 +545,105 @@ def test_host_delegation_disables_native_multi_agent(tmp_path, monkeypatch):
     assert "features.multi_agent=false" in args
     assert "features.multi_agent=true" not in args
     assert "features.multi_agent_v2=false" in args
+
+
+def test_registered_tools_only_configuration_suppresses_builtins(tmp_path, monkeypatch):
+    settings = provider(tmp_path, monkeypatch)
+    root = tmp_path / "restricted"
+    root.mkdir()
+    config, effective = configuration(
+        root,
+        tmp_path,
+        [root / "work"],
+        "synthetic-model",
+        "medium",
+        provider=settings,
+        delegation="host",
+        allow_builtin_tools=False,
+    )
+    args = config.launch_args_override
+    assert effective["allow_tools"] is True
+    assert effective["allow_builtin_tools"] is False
+    assert effective["sandbox_mode"] == "workspace-write"
+    for feature in (
+        "shell_tool",
+        "unified_exec",
+        "code_mode_host",
+        "computer_use",
+        "browser_use",
+        "view_image",
+        "multi_agent",
+        "multi_agent_v2",
+    ):
+        assert f"features.{feature}=false" in args
+    assert 'web_search="disabled"' in args
+    entry = json.loads(Path(effective["model_catalog"]).read_text())["models"][0]
+    assert entry["shell_type"] == "disabled"
+    assert entry["apply_patch_tool_type"] is None
+    assert entry["multi_agent_version"] is None
+    descriptor = Tool("registered", "Synthetic", {"type": "object"}, None).descriptor()
+    assert descriptor["type"] == "function"
+    assert DynamicToolSpec.model_validate(descriptor).root.name == "registered"
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"type": "commandExecution"},
+        {"type": "fileChange"},
+        {"type": "webSearch"},
+        {"type": "browserToolCall"},
+        {"type": "computerToolCall"},
+        {"type": "collabAgentToolCall"},
+        {"type": "dynamicToolCall", "tool": "unregistered"},
+        {"type": "function_call", "name": "exec_command"},
+    ],
+)
+def test_registered_tools_only_native_rejects_unregistered_activity(tmp_path, item):
+    from types import SimpleNamespace
+
+    class UnexpectedTool(Client):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.notifications = iter(
+                [
+                    ("item/started", {"item": item}),
+                    ("turn/completed", {"turn": {"status": "interrupted"}}),
+                ]
+            )
+
+        def next_turn_notification(self, turn_id):
+            method, payload = next(self.notifications)
+            return SimpleNamespace(method=method, payload=payload)
+
+    async def check():
+        journal = Journal(tmp_path / "events")
+        native = Native(None, journal, client_factory=UnexpectedTool)
+        await native.open()
+        with pytest.raises(RuntimeError, match="Forbidden tool"):
+            await native.run(
+                "restricted",
+                {},
+                {},
+                model="gpt-6.1-sol",
+                effort="medium",
+                delegation="none",
+                allow_builtin_tools=False,
+            )
+        assert ("turn/interrupt", "lead") in native.client.calls
+        rejected = await native._tool(
+            {
+                "threadId": "lead",
+                "tool": "unregistered",
+                "arguments": {},
+            }
+        )
+        assert not rejected["success"]
+        assert "Unregistered tool" in rejected["contentItems"][0]["text"]
+        await native.close()
+        journal.close()
+
+    asyncio.run(check())
 
 
 def test_host_delegation_catalog_disables_native_subagents(tmp_path, monkeypatch):

@@ -125,6 +125,65 @@ def test_context_reuse_fresh_roles_and_settled_lifecycle(context):
     asyncio.run(check())
 
 
+def test_group_call_can_disable_tools_in_transport_and_native(context, monkeypatch):
+    configured = []
+
+    def configure(*args, **kwargs):
+        configured.append(kwargs)
+        return CodexConfig(), {"allow_tools": kwargs["allow_tools"]}
+
+    monkeypatch.setattr("research_loop.group_agents.configuration", configure)
+
+    async def check():
+        service, journal = services(context)
+        await service.call(
+            "analyst", "synthesis", "summarize", {}, {}, allow_tools=False
+        )
+        assert configured[0]["allow_tools"] is False
+        assert FakeNative.instances[0].calls[0][2]["allow_tools"] is False
+        assert context.state["native_calls"][0]["effective"]["allow_tools"] is False
+        await service.close()
+        journal.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_recovery_evidence_is_serialized_once_without_mutating_inputs(
+    context, recovery
+):
+    async def check():
+        service, journal = services(context)
+        evidence = {"reference": "synthetic unique marker"}
+        service.study_context["input"].update(
+            shared_input=evidence, scoped_metadata={"scope": "synthetic"}
+        )
+        payload = {"study_context": json.loads(json.dumps(service.study_context))}
+        if recovery:
+            payload["recovery_evidence"] = evidence
+        original_payload = json.loads(json.dumps(payload))
+        original_context = json.loads(json.dumps(service.study_context))
+
+        await service.call("analyst", "synthesis", "summarize", payload, {})
+
+        packet = FakeNative.instances[0].calls[0][1]
+        assert json.dumps(packet).count("synthetic unique marker") == (
+            1 if recovery else 2
+        )
+        for scope in (packet, packet["assignment"]):
+            assert scope["study_context"]["input"]["scoped_metadata"] == {
+                "scope": "synthetic"
+            }
+            assert ("shared_input" in scope["study_context"]["input"]) is not recovery
+        assert payload == original_payload
+        assert service.study_context == original_context
+        assert context.state["native_study_context"] == original_context
+        await service.close()
+        journal.close()
+
+    asyncio.run(check())
+
+
 def test_contexts_cannot_cross_run_and_stop_admission(context):
     service, journal = services(context)
     context.run_id = "another-run"

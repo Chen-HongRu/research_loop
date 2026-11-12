@@ -5,9 +5,9 @@ from pathlib import Path
 from .groups import GroupDefinition
 
 
-def definitions(*, resource=False):
+def definitions(*, resource=False, recovery=False):
     directory = Path(__file__).with_name("group_programs")
-    return [
+    groups = [
         GroupDefinition(
             "direction",
             "1",
@@ -19,7 +19,7 @@ def definitions(*, resource=False):
         ),
         GroupDefinition(
             "exp",
-            "h11-1",
+            "h11-2",
             "Answer one selected experiment question: Plan and Prepare in a shared context, "
             "execute the prepared command once, independently Evaluate its evidence. "
             "Accept experiment-task.json or an explicit scientific task; return experiment "
@@ -29,7 +29,7 @@ def definitions(*, resource=False):
         ),
         GroupDefinition(
             "synthesis",
-            "3",
+            "4",
             "Integrate completed experimental evidence across the Study. Maintain scientific "
             "knowledge, negative results and uncertainty, obtain independent scrutiny of new "
             "claims, and export study-result.json plus knowledge-manifest.json. Owns the "
@@ -46,3 +46,6 @@ def definitions(*, resource=False):
             directory / "diagnosis.py",
         ),
     ]
+    if recovery:
+        return [group for group in groups if group.id == "synthesis"]
+    return groups

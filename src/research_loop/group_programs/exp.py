@@ -4,6 +4,7 @@ The source COMMON and phase instructions are retained verbatim. The deterministi
 adapter supplies Group scope, file handoffs, receipts and bounded recovery.
 """
 
+from copy import deepcopy
 from pathlib import Path
 
 from research_loop.state import write_json
@@ -105,6 +106,8 @@ async def run(ctx, payload):
         )
     phases = ctx.state.setdefault("experiment_phases", {})
     phase_rounds = ctx.state.setdefault("experiment_phase_rounds", {})
+    validation = ctx.state.setdefault("experiment_phase_validation", {})
+    history = ctx.state.setdefault("experiment_phase_history", {})
     sources = {
         "task_ref": str(Path(task_ref).resolve()),
         "workspace": str(ctx.work),
@@ -133,40 +136,29 @@ async def run(ctx, payload):
                 include_role_template=False,
                 cwd=ctx.work,
             )
-            result = dict(result)
-            invalid = [
-                ref for ref in result.get("artifacts", []) if not _artifact(ctx, ref)
-            ]
-            if name == "plan" and not result.get("help"):
-                plan_path = _artifact(ctx, result.get("plan_artifact", ""))
-                if plan_path is None:
-                    invalid.append("plan_artifact")
-                elif str(plan_path) not in result["artifacts"]:
-                    result["artifacts"].append(str(plan_path))
-            if invalid:
-                result["help"] = (
-                    "Produce existing small artifact files under this Run's work directory: "
-                    + ", ".join(invalid)
-                )
-            if name == "prepare" and not result["help"]:
-                ref = result.get("result_file", "")
-                if not ref or Path(ref).is_absolute() or ".." in Path(ref).parts:
-                    result["help"] = "Supply the plan's workspace-relative result_file."
-            if name == "evaluate" and not result["help"]:
-                evidence = result.get("evidence", [])
-                if assignment["result_file"] not in evidence or any(
-                    Path(ref).is_absolute() or not _artifact(ctx, ref)
-                    for ref in evidence
-                ):
-                    result["help"] = (
-                        "Provide existing workspace-relative evidence filenames, "
-                        "including the supplied result_file."
-                    )
-            phases[name] = result
+            history.setdefault(name, []).append(
+                {"round": ctx.round, "result": deepcopy(result)}
+            )
+            phases[name] = deepcopy(result)
             phase_rounds[name] = ctx.round
-            ctx.save_state()
+        # Boundary repairs never turn an independent assessment into a new model
+        # task. Recheck the original receipt, preserving scientific help verbatim.
+        original = history.get(name, [])
+        record = original[-1]["result"] if original else phases[name]
+        phases[name], validation[name] = _normalize_phase(ctx, name, record, assignment)
+        validation[name]["round"] = phase_rounds.get(name, ctx.round)
+        ctx.save_state()
         write_json(ctx.work / f"{name}.json", phases[name])
         return phases[name]
+
+    def phase_help(name, result):
+        errors = validation[name]["errors"]
+        return result["help"] or (
+            "Artifact boundary requires mechanical repair: "
+            + "; ".join(f"{error['field']}: {error['reason']}" for error in errors)
+            if errors
+            else ""
+        )
 
     plan = await phase(
         "plan",
@@ -176,8 +168,8 @@ async def run(ctx, payload):
         PLAN_SCHEMA,
         sources,
     )
-    if plan["help"]:
-        return _finish(ctx, phases, plan["summary"], plan["help"], backend)
+    if phase_help("plan", plan):
+        return _finish(ctx, phases, plan["summary"], phase_help("plan", plan), backend)
     prepare = await phase(
         "prepare",
         "experimenter",
@@ -190,12 +182,12 @@ async def run(ctx, payload):
             "plan_artifact": plan["plan_artifact"],
         },
     )
-    if prepare["help"] or not prepare["command"]:
+    if phase_help("prepare", prepare) or not prepare["command"]:
         return _finish(
             ctx,
             phases,
             prepare["summary"],
-            prepare["help"] or "Provide one authorized bounded command.",
+            phase_help("prepare", prepare) or "Provide one authorized bounded command.",
             backend,
         )
     if "execution" not in phases:
@@ -234,26 +226,105 @@ async def run(ctx, payload):
             "result_file": prepare["result_file"],
         },
     )
-    return _finish(ctx, phases, evaluate["summary"], evaluate["help"], backend)
+    return _finish(
+        ctx, phases, evaluate["summary"], phase_help("evaluate", evaluate), backend
+    )
+
+
+def _reference(ctx, ref, admitted=(), *, existing=True):
+    """Classify exact file references without reading scientific input contents."""
+    if not isinstance(ref, str) or not ref:
+        raise ValueError("expected a nonempty file reference")
+    path = Path(ref)
+    path = path if path.is_absolute() else ctx.work / path
+    resolved = path.resolve()
+    admitted = {str(Path(value).resolve()) for value in admitted if value}
+    if str(resolved) in admitted:
+        return str(resolved), True
+    work = ctx.work.resolve()
+    if not resolved.is_relative_to(work) or ".." in path.parts:
+        raise ValueError("not ownwork or an explicitly admitted input")
+    relative = path.relative_to(ctx.work)
+    cursor = ctx.work
+    for part in relative.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise ValueError("ownwork references may not contain symlinks")
+    if existing and not resolved.is_file():
+        raise ValueError("ownwork file does not exist")
+    if resolved == work:
+        raise ValueError("expected a file inside ownwork")
+    return resolved.relative_to(work).as_posix(), False
+
+
+def _normalize_phase(ctx, name, record, assignment):
+    result = deepcopy(record)
+    errors, citations = [], []
+    admitted = [
+        assignment.get("task_ref"),
+        *assignment.get("input_refs", []),
+        *assignment.get("feedback_refs", []),
+    ]
+
+    def normalize(ref, field, *, existing=True, inputs=True):
+        try:
+            value, citation = _reference(
+                ctx, ref, admitted if inputs else (), existing=existing
+            )
+            if citation:
+                citations.append(value)
+            return value, citation
+        except (OSError, ValueError) as error:
+            errors.append({"field": field, "reason": str(error)})
+            return ref, False
+
+    outputs = []
+    for index, ref in enumerate(result.get("artifacts", [])):
+        value, citation = normalize(ref, f"{name}.artifacts[{index}]")
+        if not citation:
+            outputs.append(value)
+    result["artifacts"] = list(dict.fromkeys(outputs))
+    if not result.get("help"):
+        if name == "plan":
+            value, _ = normalize(
+                result.get("plan_artifact", ""), "plan.plan_artifact", inputs=False
+            )
+            result["plan_artifact"] = value
+            if not errors and value not in result["artifacts"]:
+                result["artifacts"].append(value)
+        if name == "prepare":
+            result["result_file"], _ = normalize(
+                result.get("result_file", ""),
+                "prepare.result_file",
+                existing=False,
+                inputs=False,
+            )
+        if name == "evaluate":
+            result["evidence"] = [
+                normalize(ref, f"evaluate.evidence[{index}]")[0]
+                for index, ref in enumerate(result.get("evidence", []))
+            ]
+            if assignment["result_file"] not in result["evidence"]:
+                errors.append(
+                    {
+                        "field": "evaluate.evidence",
+                        "reason": "missing supplied result_file",
+                    }
+                )
+    return result, {
+        "origin": "host-boundary-validation",
+        "scientific_help": record["help"],
+        "errors": errors,
+        "input_citations": list(dict.fromkeys(citations)),
+    }
 
 
 def _artifact(ctx, ref):
-    if not isinstance(ref, str) or not ref:
-        return None
-    path = Path(ref)
-    if not path.is_absolute():
-        path = ctx.work / path
-    # Artifact publication separately enforces size, regular identity and symlinks.
-    # This cheap handoff check rejects missing/escaping reports before another call.
     try:
-        if (
-            path.resolve(strict=True).is_relative_to(ctx.work.resolve())
-            and path.is_file()
-        ):
-            return path.resolve()
+        relative, _ = _reference(ctx, ref)
+        return (ctx.work / relative).resolve()
     except (OSError, ValueError):
-        pass
-    return None
+        return None
 
 
 def _output(summary, help_text, artifacts=None):
@@ -276,6 +347,7 @@ def _finish(ctx, phases, summary, help_text, backend):
             "phases": list(phases),
             "execution_backend": backend,
             "integration": "h11-eval33-group-v1; historical gains unverified",
+            "phase_validation": ctx.state.get("experiment_phase_validation", {}),
         },
     )
     artifacts = [str(report), *[str(ctx.work / f"{name}.json") for name in phases]]

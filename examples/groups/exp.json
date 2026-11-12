@@ -1,7 +1,7 @@
 [
   {
     "id": "exp",
-    "version": "h11-1",
+    "version": "h11-2",
     "description": "H11 Plan/Prepare shared-context experiment execution with independent Evaluate.",
     "program": "../../src/research_loop/group_programs/exp.py",
     "settings": {

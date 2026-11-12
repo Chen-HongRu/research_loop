@@ -81,6 +81,16 @@ def _plain(value):
     return value
 
 
+def is_tool_item(item):
+    """Fail closed for item kinds other than conversation and reasoning."""
+    return bool(item) and item.get("type", "") not in {
+        "agentMessage",
+        "reasoning",
+        "userMessage",
+        "contextCompaction",
+    }
+
+
 @dataclass
 class RoleTask:
     id: str
@@ -116,12 +126,16 @@ class HostDelegation:
         on_thread=None,
         max_active=MAX_ACTIVE,
         environment=None,
+        shared_input=None,
+        allow_builtin_tools=True,
     ):
         self.client = client
         self.journal = journal
         self.model = model
         self.effort = effort
         self.environment = environment
+        self.shared_input = shared_input
+        self.allow_builtin_tools = allow_builtin_tools
         self.roles_path = Path(roles_path) if roles_path else None
         self.on_thread = on_thread
         self.max_active = max_active
@@ -305,8 +319,14 @@ class HostDelegation:
                 model=started.get("model"),
                 effort=started.get("reasoningEffort"),
             )
+            message = task.message
+            if self.shared_input is not None:
+                message = json.dumps(
+                    {"assignment": task.message, "shared_input": self.shared_input},
+                    ensure_ascii=False,
+                )
             turn = _plain(
-                self.client.turn_start(thread_id, task.message, {"effort": self.effort})
+                self.client.turn_start(thread_id, message, {"effort": self.effort})
             )
             turn_id = turn["turn"]["id"]
             with self._lock:
@@ -332,10 +352,12 @@ class HostDelegation:
                     item.get("type") in {"function_call", "custom_tool_call"}
                     and item.get("name") in NATIVE_DELEGATION_TOOLS
                 )
-                if method == "item/completed" and native_item:
+                if native_item or (not self.allow_builtin_tools and is_tool_item(item)):
                     violation = (
                         "A delegated role attempted native delegation; roles must "
                         "return proposed work to the coordinator"
+                        if native_item
+                        else "Tool activity is forbidden for this delegated role"
                     )
                     try:
                         self.client.turn_interrupt(thread_id, turn_id)

@@ -18,7 +18,7 @@ from .environment import (
     prepend as environment_instructions,
     render as render_environment,
 )
-from .delegation import DELEGATE_TOOL, WAIT_TOOL, HostDelegation
+from .delegation import DELEGATE_TOOL, WAIT_TOOL, HostDelegation, is_tool_item
 
 _INTERRUPT_TIMEOUT = 5.0
 
@@ -32,6 +32,7 @@ class Tool:
 
     def descriptor(self):
         return {
+            "type": "function",
             "name": self.name,
             "description": self.description,
             "inputSchema": self.parameters,
@@ -131,6 +132,7 @@ def configuration(
     delegation="native",
     execution_environment=None,
     allow_tools=True,
+    allow_builtin_tools=True,
     readable_roots=(),
     denied_roots=(),
 ):
@@ -138,6 +140,8 @@ def configuration(
         raise ValueError("Delegation mode must be native, host or none")
     if not allow_tools and delegation != "none":
         raise ValueError("Tool-free transport requires delegation=none")
+    if not allow_builtin_tools and delegation == "native":
+        raise ValueError("Disabled built-in tools require delegation=host or none")
     if denied_roots:
         raise ValueError(
             "Ordinary workspace-write does not support denied_roots overlays"
@@ -227,6 +231,7 @@ def configuration(
         "network": False,
         "native_multi_agent": delegation == "native",
         "allow_tools": allow_tools,
+        "allow_builtin_tools": allow_tools and allow_builtin_tools,
         "child_dynamic_tools": False,
     }
     if provider is None:
@@ -320,7 +325,7 @@ def configuration(
             model_catalog=str(catalog),
             web_search=False,
         )
-    if not allow_tools:
+    if not allow_tools or not allow_builtin_tools:
         # Pinned CLI registers apply_patch from model metadata independently of
         # shell feature flags. Remove that capability before any turn starts.
         restricted = (
@@ -407,6 +412,7 @@ class Native:
         self.settled = False
         self.closed = False
         self.allow_tools = True
+        self.allow_builtin_tools = True
         self.delegation_mode = "native"
         self.tool_violation = None
 
@@ -481,6 +487,9 @@ class Native:
             if not self.allow_tools:
                 self.tool_violation = "Tool activity is forbidden for this context"
                 raise ValueError(self.tool_violation)
+            if not self.allow_builtin_tools and name not in self.tools:
+                self.tool_violation = "Unregistered tool activity is forbidden"
+                raise ValueError(self.tool_violation)
             if self.stopping or params.get("threadId") != self.thread_id:
                 raise ValueError(
                     "External resource tools are registered for the lead thread only"
@@ -530,8 +539,12 @@ class Native:
                 "The exact configured model/reasoning effort is unavailable"
             )
 
-    def install_delegation(self, model, effort, roles_path=None, environment=None):
+    def install_delegation(
+        self, model, effort, roles_path=None, environment=None, shared_input=None
+    ):
         if self.delegator is not None:
+            self.delegator.allow_builtin_tools = self.allow_builtin_tools
+            self.delegator.shared_input = shared_input
             return
         self.delegator = HostDelegation(
             self.client,
@@ -541,6 +554,8 @@ class Native:
             roles_path=roles_path,
             on_thread=self._add_child,
             environment=environment,
+            shared_input=shared_input,
+            allow_builtin_tools=self.allow_builtin_tools,
         )
 
         async def delegate(arguments):
@@ -574,6 +589,7 @@ class Native:
         roles_path=None,
         environment=None,
         allow_tools=True,
+        allow_builtin_tools=True,
     ):
         if delegation not in {"native", "host", "none"}:
             raise ValueError("Delegation mode must be native, host or none")
@@ -581,7 +597,10 @@ class Native:
             raise ValueError(
                 "Tool-free context requires no delegation or dynamic tools"
             )
+        if not allow_builtin_tools and delegation == "native":
+            raise ValueError("Disabled built-in tools require delegation=host or none")
         self.allow_tools = allow_tools
+        self.allow_builtin_tools = allow_tools and allow_builtin_tools
         self.delegation_mode = delegation
         if environment is None and isinstance(payload, dict):
             environment = payload.get("execution_environment")
@@ -589,7 +608,13 @@ class Native:
         if self.stopping:
             raise RuntimeError("Stop requested before model admission")
         if delegation == "host":
-            self.install_delegation(model, effort, roles_path, environment)
+            self.install_delegation(
+                model,
+                effort,
+                roles_path,
+                environment,
+                payload.get("shared_input") if isinstance(payload, dict) else None,
+            )
         definition = {
             "model": model,
             "allowProviderModelFallback": False,
@@ -655,36 +680,20 @@ class Native:
             item = data.get("item", {})
             kind = item.get("type", "")
             delegation_item = kind in {"collabAgentToolCall", "subAgentActivity"}
-            tool_item = (
-                (
-                    bool(item)
-                    and kind
-                    not in {
-                        "agentMessage",
-                        "reasoning",
-                        "userMessage",
-                        "contextCompaction",
-                    }
-                )
-                or kind
+            tool_item = is_tool_item(item)
+            registered_tool = (
+                kind
                 in {
-                    "commandExecution",
-                    "fileChange",
-                    "mcpToolCall",
                     "dynamicToolCall",
-                    "webSearch",
-                    "imageView",
-                    "imageGeneration",
-                    "browserToolCall",
-                    "computerToolCall",
                     "function_call",
                     "custom_tool_call",
                 }
-                or delegation_item
-                or "tool" in kind.lower()
+                and item.get("tool", item.get("name")) in self.tools
             )
-            if (not allow_tools and tool_item) or (
-                delegation == "none" and delegation_item
+            if (
+                (not allow_tools and tool_item)
+                or (delegation == "none" and delegation_item)
+                or (not self.allow_builtin_tools and tool_item and not registered_tool)
             ):
                 self.tool_violation = "Forbidden tool or delegation activity observed"
                 await self.stop()
