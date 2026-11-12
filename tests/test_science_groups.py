@@ -952,7 +952,7 @@ def test_recovery_rejects_oversized_output_and_reserved_archive_targets(
             }
         )
     elif invalid == "long_content":
-        authored["knowledge_files"][0]["content"] = "x" * 2001
+        authored["knowledge_files"][0]["content"] = "x" * 3201
     elif invalid == "long_summary":
         authored["summary"] = "x" * 401
     elif invalid == "long_result_summary":
@@ -1001,7 +1001,7 @@ def test_recovery_author_schema_bounds_do_not_change_normal_schema():
         recovery["properties"]["knowledge_files"]["items"]["properties"]["content"][
             "maxLength"
         ]
-        == 2000
+        == 3200
     )
 
 
@@ -1050,7 +1050,7 @@ def test_recovery_compact_schema_omits_all_mechanical_citations():
     assert "evidence" not in result["human_request"]["properties"]
     assert (
         properties["knowledge_files"]["items"]["properties"]["content"]["maxLength"]
-        == 1200
+        == 2400
     )
 
 
@@ -1074,7 +1074,7 @@ def test_recovery_binder_preserves_science_and_is_idempotent(tmp_path):
     assert content.startswith(original["knowledge_files"][1]["content"])
     assert "Host-added provenance" in content
     assert "(../recovery-evidence/original-evaluation.json)" in content
-    assert len(content) <= 2000
+    assert len(content) <= 3200
 
 
 @pytest.mark.parametrize(
@@ -1180,3 +1180,20 @@ def test_recovery_scientific_critic_can_request_revision(tmp_path):
     assert not any(
         Path(ref).name == "study-result.json" for ref in row["output"]["artifacts"]
     )
+
+
+@pytest.mark.parametrize("characters", [2400, 2401])
+def test_recovery_scientific_content_headroom_boundary(tmp_path, characters):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    candidate = compact_recovery(authored)
+    candidate["knowledge_files"][1]["content"] = "x" * characters
+    sources = recovery_sources(request, packet, refs)
+    if characters > 2400:
+        with pytest.raises(ValueError, match="at most 2400 characters"):
+            bind_recovery_analysis(candidate, sources)
+    else:
+        bound = bind_recovery_analysis(candidate, sources)
+        content = bound["knowledge_files"][1]["content"]
+        assert content.startswith("x" * characters)
+        assert len(content) <= 3200
+        assert bind_recovery_analysis(bound, sources) == bound

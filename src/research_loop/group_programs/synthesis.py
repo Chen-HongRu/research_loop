@@ -105,8 +105,8 @@ RECOVERY_INSTRUCTIONS = (
     "the packet; do not invent new causal claims or leave scientific authorship "
     "to the Critic. Scientific review may accept or request bounded revision. "
     "Publication paths are literal destinations, never additional evidence. "
-    "Author exactly two knowledge_files, each scientific content at most 1200 "
-    "characters (the final document with provenance is at most 2000), and "
+    "Author exactly two knowledge_files, each scientific content at most 2400 "
+    "characters (the final document with provenance is at most 3200), and "
     "summaries at most 400 characters. Knowledge targets must not overwrite the "
     "reserved recovery-evidence archive or its contents."
 )
@@ -369,7 +369,7 @@ def validate_analysis(analysis, result_schema, sources):
             or len(analysis["summary"]) > 400
             or len(result["summary"]) > 400
             or any(
-                len(document["content"]) > 2000
+                len(document["content"]) > 3200
                 for document in analysis["knowledge_files"]
             )
         ):
@@ -456,7 +456,7 @@ def analysis_schema(result_schema, *, recovery=False):
         schema["properties"]["study_result"]["anyOf"][0] = bounded_result
         knowledge = schema["properties"]["knowledge_files"]
         knowledge["maxItems"] = 2
-        knowledge["items"]["properties"]["content"] = {**_TEXT, "maxLength": 2000}
+        knowledge["items"]["properties"]["content"] = {**_TEXT, "maxLength": 3200}
     return schema
 
 
@@ -474,7 +474,7 @@ def recovery_author_schema(result_schema):
         outcome = result["properties"]["human_request"]
         del outcome["properties"]["evidence"]
         outcome["required"].remove("evidence")
-    fields["knowledge_files"]["items"]["properties"]["content"]["maxLength"] = 1200
+    fields["knowledge_files"]["items"]["properties"]["content"]["maxLength"] = 2400
     return schema
 
 
@@ -553,13 +553,13 @@ def bind_recovery_analysis(candidate, sources):
                     raise ValueError("Recovery has contradictory provenance footer")
                 else:
                     document["content"] = content + footer
-            if not scientific.strip() or len(scientific) > 1200:
+            if not scientific.strip() or len(scientific) > 2400:
                 raise ValueError(
-                    "Recovery scientific knowledge content must be nonempty and at most 1200 characters"
+                    "Recovery scientific knowledge content must be nonempty and at most 2400 characters"
                 )
-            if len(document["content"]) > 2000:
+            if len(document["content"]) > 3200:
                 raise ValueError(
-                    "Recovery knowledge including provenance exceeds 2000 characters"
+                    "Recovery knowledge including provenance exceeds 3200 characters"
                 )
     return record
 
