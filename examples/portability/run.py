@@ -22,7 +22,7 @@ async def execute(study, *, timeout, max_calls):
             calls += 1
             if calls > max_calls:
                 raise RuntimeError("Audit model-call limit reached; inspect artifacts")
-            kwargs.setdefault("max_output_chars", 16000)
+            kwargs.setdefault("max_output_chars", 32768)
             return await super().run(*args, **kwargs)
 
     task = asyncio.create_task(run(study, native_factory=BoundedNative))
@@ -43,7 +43,7 @@ def main():
     parser.add_argument("study", type=Path, help="New private Study directory")
     parser.add_argument("--model", default="gpt-6.1-sol")
     parser.add_argument("--effort", default="medium")
-    parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--max-model-calls", type=int, default=18)
     parser.add_argument(
         "--run", action="store_true", help="Start authorized model calls and CPU audit"

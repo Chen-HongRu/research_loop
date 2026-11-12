@@ -47,6 +47,8 @@ revision (from project Git HEAD), platform, Python executable/version, installed
 pytest version, imported research_loop module path, actual test selection,
 pytest exit code, elapsed seconds, tests/failures/errors/skipped, and JUnit/log
 paths. Derive counts from the actual JUnit XML; never hardcode passing totals.
+Use the recorded Git revision and environment metadata for identity; do not add
+content scans or hashes of source, logs, JUnit or other produced artifacts.
 Keep stdout/stderr in `pytest.log`. A normal completed pytest exit 0 or 1 means
 the audit runner finished; preserve a nonzero pytest exit as a negative finding
 in metrics. Setup/internal errors, missing output or timeout fail the runner.

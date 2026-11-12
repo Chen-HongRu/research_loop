@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from research_loop.group_programs.synthesis import (
+    analysis_schema,
     bind_recovery_analysis,
     recovery_author_schema,
 )
@@ -541,6 +542,100 @@ def test_synthesis_delivers_dynamic_human_result_and_every_manifest_source(tmp_p
         assert exported.read_text() == source["content"]
     assert [call[0] for call in calls] == ["analyst", "critic"]
     assert "No-useful-action stop requires" in calls[-1][2]
+
+
+def test_synthesis_author_selects_host_receipts_and_preserves_auxiliary_evidence(
+    tmp_path,
+):
+    request = {
+        "id": "typed-receipts",
+        "text": "Execute and independently evaluate once.",
+    }
+    execution = write(tmp_path / "execution.json", {"exit_code": 0, "running": False})
+    evaluation = write(
+        tmp_path / "evaluate.json", {"summary": "Observed result", "help": ""}
+    )
+    auxiliary = write(
+        tmp_path / "runner-receipt.json", {"runner_exit_code": 0, "pytest_exit_code": 0}
+    )
+    authored = synthesis(request, executions=[execution], analyses=[evaluation])
+    authored["study_result"]["evidence"].append(auxiliary)
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analyst", authored), ("critic", synthesis_review())],
+        request=request,
+    )
+
+    async def scenario():
+        return await boundary(
+            runtime,
+            await runtime.start("synthesis", task, [execution, evaluation, auxiliary]),
+        )
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    fields = calls[0][4]["properties"]
+    assert fields["execution_refs"]["items"] == {"type": "string", "enum": [execution]}
+    assert fields["analysis_refs"]["items"] == {"type": "string", "enum": [evaluation]}
+    assert (
+        auxiliary
+        in json.loads(artifact(row, "study-result.json").read_text())["evidence"]
+    )
+    assert "ONLY standardized host execution receipts" in calls[0][2]
+
+
+@pytest.mark.parametrize("field", ["execution_refs", "analysis_refs"])
+def test_synthesis_rejects_auxiliary_primary_receipt_when_transport_bypasses_schema(
+    tmp_path, field
+):
+    execution = write(tmp_path / "execution.json", {"exit_code": 0})
+    evaluation = write(
+        tmp_path / "evaluate.json", {"summary": "Observed result", "help": ""}
+    )
+    auxiliary = write(
+        tmp_path / "runner-receipt.json", {"runner_exit_code": 0, "pytest_exit_code": 0}
+    )
+    authored = synthesis(executions=[execution], analyses=[evaluation])
+    authored[field].append(auxiliary)
+    runtime, task, calls = setup(tmp_path, "synthesis", [("analyst", authored)])
+
+    async def scenario():
+        return await boundary(
+            runtime,
+            await runtime.start("synthesis", task, [execution, evaluation, auxiliary]),
+        )
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "failed", row
+    assert "outside the admitted schema" in row["error"]
+    assert len(calls) == 1
+
+
+def test_synthesis_receipt_schema_uses_only_admitted_names_without_reading_files(
+    tmp_path,
+):
+    schema = result_schema(RESULT_SCHEMA, None)
+    execution = str(tmp_path / "not-created/execution.json")
+    evaluation = str(tmp_path / "not-created/evaluate.json")
+    custom = str(tmp_path / "custom.json")
+    sources = {
+        "input_refs": [execution, custom],
+        "feedback_refs": [evaluation, execution],
+    }
+    fields = analysis_schema(schema, sources=sources)["properties"]
+    assert fields["execution_refs"]["items"]["enum"] == [execution]
+    assert fields["analysis_refs"]["items"]["enum"] == [evaluation]
+    generic = analysis_schema(schema)
+    assert analysis_schema(schema, sources={"input_refs": [custom]}) == generic
+    partial = analysis_schema(schema, sources={"feedback_refs": [evaluation]})[
+        "properties"
+    ]
+    assert partial["execution_refs"]["items"] == {"type": "string"}
+    assert partial["analysis_refs"]["items"]["enum"] == [evaluation]
+    assert analysis_schema(schema, recovery=True, sources=sources) == analysis_schema(
+        schema, recovery=True
+    )
 
 
 def test_synthesis_accept_explanation_does_not_request_assistance(tmp_path):

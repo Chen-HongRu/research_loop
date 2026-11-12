@@ -47,6 +47,11 @@ AUTHOR_INSTRUCTIONS = (
     "AND independent analysis: cite admitted small JSON exit_code=0 receipts in "
     "execution_refs and independent evaluate JSON receipts (help='') in analysis_refs. Preparation/failure "
     "alone leaves it pending or blocked. Include those references in its evidence. "
+    "Use ONLY standardized host execution receipts in execution_refs and independent "
+    "evaluation receipts in analysis_refs. When supplied, choose the exact admitted "
+    "execution.json and evaluate.json paths allowed by those fields. Auxiliary runner "
+    "receipts, logs and result files belong in study_result.evidence or knowledge, "
+    "not primary execution_refs. "
     "Return knowledge_files [{source,target,content}] containing actual scientific "
     "text, including target=index.md and substantive findings/frontier as needed. "
     "Use relative paths, unique source basenames, source under knowledge/. Merge "
@@ -325,7 +330,15 @@ def _completed_request_evidence(result, analysis, sources):
 
 def validate_analysis(analysis, result_schema, sources):
     """Validate completion and knowledge delivery without scientific judgment."""
-    _validate(analysis, analysis_schema(result_schema))
+    recovery = sources.get("recovery_evidence") or sources.get("study_context", {}).get(
+        "input", {}
+    ).get("shared_input", {})
+    is_recovery = (
+        isinstance(recovery, dict) and recovery.get("kind") == "exp-recovery-v1"
+    )
+    _validate(
+        analysis, analysis_schema(result_schema, recovery=is_recovery, sources=sources)
+    )
     result = analysis["study_result"]
     _validate(result, result_schema)
     _completed_request_evidence(result, analysis, sources)
@@ -364,10 +377,7 @@ def validate_analysis(analysis, result_schema, sources):
         targets.add(str(target))
     if "index.md" not in targets:
         raise ValueError("Synthesis must author a real knowledge index")
-    recovery = sources.get("recovery_evidence") or sources.get("study_context", {}).get(
-        "input", {}
-    ).get("shared_input", {})
-    if isinstance(recovery, dict) and recovery.get("kind") == "exp-recovery-v1":
+    if is_recovery:
         if (
             len(analysis["knowledge_files"]) != 2
             or len(analysis["summary"]) > 400
@@ -424,7 +434,7 @@ def validate_analysis(analysis, result_schema, sources):
     return result
 
 
-def analysis_schema(result_schema, *, recovery=False):
+def analysis_schema(result_schema, *, recovery=False, sources=None):
     """Strict Author result contract shared with the recovery Lead baseline."""
     schema = _schema(
         {
@@ -452,6 +462,21 @@ def analysis_schema(result_schema, *, recovery=False):
             },
         }
     )
+
+    if sources and not recovery:
+        admitted = dict.fromkeys(
+            [*sources.get("input_refs", []), *sources.get("feedback_refs", [])]
+        )
+        for field, basename in (
+            ("execution_refs", "execution.json"),
+            ("analysis_refs", "evaluate.json"),
+        ):
+            choices = [ref for ref in admitted if Path(ref).name == basename]
+            if choices:
+                schema["properties"][field] = {
+                    "type": "array",
+                    "items": {**_TEXT, "enum": choices},
+                }
 
     if recovery:
         bounded_result = deepcopy(result_schema)
@@ -589,7 +614,7 @@ async def run(ctx, payload):
     author_schema = (
         recovery_author_schema(result_schema)
         if recovery
-        else analysis_schema(result_schema)
+        else analysis_schema(result_schema, sources=sources)
     )
     if recovery:
         sources["recovery_evidence"] = packet

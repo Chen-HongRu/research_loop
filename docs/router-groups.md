@@ -37,6 +37,11 @@ The reference workflow programs are in [`group_programs`](../src/research_loop/g
 - **Direction** uses Scout for autonomous exploration and Proposer to select a question and its scientific constraints. An explicit human experiment skips Scout. Direction version 2 receives `frontier_ref` and `experiment_task_ref` for actual JSON files authored in its own work directory; Python validates and publishes those files without filling scientific fields. Its independent Critic returns `accept` or `revise` with a nonempty reason. Only `revise` requests assistance; an acceptance explanation never holds the Run.
 - **Experiment** uses H11 Plan and Prepare in one context, host execution, and independent Critic Evaluate including analysis of the individual experiment. It returns reports or assistance requests, not a Study result.
 - **Synthesis** uses Analyst and a fresh Critic to integrate evidence across experiments, maintain scientific knowledge and author the strict Study result and knowledge manifest. Its Critic returns an explicit `accept` or `revise` verdict and a reason; only `revise` creates an assistance request.
+
+Synthesis version 5 constrains its primary receipt slots to the exact admitted
+`execution.json` and `evaluate.json` references when supplied by the reference
+workflow. Auxiliary runner/log/result reports remain supporting evidence. The
+host still validates receipt contents before request completion.
 - **Diagnosis** handles out-of-scope faults and produces a diagnosis, patch or report in its own workspace.
 
 The H11 common and three phase instructions retain the text from the evaluated source; Group boundaries, permissions and schemas are a new integration. Published scientific files carry the frontier and positive and negative results across rounds, rather than relying on Lead conversation history. Assistance feedback retries a blocked stage and retains completed execution. A known nonzero execution requires a separate diagnosis or repair task.
