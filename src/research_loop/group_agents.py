@@ -280,6 +280,8 @@ class NativeGroupServices:
                                     if key != "shared_input"
                                 },
                             }
+                    if "study_context" in assignment["assignment"]:
+                        assignment.pop("study_context", None)
                 if include_role_template:
                     assignment["role_template"] = self.role_sections[role]
                 result = await native.run(

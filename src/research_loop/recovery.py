@@ -18,6 +18,7 @@ from .group_programs.synthesis import (
     RECOVERY_INSTRUCTIONS,
     REVIEW_INSTRUCTIONS,
     _CRITIC,
+    bind_recovery_analysis,
     validate_analysis,
 )
 from .groups import GroupRuntime
@@ -141,8 +142,9 @@ class LeadRecoveryServices(NativeGroupServices):
         )
 
         async def review(candidate):
-            validate_analysis(candidate, self.study_context["output_schema"], sources)
-            if self.ctx.state.get("lead_accepted_candidate") == candidate:
+            canonical = bind_recovery_analysis(candidate, sources)
+            validate_analysis(canonical, self.study_context["output_schema"], sources)
+            if self.ctx.state.get("lead_accepted_candidate") == canonical:
                 return {
                     "review": self.ctx.state["lead_review"],
                     "accepted_candidate": candidate,
@@ -152,7 +154,7 @@ class LeadRecoveryServices(NativeGroupServices):
                 raise RuntimeError(
                     "Recovery review budget exhausted; no automatic review retry"
                 )
-            write_json(self.ctx.work / "lead-candidate.json", candidate)
+            write_json(self.ctx.work / "lead-candidate.json", canonical)
             reviews.append({"status": "running", "at": now()})
             self.ctx.save_state()
             assessment = await super(LeadRecoveryServices, self).call(
@@ -161,16 +163,17 @@ class LeadRecoveryServices(NativeGroupServices):
                 REVIEW_INSTRUCTIONS + RECOVERY_INSTRUCTIONS,
                 {
                     **sources,
-                    "analysis_record": candidate,
+                    "analysis_record": canonical,
                     "recovery_evidence": self.study_context["input"]["shared_input"],
                 },
                 _CRITIC,
                 allow_tools=False,
+                include_role_template=False,
             )
             reviews[-1].update(status="completed", verdict=assessment["verdict"])
             self.ctx.state["lead_review"] = assessment
             if assessment["verdict"] == "accept":
-                self.ctx.state["lead_accepted_candidate"] = deepcopy(candidate)
+                self.ctx.state["lead_accepted_candidate"] = deepcopy(canonical)
             self.ctx.save_state()
             write_json(self.ctx.work / "lead-review.json", assessment)
             return {
@@ -203,6 +206,8 @@ class LeadRecoveryServices(NativeGroupServices):
             self.ctx.state["lead_thread_id"] = thread_id
             self.ctx.save_state()
             self._roles(thread_id, context, "lead", "running")
+            if getattr(self, "lead_started", None):
+                self.lead_started(thread_id)
 
         try:
             await native.open()
@@ -234,6 +239,7 @@ class LeadRecoveryServices(NativeGroupServices):
                 delegation="none",
                 allow_builtin_tools=False,
             )
+            result = bind_recovery_analysis(result, sources)
             call.update(status="completed", result=deepcopy(result))
             self.ctx.state["lead_author_status"] = "completed"
             if result != self.ctx.state.get("lead_accepted_candidate"):
@@ -263,18 +269,25 @@ class RecoveryLeadCoordinator(GroupCoordinator):
     """Controlled Lead comparison sharing the exact Group publication contract."""
 
     async def open(self):
+        self.on_started = None
+
+        def services(ctx):
+            service = LeadRecoveryServices(
+                ctx, self.config, self.journal, native_factory=self.native_factory
+            )
+            service.lead_started = lambda thread: (
+                self.on_started(thread) if self.on_started else None
+            )
+            return service
+
         self.runtime = GroupRuntime(
             self.root,
             self.definitions,
-            service_factory=lambda ctx: LeadRecoveryServices(
-                ctx,
-                self.config,
-                self.journal,
-                native_factory=self.native_factory,
-            ),
+            service_factory=services,
         )
 
     async def decide(self, packet, on_started):
+        self.on_started = on_started
         if packet["runs"]:
             raise RuntimeError(
                 "Recovery Lead could not complete its bounded publication task"

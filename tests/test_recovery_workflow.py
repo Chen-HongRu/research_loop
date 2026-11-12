@@ -15,16 +15,10 @@ settled_exp = _settled_exp
 
 
 def candidate(sources):
-    packet = sources["recovery_evidence"]
     request = sources["study_context"]["input"].get("human_request")
-    refs = [
-        packet[key]
-        for key in ("execution_ref", "evaluation_ref", "original_evaluation_ref")
-    ]
     result = dict(
         summary="Recovered the existing independent assessment.",
         goal="achieved",
-        evidence=refs,
         limitations=["Synthetic only; no new computation."],
         next_action="",
         study_action="stop",
@@ -34,13 +28,11 @@ def candidate(sources):
         result["human_request"] = dict(
             id=request["id"],
             status="completed",
-            evidence=refs,
             reason="Existing execution and independent assessment are published.",
         )
     return dict(
         summary=result["summary"],
         help="",
-        artifacts=[],
         study_result=result,
         knowledge_files=[
             dict(
@@ -51,13 +43,9 @@ def candidate(sources):
             dict(
                 source="knowledge/finding.md",
                 target="finding.md",
-                content="Existing result retained; synthetic only. Original assessment: "
-                + refs[2],
+                content="Existing result retained; synthetic only.",
             ),
         ],
-        execution_refs=[refs[0]],
-        analysis_refs=[refs[1]],
-        direction_refs=[],
         stop_basis="goal-satisfied",
     )
 

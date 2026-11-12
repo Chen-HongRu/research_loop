@@ -170,7 +170,10 @@ def test_recovery_evidence_is_serialized_once_without_mutating_inputs(
         assert json.dumps(packet).count("synthetic unique marker") == (
             1 if recovery else 2
         )
-        for scope in (packet, packet["assignment"]):
+        if recovery:
+            assert "study_context" not in packet
+        scopes = (packet["assignment"],) if recovery else (packet, packet["assignment"])
+        for scope in scopes:
             assert scope["study_context"]["input"]["scoped_metadata"] == {
                 "scope": "synthetic"
             }

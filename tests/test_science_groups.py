@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from research_loop.group_programs.synthesis import (
+    bind_recovery_analysis,
+    recovery_author_schema,
+)
 from research_loop.groups import GroupDefinition, GroupRuntime
 from research_loop.human_input import result_schema
 from research_loop.instructions import RESULT_SCHEMA
@@ -31,7 +35,7 @@ class Services:
     async def call(self, role, context, instructions, payload, schema, **kwargs):
         packet = self.study_context.get("input", {}).get("shared_input", {})
         if isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1":
-            assert kwargs == {"allow_tools": False}
+            assert kwargs == {"allow_tools": False, "include_role_template": False}
         else:
             assert kwargs == {}
         self.calls.append((role, context, instructions, payload, schema))
@@ -813,7 +817,33 @@ def recovery_candidate(tmp_path):
         f"Original independent assessment: {original}. "
         "One synthetic experiment; no general causal conclusion.\n"
     )
+    authored = bind_recovery_analysis(authored, recovery_sources(request, packet, refs))
     return request, packet, authored, refs
+
+
+def recovery_sources(request, packet, refs):
+    return {
+        "study_context": {
+            "input": {"human_request": request, "shared_input": packet},
+            "output_schema": result_schema(RESULT_SCHEMA, request),
+        },
+        "input_refs": refs,
+        "recovery_evidence": packet,
+    }
+
+
+def compact_recovery(authored):
+    compact = copy.deepcopy(authored)
+    for key in ("artifacts", "execution_refs", "analysis_refs", "direction_refs"):
+        del compact[key]
+    del compact["study_result"]["evidence"]
+    if "human_request" in compact["study_result"]:
+        del compact["study_result"]["human_request"]["evidence"]
+    for document in compact["knowledge_files"]:
+        document["content"] = document["content"].split(
+            "\n\n<!-- recovery-provenance -->"
+        )[0]
+    return compact
 
 
 def test_recovery_synthesis_has_inline_tool_free_author_and_candidate_review(tmp_path):
@@ -828,7 +858,7 @@ def test_recovery_synthesis_has_inline_tool_free_author_and_candidate_review(tmp
     runtime, task, calls = setup(
         tmp_path,
         "synthesis",
-        [("analyst", authored), ("critic", review)],
+        [("analyst", compact_recovery(authored)), ("critic", review)],
         request=request,
         shared_input=packet,
     )
@@ -874,7 +904,7 @@ def test_recovery_completion_requires_original_identity_and_final_disposition(
     elif missing == "human_evidence":
         authored["study_result"]["human_request"]["evidence"] = refs[:-1]
     elif missing == "knowledge":
-        authored["knowledge_files"][1]["content"] = "Original identity omitted."
+        authored["knowledge_files"][1]["content"] = ""
     elif missing == "goal":
         authored["study_result"]["goal"] = "not-achieved"
     elif missing == "status":
@@ -981,7 +1011,7 @@ def test_recovery_synthesis_without_admitted_human_request(tmp_path):
     runtime, task, calls = setup(
         tmp_path,
         "synthesis",
-        [("analyst", authored), ("critic", synthesis_review())],
+        [("analyst", compact_recovery(authored)), ("critic", synthesis_review())],
         shared_input=packet,
     )
 
@@ -1003,3 +1033,150 @@ def test_recovery_synthesis_without_admitted_human_request(tmp_path):
         not in calls[0][4]["properties"]["study_result"]["anyOf"][0]["properties"]
     )
     assert calls[-1][3]["analysis_record"] == authored
+
+
+def test_recovery_compact_schema_omits_all_mechanical_citations():
+    request = {"id": "compact-request", "text": "Publish reviewed evidence."}
+    schema = recovery_author_schema(result_schema(RESULT_SCHEMA, request))
+    properties = schema["properties"]
+    assert not {
+        "artifacts",
+        "execution_refs",
+        "analysis_refs",
+        "direction_refs",
+    }.intersection(properties)
+    result = properties["study_result"]["anyOf"][0]["properties"]
+    assert "evidence" not in result
+    assert "evidence" not in result["human_request"]["properties"]
+    assert (
+        properties["knowledge_files"]["items"]["properties"]["content"]["maxLength"]
+        == 1200
+    )
+
+
+def test_recovery_binder_preserves_science_and_is_idempotent(tmp_path):
+    request, packet, expected, refs = recovery_candidate(tmp_path)
+    candidate = compact_recovery(expected)
+    original = copy.deepcopy(candidate)
+    sources = recovery_sources(request, packet, refs)
+    bound = bind_recovery_analysis(candidate, sources)
+    assert candidate == original
+    assert bound == expected
+    assert bind_recovery_analysis(bound, sources) == bound
+    assert bound["study_result"]["evidence"] == refs
+    assert bound["study_result"]["human_request"]["evidence"] == refs
+    for key, value in original["study_result"].items():
+        if key != "human_request":
+            assert bound["study_result"][key] == value
+    for key, value in original["study_result"]["human_request"].items():
+        assert bound["study_result"]["human_request"][key] == value
+    content = bound["knowledge_files"][1]["content"]
+    assert content.startswith(original["knowledge_files"][1]["content"])
+    assert "Host-added provenance" in content
+    assert "(../recovery-evidence/original-evaluation.json)" in content
+    assert len(content) <= 2000
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["summary", "help", "stop_basis", "knowledge_files", "study_action", "limitations"],
+)
+def test_recovery_binder_rejects_missing_scientific_fields(tmp_path, field):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    candidate = compact_recovery(authored)
+    fields = (
+        candidate["study_result"]
+        if field in {"study_action", "limitations"}
+        else candidate
+    )
+    del fields[field]
+    with pytest.raises(ValueError, match="fields do not match"):
+        bind_recovery_analysis(candidate, recovery_sources(request, packet, refs))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "artifacts",
+        "execution_refs",
+        "analysis_refs",
+        "direction_refs",
+        "study_evidence",
+        "human_evidence",
+        "footer",
+    ],
+)
+def test_recovery_binder_rejects_contradictory_mechanical_fields(tmp_path, field):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    if field == "study_evidence":
+        authored["study_result"]["evidence"] = ["contradictory-receipt"]
+    elif field == "human_evidence":
+        authored["study_result"]["human_request"]["evidence"] = [
+            "contradictory-receipt"
+        ]
+    elif field == "footer":
+        authored["knowledge_files"][1]["content"] += "Contradictory footer suffix"
+    else:
+        authored[field] = ["contradictory-receipt"]
+    with pytest.raises(ValueError, match="contradictory"):
+        bind_recovery_analysis(authored, recovery_sources(request, packet, refs))
+
+
+def test_recovery_binder_preserves_authored_disposition_and_help(tmp_path):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    candidate = compact_recovery(authored)
+    candidate.update(
+        summary="Scientific correction needed", help="Review uncertainty", stop_basis=""
+    )
+    candidate["study_result"].update(
+        goal="not-achieved",
+        study_action="continue",
+        stop_reason="",
+        next_action="Resolve the scientific uncertainty without new compute.",
+        limitations=["Unresolved scientific ambiguity."],
+    )
+    candidate["study_result"]["human_request"].update(
+        status="pending", reason="The admitted request remains unresolved."
+    )
+    bound = bind_recovery_analysis(candidate, recovery_sources(request, packet, refs))
+    for key in ("summary", "help", "stop_basis"):
+        assert bound[key] == candidate[key]
+    for key in ("goal", "study_action", "stop_reason", "next_action", "limitations"):
+        assert bound["study_result"][key] == candidate["study_result"][key]
+    assert bound["study_result"]["human_request"]["status"] == "pending"
+    assert (
+        bound["study_result"]["human_request"]["reason"]
+        == candidate["study_result"]["human_request"]["reason"]
+    )
+
+
+def test_recovery_scientific_critic_can_request_revision(tmp_path):
+    request, packet, authored, refs = recovery_candidate(tmp_path)
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [
+            ("analyst", compact_recovery(authored)),
+            (
+                "critic",
+                synthesis_review(
+                    "revise",
+                    "Preserve the original uncertainty in the scientific prose.",
+                ),
+            ),
+        ],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        return await boundary(runtime, await runtime.start("synthesis", task, refs))
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert row["output"]["completion"] == "blocked"
+    assert "original uncertainty" in row["output"]["help"]
+    assert len(calls) == 2
+    assert not any(
+        Path(ref).name == "study-result.json" for ref in row["output"]["artifacts"]
+    )

@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import json
+import posixpath
 from pathlib import Path, PurePosixPath
 
 
@@ -85,24 +86,29 @@ REVIEW_INSTRUCTIONS = (
 RECOVERY_INSTRUCTIONS = (
     " Recovery-only contract: recovery_evidence is the complete bounded inline "
     "evidence packet; use its contents without opening paths or using tools. "
-    "The exact formal completion criterion is already settled by the completed "
-    "original Exp. Do not execute compute, recompute metrics, reinterpret the "
-    "criterion, or review the whole Exp again. Author only the Study disposition "
-    "and knowledge publication delta, preserving original constraints, negative "
-    "evidence and limitations. Cite execution_ref, evaluation_ref and "
-    "original_evaluation_ref in Study evidence, and cite original_evaluation_ref "
-    "in substantive knowledge text. The required recovery disposition is "
-    "goal=achieved, study_action=stop and stop_basis=goal-satisfied. Only when "
-    "study_context.input.human_request is admitted, preserve its identity, set "
-    "human_request.status=completed and cite those same three references in its "
-    "evidence. Without an admitted human request, never invent human_request. "
-    "Review only the candidate delta against this packet; do not invent new "
-    "causal claims or leave scientific authorship to the Critic. Publication paths "
-    "are literal destinations, never sources of additional scientific evidence. "
-    "The Critic's full candidate is analysis_record, including study_result and "
-    "knowledge_files. Return exactly two knowledge_files, each content at most "
-    "2000 characters, and summaries at most 400 characters. Knowledge targets "
-    "must not overwrite the reserved recovery-evidence archive or its contents."
+    "Do not return help solely because tools or paths are unavailable: the packet "
+    "contains the required evidence. The formal criterion is already settled by "
+    "the completed original Exp. Do not execute compute, recompute metrics, "
+    "reinterpret the criterion, or review the whole Exp again. Author only the "
+    "scientific Study disposition and knowledge publication delta, preserving "
+    "original constraints, negative evidence and limitations. Python binds exact "
+    "receipt citations and appends a mechanical provenance footer to substantive "
+    "knowledge. For the Author, the compact response schema overrides the generic "
+    "citation requirements and full publication output_schema; Python supplies "
+    "those publication fields. Omit evidence, artifacts and execution/analysis/direction refs "
+    "from your compact Author result. The recovery disposition is goal=achieved, "
+    "study_action=stop and stop_basis=goal-satisfied. Only when "
+    "study_context.input.human_request is admitted, preserve its identity and "
+    "author its status=completed and reason; never invent a human request. "
+    "The Critic's full canonical candidate is analysis_record, including "
+    "study_result and knowledge_files. Review only this candidate delta against "
+    "the packet; do not invent new causal claims or leave scientific authorship "
+    "to the Critic. Scientific review may accept or request bounded revision. "
+    "Publication paths are literal destinations, never additional evidence. "
+    "Author exactly two knowledge_files, each scientific content at most 1200 "
+    "characters (the final document with provenance is at most 2000), and "
+    "summaries at most 400 characters. Knowledge targets must not overwrite the "
+    "reserved recovery-evidence archive or its contents."
 )
 
 
@@ -194,8 +200,14 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
             instructions,
             assignment,
             schema,
-            **({"allow_tools": False} if recovery else {}),
+            **(
+                {"allow_tools": False, "include_role_template": False}
+                if recovery
+                else {}
+            ),
         )
+        if recovery and name == "analysis":
+            record = bind_recovery_analysis(record, assignment)
         stages[name] = record
         ctx.save_state()
         _json(ctx, f"reports/history/{ctx.round:06d}-{name}.json", record)
@@ -448,6 +460,110 @@ def analysis_schema(result_schema, *, recovery=False):
     return schema
 
 
+def recovery_author_schema(result_schema):
+    """Scientific Author fields only; receipt identities are bound by Python."""
+    schema = analysis_schema(result_schema, recovery=True)
+    fields = schema["properties"]
+    for field in ("artifacts", "execution_refs", "analysis_refs", "direction_refs"):
+        del fields[field]
+        schema["required"].remove(field)
+    result = fields["study_result"]["anyOf"][0]
+    del result["properties"]["evidence"]
+    result["required"].remove("evidence")
+    if "human_request" in result["properties"]:
+        outcome = result["properties"]["human_request"]
+        del outcome["properties"]["evidence"]
+        outcome["required"].remove("evidence")
+    fields["knowledge_files"]["items"]["properties"]["content"]["maxLength"] = 1200
+    return schema
+
+
+def bind_recovery_analysis(candidate, sources):
+    """Bind only deterministic citations/provenance, preserving scientific fields."""
+    packet = sources.get("recovery_evidence") or sources["study_context"]["input"].get(
+        "shared_input", {}
+    )
+    if not isinstance(packet, dict) or packet.get("kind") != "exp-recovery-v1":
+        raise ValueError("Recovery binding requires the admitted evidence packet")
+    refs = [
+        packet.get(key)
+        for key in ("execution_ref", "evaluation_ref", "original_evaluation_ref")
+    ]
+    if any(not isinstance(ref, str) or not ref for ref in refs):
+        raise ValueError("Recovery binding requires exact receipt identities")
+    record = deepcopy(candidate)
+
+    def bind(fields, key, expected):
+        if key in fields and fields[key] != expected:
+            raise ValueError(f"Recovery has contradictory mechanical field: {key}")
+        fields[key] = expected
+
+    bind(record, "artifacts", [])
+    bind(record, "execution_refs", [packet["execution_ref"]])
+    bind(record, "analysis_refs", [packet["evaluation_ref"]])
+    bind(record, "direction_refs", [])
+    result = record.get("study_result")
+    if isinstance(result, dict):
+        bind(result, "evidence", refs)
+        if "human_request" in result:
+            bind(result["human_request"], "evidence", refs)
+    output_schema = sources["study_context"]["output_schema"]
+    _validate(record, analysis_schema(output_schema, recovery=True))
+    if isinstance(result, dict):
+        _validate(result, output_schema)
+    elif result != "" or not record["help"]:
+        raise ValueError("Recovery requires an authored Study result or explicit help")
+    documents = record["knowledge_files"]
+    if documents:
+        archive = packet.get("publication_paths", {}).get(
+            packet["original_evaluation_ref"]
+        )
+        if not isinstance(archive, str) or not archive:
+            raise ValueError(
+                "Recovery binding requires the original evaluation archive path"
+            )
+        _relative(archive)
+        substantive = next(
+            (
+                document
+                for document in documents
+                if document.get("target") != "index.md"
+            ),
+            None,
+        )
+        if substantive is None:
+            raise ValueError(
+                "Recovery requires substantive knowledge alongside its index"
+            )
+        target = _relative(substantive["target"])
+        archive_link = posixpath.relpath(archive, str(target.parent))
+        footer = (
+            "\n\n<!-- recovery-provenance -->\n"
+            "Host-added provenance (receipt identity only; no scientific claim):\n"
+            f"Original evaluation: {packet['original_evaluation_ref']}\n"
+            f"Archived assessment: [original evaluation]({archive_link})\n"
+        )
+        for document in documents:
+            content = document["content"]
+            scientific = content
+            if document is substantive:
+                if content.endswith(footer):
+                    scientific = content[: -len(footer)]
+                elif "<!-- recovery-provenance -->" in content:
+                    raise ValueError("Recovery has contradictory provenance footer")
+                else:
+                    document["content"] = content + footer
+            if not scientific.strip() or len(scientific) > 1200:
+                raise ValueError(
+                    "Recovery scientific knowledge content must be nonempty and at most 1200 characters"
+                )
+            if len(document["content"]) > 2000:
+                raise ValueError(
+                    "Recovery knowledge including provenance exceeds 2000 characters"
+                )
+    return record
+
+
 async def run(ctx, payload):
     study = _context(ctx, payload)
     if "output_schema" not in study:
@@ -466,7 +582,11 @@ async def run(ctx, payload):
     }
     packet = study.get("input", {}).get("shared_input", {})
     recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"
-    author_schema = analysis_schema(result_schema, recovery=recovery)
+    author_schema = (
+        recovery_author_schema(result_schema)
+        if recovery
+        else analysis_schema(result_schema)
+    )
     if recovery:
         sources["recovery_evidence"] = packet
     analysis = await _stage(
