@@ -165,6 +165,7 @@ class NativeGroupServices:
         include_role_template=True,
         cwd=None,
         allow_tools=True,
+        max_output_chars=None,
     ):
         self.pending_calls += 1
         try:
@@ -178,6 +179,7 @@ class NativeGroupServices:
                 include_role_template=include_role_template,
                 cwd=cwd,
                 allow_tools=allow_tools,
+                max_output_chars=max_output_chars,
             )
         finally:
             self.pending_calls -= 1
@@ -194,6 +196,7 @@ class NativeGroupServices:
         include_role_template,
         cwd,
         allow_tools,
+        max_output_chars,
     ):
         self._admit()
         role = role.lower()
@@ -294,6 +297,11 @@ class NativeGroupServices:
                     on_started=started,
                     delegation="none",
                     allow_tools=allow_tools,
+                    **(
+                        {"max_output_chars": max_output_chars}
+                        if max_output_chars
+                        else {}
+                    ),
                 )
                 call.update(status="completed", result=result, effective=effective)
                 record["status"] = "completed"

@@ -157,6 +157,7 @@ def report(
     # First lead.input is the default window start, independent of file order.
     events = []
     starts = []
+    streamed_threads = set()
     for row in reader.rows(root / "events.jsonl", "events"):
         at = reader.at(row, "events", "at")
         if at is None:
@@ -165,6 +166,17 @@ def report(
             starts.append(at)
         if row.get("event") == "resource.tool":
             events.append((at, row))
+        data = row.get("data")
+        if (
+            at < end
+            and row.get("event") == "codex.event"
+            and str(row.get("method", "")).endswith("/delta")
+            and isinstance(data, dict)
+            and isinstance(data.get("delta"), str)
+            and data["delta"]
+        ):
+            if isinstance(data.get("threadId"), str):
+                streamed_threads.add(data["threadId"])
     if start is None:
         start = min(starts) if starts else None
         if start is None:
@@ -235,7 +247,7 @@ def report(
         seen_calls = set()
         cumulative = _tokens()
         lifetime_responses = 0
-        consumption_evidence = False
+        consumption_evidence = tid in streamed_threads
         token_cutoff_reached = False
         started_at = first_tool_at = completed_at = None
         pending_waits = {}

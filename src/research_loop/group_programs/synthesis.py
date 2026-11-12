@@ -201,7 +201,11 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
             assignment,
             schema,
             **(
-                {"allow_tools": False, "include_role_template": False}
+                {
+                    "allow_tools": False,
+                    "include_role_template": False,
+                    "max_output_chars": 12000 if name == "analysis" else 4000,
+                }
                 if recovery
                 else {}
             ),

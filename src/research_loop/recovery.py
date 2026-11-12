@@ -169,6 +169,7 @@ class LeadRecoveryServices(NativeGroupServices):
                 _CRITIC,
                 allow_tools=False,
                 include_role_template=False,
+                max_output_chars=4000,
             )
             reviews[-1].update(status="completed", verdict=assessment["verdict"])
             self.ctx.state["lead_review"] = assessment
@@ -238,6 +239,7 @@ class LeadRecoveryServices(NativeGroupServices):
                 on_started=started,
                 delegation="none",
                 allow_builtin_tools=False,
+                max_output_chars=12000,
             )
             result = bind_recovery_analysis(result, sources)
             call.update(status="completed", result=deepcopy(result))

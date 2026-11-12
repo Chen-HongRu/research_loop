@@ -35,7 +35,11 @@ class Services:
     async def call(self, role, context, instructions, payload, schema, **kwargs):
         packet = self.study_context.get("input", {}).get("shared_input", {})
         if isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1":
-            assert kwargs == {"allow_tools": False, "include_role_template": False}
+            assert kwargs == {
+                "allow_tools": False,
+                "include_role_template": False,
+                "max_output_chars": 4000 if role == "critic" else 12000,
+            }
         else:
             assert kwargs == {}
         self.calls.append((role, context, instructions, payload, schema))

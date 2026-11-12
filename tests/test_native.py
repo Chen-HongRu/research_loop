@@ -748,3 +748,163 @@ def test_native_start_and_resume_use_workspace_sandbox_and_explicit_cwd(
         journal.close()
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize(
+    "deltas,final,observed",
+    [
+        ([json.dumps({"value": "x" * 40})], None, 53),
+        ([" " * 8] * 3, None, 24),
+        ([], json.dumps({"value": "x" * 40}), 53),
+    ],
+)
+def test_output_limit_interrupts_stream_or_oversized_final(
+    tmp_path, deltas, final, observed
+):
+    from types import SimpleNamespace
+
+    class LimitedClient(Client):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.interrupted = False
+            self.read_after_interrupt = False
+            self.release = threading.Event()
+            events = [("item/agentMessage/delta", {"delta": delta}) for delta in deltas]
+            if final is not None:
+                events.append(
+                    (
+                        "item/completed",
+                        {"item": {"type": "agentMessage", "text": final}},
+                    )
+                )
+            self.notifications = iter(events)
+
+        def next_turn_notification(self, turn_id):
+            if self.interrupted:
+                self.read_after_interrupt = True
+                self.release.wait(5)
+                raise RuntimeError("Transport never emitted turn/completed")
+            method, payload = next(self.notifications)
+            return SimpleNamespace(method=method, payload=payload)
+
+        def turn_interrupt(self, thread_id, turn_id):
+            super().turn_interrupt(thread_id, turn_id)
+            # Acknowledge the interrupt without ever emitting turn/completed.
+            self.interrupted = True
+
+        def close(self):
+            self.release.set()
+            super().close()
+
+    async def check():
+        journal = Journal(tmp_path / "events")
+        native = Native(None, journal, client_factory=LimitedClient)
+        await native.open()
+        try:
+            with pytest.raises(
+                RuntimeError, match="Native output exceeded max_output_chars"
+            ):
+                async with asyncio.timeout(1):
+                    await native.run(
+                        "bounded",
+                        {},
+                        {},
+                        model="gpt-6.1-sol",
+                        effort="medium",
+                        delegation="none",
+                        max_output_chars=16,
+                    )
+            assert native.stopping and native.active
+            assert not native.settled and not native.closed
+            assert not native.client.read_after_interrupt
+            assert native.client.calls.count(("turn/interrupt", "lead")) == 1
+            await native.settle()
+        finally:
+            await native.close()
+            journal.close()
+        assert native.settled and native.closed
+        rows = [
+            json.loads(line) for line in (tmp_path / "events").read_text().splitlines()
+        ]
+        limits = [row for row in rows if row["event"] == "native.output_limit"]
+        assert len(limits) == 1
+        assert limits[0]["observed_chars"] == observed
+        assert limits[0]["max_output_chars"] == 16
+        assert set(limits[0]) == {"at", "event", "observed_chars", "max_output_chars"}
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("limit", [None, len(json.dumps(RESULT))])
+def test_output_limit_preserves_default_and_does_not_double_count_final(
+    tmp_path, limit
+):
+    from types import SimpleNamespace
+
+    class CompleteClient(Client):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            text = json.dumps(RESULT)
+            self.notifications = iter(
+                [
+                    ("item/agentMessage/delta", {"delta": text[:10]}),
+                    ("item/agentMessage/delta", {"delta": text[10:]}),
+                    (
+                        "item/completed",
+                        {"item": {"type": "agentMessage", "text": text}},
+                    ),
+                    ("turn/completed", {"turn": {"status": "completed"}}),
+                ]
+            )
+
+        def next_turn_notification(self, turn_id):
+            method, payload = next(self.notifications)
+            return SimpleNamespace(method=method, payload=payload)
+
+    async def check():
+        journal = Journal(tmp_path / "events")
+        native = Native(None, journal, client_factory=CompleteClient)
+        await native.open()
+        try:
+            result = await native.run(
+                "bounded",
+                {},
+                {},
+                model="gpt-6.1-sol",
+                effort="medium",
+                delegation="none",
+                max_output_chars=limit,
+            )
+            assert result == RESULT
+            assert ("turn/interrupt", "lead") not in native.client.calls
+        finally:
+            await native.close()
+            journal.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, False, 1.5, "16"])
+def test_output_limit_requires_positive_integer_before_admission(tmp_path, limit):
+    async def check():
+        journal = Journal(tmp_path / "events")
+        native = Native(None, journal, client_factory=Client)
+        try:
+            with pytest.raises(
+                ValueError, match="max_output_chars must be a positive integer"
+            ):
+                await native.run(
+                    "bounded",
+                    {},
+                    {},
+                    model="gpt-6.1-sol",
+                    effort="medium",
+                    max_output_chars=limit,
+                )
+            assert native.client.definition is None
+            assert native.client.calls == []
+        finally:
+            await native.close()
+            journal.close()
+
+    asyncio.run(check())

@@ -234,6 +234,27 @@ def test_counter_reset_is_reported_without_negative_usage(study):
     assert result["coverage"]["issues"]["sessions:cumulative_counter_decrease"] == 1
 
 
+def test_streamed_output_without_usage_is_unknown_cost_not_awaiting(study):
+    session(study / "native/sessions/a.jsonl", "lead")
+    with (study / "events.jsonl").open("a") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "at": "2026-01-01T00:02:00Z",
+                    "event": "codex.event",
+                    "method": "item/agentMessage/delta",
+                    "data": {"threadId": "lead", "delta": " " * 100},
+                }
+            )
+            + "\n"
+        )
+    result = report(study, until=END)
+    assert not result["llm"]["measurable"]
+    assert not result["coverage"]["complete"]
+    assert result["coverage"]["usage_records_missing_threads"] == ["lead"]
+    assert result["coverage"]["awaiting_first_usage_threads"] == []
+
+
 def test_missing_and_invalid_sources_are_visible(tmp_path):
     (tmp_path / "events.jsonl").write_text("not json\n")
     result = report(tmp_path, until=END)

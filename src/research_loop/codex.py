@@ -590,7 +590,12 @@ class Native:
         environment=None,
         allow_tools=True,
         allow_builtin_tools=True,
+        max_output_chars=None,
     ):
+        if max_output_chars is not None and (
+            type(max_output_chars) is not int or max_output_chars <= 0
+        ):
+            raise ValueError("max_output_chars must be a positive integer or None")
         if delegation not in {"native", "host", "none"}:
             raise ValueError("Delegation mode must be native, host or none")
         if not allow_tools and (delegation != "none" or self.tools):
@@ -670,6 +675,7 @@ class Native:
         if self.stopping:
             await self.stop()
         final = ""
+        stream_chars = 0
         while True:
             notification = await asyncio.to_thread(
                 self.client.next_turn_notification, self.turn_id
@@ -677,6 +683,12 @@ class Native:
             method = notification.method
             data = plain(notification.payload)
             self.journal.emit("codex.event", method=method, data=data)
+            if (
+                max_output_chars is not None
+                and method.endswith("/delta")
+                and "delta" in data
+            ):
+                stream_chars += len(str(data["delta"]))
             item = data.get("item", {})
             kind = item.get("type", "")
             delegation_item = kind in {"collabAgentToolCall", "subAgentActivity"}
@@ -707,6 +719,21 @@ class Native:
                 and item.get("phase") in (None, "final_answer")
             ):
                 final = item.get("text", "")
+            observed_chars = max(stream_chars, len(final))
+            if max_output_chars is not None and observed_chars > max_output_chars:
+                self.journal.emit(
+                    "native.output_limit",
+                    observed_chars=observed_chars,
+                    max_output_chars=max_output_chars,
+                )
+                output_violation = (
+                    "Native output exceeded max_output_chars "
+                    f"({observed_chars} > {max_output_chars})"
+                )
+                await self.stop()
+                # An interrupt receipt does not guarantee a terminal event.
+                # Leave active set until the owner reconciles and closes.
+                raise RuntimeError(output_violation)
             if method == "turn/completed":
                 self.active = False
                 turn = data["turn"]

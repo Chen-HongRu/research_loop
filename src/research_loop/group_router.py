@@ -404,6 +404,7 @@ class GroupCoordinator:
                 effort=self.config["effort"],
                 delegation="none",
                 allow_tools=False,
+                max_output_chars=12000,
                 on_started=started,
             )
             validate_decision(decision, packet)
