@@ -78,6 +78,16 @@ def test_explicit_router_role_overrides_current_coordinator():
     assert identities["router"].role_source == "host-role-record"
 
 
+def test_first_group_author_is_not_reclassified_as_legacy_lead():
+    identities = resolve(
+        "author",
+        [metadata("author")],
+        {"author": {"role": "analyst", "group_run_id": "synthetic-run"}},
+    )
+    assert identities["author"].role == "analyst"
+    assert identities["author"].role_source == "host-role-record"
+
+
 def prepare(tmp_path):
     root = tmp_path / "study"
     write(root / "status.json", {"thread_id": "lead"})

@@ -58,7 +58,8 @@ def resolve(lead, metadata, host_roles):
         host = host_roles.get(tid)
         host = host if isinstance(host, dict) else {}
         task = host.get("task") or row["task"].rsplit("/", 1)[-1]
-        if tid == lead and host.get("role") != "router":
+        explicit_group_role = bool(host.get("group_run_id") and host.get("role"))
+        if tid == lead and host.get("role") != "router" and not explicit_group_role:
             role, role_source = "lead", "lead"
         elif host.get("role"):
             role, role_source = host["role"], "host-role-record"

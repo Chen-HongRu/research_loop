@@ -505,6 +505,7 @@ class Collector:
                 not self._inside(at)
                 or row.get("event") != "resource.tool"
                 or row.get("thread_id") != lead
+                or row.get("resource_effect") is False
             ):
                 continue
             r = self.state["resources"]

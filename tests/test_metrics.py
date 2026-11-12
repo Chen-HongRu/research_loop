@@ -308,6 +308,39 @@ def test_resources_ledger_precedence_and_missing_coverage(study):
         assert not c.poll(END)["coverage"]["complete"]
 
 
+@pytest.mark.parametrize("resource_effect", [False, True, None])
+def test_readonly_callback_needs_no_resource_ledger_and_retains_model_usage(
+    study, resource_effect
+):
+    (study / "gpu-budget.json").unlink()
+    session(study, events=[record()])
+    event = {
+        "at": START,
+        "event": "resource.tool",
+        "thread_id": "lead",
+        "tool": "inspect_evidence",
+        "success": True,
+        "output": {"summary": "Read-only evidence inspected."},
+    }
+    if resource_effect is not None:
+        event["resource_effect"] = resource_effect
+    append(study / "events.jsonl", event)
+
+    with collector(study) as c:
+        result = c.poll(END)
+        readonly = resource_effect is False
+        assert result["resources"]["calls"] == (0 if readonly else 1)
+        assert result["resources"]["by_tool"] == (
+            {} if readonly else {"inspect_evidence": 1}
+        )
+        assert ("ledger:missing" in result["coverage"]["tick_issues"]) is not readonly
+        assert result["coverage"]["complete"] is readonly
+        assert result["allocation"]["available"] is False
+        assert result["llm"]["total"]["responses"] == 1
+        assert result["llm"]["total"]["input_tokens"] == 100
+        assert result["llm"]["total"]["output_tokens"] == 10
+
+
 def test_journal_repair_after_checkpoint_commit(study, monkeypatch):
     session(study, events=[record()])
     c = collector(study)
