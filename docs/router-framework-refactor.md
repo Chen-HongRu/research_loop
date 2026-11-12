@@ -49,6 +49,8 @@ Group 状态为 running → returned → held/closed；已结算失败为 failed
 
 研究 author 阶段以 `ready|blocked` 表示能否推进，`help` 保留说明文字；独立审查使用 `accept|revise`。缺失必需产物、未执行成功和未知操作不能由说明文字绕过。Plan/Prepare 显式共享会话，Evaluate 使用独立会话，命令由 host 执行一次。
 
+Synthesis 的 ready 表示未审查候选已完成，足以交给 host 随后调用的独立 Critic；Author 不等待下游审查才返回。Critic 接受后才导出最终结果，缺失上游证据仍阻塞候选。
+
 发布前关闭本轮工作并确认资源结算。输出仅接纳显式选定的小型产物，发布指针激活是提交事实。提交路径在激活前观察到 STOP 则拒绝激活；已激活的发布保持有效。提交后恢复只重建结果、输入完成状态和下一轮路由投影，不重做实验。
 
 ## 干预与修订

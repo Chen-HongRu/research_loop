@@ -338,3 +338,67 @@ def test_recovery_requires_the_current_exp_status_schema(settled_exp):
         {key: value for key, value in record.items() if key != "status"}
     )
     assert not _strict_evaluation({**record, "status": "other"})
+
+
+def test_recovery_packet_admits_41504_byte_report_without_rewriting(
+    settled_exp, tmp_path
+):
+    from research_workflows.recovery import evidence_packet
+
+    root, _, _ = settled_exp
+    manifest_path, manifest = build_recovery_bundle(root, tmp_path / "bundle")
+    report = {
+        "cases": [
+            {
+                "seed": 1001 + index,
+                "status": "FAILED",
+                "elapsed": 2.0,
+                "reference_duration": 9.0,
+                "joint_within_threshold_fraction": 0.005,
+                "limitation": "Synthetic bounded report only.",
+            }
+            for index in range(96)
+        ],
+        "notes": "",
+    }
+    report["notes"] = "x" * (41504 - len(json.dumps(report)))
+    content = json.dumps(report)
+    assert len(content.encode("utf-8")) == 41504
+    metrics = Path(manifest["metrics_ref"])
+    metrics.write_text(content)
+    packet = evidence_packet(manifest_path)
+    recovered = next(
+        item["content"]
+        for item in packet["evidence_files"]
+        if item["kind"] == "metrics"
+    )
+    assert recovered == report and len(recovered["cases"]) == 96
+    assert metrics.read_text() == content
+    assert len(json.dumps(packet, ensure_ascii=False)) <= 64 * 1024
+
+
+@pytest.mark.parametrize("boundary", ["file", "unicode-file", "packet"])
+def test_recovery_packet_retains_finite_file_bytes_and_packet_character_limits(
+    settled_exp, tmp_path, boundary
+):
+    from research_workflows.recovery import evidence_packet
+
+    root, _, _ = settled_exp
+    manifest_path, manifest = build_recovery_bundle(root, tmp_path / "bundle")
+    metrics = Path(manifest["metrics_ref"])
+    if boundary in {"file", "unicode-file"}:
+        report = {
+            "synthetic_report": "x" * (64 * 1024)
+            if boundary == "file"
+            else "界" * 22000
+        }
+        content = json.dumps(report, ensure_ascii=False)
+        assert len(content.encode("utf-8")) > 64 * 1024
+        metrics.write_text(content)
+        error = "65536 bytes"
+    else:
+        metrics.write_text(json.dumps({"synthetic_report": "x" * 40000}))
+        Path(manifest["report_ref"]).write_text("x" * 40000)
+        error = "65536 serialized characters"
+    with pytest.raises(ValueError, match=error):
+        evidence_packet(manifest_path)

@@ -3,7 +3,8 @@
 import json
 from pathlib import Path
 
-_MAX_PACKET = 24000
+_MAX_PACKET_CHARACTERS = 64 * 1024
+_MAX_REPORT_BYTES = 64 * 1024
 _REPORT_FIELDS = (
     "execution_ref",
     "evaluation_ref",
@@ -35,8 +36,10 @@ def evidence_packet(manifest_path):
             raise ValueError(
                 "Recovery report must belong to the frozen evidence bundle"
             )
-        if not path.is_file() or path.stat().st_size > 32 * 1024:
-            raise ValueError("Recovery supports only small report files")
+        if not path.is_file() or path.stat().st_size > _MAX_REPORT_BYTES:
+            raise ValueError(
+                f"Recovery supports only small report files (at most {_MAX_REPORT_BYTES} bytes)"
+            )
         content = path.read_text()
         files.append(
             {
@@ -57,8 +60,10 @@ def evidence_packet(manifest_path):
             for ref in refs
         },
     }
-    if len(json.dumps(packet, ensure_ascii=False)) > _MAX_PACKET:
-        raise ValueError("Recovery evidence packet exceeds the model input budget")
+    if len(json.dumps(packet, ensure_ascii=False)) > _MAX_PACKET_CHARACTERS:
+        raise ValueError(
+            f"Recovery evidence packet exceeds the model input budget ({_MAX_PACKET_CHARACTERS} serialized characters)"
+        )
     return packet
 
 

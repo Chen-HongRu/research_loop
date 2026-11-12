@@ -1780,3 +1780,124 @@ def test_recovery_synthesis_blocked_status_preserves_assistance_boundary(tmp_pat
     assert not any(
         Path(ref).name == "study-result.json" for ref in row["output"]["artifacts"]
     )
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+@pytest.mark.parametrize("verdict", ["accept", "revise"])
+def test_synthesis_returns_unreviewed_candidate_before_host_critic(
+    tmp_path, recovery, verdict
+):
+    if recovery:
+        request, packet, authored, refs = recovery_candidate(tmp_path)
+        candidate = compact_recovery(authored)
+    else:
+        request, packet, refs = None, None, []
+        authored = synthesis()
+        candidate = copy.deepcopy(authored)
+    candidate["help"] = (
+        "Unreviewed candidate prepared; host independent review is next."
+    )
+
+    def author(ctx, payload):
+        assert payload["review_protocol"] == {
+            "candidate": "unreviewed",
+            "review_owner": "host",
+            "review_step": "after_ready_candidate_return",
+            "publication_requires": "independent_critic_accept",
+        }
+        assert len(calls) == 1
+        instructions, schema = calls[0][2], calls[0][4]
+        assert "without delegating or waiting for a Critic verdict" in instructions
+        assert "unreviewed candidate" in schema["properties"]["status"]["description"]
+        assert not (ctx.work / "study-result.json").exists()
+        return candidate
+
+    def review(ctx, payload):
+        assert [call[0] for call in calls] == ["analysis", "critique"]
+        assert not (ctx.work / "study-result.json").exists()
+        assert (
+            json.loads((ctx.work / "reports/study-result-candidate.json").read_text())
+            == authored["study_result"]
+        )
+        assert (
+            payload["review_protocol"]["publication_requires"]
+            == "independent_critic_accept"
+        )
+        if recovery:
+            assert payload["analysis_record"]["status"] == "ready"
+        return synthesis_review(
+            verdict,
+            "Evidence supports the candidate."
+            if verdict == "accept"
+            else "Correct the unsupported claim before publication.",
+        )
+
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analysis", author), ("critique", review)],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        identity = await runtime.start("synthesis", task, refs)
+        return await boundary(runtime, identity)
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned", row
+    assert [call[0] for call in calls] == ["analysis", "critique"]
+    assert calls[0][1] != calls[1][1]
+    assert (
+        json.loads(artifact(row, "analysis.json").read_text())["help"]
+        == candidate["help"]
+    )
+    final = [
+        ref
+        for ref in row["output"]["artifacts"]
+        if Path(ref).name == "study-result.json"
+    ]
+    if verdict == "accept":
+        assert row["output"]["completion"] == "completed" and len(final) == 1
+    else:
+        assert row["output"]["completion"] == "blocked" and not final
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_synthesis_missing_upstream_evidence_does_not_request_downstream_review(
+    tmp_path, recovery
+):
+    help_text = "Supply the missing admitted upstream evidence artifact."
+    if recovery:
+        request, packet, authored, refs = recovery_candidate(tmp_path)
+        candidate = compact_recovery(authored)
+        candidate.update(
+            status="blocked", help=help_text, study_result="", knowledge_files=[]
+        )
+    else:
+        request, packet, refs = None, None, []
+        candidate = synthesis(help_text=help_text)
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [("analysis", candidate)],
+        request=request,
+        shared_input=packet,
+    )
+
+    async def scenario():
+        identity = await runtime.start("synthesis", task, refs)
+        first = await boundary(runtime, identity)
+        runtime.hold(identity)
+        await runtime.resume(identity, [])
+        final = await boundary(runtime, identity)
+        assert final["output"]["completion"] == first["output"]["completion"]
+        assert not (
+            runtime.root / identity / "work/reports/study-result-candidate.json"
+        ).exists()
+        return final
+
+    row = asyncio.run(scenario())
+    assert row["status"] == "returned" and row["output"]["completion"] == "blocked", row
+    assert row["output"]["help"] == help_text
+    assert [call[0] for call in calls] == ["analysis"]

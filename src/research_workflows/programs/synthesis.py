@@ -20,7 +20,17 @@ def _schema(properties):
 
 _TEXT = {"type": "string"}
 _STRINGS = {"type": "array", "items": _TEXT}
-_BASE = {"summary": _TEXT, "status": STAGE_STATUS, "help": _TEXT, "artifacts": _STRINGS}
+_STATUS = {
+    **STAGE_STATUS,
+    "description": "ready means the unreviewed candidate is complete enough for the host's next independent Critic review; it does not mean accepted or published. Missing downstream review is expected here. Use blocked only for missing upstream evidence, inputs, authorization or required correction, with meaningful help. Informational help may accompany ready.",
+}
+_BASE = {"summary": _TEXT, "status": _STATUS, "help": _TEXT, "artifacts": _STRINGS}
+REVIEW_PROTOCOL = {
+    "candidate": "unreviewed",
+    "review_owner": "host",
+    "review_step": "after_ready_candidate_return",
+    "publication_requires": "independent_critic_accept",
+}
 _CRITIC = _schema(
     {
         "summary": _TEXT,
@@ -32,6 +42,14 @@ _CRITIC = _schema(
 
 
 AUTHOR_INSTRUCTIONS = (
+    "Author an UNREVIEWED publication candidate. status=ready means your candidate "
+    "is complete enough for the host's NEXT independent Synthesis Critic review; "
+    "it does not mean accepted, reviewed or published. The host obtains that fresh "
+    "review only after receiving your ready candidate, as specified by review_protocol. "
+    "The leaf Author must return the ready candidate without delegating or waiting "
+    "for a Critic verdict. Missing downstream review is expected at this stage, not "
+    "a missing external input. Do not claim that the candidate has passed review. "
+    "The host publishes only after the independent Critic accepts it. "
     "Own what the cumulative evidence supports and the next Study action. Read "
     "the goal, admitted human request, published knowledge index, relevant "
     "positive AND negative history/frontier, direction judgments and new Exp "
@@ -61,7 +79,7 @@ AUTHOR_INSTRUCTIONS = (
     "the existing index references; preserve historical/negative evidence and "
     "limitations. Do not erase prior history or claim it validates new behavior. "
     "Python installs these files verbatim, never fills in scientific content. "
-    "Return status=blocked with meaningful help and study_result='' if required evidence lies outside scope; otherwise return status=ready even with informational help, "
+    "Return status=blocked with meaningful help and study_result='' if required upstream evidence, inputs, authorization or corrections are missing, "
     "rather than fabricating result fields. Do not read raw agent chats. "
     "Return artifacts only for new files inside this Run's work; admitted input "
     "paths are evidence citations, not new outputs. Use study_result.evidence, "
@@ -628,6 +646,7 @@ async def run(ctx, payload):
         "study_context": study,
         "work": str(ctx.work),
         "revision": _revise(ctx, payload),
+        "review_protocol": REVIEW_PROTOCOL,
     }
     packet = study.get("input", {}).get("shared_input", {})
     recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"

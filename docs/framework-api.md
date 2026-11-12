@@ -118,3 +118,10 @@ task, Plan, protocol settings and result schema remain fixed. Changed scientific
 tasks or protocol settings are rejected. Recovery reads selected files once at
 creation, each at most 4 MiB and together at most 16 MiB; it does not scan datasets
 or checkpoints. This bounded recovery profile does not cover large result files.
+
+For recovery-only Synthesis, the explicit report packet admits at most 65,536
+bytes per report and 65,536 serialized characters in total. This model-input
+limit is separate from the 16 MiB evidence bundle limit. Original report content
+is retained. The Author returns an unreviewed candidate before the host requests
+independent Critic review; only an accepted candidate can be exported for
+publication.

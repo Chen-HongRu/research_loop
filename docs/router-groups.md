@@ -46,7 +46,11 @@ judgment. A diagnostic completion alone does not complete the research run.
 The scientific goal remains distinct from execution termination.
 
 Synthesis exports `study-result.json`, a knowledge manifest and the selected small
-knowledge files. The workflow checks those contents and maps them to generic
+knowledge files. Its Author first returns a complete, unreviewed candidate with
+`status: ready`; the host then calls the independent Critic. Waiting for that
+downstream verdict cannot block Author's return, and only acceptance permits the
+final export. Missing upstream evidence still blocks the candidate.
+The workflow checks those contents and maps them to generic
 publication proposals. The publisher activates `outputs/current` only after
 settlement. Actual execution/evaluation receipts and successful publication gate
 human experiment completion; a receipt marked applied is not that scientific
