@@ -34,15 +34,38 @@ In the reference `research-v1` workflow, the Router chooses start, resume, or es
 
 The reference workflow programs are in [`group_programs`](../src/research_loop/group_programs):
 
-- **Direction** uses Scout for autonomous exploration and Proposer to select a question and its scientific constraints. An explicit human experiment skips Scout. Direction version 2 receives `frontier_ref` and `experiment_task_ref` for actual JSON files authored in its own work directory; Python validates and publishes those files without filling scientific fields. Its independent Critic returns `accept` or `revise` with a nonempty reason. Only `revise` requests assistance; an acceptance explanation never holds the Run.
+- **Direction** uses Scout for autonomous exploration and Proposer to select a question and its scientific constraints. An explicit human experiment skips Scout. Direction version 3 receives `frontier_ref` and `experiment_task_ref` for actual JSON files authored in its own work directory; Python validates and publishes those files without filling scientific fields. Its independent Critic returns `accept` or `revise` with a nonempty reason. Only `revise` requests assistance; an acceptance explanation never holds the Run.
 - **Experiment** uses H11 Plan and Prepare in one context, host execution, and independent Critic Evaluate including analysis of the individual experiment. It returns reports or assistance requests, not a Study result.
 - **Synthesis** uses Analyst and a fresh Critic to integrate evidence across experiments, maintain scientific knowledge and author the strict Study result and knowledge manifest. Its Critic returns an explicit `accept` or `revise` verdict and a reason; only `revise` creates an assistance request.
 
-Synthesis version 5 constrains its primary receipt slots to the exact admitted
+Synthesis version 6 constrains its primary receipt slots to the exact admitted
 `execution.json` and `evaluate.json` references when supplied by the reference
 workflow. Auxiliary runner/log/result reports remain supporting evidence. The
 host still validates receipt contents before request completion.
 - **Diagnosis** handles out-of-scope faults and produces a diagnosis, patch or report in its own workspace.
+
+The default internal stage schemas require `status: "ready" | "blocked"` for
+Direction Scout/Proposer, Experiment Plan/Prepare/Evaluate, Synthesis Analyst and
+Diagnosis author/reviewer. Status controls advancement and feedback retries.
+`ready` may retain informational text in `help`; that text stays in the exported
+stage report and does not request assistance. `blocked` requires meaningful
+`help` describing the missing input, authorization or correction. The host does
+not parse the prose to decide readiness. Missing required artifacts, invalid
+references, failed execution and unknown execution effects retain their existing
+blocking or reconciliation behavior. Direction and Synthesis Critic verdicts
+remain `accept`/`revise`. The public Group output and Study result schemas are
+unchanged.
+
+These schemas are pinned by Direction 3, Experiment h11-3, Synthesis 6 and
+Diagnosis 2 in new default Studies. Existing Studies retain their copied programs
+and versions; updating the package does not upgrade them. The fixed publication
+recovery profile also uses Synthesis 6 to clarify receipt eligibility while
+retaining its publication-only Author/reviewer task and fixed scientific
+criterion. Existing Synthesis 5 Studies remain pinned. Ordinary and recovery
+Synthesis accept ready evaluation receipts with informational help; existing
+status-less receipts still require empty help. Publication recovery reads both
+the strict historical receipt shape and current default Exp receipts, retaining
+original assessments and provenance; blocked assessments remain ineligible.
 
 The H11 common and three phase instructions retain the text from the evaluated source; Group boundaries, permissions and schemas are a new integration. Published scientific files carry the frontier and positive and negative results across rounds, rather than relying on Lead conversation history. Assistance feedback retries a blocked stage and retains completed execution. A known nonzero execution requires a separate diagnosis or repair task.
 

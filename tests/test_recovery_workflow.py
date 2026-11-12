@@ -51,14 +51,26 @@ def candidate(sources):
 
 @pytest.mark.parametrize("mode", ["router", "lead"])
 @pytest.mark.parametrize("with_request", [False, True])
+@pytest.mark.parametrize("current_receipt", [False, True])
 def test_recovery_publication_uses_same_completion_gate_without_experiment(
     settled_exp,
     tmp_path,
     monkeypatch,
     mode,
     with_request,
+    current_receipt,
 ):
     source, _, _ = settled_exp
+    if current_receipt:
+        state = json.loads((source / "state.json").read_text())
+        state["native_calls"][0]["result"].update(
+            status="ready", help="No blocker; retain the limitations."
+        )
+        (source / "state.json").write_text(json.dumps(state))
+        original = source / "exports/000001/evaluate.json"
+        value = json.loads(original.read_text())
+        value["status"] = "ready"
+        original.write_text(json.dumps(value))
     project = tmp_path / "project"
     project.mkdir()
     goal = tmp_path / "goal.md"
@@ -70,6 +82,7 @@ def test_recovery_publication_uses_same_completion_gate_without_experiment(
     if with_request:
         human_input.submit(root, goal.read_text())
     assert {g["id"] for g in loop.read_config(root)["groups"]} == {"synthesis"}
+    assert loop.read_config(root)["groups"][0]["version"] == "6"
     calls = []
     thread_ids = []
 

@@ -11,6 +11,7 @@ import pytest
 
 from research_loop import group_router, human_input, loop
 from research_loop.group_programs import exp
+from research_loop.group_programs.exp_recovery import build_recovery_bundle
 from research_loop.codex import CodexConfig
 from test_group_router import decision
 
@@ -27,7 +28,7 @@ def test_default_research_workflow_completes_and_installs_scientific_knowledge(
     config = loop.read_config(root)
     assert config["coordinator"] == "router"
     assert config["study_result_group"] == "synthesis"
-    assert next(g for g in config["groups"] if g["id"] == "direction")["version"] == "2"
+    assert next(g for g in config["groups"] if g["id"] == "direction")["version"] == "3"
     assert {g["id"] for g in config["groups"]} == {
         "direction",
         "exp",
@@ -107,7 +108,12 @@ def test_default_research_workflow_completes_and_installs_scientific_knowledge(
             assignment = payload["assignment"]
             work = Path(payload["work"])
             calls.append((role, thread, instructions, payload))
-            base = dict(summary="Authored bounded assessment", help="", artifacts=[])
+            base = dict(
+                summary="Authored bounded assessment",
+                status="ready",
+                help="No stage blocker; retain the stated limitations.",
+                artifacts=[],
+            )
             if payload["instructions"] == exp.PLAN_INSTRUCTIONS:
                 (work / "scientific-plan.md").write_text(
                     "Exact integer arithmetic, one execution, independent evaluation."
@@ -265,6 +271,20 @@ def test_default_research_workflow_completes_and_installs_scientific_knowledge(
     ]
     assert calls[1][1] == calls[2][1] != calls[3][1]
     assert len(list((root / "group-runs").glob("*/run.json"))) == 3
+    exp_run = next(
+        path.parent
+        for path in (root / "group-runs").glob("*/run.json")
+        if json.loads(path.read_text())["group_id"] == "exp"
+    )
+    _, manifest = build_recovery_bundle(exp_run, tmp_path / "current-exp-recovery")
+    assert manifest["warnings"] == []
+    recovered = json.loads(Path(manifest["evaluation_ref"]).read_text())
+    assert recovered["status"] == "ready"
+    assert recovered["help"] == "No stage blocker; retain the stated limitations."
+    assert (
+        Path(manifest["original_evaluation_ref"]).read_bytes()
+        == (exp_run / "exports/000001/evaluate.json").read_bytes()
+    )
     roles = json.loads((root / "roles.json").read_text())["threads"]
     assert sum(row["role"] == "router" for row in roles.values()) > 1
     # A later task gets its own Runs and follows durable evidence in the prior

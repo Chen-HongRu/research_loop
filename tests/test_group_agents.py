@@ -387,6 +387,7 @@ def test_exp_adapter_small_cpu_path_and_resumed_phases(context):
     FakeNative.outputs = [
         {
             "summary": "planned",
+            "status": "ready",
             "help": "",
             "artifacts": [str(scientific_plan)],
             "command": "",
@@ -394,6 +395,7 @@ def test_exp_adapter_small_cpu_path_and_resumed_phases(context):
         },
         {
             "summary": "prepared",
+            "status": "ready",
             "help": "",
             "artifacts": [],
             "command": f'{sys.executable} -c \'from pathlib import Path; Path("result.json").write_text("42")\'',
@@ -401,6 +403,7 @@ def test_exp_adapter_small_cpu_path_and_resumed_phases(context):
         },
         {
             "summary": "Observed 42; synthetic CPU evidence only",
+            "status": "ready",
             "help": "",
             "artifacts": [],
             "command": "",
@@ -532,6 +535,7 @@ def test_real_runtime_exp_hold_feedback_resumes_only_blocked_evaluate(
         [
             {
                 "summary": "planned",
+                "status": "ready",
                 "help": "",
                 "artifacts": ["scientific-plan.md"],
                 "command": "",
@@ -539,6 +543,7 @@ def test_real_runtime_exp_hold_feedback_resumes_only_blocked_evaluate(
             },
             {
                 "summary": "prepared",
+                "status": "ready",
                 "help": "",
                 "artifacts": [],
                 "command": f'{sys.executable} -c \'from pathlib import Path; p=Path("dispatches"); p.write_text(p.read_text()+"once" if p.exists() else "once")\'',
@@ -546,12 +551,14 @@ def test_real_runtime_exp_hold_feedback_resumes_only_blocked_evaluate(
             },
             {
                 "summary": "need interpretation input",
+                "status": "blocked",
                 "help": "Supply the approved interpretation threshold",
                 "artifacts": [],
                 "command": "",
             },
             {
                 "summary": "Evaluation completed using approved feedback",
+                "status": "ready",
                 "help": "",
                 "artifacts": [],
                 "command": "",
@@ -911,6 +918,7 @@ def test_exp_failed_execution_exports_explicit_code_and_directs_separate_repair(
     FakeNative.outputs = [
         {
             "summary": "planned",
+            "status": "ready",
             "help": "",
             "artifacts": [str(scientific_plan)],
             "command": "",
@@ -918,6 +926,7 @@ def test_exp_failed_execution_exports_explicit_code_and_directs_separate_repair(
         },
         {
             "summary": "prepared",
+            "status": "ready",
             "help": "",
             "artifacts": [str(code)],
             "command": f"{sys.executable} implementation.py",

@@ -18,6 +18,11 @@ def _schema(properties):
 _TEXT = {"type": "string"}
 _STRINGS = {"type": "array", "items": _TEXT}
 _BASE = {"summary": _TEXT, "help": _TEXT, "artifacts": _STRINGS}
+_STATUS = {
+    "type": "string",
+    "enum": ["ready", "blocked"],
+    "description": "Use ready when analysis can advance, even with informational help. Use blocked for missing inputs, authorization or required correction and explain it in help.",
+}
 _CRITIC = _schema(
     {
         "summary": _TEXT,
@@ -45,7 +50,9 @@ AUTHOR_INSTRUCTIONS = (
     "For continue define the next falsifiable action. A completed human_request "
     "must match its admitted ID and be supported by actual successful execution "
     "AND independent analysis: cite admitted small JSON exit_code=0 receipts in "
-    "execution_refs and independent evaluate JSON receipts (help='') in analysis_refs. Preparation/failure "
+    "execution_refs and independent evaluate JSON receipts in analysis_refs. "
+    "A receipt with status must be ready; informational help is allowed. Existing "
+    "status-less receipts require help=''. Preparation/failure "
     "alone leaves it pending or blocked. Include those references in its evidence. "
     "Use ONLY standardized host execution receipts in execution_refs and independent "
     "evaluation receipts in analysis_refs. When supplied, choose the exact admitted "
@@ -189,16 +196,22 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
     stages = ctx.state.setdefault("synthesis_stages", {})
     attempts = ctx.state.setdefault("synthesis_attempts", {})
     record = stages.get(name)
+    packet = assignment.get("recovery_evidence", {})
+    recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"
     retry = (
         record
-        and (record["verdict"] == "revise" if name == "critique" else record["help"])
+        and (
+            record["verdict"] == "revise"
+            if name == "critique"
+            else record["help"]
+            if recovery
+            else record["status"] == "blocked"
+        )
         and payload.get("feedback_refs")
         and attempts[name] != ctx.round
     )
     if record is None or retry:
         attempts[name] = ctx.round
-        packet = assignment.get("recovery_evidence", {})
-        recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"
         record = await ctx.services.call(
             role,
             f"synthesis-{name}-{ctx.round}",
@@ -224,6 +237,14 @@ async def _stage(ctx, payload, name, role, instructions, assignment, schema):
         _validate(record, schema)
         if not record["reason"].strip():
             raise ValueError("Synthesis Critic requires a nonempty reason")
+    elif not recovery and (
+        record.get("status") not in {"ready", "blocked"}
+        or not isinstance(record.get("help"), str)
+        or (record["status"] == "blocked" and not record["help"].strip())
+    ):
+        raise ValueError(
+            "Synthesis stage requires ready/blocked status and blocked help"
+        )
     _json(ctx, f"reports/{name}.json", record)
     return record
 
@@ -324,7 +345,14 @@ def _completed_request_evidence(result, analysis, sources):
                 "Human completion requires a small independent evaluation receipt"
             )
         evaluation = json.loads(path.read_text())
-        if evaluation.get("help") != "" or not evaluation.get("summary"):
+        # Both ordinary and recovery Synthesis read sealed assessments predating
+        # explicit stage status, as well as current default Exp receipts.
+        ready = (
+            evaluation["status"] == "ready"
+            if "status" in evaluation
+            else evaluation.get("help") == ""
+        )
+        if not ready or not evaluation.get("summary"):
             raise ValueError("Blocked or missing evaluation cannot complete a request")
 
 
@@ -462,6 +490,10 @@ def analysis_schema(result_schema, *, recovery=False, sources=None):
             },
         }
     )
+
+    if not recovery:
+        schema["properties"]["status"] = _STATUS
+        schema["required"].append("status")
 
     if sources and not recovery:
         admitted = dict.fromkeys(
@@ -623,11 +655,18 @@ async def run(ctx, payload):
         payload,
         "analysis",
         "analyst",
-        AUTHOR_INSTRUCTIONS + (RECOVERY_INSTRUCTIONS if recovery else ""),
+        AUTHOR_INSTRUCTIONS
+        + (
+            RECOVERY_INSTRUCTIONS
+            if recovery
+            else " Return status=ready when analysis can advance, even with informational help. "
+            "Return status=blocked with meaningful help and study_result='' when required "
+            "evidence, inputs, authorization or corrections are missing."
+        ),
         sources,
         author_schema,
     )
-    if analysis["help"]:
+    if analysis["help"] if recovery else analysis["status"] == "blocked":
         return _finish(ctx, payload, analysis["summary"], analysis["help"])
     validate_analysis(analysis, result_schema, sources)
     result = analysis["study_result"]

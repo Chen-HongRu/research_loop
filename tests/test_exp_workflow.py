@@ -105,7 +105,13 @@ def experiment(tmp_path, monkeypatch):
             thread = kwargs["thread_id"] or f"thread-{len(calls)}"
             kwargs["on_started"](thread)
             calls.append((phase, thread, self.config, instructions, payload))
-            result = {"summary": phase, "help": "", "artifacts": [], "command": ""}
+            result = {
+                "summary": phase,
+                "status": "ready",
+                "help": "",
+                "artifacts": [],
+                "command": "",
+            }
             if phase == "plan":
                 result["plan_artifact"] = "scientific-plan.md"
                 (work / "scientific-plan.md").write_text(
@@ -130,6 +136,7 @@ def experiment(tmp_path, monkeypatch):
                 assert json.loads((work / "result.json").read_text()) == 42
                 result["summary"] = result["claim"]
             if blocked["phase"] == phase and not payload["assignment"]["feedback_refs"]:
+                result["status"] = "blocked"
                 result["help"] = "Supply the approved missing scientific decision."
                 result["command"] = ""
             return result
@@ -232,6 +239,128 @@ def test_feedback_resumes_only_blocked_phase_without_repeated_compute(
         assert (ctx.work / "dispatches").read_text() == "once"
         assert len(ctx.state["executions"]) == 1
         await ctx.services.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("phase", ["plan", "prepare", "evaluate"])
+def test_ready_phase_with_informational_help_advances_once(experiment, phase):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+    note = "No phase blocker; retain the stated limitations."
+
+    async def informative(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        if result["summary"] == phase or (phase == "evaluate" and args[0] == "critic"):
+            result["help"] = note
+        return result
+
+    ctx.services.call = informative
+
+    async def check():
+        output = await exp.run(ctx, {"task_ref": str(task)})
+        assert output["completion"] == "completed"
+        assert output["help"] == ""
+        assert ctx.state["experiment_phases"][phase]["help"] == note
+        assert json.loads((ctx.work / f"{phase}.json").read_text())["help"] == note
+        ctx.round += 1
+        again = await exp.run(
+            ctx, {"task_ref": str(task), "feedback_refs": [str(task)]}
+        )
+        assert again == output
+        assert [call[0] for call in calls] == ["plan", "prepare", "evaluate"]
+        assert (ctx.work / "dispatches").read_text() == "once"
+        await ctx.services.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize(
+    "status,help_text", [(None, ""), ("invalid", ""), ("blocked", " ")]
+)
+def test_exp_rejects_missing_status_or_empty_blocker(experiment, status, help_text):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+
+    async def malformed(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        result.update(status=status, help=help_text)
+        if status is None:
+            del result["status"]
+        return result
+
+    ctx.services.call = malformed
+    with pytest.raises(ValueError, match="status"):
+        asyncio.run(exp.run(ctx, {"task_ref": str(task)}))
+    assert [call[0] for call in calls] == ["plan"]
+    assert not (ctx.work / "dispatches").exists()
+
+
+def test_ready_note_cannot_mask_missing_required_plan(experiment):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+
+    async def missing_plan(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        result.update(plan_artifact="missing-plan.md", help="No scientific blocker.")
+        return result
+
+    ctx.services.call = missing_plan
+    output = asyncio.run(exp.run(ctx, {"task_ref": str(task)}))
+    assert output["completion"] == "blocked"
+    assert "plan.plan_artifact" in output["help"]
+    assert [call[0] for call in calls] == ["plan"]
+    assert not (ctx.work / "dispatches").exists()
+
+
+def test_failed_prepared_command_is_never_rerun_with_feedback(experiment):
+    ctx, task, calls, _, _ = experiment
+    original = ctx.services.call
+
+    async def failing_command(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        result["help"] = "No phase blocker."
+        if args[0] == "experimenter":
+            script = ctx.work / "implementation.py"
+            script.write_text(script.read_text() + "raise SystemExit(7)\n")
+        return result
+
+    ctx.services.call = failing_command
+
+    async def check():
+        output = await exp.run(ctx, {"task_ref": str(task)})
+        assert output["completion"] == "blocked"
+        assert ctx.state["experiment_phases"]["execution"]["exit_code"] == 7
+        ctx.round += 1
+        assert (
+            await exp.run(ctx, {"task_ref": str(task), "feedback_refs": [str(task)]})
+            == output
+        )
+        assert [call[0] for call in calls] == ["plan", "prepare"]
+        assert (ctx.work / "dispatches").read_text() == "once"
+        await ctx.services.close()
+
+    asyncio.run(check())
+
+
+def test_unknown_prepared_command_cannot_redispatch_with_feedback(experiment):
+    ctx, task, calls, _, _ = experiment
+    ctx.state["executions"]["prepared-experiment"] = {
+        "status": "unknown",
+        "tool": "local",
+        "arguments": {"command": f"{shlex.quote(sys.executable)} implementation.py"},
+    }
+
+    async def check():
+        for feedback in ([], [str(task)]):
+            with pytest.raises(RuntimeError, match="reconciliation"):
+                await exp.run(ctx, {"task_ref": str(task), "feedback_refs": feedback})
+            ctx.round += 1
+        assert [call[0] for call in calls] == ["plan", "prepare"]
+        assert "execution" not in ctx.state["experiment_phases"]
+        assert not (ctx.work / "dispatches").exists()
+        with pytest.raises(RuntimeError, match="reconciliation"):
+            await ctx.services.close()
 
     asyncio.run(check())
 

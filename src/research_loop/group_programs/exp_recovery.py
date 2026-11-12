@@ -16,6 +16,17 @@ from research_loop.state import write_json
 
 _LIMIT = 4 * 1024 * 1024
 _TOTAL_LIMIT = 16 * 1024 * 1024
+# Frozen receipt contract for sealed historical assessments. The current default
+# Exp schema is accepted separately, without changing legacy receipt admission.
+_EVALUATION_FIELDS = {
+    "summary": str,
+    "help": str,
+    "artifacts": list,
+    "command": str,
+    "claim": str,
+    "limitations": list,
+    "evidence": list,
+}
 
 
 def _small(path):
@@ -34,11 +45,20 @@ def _json(path):
 
 
 def _strict_evaluation(value):
-    if not isinstance(value, dict) or set(value) != set(EVALUATE_SCHEMA["required"]):
+    if not isinstance(value, dict):
         return False
-    for field, definition in EVALUATE_SCHEMA["properties"].items():
+    if "status" in value:
+        if (
+            set(value) != set(EVALUATE_SCHEMA["required"])
+            or not isinstance(value["status"], str)
+            or value["status"] not in {"ready", "blocked"}
+        ):
+            return False
+    elif set(value) != set(_EVALUATION_FIELDS):
+        return False
+    for field, kind in _EVALUATION_FIELDS.items():
         item = value[field]
-        if definition["type"] == "string":
+        if kind is str:
             if not isinstance(item, str):
                 return False
         elif not isinstance(item, list) or any(not isinstance(x, str) for x in item):
@@ -87,7 +107,9 @@ def _original_call(state, exported):
             "Original assessment lacks a unique matching strict Critic result"
         )
     index, call = matches[0]
-    if call["result"]["help"] != "":
+    result = call["result"]
+    ready = result["status"] == "ready" if "status" in result else result["help"] == ""
+    if not ready:
         raise ValueError(
             "Original Critic requested scientific help; it cannot be cleared"
         )

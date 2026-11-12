@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from research_loop.group_programs.exp_recovery import build_recovery_bundle
+from research_loop.group_programs.exp import EVALUATE_SCHEMA
+from research_loop.group_programs.exp_recovery import (
+    _strict_evaluation,
+    build_recovery_bundle,
+)
 from research_loop.state import write_json
 
 
@@ -151,6 +155,52 @@ def test_recovery_preserves_original_and_reads_only_small_published_evidence(
             == Path(artifact["source_ref"]).read_bytes()
         )
     assert all("transcript" not in path.name for path in reads)
+
+
+@pytest.mark.parametrize(
+    "status,help_text,accepted",
+    [
+        ("ready", "", True),
+        ("ready", "No blocker; retain the limitations.", True),
+        ("blocked", "Supply the missing evaluation input.", False),
+        ("blocked", "", False),
+        ("invalid", "", False),
+    ],
+)
+def test_recovery_accepts_ready_current_receipts_without_clearing_notes(
+    settled_exp, tmp_path, status, help_text, accepted
+):
+    root, _, _ = settled_exp
+    state = json.loads((root / "state.json").read_text())
+    state["native_calls"][0]["result"].update(status=status, help=help_text)
+    write_json(root / "state.json", state)
+    original_path = root / "exports/000001/evaluate.json"
+    original = json.loads(original_path.read_text())
+    original["status"] = status
+    write_json(original_path, original)
+    original_bytes = original_path.read_bytes()
+
+    _, manifest = build_recovery_bundle(root, tmp_path / "current-receipt-bundle")
+    assert bool(manifest["warnings"]) is not accepted
+    assert original_path.read_bytes() == original_bytes
+    if accepted:
+        evaluation = json.loads(Path(manifest["evaluation_ref"]).read_text())
+        assert evaluation["status"] == status
+        assert evaluation["help"] == help_text
+        assert evaluation["provenance"]["raw_call_index"] == 0
+        assert Path(manifest["original_evaluation_ref"]).read_bytes() == original_bytes
+
+
+def test_historical_receipt_schema_is_separate_from_new_model_schema(settled_exp):
+    _, _, legacy = settled_exp
+    assert "status" not in legacy
+    assert _strict_evaluation(legacy)
+    assert "status" in EVALUATE_SCHEMA["required"]
+    current = {**legacy, "status": "ready"}
+    assert _strict_evaluation(current)
+    assert not _strict_evaluation({**current, "unexpected": "field"})
+    del current["claim"]
+    assert not _strict_evaluation(current)
 
 
 @pytest.mark.parametrize("scope_field", ["project_root", "published_knowledge_root"])

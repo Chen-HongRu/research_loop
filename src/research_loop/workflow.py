@@ -10,7 +10,7 @@ def definitions(*, resource=False, recovery=False):
     groups = [
         GroupDefinition(
             "direction",
-            "2",
+            "3",
             "Select the next worthwhile research question. Read the goal, admitted human "
             "experiment and published knowledge; explore alternatives when autonomous, "
             "maintain the frontier and export experiment-task.json with scientific constraints. "
@@ -19,7 +19,7 @@ def definitions(*, resource=False, recovery=False):
         ),
         GroupDefinition(
             "exp",
-            "h11-2",
+            "h11-3",
             "Answer one selected experiment question: Plan and Prepare in a shared context, "
             "execute the prepared command once, independently Evaluate its evidence. "
             "Accept experiment-task.json or an explicit scientific task; return experiment "
@@ -29,7 +29,7 @@ def definitions(*, resource=False, recovery=False):
         ),
         GroupDefinition(
             "synthesis",
-            "5",
+            "6",
             "Integrate completed experimental evidence across the Study. Maintain scientific "
             "knowledge, negative results and uncertainty, obtain independent scrutiny of new "
             "claims, and export study-result.json plus knowledge-manifest.json. Owns the "
@@ -39,7 +39,7 @@ def definitions(*, resource=False, recovery=False):
         ),
         GroupDefinition(
             "diagnosis",
-            "1",
+            "2",
             "Diagnose a bounded implementation, tool or environment failure outside another "
             "Group's scope. Export a diagnosis, patch or recovery instructions in its own "
             "workspace. Does not change scientific design or repair/activate the controller.",

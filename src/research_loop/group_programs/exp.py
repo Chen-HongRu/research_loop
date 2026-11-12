@@ -28,11 +28,16 @@ PHASE_SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
+        "status": {
+            "type": "string",
+            "enum": ["ready", "blocked"],
+            "description": "Use ready when this phase can advance, even with informational help. Use blocked for missing inputs, authorization or required correction and explain it in help.",
+        },
         "help": {"type": "string"},
         "artifacts": {"type": "array", "items": {"type": "string"}},
         "command": {"type": "string"},
     },
-    "required": ["summary", "help", "artifacts", "command"],
+    "required": ["summary", "status", "help", "artifacts", "command"],
     "additionalProperties": False,
 }
 PLAN_SCHEMA = {
@@ -70,7 +75,9 @@ inputs, constraints and completion_criteria. Markdown tasks are equally valid.
 Do not select another research question or change any explicit upstream choice.
 Plan develops one complete experiment within those constraints; Prepare implements
 that plan. Missing external scientific decisions, evidence, authorization or inputs
-require help, not an invented choice. Feedback resolves the currently blocked phase;
+require status=blocked and meaningful help, not an invented choice. Use status=ready
+when the phase can advance; informational help is retained without blocking.
+Feedback resolves the currently blocked phase;
 completed computation is never rerun. The host executes only the prepared command
 on the explicit execution_backend and supplies its settled receipt.
 The assignment's workspace is this Run's work directory. Write a small complete
@@ -78,8 +85,8 @@ scientific plan to scientific-plan.md during Plan and return its exact path as
 plan_artifact and in artifacts. The complete plan specifies the intended bounded
 command and result filename. During Prepare write small implementation/code and
 handoff files there and return the exact bounded command and workspace-relative
-result_file; do not execute it or create the result file. On help result_file may
-be empty.
+result_file; do not execute it or create the result file. Only when status=blocked
+may result_file be empty.
 Evaluate is the independent Critic, including metrics, comparison, analysis and
 interpretation. Return its small evaluation report as JSON with claim and
 limitations supported by actual evidence; the host writes evaluate.json. Remain
@@ -87,8 +94,11 @@ read-only and do not rerun the experiment. There is no extra
 Analyst or internal review stage. No benchmark-specific metric or dataset is implied.
 Artifacts must be exact existing file paths under workspace, using relative names
 where requested by the phase. Do not export canonical data, checkpoints, raw chats
-or large outputs. Plan and Evaluate return command as an empty string. For help,
-return an empty command and available small artifacts; plan_artifact may be empty.
+or large outputs. Plan and Evaluate return command as an empty string. When
+status=blocked, return an empty command and available small artifacts;
+plan_artifact may be empty. When status=ready, all required phase artifacts,
+Prepare's command/result_file and Evaluate's evidence remain mandatory even if
+help contains an informational note.
 """
 
 
@@ -120,7 +130,8 @@ async def run(ctx, payload):
 
     async def phase(name, role, context, instructions, schema, assignment):
         blocked = name in phases and (
-            phases[name]["help"] or (name == "prepare" and not phases[name]["command"])
+            phases[name]["status"] == "blocked"
+            or (name == "prepare" and not phases[name]["command"])
         )
         retry = (
             blocked and sources["feedback_refs"] and phase_rounds.get(name) != ctx.round
@@ -153,7 +164,7 @@ async def run(ctx, payload):
 
     def phase_help(name, result):
         errors = validation[name]["errors"]
-        return result["help"] or (
+        return (result["help"] if result["status"] == "blocked" else "") or (
             "Artifact boundary requires mechanical repair: "
             + "; ".join(f"{error['field']}: {error['reason']}" for error in errors)
             if errors
@@ -258,6 +269,12 @@ def _reference(ctx, ref, admitted=(), *, existing=True):
 
 
 def _normalize_phase(ctx, name, record, assignment):
+    if (
+        record.get("status") not in {"ready", "blocked"}
+        or not isinstance(record.get("help"), str)
+        or (record["status"] == "blocked" and not record["help"].strip())
+    ):
+        raise ValueError("Exp phase requires ready/blocked status and blocked help")
     result = deepcopy(record)
     errors, citations = [], []
     admitted = [
@@ -284,7 +301,7 @@ def _normalize_phase(ctx, name, record, assignment):
         if not citation:
             outputs.append(value)
     result["artifacts"] = list(dict.fromkeys(outputs))
-    if not result.get("help"):
+    if result["status"] == "ready":
         if name == "plan":
             value, _ = normalize(
                 result.get("plan_artifact", ""), "plan.plan_artifact", inputs=False
@@ -353,7 +370,7 @@ def _finish(ctx, phases, summary, help_text, backend):
     artifacts = [str(report), *[str(ctx.work / f"{name}.json") for name in phases]]
     # Keep the verified small raw evidence beside evaluate.json after export.
     evaluation = phases.get("evaluate", {})
-    if not evaluation.get("help"):
+    if evaluation.get("status") == "ready":
         for ref in evaluation.get("evidence", []):
             path = _artifact(ctx, ref)
             if path is not None and str(path) not in artifacts:
