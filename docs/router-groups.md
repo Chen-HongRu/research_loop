@@ -49,7 +49,14 @@ Synthesis exports `study-result.json`, a knowledge manifest and the selected sma
 knowledge files. Its Author first returns a complete, unreviewed candidate with
 `status: ready`; the host then calls the independent Critic. Waiting for that
 downstream verdict cannot block Author's return, and only acceptance permits the
-final export. Missing upstream evidence still blocks the candidate.
+final export. Outer readiness fields describe that current lifecycle; nested
+result/knowledge text is the proposed final content installed after acceptance.
+Goal judgment follows the admitted objective and settled evidence: a negative
+comparison can complete an investigation without meeting a performance target.
+Pending review/publication of this candidate is neither a final limitation nor
+its next action, and does not alone defeat goal achievement. Critic checks those
+fields as they will read after commit; genuine upstream evidence gaps still block
+the candidate.
 The workflow checks those contents and maps them to generic
 publication proposals. The publisher activates `outputs/current` only after
 settlement. Actual execution/evaluation receipts and successful publication gate

@@ -108,6 +108,17 @@ The generic publisher stages these mappings and activates the output pointer;
 workflow validation itself does not publish. Active outputs are under
 `outputs/current`.
 
+For Synthesis, outer `status`/`help` and `review_protocol` describe current
+candidate readiness. Nested `study_result` and `knowledge_files` are proposed final
+publication content: the host installs their scientific content only after
+independent acceptance. Judge `goal` from the admitted objective and settled
+execution/independent analysis. A completed negative comparison can achieve a
+bounded investigation goal while leaving a performance target unmet. Pending
+review or commit of this current candidate is not a final limitation, next action,
+or reason to negate that goal. Omit that self-reference rather than inventing an
+acceptance event; retain genuine evidence gaps. Critic reviews the final text as
+it will read after acceptance and publication and requests revision for leakage.
+
 The reference research plugin retains scientific task/data/evaluation boundaries,
 independent review, authored knowledge manifests and human-request completion
 checks. Its recovery hook accepts a settled successful Exp command, freezes only

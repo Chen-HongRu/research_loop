@@ -4,10 +4,21 @@ RESULT_SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
-        "goal": {"type": "string", "enum": ["achieved", "not-achieved", "unknown"]},
+        "goal": {
+            "type": "string",
+            "enum": ["achieved", "not-achieved", "unknown"],
+            "description": "Judge the admitted objective from settled execution and independent analysis. A completed bounded investigation can achieve its goal with a negative comparison; a performance target may remain unmet. Pending review or publication of this current candidate alone does not determine goal achievement.",
+        },
         "evidence": {"type": "array", "items": {"type": "string"}},
-        "limitations": {"type": "array", "items": {"type": "string"}},
-        "next_action": {"type": "string"},
+        "limitations": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Evidence gaps, uncertainty and scope limits that remain in the proposed final result after acceptance and publication. Omit this current candidate's pending host review or commit; preserve genuine missing scientific evidence.",
+        },
+        "next_action": {
+            "type": "string",
+            "description": "The scientific or operator action appropriate after this exact result is accepted and published. Do not list reviewing or publishing this current candidate as outstanding work, and do not invent an unseen acceptance event.",
+        },
         "study_action": {"type": "string", "enum": ["continue", "stop"]},
         "stop_reason": {"type": "string"},
     },

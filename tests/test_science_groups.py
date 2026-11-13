@@ -1901,3 +1901,186 @@ def test_synthesis_missing_upstream_evidence_does_not_request_downstream_review(
     assert row["status"] == "returned" and row["output"]["completion"] == "blocked", row
     assert row["output"]["help"] == help_text
     assert [call[0] for call in calls] == ["analysis"]
+
+
+@pytest.mark.parametrize(
+    "objective,goal,action,next_action,limitations",
+    [
+        (
+            "Determine whether either fixed method meets the frozen 90% target.",
+            "achieved",
+            "stop",
+            "Retain the negative comparison; the bounded investigation is complete.",
+            ["Two fixed methods and a bounded case set; no generalization claim."],
+        ),
+        (
+            "Produce a method meeting the frozen 90% target.",
+            "not-achieved",
+            "continue",
+            "Investigate a different method against the unchanged performance target.",
+            ["Neither fixed method met the 90% target on the admitted cases."],
+        ),
+    ],
+)
+def test_synthesis_final_content_survives_revision_review_and_real_publication(
+    tmp_path, objective, goal, action, next_action, limitations
+):
+    from research_loop import publication
+    from research_loop.interventions import get_intervention, submit_intervention
+    from research_loop.state import PublicationStore, writer
+    from research_workflows.research import Workflow
+
+    request = {
+        "id": "comparison",
+        "text": "Perform and independently evaluate the bounded comparison of the two fixed methods.",
+    }
+    execution = write(
+        tmp_path / "execution.json",
+        {"operation_id": "original-comparison", "exit_code": 0, "running": False},
+    )
+    evaluation = write(
+        tmp_path / "evaluate.json",
+        {
+            "status": "ready",
+            "summary": "Both fixed methods failed the frozen target.",
+            "help": "",
+            "operation_id": "original-comparison",
+        },
+    )
+    original_receipts = [Path(ref).read_bytes() for ref in (execution, evaluation)]
+    final = synthesis(request, executions=[execution], analyses=[evaluation])
+    final["study_result"].update(
+        summary="The bounded comparison found neither method met the frozen target.",
+        goal=goal,
+        evidence=[execution, evaluation],
+        limitations=limitations,
+        next_action=next_action,
+        study_action=action,
+        stop_reason="The admitted investigation is complete."
+        if action == "stop"
+        else "",
+    )
+    final["stop_basis"] = "goal-satisfied" if action == "stop" else ""
+    final["knowledge_files"][1]["content"] = (
+        "# Fixed-method comparison\n\n"
+        "Both fixed methods missed the frozen target. The original comparison "
+        "and its independent analysis establish this negative result.\n\n"
+        + "\n".join(limitations)
+        + "\n"
+    )
+    # Current readiness may be stated outside the proposed final publication.
+    final["help"] = "Ready for the host's independent review."
+    leaking = copy.deepcopy(final)
+    leaking["study_result"].update(
+        goal="not-achieved",
+        next_action="Obtain host review and publish this candidate.",
+        limitations=["This candidate has not yet passed host review."],
+    )
+    leaking["knowledge_files"][1]["content"] = (
+        "Current candidate awaits host publication.\n"
+    )
+
+    def review(ctx, payload):
+        candidate = json.loads(
+            (ctx.work / "reports/study-result-candidate.json").read_text()
+        )
+        assert payload["review_protocol"]["candidate"] == "unreviewed"
+        assert "after acceptance and publication" in calls[-1][2]
+        if ctx.round == 1:
+            assert candidate == leaking["study_result"]
+            return synthesis_review(
+                "revise",
+                "Separate pending candidate readiness from final scientific content.",
+            )
+        assert candidate == final["study_result"]
+        assert candidate["evidence"] == [execution, evaluation]
+        return synthesis_review(
+            reason="The final disposition matches the admitted objective and settled negative evidence."
+        )
+
+    def reauthor(ctx, payload):
+        assert set(payload["revision"]) == {"analysis", "critique"}
+        description = calls[-1][4]["properties"]["study_result"]["description"]
+        assert "FINAL" in description
+        return final
+
+    runtime, task, calls = setup(
+        tmp_path,
+        "synthesis",
+        [
+            ("analysis", leaking),
+            ("critique", review),
+            ("analysis", reauthor),
+            ("critique", review),
+        ],
+        request=request,
+    )
+    (tmp_path / "goal.md").write_text(objective)
+    submit_intervention(
+        tmp_path,
+        {
+            "id": request["id"],
+            "kind": "experiment",
+            "payload": {"text": request["text"]},
+            "expected_revision": "initial",
+        },
+    )
+    store = PublicationStore(tmp_path)
+    baseline = store.prepare()
+    feedback = write(
+        tmp_path / "correction.json",
+        {"correction": "Use settled evidence for the final-content judgment."},
+    )
+
+    async def scenario():
+        identity = await runtime.start("synthesis", task, [execution, evaluation])
+        rejected = await boundary(runtime, identity)
+        assert rejected["output"]["completion"] == "blocked"
+        assert store.published_state() is None
+        assert not any(
+            Path(ref).name == "study-result.json"
+            for ref in rejected["output"]["artifacts"]
+        )
+        runtime.hold(identity)
+        await runtime.resume(identity, [feedback])
+        accepted = await boundary(runtime, identity)
+        assert accepted["output"]["completion"] == "completed", accepted
+        runtime.close(identity)
+        accepted = runtime.observe(identity)
+        study_result = artifact(accepted, "study-result.json")
+        proposal = Workflow({}).complete(
+            {
+                "root": tmp_path,
+                "runs": [accepted],
+                "admitted": [identity],
+                "input": {"input": {"human_request": request}},
+            },
+            str(study_result),
+        )
+        state = {"iteration": 1, "status": "running"}
+        with writer(tmp_path):
+            await publication.commit(tmp_path, state, baseline, proposal)
+        return accepted, study_result
+
+    accepted, study_result = asyncio.run(scenario())
+    assert [call[0] for call in calls] == [
+        "analysis",
+        "critique",
+        "analysis",
+        "critique",
+    ]
+    assert calls[1][1] != calls[3][1]  # The corrected candidate gets a fresh Critic.
+    assert json.loads(study_result.read_text()) == final["study_result"]
+    assert json.loads((tmp_path / "result.json").read_text()) == final["study_result"]
+    assert (store.current / "findings/current.md").read_bytes() == final[
+        "knowledge_files"
+    ][1]["content"].encode()
+    assert (
+        artifact(accepted, "current.md").read_bytes()
+        == (store.current / "findings/current.md").read_bytes()
+    )
+    assert [
+        Path(ref).read_bytes() for ref in (execution, evaluation)
+    ] == original_receipts
+    assert get_intervention(tmp_path, request["id"])["work_outcome"] == "completed"
+    # Services.execute_prepared raises if any stage attempts new execution.

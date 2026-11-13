@@ -50,6 +50,17 @@ AUTHOR_INSTRUCTIONS = (
     "for a Critic verdict. Missing downstream review is expected at this stage, not "
     "a missing external input. Do not claim that the candidate has passed review. "
     "The host publishes only after the independent Critic accepts it. "
+    "Outer status/help and review_protocol describe CURRENT readiness. Nested "
+    "study_result and knowledge_files are proposed FINAL publication content, "
+    "installed verbatim only after host acceptance. Write that final content as "
+    "it will read after acceptance and publication; pending review or commit of "
+    "this current candidate is neither a scientific limitation nor its next_action "
+    "and does not by itself make goal not-achieved. Do not invent an unseen "
+    "acceptance event; omit this candidate's self-referential lifecycle instead. "
+    "Judge goal from the admitted objective, settled execution and independent "
+    "analysis: completing a bounded investigation can achieve its goal with a "
+    "negative comparison, while failing a performance target may leave that goal "
+    "unmet. Preserve actual evidence gaps and uncertainty. "
     "Own what the cumulative evidence supports and the next Study action. Read "
     "the goal, admitted human request, published knowledge index, relevant "
     "positive AND negative history/frontier, direction judgments and new Exp "
@@ -94,7 +105,15 @@ REVIEW_INSTRUCTIONS = (
     "knowledge/index and Study disposition only. Do not repeat the full review "
     "of an individual experiment. Read actual cited positive/negative evidence, "
     "frontier and Direction judgments. Check goal/action separation, uncertainty, "
-    "historical index references and new claims. No-useful-action stop requires "
+    "historical index references and new claims. Review study_result and "
+    "knowledge_files as they will read after acceptance and publication. Outer "
+    "readiness remains unreviewed at this point. Request revision if the proposed "
+    "final content leaks this current candidate's pending host review/publication "
+    "into goal judgment, next_action, limitations or knowledge text. Do not demand "
+    "an invented acceptance claim; require evidence-based final content and "
+    "preserve genuine scientific evidence gaps. A bounded negative comparison "
+    "can achieve an investigation goal without meeting a performance goal. "
+    "No-useful-action stop requires "
     "Direction evidence covering useful alternatives; one failed branch or "
     "finished experiment does not imply Study stop. Check human_request identity "
     "and successful actual execution plus independent analysis before completed. "
@@ -477,11 +496,22 @@ def analysis_schema(result_schema, *, recovery=False, sources=None):
         {
             **_BASE,
             "study_result": {
-                "anyOf": [result_schema, {"type": "string", "enum": [""]}]
+                "anyOf": [result_schema, {"type": "string", "enum": [""]}],
+                "description": "Proposed FINAL result installed verbatim only after independent host acceptance. Judge the admitted objective from settled evidence; omit this current candidate's pending review/commit lifecycle. Outer status/help carry current readiness. Empty only for blocked upstream requirements.",
             },
             "knowledge_files": {
                 "type": "array",
-                "items": _schema({"source": _TEXT, "target": _TEXT, "content": _TEXT}),
+                "description": "Proposed FINAL knowledge documents, installed only after host acceptance; current candidate readiness belongs in outer status/help.",
+                "items": _schema(
+                    {
+                        "source": _TEXT,
+                        "target": _TEXT,
+                        "content": {
+                            **_TEXT,
+                            "description": "Final scientific text as it will read after acceptance and publication. Retain evidence, uncertainty and historical limits; omit this current candidate's pending host review/publication and do not invent acceptance events.",
+                        },
+                    }
+                ),
             },
             "execution_refs": _STRINGS,
             "analysis_refs": _STRINGS,
@@ -522,7 +552,7 @@ def analysis_schema(result_schema, *, recovery=False, sources=None):
         schema["properties"]["study_result"]["anyOf"][0] = bounded_result
         knowledge = schema["properties"]["knowledge_files"]
         knowledge["maxItems"] = 2
-        knowledge["items"]["properties"]["content"] = {**_TEXT, "maxLength": 3200}
+        knowledge["items"]["properties"]["content"]["maxLength"] = 3200
     return schema
 
 
