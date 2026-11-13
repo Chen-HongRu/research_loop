@@ -96,8 +96,10 @@ def test_current_research_group_shared_author_and_independent_evaluation(tmp_pat
     task.write_text("""One bounded synthetic CPU smoke; no scientific generalization.
 Design and prepare a standard-library Python script computing count, sum and sum
 of squares from [1,2,3,4]. Exact expected output is {"count":4,"sum":10,"sum_squares":30}.
-Write the actual output to result.json and a local dispatch-count file containing
-'once'. The host alone executes the prepared command once. Plan writes a scientific
+Write the actual output to result.json. On each script invocation, append exactly
+'once' with no newline to the file named dispatch-count (no extension), without
+replacing any existing content. The host alone executes the prepared command once.
+Plan writes a scientific
 plan with the control and toy-only scope. Prepare may syntax-check only. Independent
 Evaluate reads the actual plan, host execution receipt and result.json, checks the
 three exact values without rerunning, and reports limitations. Do not spawn agents,
