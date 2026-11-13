@@ -1,70 +1,24 @@
-"""Frozen, bounded evidence inputs for recovery-only synthesis."""
+"""Recover settled experiment commands for independent evaluation without redispatch."""
 
+from copy import deepcopy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
-_MAX_PACKET_CHARACTERS = 64 * 1024
-_MAX_REPORT_BYTES = 64 * 1024
-_REPORT_FIELDS = (
-    "execution_ref",
-    "evaluation_ref",
-    "original_evaluation_ref",
-    "recovery_evaluation_ref",
-    "metrics_ref",
-    "report_ref",
-)
+from research_loop.state import write_json
+
+_LIMIT = 4 * 1024 * 1024
 
 
-def evidence_packet(manifest_path):
-    """Load explicit small reports, never input datasets, code or transcripts."""
-    manifest_path = Path(manifest_path).resolve(strict=True)
-    manifest = json.loads(manifest_path.read_text())
-    if manifest.get("warnings") or not manifest.get("evaluation_ref"):
-        raise ValueError(
-            "Recovery evidence has unresolved authority or delivery errors"
-        )
-    root = manifest_path.parent
-    files, refs = [], []
-    for field in _REPORT_FIELDS:
-        ref = manifest.get(field)
-        if ref is None and field == "recovery_evaluation_ref":
-            continue
-        if not isinstance(ref, str):
-            raise ValueError(f"Missing recovery evidence {field}")
-        path = Path(ref)
-        if path.is_symlink() or not path.resolve(strict=True).is_relative_to(root):
-            raise ValueError(
-                "Recovery report must belong to the frozen evidence bundle"
-            )
-        if not path.is_file() or path.stat().st_size > _MAX_REPORT_BYTES:
-            raise ValueError(
-                f"Recovery supports only small report files (at most {_MAX_REPORT_BYTES} bytes)"
-            )
-        content = path.read_text()
-        files.append(
-            {
-                "kind": field.removesuffix("_ref"),
-                "ref": ref,
-                "content": json.loads(content) if path.suffix == ".json" else content,
-            }
-        )
-        refs.append(ref)
-    packet = {
-        "kind": "exp-recovery-v1",
-        **{field: manifest.get(field) for field in _REPORT_FIELDS},
-        "source_run": manifest["source_run"],
-        "limitations": manifest.get("limitations", []),
-        "evidence_files": files,
-        "publication_paths": {
-            ref: "recovery-evidence/" + Path(ref).relative_to(root).as_posix()
-            for ref in refs
-        },
-    }
-    if len(json.dumps(packet, ensure_ascii=False)) > _MAX_PACKET_CHARACTERS:
-        raise ValueError(
-            f"Recovery evidence packet exceeds the model input budget ({_MAX_PACKET_CHARACTERS} serialized characters)"
-        )
-    return packet
+def _small(path):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > _LIMIT:
+        raise ValueError("Recovery requires a small regular evidence file")
+    with path.open("rb") as stream:
+        content = stream.read(_LIMIT + 1)
+    if len(content) > _LIMIT:
+        raise ValueError("Recovery evidence exceeded the small-file limit")
+    return content
 
 
 def recover_experiment(root, record):
@@ -74,12 +28,7 @@ def recover_experiment(root, record):
     dispatchable recovery inputs. This one-time stop path reads selected small
     Plan/Prepare/result files; it never scans a dataset or checkpoint directory.
     """
-    from copy import deepcopy
-
-    from research_loop.state import write_json
     from research_workflows.programs.exp import _reference
-    from research_workflows.programs.exp_recovery import _small
-    from types import SimpleNamespace
 
     if record.get("group_id") != "exp" or record.get("status") == "running":
         return None
@@ -168,9 +117,6 @@ def recover_experiment(root, record):
 
 def adopt_experiment(ctx, packet, payload):
     """Seed completed phases in a new Run and preserve the original operation ID."""
-    from copy import deepcopy
-
-    from research_workflows.programs.exp_recovery import _small
 
     if not isinstance(packet, dict) or packet.get("kind") != "settled-exp-v1":
         raise ValueError("Exp recovery requires an explicit settled-exp-v1 descriptor")

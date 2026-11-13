@@ -68,27 +68,23 @@ class BehaviorCollector(Collector):
 
     def __init__(self, root, output, **kwargs):
         checkpoint = Path(output) / "checkpoint.json"
-        if (
-            checkpoint.exists()
-            and json.loads(checkpoint.read_text()).get("behavior_schema") != 1
-        ):
-            raise ValueError("not a behavior checkpoint; use a new output directory")
+        if checkpoint.exists():
+            state = json.loads(checkpoint.read_text())
+            if state.get("behavior_schema") != 1 or not isinstance(
+                state.get("resource_presentations"), dict
+            ):
+                raise ValueError(
+                    "unsupported behavior checkpoint; use a new output directory"
+                )
         super().__init__(root, output, **kwargs)
         self.state["behavior_schema"] = 1
-        resumed = self.state.get("sequence", 0) > 0
-        enabled_at = datetime.now(timezone.utc).isoformat()
-        self.state.setdefault(
-            "resource_presentations",
-            {
-                "enabled_at": enabled_at,
-                "read_from_at": enabled_at if resumed else self.since.isoformat(),
-                "read_from_at_basis": "collector_wall_time"
-                if resumed
-                else "phase_event_time",
-                "coverage_mode": "existing_offsets_only"
-                if resumed
-                else "phase_history_and_append",
-                "prior_source_bytes_not_replayed": resumed,
+        if not checkpoint.exists():
+            self.state["resource_presentations"] = {
+                "enabled_at": datetime.now(timezone.utc).isoformat(),
+                "read_from_at": self.since.isoformat(),
+                "read_from_at_basis": "phase_event_time",
+                "coverage_mode": "phase_history_and_append",
+                "prior_source_bytes_not_replayed": False,
                 "observed_calls": 0,
                 "eligible": 0,
                 "compacted": 0,
@@ -96,8 +92,7 @@ class BehaviorCollector(Collector):
                 "returned_output_bytes": 0,
                 "missing_or_legacy": 0,
                 "invalid_metadata": 0,
-            },
-        )
+            }
 
     def _issue(self, name):
         super()._issue(name)
@@ -425,6 +420,8 @@ class BehaviorCollector(Collector):
         }
 
     def _sample_history(self, pending):
+        if "behavior" in pending and "resource_presentations" not in pending:
+            raise ValueError("unsupported behavior sample; use a new output directory")
         if "behavior" not in pending:
             cutoff = timestamp(pending["window"]["until"])
             tasks = [
@@ -522,29 +519,22 @@ class BehaviorCollector(Collector):
             for task in pending["llm"]["by_task"]:
                 task.pop("behavior", None)
         if "resource_presentations" not in pending:
-            presentations = self.state.get("resource_presentations")
-            if presentations is None:
-                pending["resource_presentations"] = {
-                    "status": "not_collected_in_this_sample"
-                }
-            else:
-                presentation = dict(presentations)
-                presentation["status"] = (
-                    "partial_metadata"
-                    if presentation["missing_or_legacy"]
-                    or presentation["invalid_metadata"]
-                    else "observed_metadata"
-                    if presentation["eligible"]
-                    else "no_records"
-                )
-                if not presentation["eligible"]:
-                    for key in (
-                        "compacted",
-                        "original_output_bytes",
-                        "returned_output_bytes",
-                    ):
-                        presentation[key] = None
-                pending["resource_presentations"] = presentation
+            presentation = dict(self.state["resource_presentations"])
+            presentation["status"] = (
+                "partial_metadata"
+                if presentation["missing_or_legacy"] or presentation["invalid_metadata"]
+                else "observed_metadata"
+                if presentation["eligible"]
+                else "no_records"
+            )
+            if not presentation["eligible"]:
+                for key in (
+                    "compacted",
+                    "original_output_bytes",
+                    "returned_output_bytes",
+                ):
+                    presentation[key] = None
+            pending["resource_presentations"] = presentation
         history = json.loads(json.dumps(pending))
         for task in history["behavior"]["by_task"]:
             task.pop("tool_outputs", None)
@@ -557,8 +547,12 @@ def compare(baseline, improved):
     snapshots = []
     for directory in (baseline, improved):
         snapshot = json.loads((Path(directory) / "latest.json").read_text())
-        if not isinstance(snapshot.get("behavior", {}).get("by_task"), list):
-            raise ValueError("comparison requires behavior collector latest.json")
+        if not isinstance(
+            snapshot.get("behavior", {}).get("by_task"), list
+        ) or not isinstance(snapshot.get("resource_presentations"), dict):
+            raise ValueError(
+                "comparison requires current behavior collector latest.json"
+            )
         snapshots.append(snapshot)
 
     def completed(snapshot):
@@ -718,9 +712,7 @@ def compare(baseline, improved):
                 role: summary([t for t in included if t["role"] == role], snapshot)
                 for role in roles
             },
-            "resource_presentations": snapshot.get(
-                "resource_presentations", {"status": "unavailable_in_source"}
-            ),
+            "resource_presentations": snapshot["resource_presentations"],
         }
     return result
 

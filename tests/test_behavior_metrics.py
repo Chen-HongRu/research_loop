@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from research_loop.behavior_metrics import BehaviorCollector, main
+from research_loop.behavior_metrics import BehaviorCollector, compare, main
 
 START = "2026-01-01T00:01:00Z"
 END = "2026-01-01T00:03:00Z"
@@ -421,8 +421,8 @@ def test_resource_presentations_exact_metadata_and_phase_scope(study):
         assert c.poll(END)["resource_presentations"] == r
 
 
-def test_resource_presentations_old_checkpoint_never_replays_or_invents_zero(study):
-    append(study / "events.jsonl", resource_event(output="legacy"))
+def test_resource_presentations_missing_metadata_and_old_checkpoint_rejected(study):
+    append(study / "events.jsonl", resource_event(output="unmeasured output"))
     with collector(study) as c:
         first = c.poll(END)["resource_presentations"]
         assert first["eligible"] == 0
@@ -432,32 +432,72 @@ def test_resource_presentations_old_checkpoint_never_replays_or_invents_zero(stu
         assert first["returned_output_bytes"] is None
         checkpoint = c.output / "checkpoint.json"
     state = json.loads(checkpoint.read_text())
-    state.pop(
-        "resource_presentations"
-    )  # Synthetic checkpoint from the deployed older module.
+    state.pop("resource_presentations")
     checkpoint.write_text(json.dumps(state))
+    before = checkpoint.read_bytes()
+    with pytest.raises(ValueError, match="unsupported behavior checkpoint"):
+        collector(study)
+    assert checkpoint.read_bytes() == before
+
+
+@pytest.mark.parametrize("enriched", [False, True])
+def test_current_pending_recovery_preserves_resource_counters(
+    study, monkeypatch, enriched
+):
+    from research_loop.sample_store import _atomic
+
+    append(
+        study / "events.jsonl",
+        resource_event(
+            output_compacted=True, output_bytes=600, returned_output_bytes=60
+        ),
+    )
+    c = collector(study)
+
+    def crash():
+        if enriched:
+            c._sample_history(c.state["pending_sample"])
+            _atomic(c.output / "checkpoint.json", c.state)
+        raise OSError("interrupted publication")
+
+    monkeypatch.setattr(c, "_publish_pending", crash)
+    with pytest.raises(OSError, match="interrupted publication"):
+        c.poll(END)
+    c.close()
+    with collector(study) as restarted:
+        recovered = json.loads((restarted.output / "latest.json").read_text())
+        r = recovered["resource_presentations"]
+        assert r["observed_calls"] == r["eligible"] == r["compacted"] == 1
+        assert r["original_output_bytes"] == 600
+        assert r["returned_output_bytes"] == 60
+        assert restarted.poll(END)["resource_presentations"] == r
+        samples = (restarted.output / "samples.jsonl").read_text().splitlines()
+        assert [json.loads(line)["sample_id"] for line in samples] == [
+            "test:1",
+            "test:2",
+        ]
+
+
+@pytest.mark.parametrize("source", ["pending", "latest"])
+def test_old_behavior_sample_rejected(study, source):
     with collector(study) as c:
-        r = c.poll(END)["resource_presentations"]
-        assert r["coverage_mode"] == "existing_offsets_only"
-        assert r["read_from_at_basis"] == "collector_wall_time"
-        assert r["prior_source_bytes_not_replayed"] is True
-        assert r["observed_calls"] == 0
-        assert r["original_output_bytes"] is None
-        append(
-            study / "events.jsonl",
-            resource_event(
-                at="2026-01-01T00:03:10Z",
-                output_compacted=True,
-                output_bytes=600,
-                returned_output_bytes=60,
-            ),
-        )
-        next_r = c.poll("2026-01-01T00:04:00Z")["resource_presentations"]
-        assert next_r["eligible"] == next_r["compacted"] == 1
-        assert next_r["original_output_bytes"] == 600
-        assert next_r["returned_output_bytes"] == 60
-        assert next_r["read_from_at"] == r["read_from_at"]
-        assert next_r["prior_source_bytes_not_replayed"] is True
+        sample = c.poll(END)
+        output = c.output
+    sample.pop("resource_presentations")
+    checkpoint = output / "checkpoint.json"
+    if source == "pending":
+        state = json.loads(checkpoint.read_text())
+        state["pending_sample"] = sample
+        checkpoint.write_text(json.dumps(state))
+    else:
+        (output / "latest.json").write_text(json.dumps(sample))
+    before = {path: path.read_bytes() for path in output.iterdir() if path.is_file()}
+    with pytest.raises(ValueError, match="behavior"):
+        if source == "pending":
+            collector(study)
+        else:
+            compare(output, output)
+    assert {path: path.read_bytes() for path in before} == before
 
 
 def test_compare_shared_complete_roles_unknown_ready_and_atomic_watch(
@@ -492,7 +532,6 @@ def test_compare_shared_complete_roles_unknown_ready_and_atomic_watch(
             },
         ]
     )
-    baseline_sample.pop("resource_presentations")
     baseline_latest = baseline / "latest.json"
     baseline_latest.write_text(json.dumps(baseline_sample))
     baseline_before = baseline_latest.read_bytes()
@@ -560,7 +599,7 @@ def test_compare_shared_complete_roles_unknown_ready_and_atomic_watch(
     assert b["shared_role_cohort"]["readiness"]["created_before_ready_count"] is None
     assert i["shared_role_cohort"]["readiness"]["observed_fraction"] == 1
     assert i["shared_role_cohort"]["readiness"]["created_before_ready_count"] == 0
-    assert b["resource_presentations"]["status"] == "unavailable_in_source"
+    assert b["resource_presentations"]["status"] == "no_records"
     assert i["resource_presentations"]["status"] == "no_records"
 
 

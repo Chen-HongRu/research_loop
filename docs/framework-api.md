@@ -130,9 +130,8 @@ tasks or protocol settings are rejected. Recovery reads selected files once at
 creation, each at most 4 MiB and together at most 16 MiB; it does not scan datasets
 or checkpoints. This bounded recovery profile does not cover large result files.
 
-For recovery-only Synthesis, the explicit report packet admits at most 65,536
-bytes per report and 65,536 serialized characters in total. This model-input
-limit is separate from the 16 MiB evidence bundle limit. Original report content
-is retained. The Author returns an unreviewed candidate before the host requests
-independent Critic review; only an accepted candidate can be exported for
-publication.
+To review or publish completed work, admit its existing execution, evaluation and
+scientific artifacts through `input_refs` and route them to Synthesis. It uses the
+same Author/Critic contract and derives the disposition from the admitted goal
+and evidence. External evidence remains referenced in place; Synthesis does not
+automatically copy it into a separate archive or rerun the experiment.

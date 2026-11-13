@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 
 from research_workflows.contracts import RESULT_SCHEMA, result_schema, validate_result
 from research_workflows.programs.synthesis import _validate
-from research_workflows.recovery import evidence_packet, recover_experiment
+from research_workflows.recovery import recover_experiment
 
 ROUTER_POLICY = """You route scientific tasks between specialist Groups. You have
 no tools. Return only the requested routing JSON using packet.allowed_actions.
@@ -55,8 +55,7 @@ class Workflow:
     max_active_groups = 1
 
     def __init__(self, settings):
-        self.settings = dict(settings)
-        unknown = set(settings) - {"synthesis_group", "recovery_bundle"}
+        unknown = set(settings) - {"synthesis_group"}
         if unknown:
             raise ValueError(f"Unknown research workflow settings: {sorted(unknown)}")
         self.synthesis_group = settings.get("synthesis_group", "synthesis")
@@ -85,9 +84,6 @@ class Workflow:
             "execution_environment": config.get("execution_environment"),
             "input_refs": config.get("input_refs", []),
         }
-        if self.settings.get("recovery_bundle"):
-            inputs["shared_input"] = evidence_packet(self.settings["recovery_bundle"])
-            inputs["goal_text"] = (root / "goal.md").read_text()
         return {
             "input": inputs,
             "iteration": iteration,
@@ -218,7 +214,7 @@ class Workflow:
                 or any(part in {".", ".."} for part in target.parts)
             ):
                 raise ValueError("Knowledge targets must stay within the draft")
-            if target.parts[0] in {"groups", "group-artifacts.md", "recovery-evidence"}:
+            if target.parts[0] in {"groups", "group-artifacts.md"}:
                 raise ValueError(
                     "Knowledge targets may not replace published Group artifacts"
                 )
@@ -275,25 +271,6 @@ class Workflow:
             index["content"] = (
                 content if link in content else content + "\n\n" + link + "\n"
             )
-        if self.settings.get("recovery_bundle"):
-            manifest_path = Path(self.settings["recovery_bundle"])
-            frozen = json.loads(manifest_path.read_text())
-            for source in dict.fromkeys(
-                [
-                    str(manifest_path),
-                    frozen["evaluation_ref"],
-                    *[entry["ref"] for entry in frozen["artifacts"]],
-                ]
-            ):
-                relative = Path(source).relative_to(manifest_path.parent)
-                artifacts.append(
-                    {
-                        "source": source,
-                        "destination": (
-                            Path("recovery-evidence") / relative
-                        ).as_posix(),
-                    }
-                )
         proposal = {
             "action": result["study_action"],
             "result": result,

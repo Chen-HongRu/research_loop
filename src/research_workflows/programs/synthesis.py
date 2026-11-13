@@ -1,8 +1,6 @@
 """Reference cumulative-evidence and Study-disposition Group."""
 
-from copy import deepcopy
 import json
-import posixpath
 from pathlib import Path, PurePosixPath
 
 from research_workflows.programs.tracing import references, step
@@ -128,34 +126,6 @@ REVIEW_INSTRUCTIONS = (
     "New feedback can resolve the blocked review without redoing completed work."
 )
 
-RECOVERY_INSTRUCTIONS = (
-    " Recovery-only contract: recovery_evidence is the complete bounded inline "
-    "evidence packet; use its contents without opening paths or using tools. "
-    "Return status=ready even with informational help. Do not return status=blocked solely because tools or paths are unavailable: the packet "
-    "contains the required evidence. The formal criterion is already settled by "
-    "the completed original Exp. Do not execute compute, recompute metrics, "
-    "reinterpret the criterion, or review the whole Exp again. Author only the "
-    "scientific Study disposition and knowledge publication delta, preserving "
-    "original constraints, negative evidence and limitations. Python binds exact "
-    "receipt citations and appends a mechanical provenance footer to substantive "
-    "knowledge. For the Author, the compact response schema overrides the generic "
-    "citation requirements and full publication output_schema; Python supplies "
-    "those publication fields. Omit evidence, artifacts and execution/analysis/direction refs "
-    "from your compact Author result. The recovery disposition is goal=achieved, "
-    "study_action=stop and stop_basis=goal-satisfied. Only when "
-    "study_context.input.human_request is admitted, preserve its identity and "
-    "author its status=completed and reason; never invent a human request. "
-    "The Critic's full canonical candidate is analysis_record, including "
-    "study_result and knowledge_files. Review only this candidate delta against "
-    "the packet; do not invent new causal claims or leave scientific authorship "
-    "to the Critic. Scientific review may accept or request bounded revision. "
-    "Publication paths are literal destinations, never additional evidence. "
-    "Author exactly two knowledge_files, each scientific content at most 2400 "
-    "characters (the final document with provenance is at most 3200), and "
-    "summaries at most 400 characters. Knowledge targets must not overwrite the "
-    "reserved recovery-evidence archive or its contents."
-)
-
 
 def _write(ctx, name, content):
     path = ctx.work / name
@@ -236,8 +206,6 @@ async def _stage(ctx, payload, name, instructions, assignment, schema):
     )
     if record is None or retry:
         attempts[name] = ctx.round
-        packet = assignment.get("recovery_evidence", {})
-        recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"
         with step(
             ctx,
             f"synthesis.{name}",
@@ -251,17 +219,7 @@ async def _stage(ctx, payload, name, instructions, assignment, schema):
                 assignment,
                 schema,
                 step_id=step_id,
-                **(
-                    {
-                        "allow_tools": False,
-                        "max_output_chars": 12000 if name == "analysis" else 4000,
-                    }
-                    if recovery
-                    else {}
-                ),
             )
-        if recovery and name == "analysis":
-            record = bind_recovery_analysis(record, assignment)
         stages[name] = record
         ctx.save_state()
         _json(ctx, f"reports/history/{ctx.round:06d}-{name}.json", record)
@@ -386,15 +344,7 @@ def _completed_request_evidence(result, analysis, sources):
 
 def validate_analysis(analysis, result_schema, sources):
     """Validate completion and knowledge delivery without scientific judgment."""
-    recovery = sources.get("recovery_evidence") or sources.get("study_context", {}).get(
-        "input", {}
-    ).get("shared_input", {})
-    is_recovery = (
-        isinstance(recovery, dict) and recovery.get("kind") == "exp-recovery-v1"
-    )
-    _validate(
-        analysis, analysis_schema(result_schema, recovery=is_recovery, sources=sources)
-    )
+    _validate(analysis, analysis_schema(result_schema, sources=sources))
     result = analysis["study_result"]
     _validate(result, result_schema)
     _completed_request_evidence(result, analysis, sources)
@@ -433,65 +383,11 @@ def validate_analysis(analysis, result_schema, sources):
         targets.add(str(target))
     if "index.md" not in targets:
         raise ValueError("Synthesis must author a real knowledge index")
-    if is_recovery:
-        if (
-            len(analysis["knowledge_files"]) != 2
-            or len(analysis["summary"]) > 400
-            or len(result["summary"]) > 400
-            or any(
-                len(document["content"]) > 3200
-                for document in analysis["knowledge_files"]
-            )
-        ):
-            raise ValueError(
-                "Recovery requires two bounded knowledge files and concise summaries"
-            )
-        if any(
-            PurePosixPath(target).parts[0] == "recovery-evidence" for target in targets
-        ):
-            raise ValueError(
-                "Recovery knowledge cannot overwrite the recovery-evidence archive"
-            )
-        refs = {
-            recovery.get("execution_ref"),
-            recovery.get("evaluation_ref"),
-            recovery.get("original_evaluation_ref"),
-        }
-        admitted = set(sources.get("input_refs", [])) | set(
-            sources.get("feedback_refs", [])
-        )
-        request = sources["study_context"].get("input", {}).get("human_request")
-        outcome = result.get("human_request", {})
-        if (
-            None in refs
-            or not refs.issubset(admitted)
-            or result["goal"] != "achieved"
-            or result["study_action"] != "stop"
-            or analysis["stop_basis"] != "goal-satisfied"
-            or not refs.issubset(result["evidence"])
-            or (
-                request
-                and (
-                    outcome.get("status") != "completed"
-                    or not refs.issubset(outcome.get("evidence", []))
-                )
-            )
-            or recovery["execution_ref"] not in analysis["execution_refs"]
-            or recovery["evaluation_ref"] not in analysis["analysis_refs"]
-        ):
-            raise ValueError(
-                "Recovery requires completed disposition and exact admitted evidence"
-            )
-        if not any(
-            recovery["original_evaluation_ref"] in document["content"]
-            for document in analysis["knowledge_files"]
-        ):
-            raise ValueError("Recovery knowledge must cite the original evaluation")
     return result
 
 
-def analysis_schema(result_schema, *, recovery=False, sources=None):
-    """Strict Author result contract for ordinary and recovery synthesis."""
+def analysis_schema(result_schema, *, sources=None):
+    """Strict Author result contract for reviewed scientific publication."""
     schema = _schema(
         {
             **_BASE,
@@ -530,7 +426,7 @@ def analysis_schema(result_schema, *, recovery=False, sources=None):
         }
     )
 
-    if sources and not recovery:
+    if sources:
         admitted = dict.fromkeys(
             [*sources.get("input_refs", []), *sources.get("feedback_refs", [])]
         )
@@ -545,120 +441,7 @@ def analysis_schema(result_schema, *, recovery=False, sources=None):
                     "items": {**_TEXT, "enum": choices},
                 }
 
-    if recovery:
-        bounded_result = deepcopy(result_schema)
-        bounded_result["properties"]["summary"]["maxLength"] = 400
-        schema["properties"]["summary"] = {**_TEXT, "maxLength": 400}
-        schema["properties"]["study_result"]["anyOf"][0] = bounded_result
-        knowledge = schema["properties"]["knowledge_files"]
-        knowledge["maxItems"] = 2
-        knowledge["items"]["properties"]["content"]["maxLength"] = 3200
     return schema
-
-
-def recovery_author_schema(result_schema):
-    """Scientific Author fields only; receipt identities are bound by Python."""
-    schema = analysis_schema(result_schema, recovery=True)
-    fields = schema["properties"]
-    for field in ("artifacts", "execution_refs", "analysis_refs", "direction_refs"):
-        del fields[field]
-        schema["required"].remove(field)
-    result = fields["study_result"]["anyOf"][0]
-    del result["properties"]["evidence"]
-    result["required"].remove("evidence")
-    if "human_request" in result["properties"]:
-        outcome = result["properties"]["human_request"]
-        del outcome["properties"]["evidence"]
-        outcome["required"].remove("evidence")
-    fields["knowledge_files"]["items"]["properties"]["content"]["maxLength"] = 2400
-    return schema
-
-
-def bind_recovery_analysis(candidate, sources):
-    """Bind only deterministic citations/provenance, preserving scientific fields."""
-    packet = sources.get("recovery_evidence") or sources["study_context"]["input"].get(
-        "shared_input", {}
-    )
-    if not isinstance(packet, dict) or packet.get("kind") != "exp-recovery-v1":
-        raise ValueError("Recovery binding requires the admitted evidence packet")
-    refs = [
-        packet.get(key)
-        for key in ("execution_ref", "evaluation_ref", "original_evaluation_ref")
-    ]
-    if any(not isinstance(ref, str) or not ref for ref in refs):
-        raise ValueError("Recovery binding requires exact receipt identities")
-    record = deepcopy(candidate)
-
-    def bind(fields, key, expected):
-        if key in fields and fields[key] != expected:
-            raise ValueError(f"Recovery has contradictory mechanical field: {key}")
-        fields[key] = expected
-
-    bind(record, "artifacts", [])
-    bind(record, "execution_refs", [packet["execution_ref"]])
-    bind(record, "analysis_refs", [packet["evaluation_ref"]])
-    bind(record, "direction_refs", [])
-    result = record.get("study_result")
-    if isinstance(result, dict):
-        bind(result, "evidence", refs)
-        if "human_request" in result:
-            bind(result["human_request"], "evidence", refs)
-    output_schema = sources["study_context"]["output_schema"]
-    _validate(record, analysis_schema(output_schema, recovery=True))
-    validate_stage(record, "Recovery synthesis stage")
-    if isinstance(result, dict):
-        _validate(result, output_schema)
-    elif result != "" or record["status"] != "blocked" or not record["help"].strip():
-        raise ValueError("Recovery requires an authored Study result or explicit help")
-    documents = record["knowledge_files"]
-    if documents:
-        archive = packet.get("publication_paths", {}).get(
-            packet["original_evaluation_ref"]
-        )
-        if not isinstance(archive, str) or not archive:
-            raise ValueError(
-                "Recovery binding requires the original evaluation archive path"
-            )
-        _relative(archive)
-        substantive = next(
-            (
-                document
-                for document in documents
-                if document.get("target") != "index.md"
-            ),
-            None,
-        )
-        if substantive is None:
-            raise ValueError(
-                "Recovery requires substantive knowledge alongside its index"
-            )
-        target = _relative(substantive["target"])
-        archive_link = posixpath.relpath(archive, str(target.parent))
-        footer = (
-            "\n\n<!-- recovery-provenance -->\n"
-            "Host-added provenance (receipt identity only; no scientific claim):\n"
-            f"Original evaluation: {packet['original_evaluation_ref']}\n"
-            f"Archived assessment: [original evaluation]({archive_link})\n"
-        )
-        for document in documents:
-            content = document["content"]
-            scientific = content
-            if document is substantive:
-                if content.endswith(footer):
-                    scientific = content[: -len(footer)]
-                elif "<!-- recovery-provenance -->" in content:
-                    raise ValueError("Recovery has contradictory provenance footer")
-                else:
-                    document["content"] = content + footer
-            if not scientific.strip() or len(scientific) > 2400:
-                raise ValueError(
-                    "Recovery scientific knowledge content must be nonempty and at most 2400 characters"
-                )
-            if len(document["content"]) > 3200:
-                raise ValueError(
-                    "Recovery knowledge including provenance exceeds 3200 characters"
-                )
-    return record
 
 
 async def run(ctx, payload):
@@ -678,22 +461,13 @@ async def run(ctx, payload):
         "revision": _revise(ctx, payload),
         "review_protocol": REVIEW_PROTOCOL,
     }
-    packet = study.get("input", {}).get("shared_input", {})
-    recovery = isinstance(packet, dict) and packet.get("kind") == "exp-recovery-v1"
-    author_schema = (
-        recovery_author_schema(result_schema)
-        if recovery
-        else analysis_schema(result_schema, sources=sources)
-    )
-    if recovery:
-        sources["recovery_evidence"] = packet
     analysis = await _stage(
         ctx,
         payload,
         "analysis",
-        AUTHOR_INSTRUCTIONS + (RECOVERY_INSTRUCTIONS if recovery else ""),
+        AUTHOR_INSTRUCTIONS,
         sources,
-        author_schema,
+        analysis_schema(result_schema, sources=sources),
     )
     if analysis["status"] == "blocked":
         return _finish(ctx, payload, analysis["summary"], analysis["help"])
@@ -724,12 +498,11 @@ async def run(ctx, payload):
         ctx,
         payload,
         "critique",
-        REVIEW_INSTRUCTIONS + (RECOVERY_INSTRUCTIONS if recovery else ""),
+        REVIEW_INSTRUCTIONS,
         {
             **sources,
             "analysis": str(ctx.work / "reports/analysis.json"),
             "candidate_artifacts": extra,
-            **({"analysis_record": analysis} if recovery else {}),
         },
         _CRITIC,
     )

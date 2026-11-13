@@ -1,6 +1,7 @@
 """Deterministic, incremental local sidecar; never invokes models or resource tools."""
 
 import argparse
+from collections import defaultdict
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -13,6 +14,9 @@ from time import perf_counter, process_time
 
 from .identity import resolve, session_paths
 from .efficiency import (
+    WAIT_TOOLS as WAITS,
+    TERMINAL_STATES as TERMINAL,
+    _derived as derived,
     aggregate_tool_outcomes,
     frozen_configuration,
     record_tool_outcome,
@@ -22,19 +26,6 @@ from .sample_store import _atomic, publish_pending
 from .token_usage import AUTHORITY, TOKEN_KEYS, accept_record, cumulative_counts
 
 VERSION = 2
-WAITS = {"wait", "wait_agent", "sleep"}
-TERMINAL = {
-    "COMPLETED",
-    "FAILED",
-    "CANCELLED",
-    "TIMEOUT",
-    "OUT_OF_MEMORY",
-    "NODE_FAIL",
-    "PREEMPTED",
-    "BOOT_FAIL",
-    "DEADLINE",
-    "REVOKED",
-}
 LIMITATIONS = [
     "Unique token_usage_record response IDs are authoritative, including compaction requests. token_count is a separate cross-check, never added. Input includes cached; output includes reasoning.",
     "Usage belongs to notification time in [since, until), without prorating requests. Startup and first-3/5 refer to the thread's lifetime response order, restricted to the phase window.",
@@ -62,13 +53,6 @@ def usage():
 def add(target, other):
     for key in target:
         target[key] += other.get(key, 0)
-
-
-def derived(value):
-    return {
-        **value,
-        "uncached_input_tokens": value["input_tokens"] - value["cached_input_tokens"],
-    }
 
 
 def task_state(tid, task, parent, role):
@@ -669,12 +653,10 @@ class Collector:
             raise ValueError("cutoff cannot move backwards")
         self.tick_bytes, self.tick_issues = 0, set()
         self.responses = set(self.state["seen_responses"])
-        self.calls = {
-            tid: set(t["seen_calls"]) for tid, t in self.state["tasks"].items()
-        }
+        self.calls = defaultdict(
+            set, {tid: set(t["seen_calls"]) for tid, t in self.state["tasks"].items()}
+        )
         status = self._json(self.root / "status.json", "status")
-        # New task call sets are lazily created by _session.
-        self.calls = _CallSets(self.calls)
         discovered, selected, excluded = self._discover()
         self._events()
         config = frozen_configuration(self.root, self._json)
@@ -867,12 +849,6 @@ class Collector:
         self.state["previous_poll_total_seconds"] = perf_counter() - started
         self.state["previous_poll_total_cpu_seconds"] = process_time() - cpu
         return result
-
-
-class _CallSets(dict):
-    def __missing__(self, key):
-        self[key] = set()
-        return self[key]
 
 
 def compare(baseline, optimized):

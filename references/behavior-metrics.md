@@ -186,22 +186,14 @@ When eligible is zero, `compacted`, `original_output_bytes`, and
 `observed_metadata`, and `partial_metadata`. Partial byte sums cover only the
 eligible subset, not all observed calls.
 
-The `behavior_schema` remains 1. New output directories start with
+The `behavior_schema` is 1. New output directories start with
 `coverage_mode: phase_history_and_append`, `read_from_at` equal to phase `since`,
-and `read_from_at_basis: phase_event_time`. Existing checkpoints missing the new
-state initialize it with `setdefault`, preserve all prior offsets, and report
-`coverage_mode: existing_offsets_only`, `prior_source_bytes_not_replayed: true`,
-`read_from_at` equal to enablement wall time, and
-`read_from_at_basis: collector_wall_time`. This wall time is a reader activation
-boundary, not a filter on event timestamps: appended records may carry earlier
-timestamps. Historical records consumed by the older collector are not replayed
-or represented as measured zero. The marker persists across later restarts. A
-recovered pending sample created before instrumentation reports
-`status: not_collected_in_this_sample`. Use a fresh phase directory to collect
-complete phase history for this new metric. Running processes load the new code
-only after restart; the baseline may continue to its planned boundary, where the
-existing checkpoint can be resumed for final sealing without claiming historical
-resource presentation coverage.
+and `read_from_at_basis: phase_event_time`. Current checkpoints preserve the
+resource counters and source offsets across restarts without replaying consumed
+records. Pending publication is repaired without duplicating journal samples.
+Checkpoints without `resource_presentations` and previously enriched samples
+without this field are unsupported; use a new output directory. Comparison also
+requires current `latest.json` samples containing this field.
 
 ## Continuous descriptive comparison
 
