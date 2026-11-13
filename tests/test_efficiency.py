@@ -577,3 +577,117 @@ def test_active_revision_path_is_validated_before_reading(study):
     write_json(study / "active.json", {"revision": "../escape"})
     with pytest.raises(ValueError, match="revision"):
         report(study, until=END)
+
+
+def command_receipt(*, exit_code=0, output="synthetic stdout"):
+    return {
+        "chunk_id": "synthetic-chunk",
+        "wall_time_seconds": 0.01,
+        "exit_code": exit_code,
+        "original_token_count": 4,
+        "output": output,
+    }
+
+
+def text_block(value):
+    return {"type": "input_text", "text": json.dumps(value)}
+
+
+def test_nested_exec_receipts_are_separate_from_outer_outcomes_and_match_collector(
+    study,
+):
+    from research_loop.metrics import Collector
+
+    # The script itself succeeds while a search-like command returns nonzero.
+    # Command stdout deliberately resembles another receipt and must remain opaque.
+    payload = {
+        "type": "custom_tool_call_output",
+        "call_id": "exec-one",
+        "success": True,
+        "output": [
+            {"type": "input_text", "text": "Script completed"},
+            text_block(
+                command_receipt(
+                    exit_code=1, output=json.dumps(command_receipt(exit_code=7))
+                )
+            ),
+            text_block({"status": "fulfilled", "value": command_receipt()}),
+            text_block(command_receipt()),
+        ],
+    }
+    session(
+        study / "groups/router/one/native/sessions/router.jsonl",
+        "router",
+        events=[
+            {
+                "timestamp": START,
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "exec-one",
+                    "input": "synthetic bounded command",
+                },
+            },
+            {
+                "timestamp": "2026-01-01T00:02:00Z",
+                "type": "response_item",
+                "payload": payload,
+            },
+            receipt("nested-usage", "2026-01-01T00:02:01Z", 10),
+        ],
+    )
+    offline = report(study, until=END)["agents"]["tool_outcomes"]
+    assert offline == {
+        "returned_calls": 1,
+        "failed_calls": 0,
+        "unknown_outcome_calls": 0,
+        "failed_by_tool": {},
+        "nested_command_receipts": {
+            "observed_receipts": 3,
+            "zero_exit_receipts": 2,
+            "nonzero_exit_receipts": 1,
+        },
+    }
+    with Collector(
+        study, study.parent / "nested-metrics", since=START, phase="nested"
+    ) as collector:
+        first = collector.poll(END)
+        assert first["tools"] == offline
+        assert collector.poll(END)["tools"] == offline
+    with Collector(
+        study, study.parent / "nested-metrics", since=START, phase="nested"
+    ) as collector:
+        assert collector.poll(END)["tools"] == offline
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        [text_block({"exit_code": 1})],
+        [text_block({"status": "rejected", "value": command_receipt(exit_code=1)})],
+        [{"type": "output_text", "text": json.dumps(command_receipt(exit_code=1))}],
+        [text_block(command_receipt(exit_code=True))],
+        [text_block({**command_receipt(), "wall_time_seconds": float("nan")})],
+        [text_block({"wrapper": command_receipt(exit_code=1)})],
+        [{"type": "input_text", "text": "command failed with exit_code=1"}],
+    ],
+)
+def test_nested_parser_rejects_unrecognized_text_and_metadata(output):
+    from research_loop.efficiency import record_tool_outcome, tool_outcomes
+
+    result = tool_outcomes()
+    record_tool_outcome(result, "exec", {"output": output})
+    assert result["unknown_outcome_calls"] == 1
+    assert "nested_command_receipts" not in result
+
+
+def test_receipt_shaped_text_from_another_tool_is_not_a_nested_exec_receipt():
+    from research_loop.efficiency import record_tool_outcome, tool_outcomes
+
+    result = tool_outcomes()
+    record_tool_outcome(
+        result, "read_file", {"output": [text_block(command_receipt(exit_code=1))]}
+    )
+    assert result["failed_calls"] == 0
+    assert "nested_command_receipts" not in result

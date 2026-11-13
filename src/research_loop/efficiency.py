@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 import json
+import math
 import re
 from pathlib import Path
 from time import perf_counter
@@ -87,6 +88,43 @@ def tool_outcome(payload):
     return "succeeded" if known else "unknown"
 
 
+def nested_command_receipts(name, payload):
+    """Read the observed code-mode exec envelope, never command stdout."""
+    output = payload.get("output")
+    if name != "exec" or not isinstance(output, list):
+        return
+    for block in output:
+        if not isinstance(block, dict) or block.get("type") != "input_text":
+            continue
+        text = block.get("text")
+        if not isinstance(text, str):
+            continue
+        try:
+            value = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and value.get("status") == "fulfilled":
+            value = value.get("value")
+        if not isinstance(value, dict):
+            continue
+        if (
+            isinstance(value.get("chunk_id"), str)
+            and bool(value["chunk_id"])
+            and type(value.get("wall_time_seconds")) in (int, float)
+            and math.isfinite(value["wall_time_seconds"])
+            and value["wall_time_seconds"] >= 0
+            and type(value.get("exit_code")) is int
+            and type(value.get("original_token_count")) is int
+            and value["original_token_count"] >= 0
+            and isinstance(value.get("output"), str)
+        ):
+            yield value
+
+
+def _nested_outcomes():
+    return {"observed_receipts": 0, "zero_exit_receipts": 0, "nonzero_exit_receipts": 0}
+
+
 def tool_outcomes():
     return {
         "returned_calls": 0,
@@ -104,12 +142,25 @@ def aggregate_tool_outcomes(tasks):
         for key in ("returned_calls", "failed_calls", "unknown_outcome_calls"):
             result[key] += value[key]
         failed.update(value["failed_by_tool"])
+        if "nested_command_receipts" in value:
+            nested = result.setdefault("nested_command_receipts", _nested_outcomes())
+            for key, count in value["nested_command_receipts"].items():
+                nested[key] += count
     result["failed_by_tool"] = dict(failed)
     return result
 
 
 def record_tool_outcome(target, name, payload):
     target["returned_calls"] += 1
+    for receipt in nested_command_receipts(name, payload):
+        nested = target.setdefault("nested_command_receipts", _nested_outcomes())
+        nested["observed_receipts"] += 1
+        key = (
+            "zero_exit_receipts"
+            if receipt["exit_code"] == 0
+            else "nonzero_exit_receipts"
+        )
+        nested[key] += 1
     outcome = tool_outcome(payload)
     if outcome == "failed":
         target["failed_calls"] += 1

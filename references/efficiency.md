@@ -60,6 +60,15 @@ outcomes; each task has `tool_outcomes`. Failure requires structured `isError`,
 including text containing an error word. Resource call failure is distinct from a
 scientific command's nonzero result.
 
+Code-mode `exec` outputs can include JSON command receipts in `input_text` blocks,
+directly or inside a `fulfilled`/`value` wrapper. When recognized,
+`tool_outcomes.nested_command_receipts` reports `observed_receipts`,
+`zero_exit_receipts`, and `nonzero_exit_receipts`; aggregate `tools` retains the
+same fields. These count emitted receipt observations, not outer `exec` failures
+or independently verified infrastructure errors. A search with no matches can
+return nonzero. Command stdout remains opaque, and ordinary text is not parsed
+for error words or nested receipts.
+
 Wait intervals can overlap across tasks and do not establish wasted work. Tool-free
 time is not automatically idle. Background-read association is a visible-read
 heuristic rather than demonstrated waste. Allocation duration is not GPU

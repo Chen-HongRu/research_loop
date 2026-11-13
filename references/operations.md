@@ -217,7 +217,10 @@ source format differs; earlier checkpoints are not migrated.
 Native tool failures are counted only from structured `isError`/`is_error`,
 `success`, or `exit_code` outcomes. Plain text containing an error word remains an
 unmeasured outcome. `efficiency` exposes `agents.tool_outcomes`; continuous samples
-and comparisons expose `tools` and per-task outcomes. Wait durations come from
+and comparisons expose `tools` and per-task outcomes. Recognized code-mode command
+receipts add separate `nested_command_receipts` zero/nonzero exit counters; they
+never relabel an outer `exec` outcome or establish infrastructure failure.
+Wait durations come from
 paired actual calls/returns; tool-free time is not labeled idle or waste.
 
 Per-request usage is authoritative where recorded; cumulative counters are a
